@@ -14,7 +14,7 @@ Start from the user goal, then route them to the smallest public surface that fi
 
 - Rust module on the host: use `cargo add lenso@0.1.0`
 - Remote module: use `pnpm add @lenso/remote-module-kit@0.1.1`
-- Host starter app: use the `templates/starter-host` template in this repo
+- Host starter app: scaffold with `lenso host init <dir>` (template: `crates/lenso-cli/templates/starter-host`)
 - OpenAPI client work: use the committed `contracts/openapi/app-api.v1.yaml`
 
 ## Decision Rule

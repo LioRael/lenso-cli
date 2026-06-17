@@ -12,7 +12,7 @@ It is the public pressure test for host setup.
 
 ## Start Here
 
-From `templates/starter-host`:
+From `crates/lenso-cli/templates/starter-host` (or scaffold with `lenso host init <dir>`):
 
 ```sh
 cp .env.example .env
