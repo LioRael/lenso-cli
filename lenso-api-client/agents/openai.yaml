@@ -1,0 +1,4 @@
+interface:
+  display_name: "Lenso API Client"
+  short_description: "Consume Lenso APIs from OpenAPI"
+  default_prompt: "Use $lenso-api-client to consume or verify Lenso HTTP APIs from the OpenAPI contract."

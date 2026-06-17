@@ -1,0 +1,4 @@
+interface:
+  display_name: "Lenso Module Authoring"
+  short_description: "Author Rust modules on the public Lenso crate"
+  default_prompt: "Use $lenso-module-authoring to build or edit a Rust module that depends on the public lenso crate."

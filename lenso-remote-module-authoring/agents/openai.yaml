@@ -1,0 +1,4 @@
+interface:
+  display_name: "Lenso Remote Module Authoring"
+  short_description: "Build remote modules with the public kit"
+  default_prompt: "Use $lenso-remote-module-authoring to build or edit a remote Lenso module with @lenso/remote-module-kit."

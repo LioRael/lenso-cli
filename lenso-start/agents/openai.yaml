@@ -1,0 +1,4 @@
+interface:
+  display_name: "Lenso Start"
+  short_description: "Choose the right public Lenso path"
+  default_prompt: "Use $lenso-start to choose the right public Lenso path before authoring code or contracts."
