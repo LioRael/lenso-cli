@@ -1,0 +1,29 @@
+[workspace]
+
+[package]
+name = "lenso-starter-host"
+version = "0.1.0"
+edition = "2024"
+publish = false
+rust-version = "1.94"
+
+[[bin]]
+name = "api"
+path = "src/bin/api.rs"
+
+[[bin]]
+name = "worker"
+path = "src/bin/worker.rs"
+
+[[bin]]
+name = "migrate"
+path = "src/bin/migrate.rs"
+
+[dependencies]
+anyhow = "1.0"
+axum = "0.8"
+lenso-host = { git = "https://github.com/LioRael/lenso", rev = "87689832d7e2b312634b282b68624f956ead3cdd", package = "lenso-host" }
+serde = { version = "1.0", features = ["derive"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres"] }
+tokio = { version = "1.52", features = ["macros", "rt-multi-thread"] }
+utoipa = "5.5"

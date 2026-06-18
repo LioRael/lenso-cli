@@ -1,0 +1,19 @@
+set dotenv-load := true
+
+default:
+    @just --list
+
+db-up:
+    docker compose up -d postgres
+
+migrate:
+    cargo run --bin migrate
+
+api:
+    cargo run --bin api
+
+worker:
+    cargo run --bin worker
+
+check:
+    cargo check --bins
