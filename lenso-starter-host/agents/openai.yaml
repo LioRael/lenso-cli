@@ -1,0 +1,4 @@
+interface:
+  display_name: "Lenso Host Starter"
+  short_description: "Create and run a Lenso host app"
+  default_prompt: "Use $lenso-starter-host to create or run a Lenso host app from the starter template."

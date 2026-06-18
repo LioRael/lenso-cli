@@ -1,5 +1,5 @@
 ---
-name: lenso-host-starter
+name: lenso-starter-host
 description: Use when creating or running a blank Lenso host app from the starter template, especially when wiring API, worker, migrations, local Postgres, or the first linked module.
 ---
 
@@ -12,7 +12,7 @@ It is the public pressure test for host setup.
 
 ## Start Here
 
-From `crates/lenso-cli/templates/starter-host` (or scaffold with `lenso host init <dir>`):
+Scaffold with `lenso host init <dir>`, then from the generated project:
 
 ```sh
 cp .env.example .env
@@ -33,7 +33,7 @@ cargo run --bin worker
 
 ## Guardrails
 
-- Keep `lenso-host` temporary until the public host facade is ready.
+- Use `lenso = { features = ["host"] }` as the host facade.
 - Keep app-owned data in the starter, not in the auth anchor.
 - Keep the starter thin and explicit.
 
