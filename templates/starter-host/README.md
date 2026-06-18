@@ -3,12 +3,12 @@
 Minimal host application skeleton for running Lenso as a backend framework from
 a blank Rust project.
 
-This template depends on the backend repository's Git-pinned `lenso-host`
-package. The included Cargo config uses the system Git client so private
-repository credentials work the same way as normal `git clone` commands. Pin
-the dependency to a tag or commit for reproducible builds.
+This template depends on the backend repository's Git-pinned `lenso` package
+with the `host` feature. The included Cargo config uses the system Git client
+so private repository credentials work the same way as normal `git clone`
+commands. Pin the dependency to a tag or commit for reproducible builds.
 
-The binary entrypoints are deliberately thin wrappers around the `lenso-host`
+The binary entrypoints are deliberately thin wrappers around the `lenso::host`
 facade. That keeps this template on the current host API without exposing the
 boot or platform crates as its user-facing API.
 
@@ -70,7 +70,7 @@ User-facing remote-module examples live in
 Local Rust modules are registered from `src/lib.rs`:
 
 ```rust
-use lenso_host::prelude::*;
+use lenso::host::prelude::*;
 
 HostBuilder::new()
     .linked_module(modules::app::linked_module())

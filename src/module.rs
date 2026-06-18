@@ -4247,7 +4247,7 @@ fn maybe_insert_use(source: &str, use_path: Option<&str>) -> Result<String> {
     if source.contains(entry.trim()) {
         return Ok(source.to_owned());
     }
-    insert_after_needle(source, &entry, "use lenso_host::prelude::*;\n")
+    insert_after_needle(source, &entry, "use lenso::host::prelude::*;\n")
 }
 
 fn parse_module_source(source: &str) -> Result<ModuleSource> {
@@ -4689,7 +4689,7 @@ mod tests {
 
     #[test]
     fn linked_descriptor_updates_host_composition() {
-        let source = "mod modules;\n\nuse lenso_host::prelude::*;\n\npub fn host_composition() -> HostComposition {\n    HostBuilder::new()\n        .linked_module(modules::app::linked_module())\n        .build()\n}\n";
+        let source = "mod modules;\n\nuse lenso::host::prelude::*;\n\npub fn host_composition() -> HostComposition {\n    HostBuilder::new()\n        .linked_module(modules::app::linked_module())\n        .build()\n}\n";
 
         let updated = update_host_lib_for_linked_descriptor(
             source,
