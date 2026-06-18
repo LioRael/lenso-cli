@@ -1,4 +1,4 @@
-use lenso_host::http::{
+use lenso::host::http::{
     ApiErrorResponse, ApiOpenApiRouter, AppContext, AppError, ErrorCode, ErrorResponse,
     HttpRequestContext, Json, JsonBody, OpenApiRouter, Path, RequestContext, State, UserActor,
     json, routes,

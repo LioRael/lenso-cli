@@ -1,6 +1,6 @@
 mod modules;
 
-use lenso_host::prelude::*;
+use lenso::host::prelude::*;
 
 /// Host-owned module composition for this application.
 ///

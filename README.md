@@ -31,8 +31,9 @@ Update the hosted console later by upgrading `lenso-cli` and running:
 lenso host update-console
 ```
 
-The generated host depends on the Git-pinned `lenso-host` crate, which is the
-current narrow host API for booting API, worker, and migration entrypoints. See
+The generated host depends on the Git-pinned `lenso` crate with the `host`
+feature, which is the current narrow host API for booting API, worker, and
+migration entrypoints. See
 [`docs/architecture/framework-public-surface.md`](https://github.com/LioRael/lenso/blob/main/docs/architecture/framework-public-surface.md)
 for the host-facade roadmap.
 

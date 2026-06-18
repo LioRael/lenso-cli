@@ -1,7 +1,7 @@
 mod routes;
 
-use lenso_host::http::{LinkedHttpContribution, ModuleHttpMethod, ModuleHttpRoute};
-use lenso_host::prelude::*;
+use lenso::host::http::{LinkedHttpContribution, ModuleHttpMethod, ModuleHttpRoute};
+use lenso::host::prelude::*;
 
 pub const MODULE_NAME: &str = "app";
 pub const APP_STATUS_READ_CAPABILITY: &str = "app.status.read";
