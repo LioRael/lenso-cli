@@ -1,0 +1,39 @@
+name: release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: lenso-cli
+      - uses: actions/checkout@v6
+        with:
+          repository: LioRael/lenso-runtime-console
+          path: lenso-runtime-console
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: lenso-cli
+      - run: corepack enable
+      - run: corepack pnpm install --frozen-lockfile
+        working-directory: lenso-runtime-console
+      - run: corepack pnpm build:local
+        working-directory: lenso-runtime-console
+      - run: |
+          rm -rf console/dist
+          cp -R ../lenso-runtime-console/dist console/dist
+          test -f console/dist/index.html
+        working-directory: lenso-cli
+      - run: cargo test --locked
+        working-directory: lenso-cli
+      - run: cargo publish --locked
+        working-directory: lenso-cli
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
