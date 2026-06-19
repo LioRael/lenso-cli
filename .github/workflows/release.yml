@@ -7,12 +7,20 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
+      - name: Check release secrets
+        run: |
+          test -n "$CARGO_REGISTRY_TOKEN"
+          test -n "$LENSO_RUNTIME_CONSOLE_TOKEN"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          LENSO_RUNTIME_CONSOLE_TOKEN: ${{ secrets.LENSO_RUNTIME_CONSOLE_TOKEN }}
       - uses: actions/checkout@v6
         with:
           path: lenso-cli
       - uses: actions/checkout@v6
         with:
           repository: LioRael/lenso-runtime-console
+          token: ${{ secrets.LENSO_RUNTIME_CONSOLE_TOKEN }}
           path: lenso-runtime-console
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v6
