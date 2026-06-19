@@ -22,6 +22,10 @@ jobs:
           repository: LioRael/lenso-runtime-console
           token: ${{ secrets.LENSO_RUNTIME_CONSOLE_TOKEN }}
           path: lenso-runtime-console
+      - uses: actions/checkout@v6
+        with:
+          repository: LioRael/lenso-auth-module
+          path: lenso-auth-module
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v6
         with:
