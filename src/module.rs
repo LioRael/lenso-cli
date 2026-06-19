@@ -13,11 +13,9 @@ pub struct RemoteModuleInstallOptions {
     pub console_plan: bool,
     pub dry_run: bool,
     pub env_file: Option<PathBuf>,
-    pub install_plan_file: Option<PathBuf>,
     pub module_services_file: Option<PathBuf>,
     pub repo_root: Option<PathBuf>,
     pub run_install_commands: bool,
-    pub runtime_console_root: Option<PathBuf>,
     pub source: String,
 }
 
@@ -25,7 +23,6 @@ pub struct RemoteModuleInstallOptions {
 pub struct RemoteModuleUninstallOptions {
     pub dry_run: bool,
     pub env_file: Option<PathBuf>,
-    pub install_plan_file: Option<PathBuf>,
     pub module_services_file: Option<PathBuf>,
     pub repo_root: Option<PathBuf>,
     pub source: Option<String>,
@@ -98,10 +95,7 @@ pub struct ConsolePackageApplyPlanOptions {
 }
 
 #[derive(Debug, Clone)]
-pub struct AppliedConsolePlan {
-    repo_root: PathBuf,
-    runtime_console_root: PathBuf,
-}
+pub struct AppliedConsolePlan;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModuleSource {
@@ -191,6 +185,9 @@ struct RepoPaths {
 type PendingWrites = BTreeMap<PathBuf, String>;
 
 const MODULE_INSTALL_LEDGER_PATH: &str = ".lenso/module-installs.json";
+const CONSOLE_EXTENSION_REGISTRY_PATH: &str = ".lenso/console/extensions/registry.json";
+const CONSOLE_EXTENSION_ROUTE_PREFIX: &str = "/console/extensions";
+const CONSOLE_BUNDLE_HOST_API: &str = "1";
 
 pub async fn create_module(options: ModuleCreateOptions) -> Result<()> {
     if options.remote {
@@ -381,13 +378,7 @@ pub async fn add_remote_module(
             .as_deref()
             .unwrap_or_else(|| Path::new(".env")),
     );
-    let install_plan_path = resolve_path(
-        &repo_root,
-        options
-            .install_plan_file
-            .as_deref()
-            .unwrap_or_else(|| Path::new(".lenso/console-package-install-plan.json")),
-    );
+    let console_extension_registry_path = repo_root.join(CONSOLE_EXTENSION_REGISTRY_PATH);
     let install_ledger_path = repo_root.join(MODULE_INSTALL_LEDGER_PATH);
     let module_services_path = resolve_path(
         &repo_root,
@@ -406,16 +397,15 @@ pub async fn add_remote_module(
         update_remote_modules_env(&env_file_path, &module_name, &base_url)?,
         &install_env,
     );
-    let install_plan = update_console_package_install_plan(
-        &install_plan_path,
+    let console_bundle_install = install_runtime_console_bundles(
+        &repo_root,
+        &console_extension_registry_path,
         &manifest,
-        manifest_reference,
         &base_url,
-        &install_env,
-        &install_commands,
-        &install_services,
-        false,
-    )?;
+        options.console_plan,
+        options.dry_run,
+    )
+    .await?;
     let module_services =
         update_remote_module_services_file(&module_services_path, &module_name, &install_services)?;
     let install_ledger = update_module_install_ledger(
@@ -427,7 +417,9 @@ pub async fn add_remote_module(
             remote_module_install_writes(
                 &repo_root,
                 &env_file_path,
-                &install_plan_path,
+                console_bundle_install
+                    .registry_changed
+                    .then_some(console_extension_registry_path.as_path()),
                 module_services
                     .as_ref()
                     .map(|_| module_services_path.as_path()),
@@ -435,16 +427,22 @@ pub async fn add_remote_module(
             &install_env,
             &install_commands,
             &install_services,
-            console_package_count_from_install_plan(&install_plan, &module_name),
+            console_bundle_install.bundle_count,
         ),
     )?;
-    let console_package_count =
-        console_package_count_from_install_plan(&install_plan, &module_name);
 
     if options.dry_run {
         println!("Remote module install dry run:");
         println!("- {}", display_relative(&repo_root, &env_file_path));
-        println!("- {}", display_relative(&repo_root, &install_plan_path));
+        if console_bundle_install.registry_changed {
+            println!(
+                "- {}",
+                display_relative(&repo_root, &console_extension_registry_path)
+            );
+            for file_path in &console_bundle_install.bundle_files {
+                println!("- {}", display_relative(&repo_root, file_path));
+            }
+        }
         println!("- {}", display_relative(&repo_root, &install_ledger_path));
         if module_services.is_some() {
             println!("- {}", display_relative(&repo_root, &module_services_path));
@@ -453,12 +451,11 @@ pub async fn add_remote_module(
         println!("- install env vars: {}", install_env.len());
         println!("- install commands: {}", install_commands.len());
         println!("- install services: {}", install_services.len());
-        println!("- console packages: {console_package_count}");
+        println!("- console bundles: {}", console_bundle_install.bundle_count);
         return Ok(());
     }
 
     write_file(&env_file_path, env_file.as_bytes())?;
-    write_json(&install_plan_path, &install_plan)?;
     write_json(&install_ledger_path, &install_ledger)?;
     if let Some(module_services) = &module_services {
         write_json(&module_services_path, module_services)?;
@@ -467,7 +464,15 @@ pub async fn add_remote_module(
     println!("Added remote module {module_name}.");
     println!("Updated:");
     println!("- {}", display_relative(&repo_root, &env_file_path));
-    println!("- {}", display_relative(&repo_root, &install_plan_path));
+    if console_bundle_install.registry_changed {
+        println!(
+            "- {}",
+            display_relative(&repo_root, &console_extension_registry_path)
+        );
+        for file_path in &console_bundle_install.bundle_files {
+            println!("- {}", display_relative(&repo_root, file_path));
+        }
+    }
     println!("- {}", display_relative(&repo_root, &install_ledger_path));
     if module_services.is_some() {
         println!("- {}", display_relative(&repo_root, &module_services_path));
@@ -476,53 +481,16 @@ pub async fn add_remote_module(
     println!("Install env vars: {}", install_env.len());
     println!("Install commands: {}", install_commands.len());
     println!("Install services: {}", install_services.len());
-    println!("Console packages: {console_package_count}");
-
-    let applied_console_plan = if console_package_count > 0 && options.console_plan {
-        Some(
-            apply_console_package_install_plan(ConsolePackageApplyPlanOptions {
-                dependency_version: None,
-                dry_run: false,
-                install_plan_file: Some(install_plan_path.clone()),
-                log_next_steps: false,
-                repo_root: Some(repo_root.clone()),
-                runtime_console_root: options.runtime_console_root,
-            })
-            .await?,
-        )
-    } else {
-        None
-    };
+    println!("Console bundles: {}", console_bundle_install.bundle_count);
 
     let install_commands_ran = if !install_commands.is_empty() && options.run_install_commands {
         run_install_commands(&repo_root, &install_commands)?;
-        let install_plan = update_console_package_install_plan(
-            &install_plan_path,
-            &manifest,
-            manifest_reference,
-            &base_url,
-            &install_env,
-            &install_commands,
-            &install_services,
-            true,
-        )?;
-        write_json(&install_plan_path, &install_plan)?;
         true
     } else {
         false
     };
 
     println!("Next steps:");
-    if let Some(applied) = applied_console_plan {
-        let console_root = display_relative(&applied.repo_root, &applied.runtime_console_root);
-        println!("- pnpm --dir {console_root} install");
-        println!("- pnpm --dir {console_root} check:console-packages");
-        println!("- restart Runtime Console after installing packages");
-    } else if console_package_count > 0 {
-        println!("- lenso console-package apply-plan");
-        println!("- pnpm install");
-        println!("- restart Runtime Console after applying the plan");
-    }
     if !install_commands.is_empty() && !install_commands_ran {
         println!("- rerun with --run-install-commands to execute manifest install commands");
     }
@@ -706,11 +674,9 @@ fn uninstall_module_source(
     );
     let install_plan_path = resolve_path(
         &repo_root,
-        options
-            .install_plan_file
-            .as_deref()
-            .unwrap_or_else(|| Path::new(".lenso/console-package-install-plan.json")),
+        Path::new(".lenso/console-package-install-plan.json"),
     );
+    let console_extension_registry_path = repo_root.join(CONSOLE_EXTENSION_REGISTRY_PATH);
     let install_ledger_path = repo_root.join(MODULE_INSTALL_LEDGER_PATH);
     let module_services_path = resolve_path(
         &repo_root,
@@ -730,6 +696,7 @@ fn uninstall_module_source(
             module_name,
             &env_file_path,
             &install_plan_path,
+            &console_extension_registry_path,
             &module_services_path,
         )?,
     )
@@ -753,10 +720,7 @@ pub async fn uninstall_remote_module(
     );
     let install_plan_path = resolve_path(
         &repo_root,
-        options
-            .install_plan_file
-            .as_deref()
-            .unwrap_or_else(|| Path::new(".lenso/console-package-install-plan.json")),
+        Path::new(".lenso/console-package-install-plan.json"),
     );
     let install_ledger_path = repo_root.join(MODULE_INSTALL_LEDGER_PATH);
     let module_services_path = resolve_path(
@@ -766,11 +730,20 @@ pub async fn uninstall_remote_module(
             .as_deref()
             .unwrap_or_else(|| Path::new(".lenso/module-services.json")),
     );
+    let console_extension_registry_path = repo_root.join(CONSOLE_EXTENSION_REGISTRY_PATH);
+    let console_extension_module_dir = repo_root
+        .join(".lenso/console/extensions")
+        .join(slugify(module_name));
     let env_file = remove_remote_module_from_env(&env_file_path, module_name)?;
     let install_plan = remove_console_package_install_plan_module(&install_plan_path, module_name)?;
     let install_ledger = remove_module_install_ledger_module(&install_ledger_path, module_name)?;
     let module_services =
         remove_remote_module_services_file_module(&module_services_path, module_name)?;
+    let console_registry = remove_runtime_console_bundle_registry_module(
+        &console_extension_registry_path,
+        module_name,
+    )?;
+    let console_bundle_dir_exists = console_extension_module_dir.exists();
 
     if options.dry_run {
         println!("Remote module uninstall dry run:");
@@ -786,10 +759,24 @@ pub async fn uninstall_remote_module(
         if module_services.is_some() {
             println!("- {}", display_relative(&repo_root, &module_services_path));
         }
+        if console_registry.is_some() {
+            println!(
+                "- {}",
+                display_relative(&repo_root, &console_extension_registry_path)
+            );
+        }
+        if console_bundle_dir_exists {
+            println!(
+                "- {}",
+                display_relative(&repo_root, &console_extension_module_dir)
+            );
+        }
         if env_file.is_none()
             && install_plan.is_none()
             && install_ledger.is_none()
             && module_services.is_none()
+            && console_registry.is_none()
+            && !console_bundle_dir_exists
         {
             println!("- no local install state found");
         }
@@ -799,7 +786,9 @@ pub async fn uninstall_remote_module(
     let changed = env_file.is_some()
         || install_plan.is_some()
         || install_ledger.is_some()
-        || module_services.is_some();
+        || module_services.is_some()
+        || console_registry.is_some()
+        || console_bundle_dir_exists;
     if let Some(env_file) = env_file {
         write_file(&env_file_path, env_file.as_bytes())?;
     }
@@ -811,6 +800,17 @@ pub async fn uninstall_remote_module(
     }
     if let Some(module_services) = module_services {
         write_json(&module_services_path, &module_services)?;
+    }
+    if let Some(console_registry) = console_registry {
+        write_json(&console_extension_registry_path, &console_registry)?;
+    }
+    if console_bundle_dir_exists {
+        fs::remove_dir_all(&console_extension_module_dir).with_context(|| {
+            format!(
+                "remove console extension directory {}",
+                console_extension_module_dir.display()
+            )
+        })?;
     }
 
     if !changed {
@@ -1066,10 +1066,7 @@ pub async fn apply_console_package_install_plan(
             "- {}",
             display_relative(&repo_root, &paths.module_exports_path)
         );
-        return Ok(AppliedConsolePlan {
-            repo_root,
-            runtime_console_root,
-        });
+        return Ok(AppliedConsolePlan);
     }
 
     write_json(&paths.package_json_path, &package_json)?;
@@ -1091,10 +1088,7 @@ pub async fn apply_console_package_install_plan(
         println!("- pnpm check");
     }
 
-    Ok(AppliedConsolePlan {
-        repo_root,
-        runtime_console_root,
-    })
+    Ok(AppliedConsolePlan)
 }
 
 async fn create_remote_module(options: ModuleCreateOptions) -> Result<()> {
@@ -2826,6 +2820,7 @@ fn remote_module_install_state_exists(
     module_name: &str,
     env_file_path: &Path,
     install_plan_path: &Path,
+    console_extension_registry_path: &Path,
     module_services_path: &Path,
 ) -> Result<bool> {
     let env_source = read_text_if_exists(env_file_path)?;
@@ -2843,6 +2838,13 @@ fn remote_module_install_state_exists(
         return Ok(true);
     }
 
+    if read_json_if_exists(console_extension_registry_path)?
+        .as_ref()
+        .is_some_and(|registry| console_extension_registry_has_module(registry, module_name))
+    {
+        return Ok(true);
+    }
+
     Ok(read_remote_module_service_states(module_services_path)?
         .iter()
         .any(|state| state.module_name == module_name))
@@ -2855,6 +2857,17 @@ fn install_plan_has_module(plan: &Value, module_name: &str) -> bool {
             modules
                 .iter()
                 .any(|module| module.get("moduleName").and_then(Value::as_str) == Some(module_name))
+        })
+}
+
+fn console_extension_registry_has_module(registry: &Value, module_name: &str) -> bool {
+    registry
+        .get("bundles")
+        .and_then(Value::as_array)
+        .is_some_and(|bundles| {
+            bundles
+                .iter()
+                .any(|bundle| bundle.get("moduleName").and_then(Value::as_str) == Some(module_name))
         })
 }
 
@@ -3185,20 +3198,20 @@ fn simple_linked_module_install_ledger_entry(
 fn remote_module_install_writes(
     repo_root: &Path,
     env_file_path: &Path,
-    install_plan_path: &Path,
+    console_extension_registry_path: Option<&Path>,
     module_services_path: Option<&Path>,
 ) -> Vec<Value> {
-    let mut writes = vec![
-        json!({
-            "kind": "env",
-            "key": "REMOTE_MODULES",
-            "path": display_relative(repo_root, env_file_path),
-        }),
-        json!({
-            "kind": "consolePackageInstallPlan",
-            "path": display_relative(repo_root, install_plan_path),
-        }),
-    ];
+    let mut writes = vec![json!({
+        "kind": "env",
+        "key": "REMOTE_MODULES",
+        "path": display_relative(repo_root, env_file_path),
+    })];
+    if let Some(console_extension_registry_path) = console_extension_registry_path {
+        writes.push(json!({
+            "kind": "consoleExtensionRegistry",
+            "path": display_relative(repo_root, console_extension_registry_path),
+        }));
+    }
     if let Some(module_services_path) = module_services_path {
         writes.push(json!({
             "kind": "moduleServices",
@@ -3473,35 +3486,255 @@ fn shell_command(command: &str) -> Command {
     }
 }
 
-fn update_console_package_install_plan(
-    install_plan_path: &Path,
+#[derive(Debug, Clone)]
+struct ConsoleBundleInstall {
+    bundle_count: usize,
+    bundle_files: Vec<PathBuf>,
+    registry_changed: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ConsoleBundleSpec {
+    bundle_url: String,
+    entry: String,
+    export_name: String,
+    host_api: String,
+    module_name: String,
+    package_name: String,
+    required_capabilities: Vec<String>,
+    target_path: PathBuf,
+    version: Option<String>,
+}
+
+async fn install_runtime_console_bundles(
+    repo_root: &Path,
+    registry_path: &Path,
     manifest: &Value,
-    manifest_reference: &str,
     base_url: &str,
-    install_env: &[(String, String)],
-    install_commands: &[InstallCommandSpec],
-    install_services: &[RemoteModuleServiceInstallSpec],
-    install_commands_executed: bool,
-) -> Result<Value> {
+    enabled: bool,
+    dry_run: bool,
+) -> Result<ConsoleBundleInstall> {
+    if !enabled {
+        return Ok(ConsoleBundleInstall {
+            bundle_count: 0,
+            bundle_files: Vec::new(),
+            registry_changed: false,
+        });
+    }
+
+    let specs = remote_module_console_bundle_specs(repo_root, manifest, base_url)?;
+    if specs.is_empty() {
+        return Ok(ConsoleBundleInstall {
+            bundle_count: 0,
+            bundle_files: Vec::new(),
+            registry_changed: false,
+        });
+    }
+
+    if !dry_run {
+        for spec in &specs {
+            let bytes = read_bundle_reference(&spec.bundle_url).await?;
+            write_file(&spec.target_path, &bytes)?;
+        }
+        let registry = update_runtime_console_bundle_registry(registry_path, &specs)?;
+        write_json(registry_path, &registry)?;
+    }
+
+    Ok(ConsoleBundleInstall {
+        bundle_count: specs.len(),
+        bundle_files: specs.iter().map(|spec| spec.target_path.clone()).collect(),
+        registry_changed: true,
+    })
+}
+
+fn remote_module_console_bundle_specs(
+    repo_root: &Path,
+    manifest: &Value,
+    base_url: &str,
+) -> Result<Vec<ConsoleBundleSpec>> {
     let module_name = string_field(manifest, "name")?.trim();
-    let mut plan = read_json_if_exists(install_plan_path)?
-        .unwrap_or_else(|| json!({ "modules": [], "version": 1 }));
-    let modules = plan
-        .get_mut("modules")
+    let module_slug = slugify(module_name);
+    let mut specs = Vec::new();
+    for surface in manifest
+        .get("console")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("Remote module manifest console must be an array"))?
+    {
+        let package = surface.get("package").and_then(Value::as_object);
+        let Some(package_name) = package.and_then(|p| p.get("name")).and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(export_name) = package
+            .and_then(|p| p.get("export"))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        let Some(bundle_reference) = console_bundle_url(surface, package) else {
+            continue;
+        };
+        let bundle_url = resolve_bundle_reference(bundle_reference, base_url)?;
+        let file_name = console_bundle_file_name(&bundle_url, export_name);
+        let target_path = repo_root
+            .join(".lenso/console/extensions")
+            .join(&module_slug)
+            .join(&file_name);
+        let entry = format!("{CONSOLE_EXTENSION_ROUTE_PREFIX}/{module_slug}/{file_name}");
+        specs.push(ConsoleBundleSpec {
+            bundle_url,
+            entry,
+            export_name: export_name.to_owned(),
+            host_api: console_bundle_host_api(surface, package).to_owned(),
+            module_name: module_name.to_owned(),
+            package_name: package_name.to_owned(),
+            required_capabilities: surface
+                .get("required_capabilities")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect(),
+            target_path,
+            version: package
+                .and_then(|p| p.get("version"))
+                .or_else(|| surface.get("version"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+        });
+    }
+    Ok(specs)
+}
+
+fn console_bundle_url<'a>(
+    surface: &'a Value,
+    package: Option<&'a Map<String, Value>>,
+) -> Option<&'a str> {
+    package
+        .and_then(|p| p.get("bundleUrl").or_else(|| p.get("bundle_url")))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            package
+                .and_then(|p| p.get("bundle"))
+                .and_then(|bundle| bundle.get("url"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            surface
+                .get("bundleUrl")
+                .or_else(|| surface.get("bundle_url"))
+                .and_then(Value::as_str)
+        })
+}
+
+fn console_bundle_host_api<'a>(
+    surface: &'a Value,
+    package: Option<&'a Map<String, Value>>,
+) -> &'a str {
+    package
+        .and_then(|p| p.get("hostApi").or_else(|| p.get("host_api")))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            surface
+                .get("hostApi")
+                .or_else(|| surface.get("host_api"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or(CONSOLE_BUNDLE_HOST_API)
+}
+
+fn resolve_bundle_reference(reference: &str, base_url: &str) -> Result<String> {
+    if reference.starts_with("http://")
+        || reference.starts_with("https://")
+        || reference.starts_with("file://")
+    {
+        return Ok(reference.to_owned());
+    }
+    let normalized_base = format!("{}/", trim_trailing_slashes(base_url));
+    let base = reqwest::Url::parse(&normalized_base)
+        .with_context(|| format!("parse base URL {base_url}"))?;
+    let resolved = base
+        .join(reference)
+        .with_context(|| format!("resolve console bundle URL {reference}"))?;
+    Ok(resolved.to_string())
+}
+
+fn console_bundle_file_name(bundle_url: &str, export_name: &str) -> String {
+    reqwest::Url::parse(bundle_url)
+        .ok()
+        .and_then(|url| {
+            url.path_segments()
+                .and_then(Iterator::last)
+                .filter(|segment| !segment.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            Path::new(bundle_url)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_else(|| format!("{}.js", slugify(export_name)))
+}
+
+async fn read_bundle_reference(reference: &str) -> Result<Vec<u8>> {
+    if reference.starts_with("http://") || reference.starts_with("https://") {
+        let response = reqwest::get(reference)
+            .await
+            .with_context(|| format!("fetch console bundle {reference}"))?;
+        if !response.status().is_success() {
+            bail!(
+                "Failed to fetch console bundle: {} {}",
+                response.status().as_u16(),
+                response.status().canonical_reason().unwrap_or("")
+            );
+        }
+        return response
+            .bytes()
+            .await
+            .map(|bytes| bytes.to_vec())
+            .context("read console bundle bytes");
+    }
+    let path = if let Some(file_path) = reference.strip_prefix("file://") {
+        PathBuf::from(file_path)
+    } else {
+        PathBuf::from(reference)
+    };
+    fs::read(&path).with_context(|| format!("read console bundle {}", path.display()))
+}
+
+fn update_runtime_console_bundle_registry(
+    registry_path: &Path,
+    specs: &[ConsoleBundleSpec],
+) -> Result<Value> {
+    let mut registry = read_json_if_exists(registry_path)?
+        .unwrap_or_else(|| json!({ "bundles": [], "version": 1 }));
+    let bundles = registry
+        .get_mut("bundles")
         .and_then(Value::as_array_mut)
-        .ok_or_else(|| anyhow!("Console package install plan modules must be an array"))?;
-    modules.retain(|entry| entry.get("moduleName").and_then(Value::as_str) != Some(module_name));
-    modules.push(json!({
-        "baseUrl": base_url,
-        "consolePackages": remote_module_console_package_plans(manifest)?,
-        "installCommands": install_command_plans(install_commands, install_commands_executed),
-        "installEnv": install_env_plans(install_env),
-        "installServices": install_service_plans(install_services),
-        "manifestReference": manifest_reference,
-        "moduleName": module_name,
-        "restartRequired": true,
-    }));
-    Ok(json!({ "modules": modules, "version": 1 }))
+        .ok_or_else(|| anyhow!("Runtime Console extension registry bundles must be an array"))?;
+    for spec in specs {
+        bundles.retain(|entry| {
+            entry.get("packageName").and_then(Value::as_str) != Some(spec.package_name.as_str())
+                || entry.get("exportName").and_then(Value::as_str)
+                    != Some(spec.export_name.as_str())
+        });
+        let mut entry = json!({
+            "entry": spec.entry,
+            "exportName": spec.export_name,
+            "hostApi": spec.host_api,
+            "moduleName": spec.module_name,
+            "packageName": spec.package_name,
+        });
+        if !spec.required_capabilities.is_empty() {
+            entry["requiredCapabilities"] = json!(spec.required_capabilities);
+        }
+        if let Some(version) = &spec.version {
+            entry["version"] = json!(version);
+        }
+        bundles.push(entry);
+    }
+    Ok(registry)
 }
 
 fn update_remote_module_services_file(
@@ -3712,13 +3945,6 @@ fn install_command_spec(command: &str, cwd: Option<String>) -> Result<InstallCom
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty()),
     })
-}
-
-fn install_env_plans(install_env: &[(String, String)]) -> Vec<Value> {
-    install_env
-        .iter()
-        .map(|(key, _)| json!({ "key": key, "status": "written" }))
-        .collect()
 }
 
 fn install_service_plans(install_services: &[RemoteModuleServiceInstallSpec]) -> Vec<Value> {
@@ -3976,59 +4202,28 @@ fn remove_console_package_install_plan_module_value(
     ))
 }
 
-fn remote_module_console_package_plans(manifest: &Value) -> Result<Vec<Value>> {
-    let module_name = string_field(manifest, "name")?.trim();
-    let mut items = Vec::new();
-    for surface in manifest
-        .get("console")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("Remote module manifest console must be an array"))?
-    {
-        let package = surface.get("package").and_then(Value::as_object);
-        let Some(package_name) = package.and_then(|p| p.get("name")).and_then(Value::as_str) else {
-            continue;
-        };
-        let Some(export_name) = package
-            .and_then(|p| p.get("export"))
-            .and_then(Value::as_str)
-        else {
-            continue;
-        };
-        let route = surface.get("route").and_then(Value::as_str).unwrap_or("-");
-        let surface_name = surface.get("name").and_then(Value::as_str).unwrap_or("-");
-        let surface_label = surface
-            .get("label")
-            .and_then(Value::as_str)
-            .unwrap_or(surface_name);
-        let key = console_package_key(package_name, export_name);
-        items.push(json!({
-            "command": format!("pnpm add {package_name}"),
-            "exportName": export_name,
-            "key": key,
-            "packageName": package_name,
-            "reason": format!("{module_name} / {surface_label} / {route}"),
-            "requestedByModule": module_name,
-            "route": route,
-            "status": "requires_manual_install",
-            "surfaceLabel": surface_label,
-            "surfaceName": surface_name,
-        }));
-    }
-    Ok(items)
-}
-
-fn console_package_count_from_install_plan(install_plan: &Value, module_name: &str) -> usize {
-    install_plan
-        .get("modules")
-        .and_then(Value::as_array)
-        .and_then(|modules| {
-            modules.iter().find(|module| {
-                module.get("moduleName").and_then(Value::as_str) == Some(module_name)
-            })
-        })
-        .and_then(|module| module.get("consolePackages"))
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len)
+fn remove_runtime_console_bundle_registry_module(
+    registry_path: &Path,
+    module_name: &str,
+) -> Result<Option<Value>> {
+    read_json_if_exists(registry_path)?.map_or(Ok(None), |mut registry| {
+        let version = registry.get("version").cloned().unwrap_or_else(|| json!(1));
+        let bundles = registry
+            .get_mut("bundles")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| {
+                anyhow!("Runtime Console extension registry bundles must be an array")
+            })?;
+        let original_len = bundles.len();
+        bundles
+            .retain(|entry| entry.get("moduleName").and_then(Value::as_str) != Some(module_name));
+        if bundles.len() == original_len {
+            return Ok(None);
+        }
+        Ok(Some(
+            json!({ "bundles": bundles.clone(), "version": version }),
+        ))
+    })
 }
 
 fn module_catalog_entry_from_manifest(
@@ -4046,11 +4241,31 @@ fn module_catalog_entry_from_manifest(
         .iter()
         .filter_map(|surface| {
             let package = surface.get("package").and_then(Value::as_object)?;
-            Some(json!({
+            let mut package_hint = json!({
                 "exportName": package.get("export")?.as_str()?,
                 "packageName": package.get("name")?.as_str()?,
                 "route": surface.get("route").and_then(Value::as_str).unwrap_or("-"),
-            }))
+            });
+            if let Some(bundle_url) = console_bundle_url(surface, Some(package)) {
+                package_hint["bundleUrl"] = json!(bundle_url);
+            }
+            if let Some(host_api) = package
+                .get("hostApi")
+                .or_else(|| package.get("host_api"))
+                .or_else(|| surface.get("hostApi"))
+                .or_else(|| surface.get("host_api"))
+                .and_then(Value::as_str)
+            {
+                package_hint["hostApi"] = json!(host_api);
+            }
+            if let Some(version) = package
+                .get("version")
+                .or_else(|| surface.get("version"))
+                .and_then(Value::as_str)
+            {
+                package_hint["version"] = json!(version);
+            }
+            Some(package_hint)
         })
         .collect::<Vec<_>>();
     Ok(json!({
@@ -4933,6 +5148,72 @@ mod tests {
                 export_name: "aModule".to_owned(),
                 package_name: "@vendor/a".to_owned(),
             }]
+        );
+    }
+
+    #[test]
+    fn console_bundle_specs_use_manifest_bundle_url() {
+        let manifest = json!({
+            "console": [
+                {
+                    "package": {
+                        "bundleUrl": "console/entry.js",
+                        "export": "crmConsoleModule",
+                        "hostApi": "1",
+                        "name": "@vendor/crm-console",
+                        "version": "1.2.3"
+                    },
+                    "required_capabilities": ["crm.read"]
+                }
+            ],
+            "name": "remote-crm"
+        });
+
+        let specs = remote_module_console_bundle_specs(
+            Path::new("/tmp/host"),
+            &manifest,
+            "https://module.example.test/lenso/module/v1",
+        )
+        .unwrap();
+
+        assert_eq!(specs.len(), 1);
+        assert_eq!(
+            specs[0].bundle_url,
+            "https://module.example.test/lenso/module/v1/console/entry.js"
+        );
+        assert_eq!(specs[0].entry, "/console/extensions/remote-crm/entry.js");
+        assert_eq!(
+            specs[0].target_path,
+            PathBuf::from("/tmp/host/.lenso/console/extensions/remote-crm/entry.js")
+        );
+        assert_eq!(specs[0].required_capabilities, vec!["crm.read"]);
+        assert_eq!(specs[0].version.as_deref(), Some("1.2.3"));
+    }
+
+    #[test]
+    fn runtime_console_bundle_registry_upserts_by_package_export() {
+        let registry_path = Path::new("/tmp/missing-console-registry.json");
+        let specs = vec![ConsoleBundleSpec {
+            bundle_url: "https://module.example.test/entry.js".to_owned(),
+            entry: "/console/extensions/crm/entry.js".to_owned(),
+            export_name: "crmConsoleModule".to_owned(),
+            host_api: "1".to_owned(),
+            module_name: "crm".to_owned(),
+            package_name: "@vendor/crm-console".to_owned(),
+            required_capabilities: vec!["crm.read".to_owned()],
+            target_path: PathBuf::from("/tmp/host/.lenso/console/extensions/crm/entry.js"),
+            version: Some("1.0.0".to_owned()),
+        }];
+
+        let registry = update_runtime_console_bundle_registry(registry_path, &specs).unwrap();
+
+        assert_eq!(registry["version"], 1);
+        assert_eq!(registry["bundles"][0]["moduleName"], "crm");
+        assert_eq!(registry["bundles"][0]["packageName"], "@vendor/crm-console");
+        assert_eq!(registry["bundles"][0]["exportName"], "crmConsoleModule");
+        assert_eq!(
+            registry["bundles"][0]["requiredCapabilities"],
+            json!(["crm.read"])
         );
     }
 }
