@@ -113,24 +113,16 @@ struct RemoteModuleInstallArgs {
     #[arg(long)]
     env_file: Option<std::path::PathBuf>,
 
-    /// Console package install plan file.
-    #[arg(long)]
-    install_plan_file: Option<std::path::PathBuf>,
-
     /// Remote module services file.
     #[arg(long)]
     module_services_file: Option<std::path::PathBuf>,
-
-    /// Runtime Console app root.
-    #[arg(long)]
-    runtime_console_root: Option<std::path::PathBuf>,
 
     /// Remote module base URL.
     #[arg(long)]
     base_url: Option<String>,
 
-    /// Skip Runtime Console package registration.
-    #[arg(long = "no-console-plan", action = clap::ArgAction::SetFalse, default_value_t = true)]
+    /// Skip Runtime Console extension registration.
+    #[arg(long = "no-console-extension", alias = "no-console-plan", action = clap::ArgAction::SetFalse, default_value_t = true)]
     console_plan: bool,
 
     /// Execute manifest-declared install.commands.
@@ -158,10 +150,6 @@ struct RemoteModuleUninstallArgs {
     /// Environment file to update.
     #[arg(long)]
     env_file: Option<std::path::PathBuf>,
-
-    /// Console package install plan file.
-    #[arg(long)]
-    install_plan_file: Option<std::path::PathBuf>,
 
     /// Remote module services file.
     #[arg(long)]
@@ -382,11 +370,9 @@ impl From<&RemoteModuleInstallArgs> for module::RemoteModuleInstallOptions {
             console_plan: args.console_plan,
             dry_run: args.dry_run,
             env_file: args.env_file.clone(),
-            install_plan_file: args.install_plan_file.clone(),
             module_services_file: args.module_services_file.clone(),
             repo_root: args.repo_root.clone(),
             run_install_commands: args.run_install_commands,
-            runtime_console_root: args.runtime_console_root.clone(),
             source: args.source.clone(),
         }
     }
@@ -397,7 +383,6 @@ impl From<&RemoteModuleUninstallArgs> for module::RemoteModuleUninstallOptions {
         Self {
             dry_run: args.dry_run,
             env_file: args.env_file.clone(),
-            install_plan_file: args.install_plan_file.clone(),
             module_services_file: args.module_services_file.clone(),
             repo_root: args.repo_root.clone(),
             source: args.source.clone(),

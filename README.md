@@ -71,23 +71,18 @@ lenso module install auth
 ```
 
 `module install` reads `source` from the module descriptor when one is present.
-Remote modules update `REMOTE_MODULES`, write the local console package install
-plan, record `.lenso/module-installs.json`, and apply Runtime Console package
-registration when the manifest declares console packages. Linked modules update
-the host `Cargo.toml`, `src/lib.rs`, `.env` toggle, and the same install
-receipt from the descriptor's `linked` section. `module add` remains a
-compatibility alias for remote installs.
+Remote modules update `REMOTE_MODULES`, copy declared Runtime Console bundles to
+`.lenso/console/extensions`, update `.lenso/console/extensions/registry.json`,
+and record `.lenso/module-installs.json` in one step. Linked modules update the
+host `Cargo.toml`, `src/lib.rs`, `.env` toggle, and the same install receipt
+from the descriptor's `linked` section. `module add` remains a compatibility
+alias for remote installs.
 
-Use `--runtime-console-root` when the console app lives outside the host
-repository, and `--no-console-plan` when you want to apply the plan later with:
-
-```sh
-lenso console-package apply-plan
-```
+Use `--no-console-extension` when you want to skip Runtime Console extension
+registration.
 
 Remote manifests may also declare `install.env` values and `install.commands`.
-Env values are written to `.env`; commands are recorded in the plan and run only
-when you pass:
+Env values are written to `.env`; commands are run only when you pass:
 
 ```sh
 lenso module install https://example.com/lenso/module/v1/manifest --run-install-commands
@@ -111,8 +106,8 @@ The doctor reads `REMOTE_MODULES` and `.lenso/module-services.json`, checks
 service `readyUrl` endpoints, and points to stale `.lock`/`.pid` files when a
 host-started service did not become ready.
 
-Remove the local remote-module source, install receipt, and pending console
-package plan with:
+Remove the local remote-module source, install receipt, service state, Runtime
+Console extension registry entry, and copied bundle files with:
 
 ```sh
 lenso module uninstall billing
