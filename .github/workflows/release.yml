@@ -40,16 +40,20 @@ jobs:
         working-directory: lenso-runtime-console
         env:
           LENSO_CONSOLE_BASE: /console/
-          VITE_API_AUTH_TOKEN: dev-service:admin:runtime.stories.read,identity.users.read,remote_crm.contacts.read,remote_crm.contacts.sync,hello-action:greetings:write
+          VITE_API_AUTH_TOKEN: dev-service:admin:runtime.stories.read,auth.users.read,identity.users.read,remote_crm.contacts.read,remote_crm.contacts.sync,hello-action:greetings:write
           VITE_API_BASE_URL: /
           VITE_RUNTIME_CONSOLE_MODE: api
       - run: |
           rm -rf console/dist
           cp -R ../lenso-runtime-console/dist console/dist
           test -f console/dist/index.html
+          test -f console/dist/extensions/host/runtime-console-api.js
+          test -f console/dist/extensions/host/react.js
+          test -f console/dist/extensions/host/react-jsx-runtime.js
           grep -q 'src="/console/assets/' console/dist/index.html
           grep -q 'href="/console/assets/' console/dist/index.html
           grep -R -q 'dev-service:admin:runtime.stories.read' console/dist/assets
+          grep -R -q 'auth.users.read' console/dist/assets
           ! grep -R -q 'function F(){return!1}' console/dist/assets
         working-directory: lenso-cli
       - run: cargo test --locked

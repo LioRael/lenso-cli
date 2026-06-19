@@ -324,6 +324,13 @@ fn install_embedded_console(target: &Path) -> Result<ConsoleInstallStatus> {
             .with_context(|| format!("create {}", console_root.join("extensions").display()))?;
     }
 
+    if let Some(host_extensions_dir) = dist_dir.get_dir("extensions/host") {
+        copy_embedded_dir(
+            host_extensions_dir,
+            &console_root.join("extensions").join("host"),
+        )?;
+    }
+
     let registry = console_root.join("extensions").join("registry.json");
     if !registry.exists() {
         fs::write(&registry, b"{\"version\":1,\"bundles\":[]}\n")
@@ -485,6 +492,13 @@ mod tests {
         if CONSOLE_DIR.get_file("dist/index.html").is_some() {
             result.unwrap();
             assert!(target.join(".lenso/console/dist/index.html").exists());
+            if CONSOLE_DIR.get_dir("dist/extensions/host").is_some() {
+                assert!(
+                    target
+                        .join(".lenso/console/extensions/host/runtime-console-api.js")
+                        .exists()
+                );
+            }
         } else {
             assert!(result.is_err());
         }
