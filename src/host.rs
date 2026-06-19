@@ -1,5 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use include_dir::{Dir, DirEntry, include_dir};
@@ -62,6 +64,61 @@ pub fn update_console(repo_root: Option<&Path>) -> Result<()> {
     }
 }
 
+/// Start the local services used by a generated Lenso host project.
+pub async fn serve(
+    repo_root: Option<&Path>,
+    skip_db: bool,
+    skip_migrate: bool,
+    separate_worker: bool,
+) -> Result<()> {
+    let repo_root = repo_root.unwrap_or_else(|| Path::new("."));
+    ensure_host_root(repo_root)?;
+
+    if !skip_db {
+        run(repo_root, "docker", &["compose", "up", "-d", "postgres"])?;
+    }
+    if !skip_migrate {
+        run(repo_root, "cargo", &cargo_run_args("migrate"))?;
+    }
+
+    let embedded_worker = !separate_worker && has_bin(repo_root, "serve");
+    let api_label = if embedded_worker { "api+worker" } else { "api" };
+    let mut api = spawn_cargo_bin(repo_root, if embedded_worker { "serve" } else { "api" })?;
+    let mut worker = if embedded_worker {
+        None
+    } else {
+        Some(spawn_cargo_bin(repo_root, "worker")?)
+    };
+    eprintln!("Lenso host is serving. Press Ctrl-C to stop.");
+
+    loop {
+        tokio::select! {
+            signal = tokio::signal::ctrl_c() => {
+                signal.context("listen for Ctrl-C")?;
+                stop_child(api_label, &mut api);
+                if let Some(worker) = worker.as_mut() {
+                    stop_child("worker", worker);
+                }
+                return Ok(());
+            }
+            () = tokio::time::sleep(Duration::from_millis(500)) => {
+                if let Some(status) = api.try_wait().with_context(|| format!("check {api_label} process"))? {
+                    if let Some(worker) = worker.as_mut() {
+                        stop_child("worker", worker);
+                    }
+                    bail!("{api_label} exited with {status}");
+                }
+                if let Some(worker) = worker.as_mut() {
+                    if let Some(status) = worker.try_wait().context("check worker process")? {
+                        stop_child(api_label, &mut api);
+                        bail!("worker exited with {status}");
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Reject names that cannot be a Cargo package name.
 fn validate_package_name(name: &str) -> Result<()> {
     let mut chars = name.chars();
@@ -76,6 +133,66 @@ fn validate_package_name(name: &str) -> Result<()> {
         bail!("package name may only contain ASCII letters, digits, '_' and '-': {name}");
     }
     Ok(())
+}
+
+fn ensure_host_root(repo_root: &Path) -> Result<()> {
+    if !repo_root.join("Cargo.toml").exists() {
+        bail!(
+            "{} does not look like a Lenso host root",
+            repo_root.display()
+        );
+    }
+    Ok(())
+}
+
+fn has_bin(repo_root: &Path, bin: &str) -> bool {
+    repo_root
+        .join("src")
+        .join("bin")
+        .join(format!("{bin}.rs"))
+        .exists()
+}
+
+fn cargo_run_args(bin: &str) -> Vec<&str> {
+    vec!["run", "--bin", bin]
+}
+
+fn run(repo_root: &Path, program: &str, args: &[&str]) -> Result<()> {
+    eprintln!("$ {} {}", program, args.join(" "));
+    let status = Command::new(program)
+        .args(args)
+        .current_dir(repo_root)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .with_context(|| format!("run {program}"))?;
+    if !status.success() {
+        bail!("{program} exited with {status}");
+    }
+    Ok(())
+}
+
+fn spawn_cargo_bin(repo_root: &Path, bin: &str) -> Result<Child> {
+    let args = cargo_run_args(bin);
+    eprintln!("$ cargo {}", args.join(" "));
+    Command::new("cargo")
+        .args(args)
+        .current_dir(repo_root)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .with_context(|| format!("start {bin}"))
+}
+
+fn stop_child(label: &str, child: &mut Child) {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    eprintln!("Stopped {label}.");
 }
 
 /// Convert a package name to its Cargo library crate name (`-` becomes `_`).
@@ -277,10 +394,7 @@ fn print_next_steps(target: &Path, package_name: &str, console_status: ConsoleIn
     eprintln!("Next steps:");
     eprintln!("  cd {}", target.display());
     eprintln!("  cp .env.example .env");
-    eprintln!("  docker compose up -d postgres");
-    eprintln!("  cargo run --bin migrate");
-    eprintln!("  cargo run --bin api       # API server");
-    eprintln!("  cargo run --bin worker    # in another shell");
+    eprintln!("  lenso serve");
     if console_status == ConsoleInstallStatus::Installed {
         eprintln!("  open http://127.0.0.1:3000/console");
     }
@@ -329,6 +443,13 @@ mod tests {
         let input = b"lenso_starter_host::host_composition()";
         let out = rewrite_bin_source(input, &rewrites);
         assert_eq!(out, "billing_svc::host_composition()");
+    }
+
+    #[test]
+    fn cargo_run_args_target_host_bins() {
+        assert_eq!(cargo_run_args("api"), vec!["run", "--bin", "api"]);
+        assert_eq!(cargo_run_args("serve"), vec!["run", "--bin", "serve"]);
+        assert_eq!(cargo_run_args("worker"), vec!["run", "--bin", "worker"]);
     }
 
     #[test]
