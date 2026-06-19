@@ -18,6 +18,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Start a Lenso host project locally.
+    Serve(ServeArgs),
     /// Scaffold and manage Lenso host applications.
     Host {
         #[command(subcommand)]
@@ -33,6 +35,25 @@ enum Command {
         #[command(subcommand)]
         command: ConsolePackageCommand,
     },
+}
+
+#[derive(Debug, Args)]
+struct ServeArgs {
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Run API and worker as separate local processes.
+    #[arg(long)]
+    separate_worker: bool,
+
+    /// Do not start the template Postgres service.
+    #[arg(long)]
+    skip_db: bool,
+
+    /// Do not run migrations before starting services.
+    #[arg(long)]
+    skip_migrate: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -476,6 +497,15 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Command::Serve(args) => {
+            host::serve(
+                args.repo_root.as_deref(),
+                args.skip_db,
+                args.skip_migrate,
+                args.separate_worker,
+            )
+            .await?;
+        }
         Command::Host { command } => match command {
             HostCommand::Init { dir, name, force } => host::init(&dir, name.as_deref(), force)?,
             HostCommand::UpdateConsole { repo_root } => {

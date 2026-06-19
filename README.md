@@ -14,9 +14,7 @@ cargo install lenso-cli
 lenso host init my-app
 cd my-app
 cp .env.example .env
-docker compose up -d postgres
-cargo run --bin migrate
-cargo run --bin api
+lenso serve
 ```
 
 The package name defaults to the target directory name and can be overridden with
@@ -36,6 +34,12 @@ feature, which is the current narrow host API for booting API, worker, and
 migration entrypoints. See
 [`docs/architecture/framework-public-surface.md`](https://github.com/LioRael/lenso/blob/main/docs/architecture/framework-public-surface.md)
 for the host-facade roadmap.
+
+`lenso serve` is a local development wrapper for the generated host. It starts
+the template Postgres service, runs migrations, then keeps the API and worker
+running until Ctrl-C. New hosts run them in one local process; pass
+`--separate-worker` when you want two child processes. Use `--skip-db` or
+`--skip-migrate` when you already have those steps covered.
 
 ## Scaffold a module
 

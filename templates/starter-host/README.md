@@ -14,14 +14,16 @@ boot or platform crates as its user-facing API.
 
 ```sh
 cp .env.example .env
+lenso serve
+```
+
+`lenso serve` runs the API and worker in one local process. For manual or
+separate-process startup:
+
+```sh
 docker compose up -d postgres
 cargo run --bin migrate
 cargo run --bin api
-```
-
-Run the worker in a second shell:
-
-```sh
 cargo run --bin worker
 ```
 
