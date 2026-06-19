@@ -16,6 +16,12 @@ Scaffold with `lenso host init <dir>`, then from the generated project:
 
 ```sh
 cp .env.example .env
+lenso serve
+```
+
+Use separate processes only when debugging service boundaries:
+
+```sh
 docker compose up -d postgres
 cargo run --bin migrate
 cargo run --bin api
