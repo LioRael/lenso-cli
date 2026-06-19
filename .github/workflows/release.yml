@@ -34,10 +34,14 @@ jobs:
         working-directory: lenso-runtime-console
       - run: corepack pnpm build:local
         working-directory: lenso-runtime-console
+        env:
+          LENSO_CONSOLE_BASE: /console/
       - run: |
           rm -rf console/dist
           cp -R ../lenso-runtime-console/dist console/dist
           test -f console/dist/index.html
+          grep -q 'src="/console/assets/' console/dist/index.html
+          grep -q 'href="/console/assets/' console/dist/index.html
         working-directory: lenso-cli
       - run: cargo test --locked
         working-directory: lenso-cli
