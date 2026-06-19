@@ -361,7 +361,7 @@ async fn install_module_descriptor(
             add_remote_module(manifest_reference, options).await
         }
         ModuleSource::Linked => {
-            install_linked_module_descriptor(descriptor, descriptor_reference, options)
+            install_linked_module_descriptor(descriptor, descriptor_reference, options).await
         }
     }
 }
@@ -509,7 +509,7 @@ fn install_linked_module(module_name: &str, options: RemoteModuleInstallOptions)
     )
 }
 
-fn install_linked_module_descriptor(
+async fn install_linked_module_descriptor(
     descriptor: &Value,
     descriptor_reference: &str,
     options: RemoteModuleInstallOptions,
@@ -535,6 +535,7 @@ fn install_linked_module_descriptor(
             .unwrap_or_else(|| Path::new(".env")),
     );
     let cargo_toml_path = repo_root.join("Cargo.toml");
+    let console_extension_registry_path = repo_root.join(CONSOLE_EXTENSION_REGISTRY_PATH);
     let host_lib_path = repo_root.join("src/lib.rs");
     let install_ledger_path = repo_root.join(MODULE_INSTALL_LEDGER_PATH);
 
@@ -553,27 +554,33 @@ fn install_linked_module_descriptor(
         env_file = set_linked_module_enabled_env(&env_file, dependency, true);
     }
 
+    let dependency_descriptors = dependencies
+        .iter()
+        .filter_map(|dependency| {
+            builtin_linked_module_descriptor(dependency)
+                .map(|descriptor| (dependency.clone(), descriptor))
+        })
+        .collect::<Vec<_>>();
+
     let mut cargo_toml = read_text_if_exists(&cargo_toml_path)?;
     let mut cargo_toml_changed = false;
     let mut host_lib = read_text(&host_lib_path)?;
-    for dependency in &dependencies {
-        if let Some(dependency_descriptor) = builtin_linked_module_descriptor(dependency) {
-            let dependency_linked = dependency_descriptor.get("linked").ok_or_else(|| {
-                anyhow!("Linked dependency descriptor linked section is required")
-            })?;
-            if let Some(updated) = update_host_cargo_toml_for_linked_descriptor(
-                &cargo_toml,
-                dependency_linked.get("cargo"),
-            )? {
-                cargo_toml = updated;
-                cargo_toml_changed = true;
-            }
-            host_lib = update_host_lib_for_linked_descriptor(
-                &host_lib,
-                dependency_linked.get("use").and_then(Value::as_str),
-                string_field(dependency_linked, "call")?,
-            )?;
+    for (_, dependency_descriptor) in &dependency_descriptors {
+        let dependency_linked = dependency_descriptor
+            .get("linked")
+            .ok_or_else(|| anyhow!("Linked dependency descriptor linked section is required"))?;
+        if let Some(updated) = update_host_cargo_toml_for_linked_descriptor(
+            &cargo_toml,
+            dependency_linked.get("cargo"),
+        )? {
+            cargo_toml = updated;
+            cargo_toml_changed = true;
         }
+        host_lib = update_host_lib_for_linked_descriptor(
+            &host_lib,
+            dependency_linked.get("use").and_then(Value::as_str),
+            string_field(dependency_linked, "call")?,
+        )?;
     }
     if let Some(updated) =
         update_host_cargo_toml_for_linked_descriptor(&cargo_toml, linked.get("cargo"))?
@@ -586,6 +593,19 @@ fn install_linked_module_descriptor(
         linked.get("use").and_then(Value::as_str),
         call,
     )?;
+    let mut console_manifests = dependency_descriptors
+        .iter()
+        .map(|(_, descriptor)| descriptor)
+        .collect::<Vec<_>>();
+    console_manifests.push(descriptor);
+    let console_bundle_install = install_runtime_console_bundles_for_manifests(
+        &repo_root,
+        &console_extension_registry_path,
+        &console_manifests,
+        options.console_plan,
+        options.dry_run,
+    )
+    .await?;
     let install_ledger = update_module_install_ledger(
         &install_ledger_path,
         linked_module_install_ledger_entry(
@@ -602,6 +622,9 @@ fn install_linked_module_descriptor(
                     None
                 },
                 &host_lib_path,
+                console_bundle_install
+                    .registry_changed
+                    .then_some(console_extension_registry_path.as_path()),
             ),
             cargo_toml_changed,
         ),
@@ -614,8 +637,18 @@ fn install_linked_module_descriptor(
             println!("- {}", display_relative(&repo_root, &cargo_toml_path));
         }
         println!("- {}", display_relative(&repo_root, &host_lib_path));
+        if console_bundle_install.registry_changed {
+            println!(
+                "- {}",
+                display_relative(&repo_root, &console_extension_registry_path)
+            );
+            for file_path in &console_bundle_install.bundle_files {
+                println!("- {}", display_relative(&repo_root, file_path));
+            }
+        }
         println!("- {}", display_relative(&repo_root, &install_ledger_path));
         println!("- {module_name}");
+        println!("- console bundles: {}", console_bundle_install.bundle_count);
         return Ok(());
     }
 
@@ -633,7 +666,17 @@ fn install_linked_module_descriptor(
         println!("- {}", display_relative(&repo_root, &cargo_toml_path));
     }
     println!("- {}", display_relative(&repo_root, &host_lib_path));
+    if console_bundle_install.registry_changed {
+        println!(
+            "- {}",
+            display_relative(&repo_root, &console_extension_registry_path)
+        );
+        for file_path in &console_bundle_install.bundle_files {
+            println!("- {}", display_relative(&repo_root, file_path));
+        }
+    }
     println!("- {}", display_relative(&repo_root, &install_ledger_path));
+    println!("Console bundles: {}", console_bundle_install.bundle_count);
     println!("Next steps:");
     println!("- cargo run --bin migrate");
     println!("- restart the API and worker");
@@ -3226,6 +3269,7 @@ fn linked_module_install_writes(
     env_file_path: &Path,
     cargo_toml_path: Option<&Path>,
     host_lib_path: &Path,
+    console_extension_registry_path: Option<&Path>,
 ) -> Vec<Value> {
     let mut writes = vec![json!({
         "kind": "env",
@@ -3241,6 +3285,12 @@ fn linked_module_install_writes(
         "kind": "hostComposition",
         "path": display_relative(repo_root, host_lib_path),
     }));
+    if let Some(console_extension_registry_path) = console_extension_registry_path {
+        writes.push(json!({
+            "kind": "consoleExtensionRegistry",
+            "path": display_relative(repo_root, console_extension_registry_path),
+        }));
+    }
     writes
 }
 
@@ -3523,6 +3573,36 @@ async fn install_runtime_console_bundles(
     }
 
     let specs = remote_module_console_bundle_specs(repo_root, manifest, base_url)?;
+    install_runtime_console_bundle_specs(registry_path, specs, dry_run).await
+}
+
+async fn install_runtime_console_bundles_for_manifests(
+    repo_root: &Path,
+    registry_path: &Path,
+    manifests: &[&Value],
+    enabled: bool,
+    dry_run: bool,
+) -> Result<ConsoleBundleInstall> {
+    if !enabled {
+        return Ok(ConsoleBundleInstall {
+            bundle_count: 0,
+            bundle_files: Vec::new(),
+            registry_changed: false,
+        });
+    }
+
+    let mut specs = Vec::new();
+    for manifest in manifests {
+        specs.extend(remote_module_console_bundle_specs(repo_root, manifest, "")?);
+    }
+    install_runtime_console_bundle_specs(registry_path, specs, dry_run).await
+}
+
+async fn install_runtime_console_bundle_specs(
+    registry_path: &Path,
+    specs: Vec<ConsoleBundleSpec>,
+    dry_run: bool,
+) -> Result<ConsoleBundleInstall> {
     if specs.is_empty() {
         return Ok(ConsoleBundleInstall {
             bundle_count: 0,
@@ -3555,11 +3635,10 @@ fn remote_module_console_bundle_specs(
     let module_name = string_field(manifest, "name")?.trim();
     let module_slug = slugify(module_name);
     let mut specs = Vec::new();
-    for surface in manifest
-        .get("console")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("Remote module manifest console must be an array"))?
-    {
+    let Some(surfaces) = manifest.get("console").and_then(Value::as_array) else {
+        return Ok(specs);
+    };
+    for surface in surfaces {
         let package = surface.get("package").and_then(Value::as_object);
         let Some(package_name) = package.and_then(|p| p.get("name")).and_then(Value::as_str) else {
             continue;
@@ -4361,6 +4440,18 @@ fn builtin_linked_module_descriptor(reference: &str) -> Option<Value> {
         "auth" => Some(json!({
             "name": "auth",
             "source": "linked",
+            "console": [
+                {
+                    "package": {
+                        "bundleUrl": "https://cdn.jsdelivr.net/npm/@lenso/auth-console@0.1.0/dist/auth-console.js",
+                        "export": "authConsoleModule",
+                        "hostApi": "1",
+                        "name": "@lenso/auth-console",
+                        "version": "0.1.0"
+                    },
+                    "required_capabilities": ["auth.users.read"]
+                }
+            ],
             "linked": {
                 "call": "builtins::auth()"
             }
@@ -4885,6 +4976,10 @@ mod tests {
         assert_eq!(descriptor["name"], "auth");
         assert_eq!(descriptor["source"], "linked");
         assert_eq!(descriptor["linked"]["call"], "builtins::auth()");
+        assert_eq!(
+            descriptor["console"][0]["package"]["bundleUrl"],
+            "https://cdn.jsdelivr.net/npm/@lenso/auth-console@0.1.0/dist/auth-console.js"
+        );
     }
 
     #[test]
