@@ -324,7 +324,7 @@ fn install_embedded_console(target: &Path) -> Result<ConsoleInstallStatus> {
             .with_context(|| format!("create {}", console_root.join("extensions").display()))?;
     }
 
-    if let Some(host_extensions_dir) = dist_dir.get_dir("extensions/host") {
+    if let Some(host_extensions_dir) = CONSOLE_DIR.get_dir("dist/extensions/host") {
         copy_embedded_dir(
             host_extensions_dir,
             &console_root.join("extensions").join("host"),
