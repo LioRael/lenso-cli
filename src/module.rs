@@ -3413,6 +3413,18 @@ fn uninstall_linked_module(module_name: &str, options: RemoteModuleUninstallOpti
     let env_file = (env_file != env_source).then_some(env_file);
     let host_lib = remove_linked_modules_from_host_lib_source(&host_lib_source, &calls);
     let install_ledger = remove_module_install_ledger_modules(&install_ledger_path, &modules)?;
+    let console_extension_registry_path = repo_root.join(CONSOLE_EXTENSION_REGISTRY_PATH);
+    let console_registry =
+        remove_runtime_console_bundle_registry_modules(&console_extension_registry_path, &modules)?;
+    let console_extension_module_dirs = modules
+        .iter()
+        .map(|module_name| {
+            repo_root
+                .join(".lenso/console/extensions")
+                .join(slugify(module_name))
+        })
+        .filter(|path| path.exists())
+        .collect::<Vec<_>>();
 
     if options.dry_run {
         println!("Linked module uninstall dry run:");
@@ -3424,6 +3436,15 @@ fn uninstall_linked_module(module_name: &str, options: RemoteModuleUninstallOpti
         }
         if install_ledger.is_some() {
             println!("- {}", display_relative(&repo_root, &install_ledger_path));
+        }
+        if console_registry.is_some() {
+            println!(
+                "- {}",
+                display_relative(&repo_root, &console_extension_registry_path)
+            );
+        }
+        for path in &console_extension_module_dirs {
+            println!("- {}", display_relative(&repo_root, path));
         }
         for call in calls {
             println!("- remove {call}");
@@ -3439,6 +3460,13 @@ fn uninstall_linked_module(module_name: &str, options: RemoteModuleUninstallOpti
     }
     if let Some(install_ledger) = install_ledger {
         write_json(&install_ledger_path, &install_ledger)?;
+    }
+    if let Some(console_registry) = console_registry {
+        write_json(&console_extension_registry_path, &console_registry)?;
+    }
+    for path in console_extension_module_dirs {
+        fs::remove_dir_all(&path)
+            .with_context(|| format!("remove console extension directory {}", path.display()))?;
     }
 
     println!("Uninstalled linked module(s): {}.", modules.join(", "));
@@ -4367,6 +4395,13 @@ fn remove_runtime_console_bundle_registry_module(
     registry_path: &Path,
     module_name: &str,
 ) -> Result<Option<Value>> {
+    remove_runtime_console_bundle_registry_modules(registry_path, &[module_name.to_owned()])
+}
+
+fn remove_runtime_console_bundle_registry_modules(
+    registry_path: &Path,
+    module_names: &[String],
+) -> Result<Option<Value>> {
     read_json_if_exists(registry_path)?.map_or(Ok(None), |mut registry| {
         let version = registry.get("version").cloned().unwrap_or_else(|| json!(1));
         let bundles = registry
@@ -4376,8 +4411,12 @@ fn remove_runtime_console_bundle_registry_module(
                 anyhow!("Runtime Console extension registry bundles must be an array")
             })?;
         let original_len = bundles.len();
-        bundles
-            .retain(|entry| entry.get("moduleName").and_then(Value::as_str) != Some(module_name));
+        bundles.retain(|entry| {
+            let Some(module_name) = entry.get("moduleName").and_then(Value::as_str) else {
+                return true;
+            };
+            !module_names.iter().any(|name| name == module_name)
+        });
         if bundles.len() == original_len {
             return Ok(None);
         }
@@ -5054,6 +5093,68 @@ mod tests {
         assert!(!updated.contains("builtins::auth()"));
         assert!(!updated.contains("builtins::auth_password()"));
         assert!(updated.contains(".linked_module(modules::app::linked_module())"));
+    }
+
+    #[test]
+    fn linked_uninstall_removes_console_extension_files() {
+        let repo_root = std::env::temp_dir().join(format!(
+            "lenso-linked-uninstall-extension-{}",
+            std::process::id()
+        ));
+        fs::remove_dir_all(&repo_root).ok();
+        write_file(&repo_root.join(".env"), b"LENSO_MODULE_AUTH_ENABLED=true\n").unwrap();
+        write_file(
+            &repo_root.join("src/lib.rs"),
+            b"pub fn host_composition() -> HostComposition {\n    HostBuilder::new()\n        .linked_module(builtins::auth())\n        .linked_module(modules::app::linked_module())\n        .build()\n}\n",
+        )
+        .unwrap();
+        write_json(
+            &repo_root.join(MODULE_INSTALL_LEDGER_PATH),
+            &json!({
+                "modules": [{
+                    "enabled": true,
+                    "linked": { "call": "builtins::auth()" },
+                    "moduleName": "auth",
+                    "source": "linked"
+                }],
+                "version": 1
+            }),
+        )
+        .unwrap();
+        write_json(
+            &repo_root.join(CONSOLE_EXTENSION_REGISTRY_PATH),
+            &json!({
+                "bundles": [
+                    { "moduleName": "auth" },
+                    { "moduleName": "crm" }
+                ],
+                "version": 1
+            }),
+        )
+        .unwrap();
+        write_file(
+            &repo_root.join(".lenso/console/extensions/auth/auth-console.js"),
+            b"export const authConsoleModule = {};\n",
+        )
+        .unwrap();
+
+        uninstall_linked_module(
+            "auth",
+            RemoteModuleUninstallOptions {
+                dry_run: false,
+                env_file: None,
+                module_services_file: None,
+                repo_root: Some(repo_root.clone()),
+                source: None,
+            },
+        )
+        .unwrap();
+
+        let registry = read_json(&repo_root.join(CONSOLE_EXTENSION_REGISTRY_PATH)).unwrap();
+        assert!(!repo_root.join(".lenso/console/extensions/auth").exists());
+        assert_eq!(registry["bundles"].as_array().unwrap().len(), 1);
+        assert_eq!(registry["bundles"][0]["moduleName"], "crm");
+        fs::remove_dir_all(&repo_root).ok();
     }
 
     #[test]
