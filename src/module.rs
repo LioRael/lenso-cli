@@ -3552,8 +3552,16 @@ struct ConsoleBundleSpec {
     module_name: String,
     package_name: String,
     required_capabilities: Vec<String>,
+    styles: Vec<ConsoleBundleStyleSpec>,
     target_path: PathBuf,
     version: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ConsoleBundleStyleSpec {
+    entry: String,
+    source_url: String,
+    target_path: PathBuf,
 }
 
 async fn install_runtime_console_bundles(
@@ -3615,6 +3623,10 @@ async fn install_runtime_console_bundle_specs(
         for spec in &specs {
             let bytes = read_bundle_reference(&spec.bundle_url).await?;
             write_file(&spec.target_path, &bytes)?;
+            for style in &spec.styles {
+                let bytes = read_bundle_reference(&style.source_url).await?;
+                write_file(&style.target_path, &bytes)?;
+            }
         }
         let registry = update_runtime_console_bundle_registry(registry_path, &specs)?;
         write_json(registry_path, &registry)?;
@@ -3622,7 +3634,13 @@ async fn install_runtime_console_bundle_specs(
 
     Ok(ConsoleBundleInstall {
         bundle_count: specs.len(),
-        bundle_files: specs.iter().map(|spec| spec.target_path.clone()).collect(),
+        bundle_files: specs
+            .iter()
+            .flat_map(|spec| {
+                std::iter::once(spec.target_path.clone())
+                    .chain(spec.styles.iter().map(|style| style.target_path.clone()))
+            })
+            .collect(),
         registry_changed: true,
     })
 }
@@ -3659,6 +3677,21 @@ fn remote_module_console_bundle_specs(
             .join(&module_slug)
             .join(&file_name);
         let entry = format!("{CONSOLE_EXTENSION_ROUTE_PREFIX}/{module_slug}/{file_name}");
+        let styles = console_bundle_styles(surface, package)
+            .into_iter()
+            .map(|style_reference| {
+                let source_url = resolve_bundle_reference(style_reference, base_url)?;
+                let file_name = console_style_file_name(&source_url, export_name);
+                Ok(ConsoleBundleStyleSpec {
+                    entry: format!("{CONSOLE_EXTENSION_ROUTE_PREFIX}/{module_slug}/{file_name}"),
+                    source_url,
+                    target_path: repo_root
+                        .join(".lenso/console/extensions")
+                        .join(&module_slug)
+                        .join(file_name),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         specs.push(ConsoleBundleSpec {
             bundle_url,
             entry,
@@ -3674,6 +3707,7 @@ fn remote_module_console_bundle_specs(
                 .filter_map(Value::as_str)
                 .map(ToOwned::to_owned)
                 .collect(),
+            styles,
             target_path,
             version: package
                 .and_then(|p| p.get("version"))
@@ -3704,6 +3738,38 @@ fn console_bundle_url<'a>(
                 .or_else(|| surface.get("bundle_url"))
                 .and_then(Value::as_str)
         })
+}
+
+fn console_bundle_styles<'a>(
+    surface: &'a Value,
+    package: Option<&'a Map<String, Value>>,
+) -> Vec<&'a str> {
+    let mut styles = Vec::new();
+    collect_console_bundle_styles(package.and_then(|p| p.get("styles")), &mut styles);
+    collect_console_bundle_styles(
+        package
+            .and_then(|p| p.get("bundle"))
+            .and_then(|bundle| bundle.get("styles")),
+        &mut styles,
+    );
+    collect_console_bundle_styles(surface.get("styles"), &mut styles);
+    collect_console_bundle_styles(
+        surface
+            .get("bundle")
+            .and_then(|bundle| bundle.get("styles")),
+        &mut styles,
+    );
+    styles
+}
+
+fn collect_console_bundle_styles<'a>(value: Option<&'a Value>, styles: &mut Vec<&'a str>) {
+    match value {
+        Some(Value::String(style)) => styles.push(style),
+        Some(Value::Array(items)) => {
+            styles.extend(items.iter().filter_map(Value::as_str));
+        }
+        _ => {}
+    }
 }
 
 fn console_bundle_host_api<'a>(
@@ -3739,7 +3805,15 @@ fn resolve_bundle_reference(reference: &str, base_url: &str) -> Result<String> {
 }
 
 fn console_bundle_file_name(bundle_url: &str, export_name: &str) -> String {
-    reqwest::Url::parse(bundle_url)
+    console_asset_file_name(bundle_url, export_name, "js")
+}
+
+fn console_style_file_name(style_url: &str, export_name: &str) -> String {
+    console_asset_file_name(style_url, export_name, "css")
+}
+
+fn console_asset_file_name(asset_url: &str, export_name: &str, extension: &str) -> String {
+    reqwest::Url::parse(asset_url)
         .ok()
         .and_then(|url| {
             url.path_segments()
@@ -3748,12 +3822,12 @@ fn console_bundle_file_name(bundle_url: &str, export_name: &str) -> String {
                 .map(ToOwned::to_owned)
         })
         .or_else(|| {
-            Path::new(bundle_url)
+            Path::new(asset_url)
                 .file_name()
                 .and_then(|name| name.to_str())
                 .map(ToOwned::to_owned)
         })
-        .unwrap_or_else(|| format!("{}.js", slugify(export_name)))
+        .unwrap_or_else(|| format!("{}.{}", slugify(export_name), extension))
 }
 
 async fn read_bundle_reference(reference: &str) -> Result<Vec<u8>> {
@@ -3807,6 +3881,14 @@ fn update_runtime_console_bundle_registry(
         });
         if !spec.required_capabilities.is_empty() {
             entry["requiredCapabilities"] = json!(spec.required_capabilities);
+        }
+        if !spec.styles.is_empty() {
+            entry["styles"] = json!(
+                spec.styles
+                    .iter()
+                    .map(|style| style.entry.as_str())
+                    .collect::<Vec<_>>()
+            );
         }
         if let Some(version) = &spec.version {
             entry["version"] = json!(version);
@@ -4328,6 +4410,10 @@ fn module_catalog_entry_from_manifest(
             if let Some(bundle_url) = console_bundle_url(surface, Some(package)) {
                 package_hint["bundleUrl"] = json!(bundle_url);
             }
+            let styles = console_bundle_styles(surface, Some(package));
+            if !styles.is_empty() {
+                package_hint["styles"] = json!(styles);
+            }
             if let Some(host_api) = package
                 .get("hostApi")
                 .or_else(|| package.get("host_api"))
@@ -4443,11 +4529,12 @@ fn builtin_linked_module_descriptor(reference: &str) -> Option<Value> {
             "console": [
                 {
                     "package": {
-                        "bundleUrl": "https://cdn.jsdelivr.net/npm/@lenso/auth-console@0.1.0/dist/auth-console.js",
+                        "bundleUrl": "https://cdn.jsdelivr.net/npm/@lenso/auth-console@0.1.1/dist/auth-console.js",
                         "export": "authConsoleModule",
                         "hostApi": "1",
                         "name": "@lenso/auth-console",
-                        "version": "0.1.0"
+                        "styles": ["https://cdn.jsdelivr.net/npm/@lenso/auth-console@0.1.1/dist/auth-console.css"],
+                        "version": "0.1.1"
                     },
                     "required_capabilities": ["auth.users.read"]
                 }
@@ -4978,7 +5065,7 @@ mod tests {
         assert_eq!(descriptor["linked"]["call"], "builtins::auth()");
         assert_eq!(
             descriptor["console"][0]["package"]["bundleUrl"],
-            "https://cdn.jsdelivr.net/npm/@lenso/auth-console@0.1.0/dist/auth-console.js"
+            "https://cdn.jsdelivr.net/npm/@lenso/auth-console@0.1.1/dist/auth-console.js"
         );
     }
 
@@ -5256,6 +5343,7 @@ mod tests {
                         "export": "crmConsoleModule",
                         "hostApi": "1",
                         "name": "@vendor/crm-console",
+                        "styles": ["console/entry.css"],
                         "version": "1.2.3"
                     },
                     "required_capabilities": ["crm.read"]
@@ -5281,6 +5369,18 @@ mod tests {
             specs[0].target_path,
             PathBuf::from("/tmp/host/.lenso/console/extensions/remote-crm/entry.js")
         );
+        assert_eq!(
+            specs[0].styles[0].source_url,
+            "https://module.example.test/lenso/module/v1/console/entry.css"
+        );
+        assert_eq!(
+            specs[0].styles[0].entry,
+            "/console/extensions/remote-crm/entry.css"
+        );
+        assert_eq!(
+            specs[0].styles[0].target_path,
+            PathBuf::from("/tmp/host/.lenso/console/extensions/remote-crm/entry.css")
+        );
         assert_eq!(specs[0].required_capabilities, vec!["crm.read"]);
         assert_eq!(specs[0].version.as_deref(), Some("1.2.3"));
     }
@@ -5296,6 +5396,11 @@ mod tests {
             module_name: "crm".to_owned(),
             package_name: "@vendor/crm-console".to_owned(),
             required_capabilities: vec!["crm.read".to_owned()],
+            styles: vec![ConsoleBundleStyleSpec {
+                entry: "/console/extensions/crm/entry.css".to_owned(),
+                source_url: "https://module.example.test/entry.css".to_owned(),
+                target_path: PathBuf::from("/tmp/host/.lenso/console/extensions/crm/entry.css"),
+            }],
             target_path: PathBuf::from("/tmp/host/.lenso/console/extensions/crm/entry.js"),
             version: Some("1.0.0".to_owned()),
         }];
@@ -5309,6 +5414,10 @@ mod tests {
         assert_eq!(
             registry["bundles"][0]["requiredCapabilities"],
             json!(["crm.read"])
+        );
+        assert_eq!(
+            registry["bundles"][0]["styles"],
+            json!(["/console/extensions/crm/entry.css"])
         );
     }
 }

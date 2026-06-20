@@ -27,6 +27,8 @@ cargo run --bin api
 cargo run --bin worker
 ```
 
+If local port 5432 is already in use, change `POSTGRES_HOST_PORT` in `.env`.
+
 The API binds to `HTTP_HOST:HTTP_PORT` from `.env` and serves:
 
 - `GET /livez`;
