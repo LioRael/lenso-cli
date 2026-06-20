@@ -215,9 +215,15 @@ pub async fn create_module(options: ModuleCreateOptions) -> Result<()> {
         bail!("Module id is required");
     }
     let module_crate = snake_case(&module_id);
-    let module_dir = repo_root.join("modules").join(&module_id);
+    let host_layout = is_starter_host_root(&repo_root);
+    let module_dir = if host_layout {
+        repo_root.join("src/modules").join(&module_crate)
+    } else {
+        repo_root.join("modules").join(&module_id)
+    };
     if module_dir.exists() {
-        bail!("Module directory already exists: modules/{module_id}");
+        let module_path = display_relative(&repo_root, &module_dir);
+        bail!("Module directory already exists: {module_path}");
     }
 
     let runtime_console_root = options
@@ -242,25 +248,46 @@ pub async fn create_module(options: ModuleCreateOptions) -> Result<()> {
     };
 
     let mut pending_writes = PendingWrites::new();
-    let paths = repo_paths(&repo_root);
-    queue_module_files(
-        &mut pending_writes,
-        &module_dir,
-        &module_id,
-        console_surface.as_ref(),
-    )?;
-    update_workspace_cargo_toml(&mut pending_writes, &paths.cargo_toml_path, &module_id)?;
-    update_lenso_bootstrap_cargo_toml(
-        &mut pending_writes,
-        &paths.lenso_bootstrap_cargo_toml_path,
-        &module_id,
-    )?;
-    update_lenso_bootstrap_lib(
-        &mut pending_writes,
-        &paths.lenso_bootstrap_lib_path,
-        &module_crate,
-        &module_id,
-    )?;
+    if host_layout {
+        queue_host_module_files(
+            &mut pending_writes,
+            &module_dir,
+            &module_id,
+            console_surface.as_ref(),
+        )?;
+        update_host_modules_mod(
+            &mut pending_writes,
+            &repo_root.join("src/modules/mod.rs"),
+            &module_crate,
+        )?;
+        update_host_lib_for_created_module(
+            &mut pending_writes,
+            &repo_root.join("src/lib.rs"),
+            &module_crate,
+        )?;
+    } else if is_framework_workspace_root(&repo_root) {
+        let paths = repo_paths(&repo_root);
+        queue_module_files(
+            &mut pending_writes,
+            &module_dir,
+            &module_id,
+            console_surface.as_ref(),
+        )?;
+        update_workspace_cargo_toml(&mut pending_writes, &paths.cargo_toml_path, &module_id)?;
+        update_lenso_bootstrap_cargo_toml(
+            &mut pending_writes,
+            &paths.lenso_bootstrap_cargo_toml_path,
+            &module_id,
+        )?;
+        update_lenso_bootstrap_lib(
+            &mut pending_writes,
+            &paths.lenso_bootstrap_lib_path,
+            &module_crate,
+            &module_id,
+        )?;
+    } else {
+        bail!("Could not find a Lenso framework workspace or starter host root");
+    }
 
     if let Some(console_surface) = console_surface.as_ref() {
         queue_console_package(
@@ -286,9 +313,14 @@ pub async fn create_module(options: ModuleCreateOptions) -> Result<()> {
         println!("Created {}.", console_surface.package_name);
     }
     println!("Next steps:");
-    println!("- cargo test --locked -p {module_crate}");
-    println!("- just rust-check");
-    println!("- just arch-check");
+    if host_layout {
+        println!("- cargo test --locked");
+        println!("- cargo run --bin migrate");
+    } else {
+        println!("- cargo test --locked -p {module_crate}");
+        println!("- just rust-check");
+        println!("- just arch-check");
+    }
 
     Ok(())
 }
@@ -1518,6 +1550,138 @@ mod tests {{
     ))
 }
 
+fn queue_host_module_files(
+    pending_writes: &mut PendingWrites,
+    module_dir: &Path,
+    module_id: &str,
+    console_surface: Option<&ConsolePackageContext>,
+) -> Result<()> {
+    queue_write(
+        pending_writes,
+        module_dir.join("mod.rs"),
+        host_module_manifest(module_id, console_surface)?,
+    );
+    Ok(())
+}
+
+fn host_module_manifest(
+    module_id: &str,
+    console_surface: Option<&ConsolePackageContext>,
+) -> Result<String> {
+    let console_imports = if console_surface.is_some() {
+        "use lenso::{ConsoleArea, ConsoleNavigation, ConsolePackage, ConsoleSurface, ConsoleWorkspaceRef};\n"
+    } else {
+        ""
+    };
+    let manifest_builder = if let Some(console_surface) = console_surface {
+        format!(
+            r#"ModuleManifest::builder(MODULE_NAME)
+        .capabilities(vec![{}.to_owned()])
+        .console(vec![ConsoleSurface {{
+            name: {}.to_owned(),
+            label: {}.to_owned(),
+            area: ConsoleArea::{},
+            route: {}.to_owned(),
+            package: ConsolePackage {{
+                name: {}.to_owned(),
+                export: {}.to_owned(),
+            }},
+            icon: Some({}.to_owned()),
+            required_capabilities: vec![{}.to_owned()],
+            navigation: Some(ConsoleNavigation {{
+                workspace: ConsoleWorkspaceRef {{
+                    id: MODULE_NAME.to_owned(),
+                    label: {}.to_owned(),
+                    icon: Some({}.to_owned()),
+                }},
+                group: None,
+                order: Some(10),
+            }}),
+        }}])
+        .build()"#,
+            rust_string_literal(&console_surface.capability),
+            rust_string_literal(&console_surface.surface_name),
+            rust_string_literal(&console_surface.label),
+            rust_console_area(&console_surface.area)?,
+            rust_string_literal(&console_surface.route),
+            rust_string_literal(&console_surface.package_name),
+            rust_string_literal(&console_surface.module_name),
+            rust_string_literal(&console_surface.icon),
+            rust_string_literal(&console_surface.capability),
+            rust_string_literal(&console_surface.label),
+            rust_string_literal(&console_surface.icon),
+        )
+    } else {
+        "ModuleManifest::builder(MODULE_NAME).build()".to_owned()
+    };
+
+    Ok(format!(
+        r#"use lenso::host::prelude::*;
+{console_imports}
+pub const MODULE_NAME: &str = {};
+
+const MIGRATIONS: &[Migration] = &[];
+
+pub fn linked_module() -> HostLinkedModule {{
+    HostLinkedModule::manifest_only(MODULE_NAME, manifest, MIGRATIONS)
+}}
+
+fn manifest() -> ModuleManifest {{
+    {manifest_builder}
+}}
+
+#[cfg(test)]
+mod tests {{
+    use super::*;
+
+    #[test]
+    fn linked_module_exposes_manifest() {{
+        let module = linked_module();
+        let manifest = (module.manifest)();
+
+        assert_eq!(module.module_name, MODULE_NAME);
+        assert_eq!(manifest.name, MODULE_NAME);
+        assert!(module.migrations.is_empty());
+    }}
+}}
+"#,
+        rust_string_literal(module_id)
+    ))
+}
+
+fn update_host_modules_mod(
+    pending_writes: &mut PendingWrites,
+    modules_mod_path: &Path,
+    module_name: &str,
+) -> Result<()> {
+    let file_source = read_text(modules_mod_path)?;
+    queue_write(
+        pending_writes,
+        modules_mod_path.to_path_buf(),
+        insert_before_first_needle(
+            &file_source,
+            &format!("pub mod {module_name};\n"),
+            &["pub mod app;"],
+        )?,
+    );
+    Ok(())
+}
+
+fn update_host_lib_for_created_module(
+    pending_writes: &mut PendingWrites,
+    host_lib_path: &Path,
+    module_name: &str,
+) -> Result<()> {
+    let file_source = read_text(host_lib_path)?;
+    let call = format!("modules::{module_name}::linked_module()");
+    queue_write(
+        pending_writes,
+        host_lib_path.to_path_buf(),
+        update_host_lib_for_linked_descriptor(&file_source, None, &call)?,
+    );
+    Ok(())
+}
+
 fn update_workspace_cargo_toml(
     pending_writes: &mut PendingWrites,
     cargo_toml_path: &Path,
@@ -2622,6 +2786,16 @@ fn repo_paths(repo_root: &Path) -> RepoPaths {
         lenso_bootstrap_lib_path: repo_root.join("crates/lenso-bootstrap/src/lib.rs"),
         cargo_toml_path: repo_root.join("Cargo.toml"),
     }
+}
+
+fn is_framework_workspace_root(path: &Path) -> bool {
+    path.join("Cargo.toml").exists() && path.join("crates/lenso-bootstrap").exists()
+}
+
+fn is_starter_host_root(path: &Path) -> bool {
+    path.join("Cargo.toml").exists()
+        && path.join("src/lib.rs").exists()
+        && path.join("src/modules/mod.rs").exists()
 }
 
 fn queue_write(pending_writes: &mut PendingWrites, file_path: PathBuf, contents: String) {
@@ -5357,7 +5531,7 @@ fn resolve_repo_root(repo_root: Option<&Path>) -> Result<PathBuf> {
 fn find_repo_root(start_path: &Path) -> Result<PathBuf> {
     let mut current = absolutize(start_path)?;
     loop {
-        if current.join("Cargo.toml").exists() && current.join("crates/lenso-bootstrap").exists() {
+        if is_framework_workspace_root(&current) || is_starter_host_root(&current) {
             return Ok(current);
         }
         let Some(parent) = current.parent() else {
@@ -5448,6 +5622,27 @@ fn write_json(path: &Path, value: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn starter_host_module_scaffold_uses_internal_module_layout() {
+        let root =
+            std::env::temp_dir().join(format!("lenso-cli-starter-host-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src/modules")).unwrap();
+        fs::write(root.join("Cargo.toml"), "[package]\nname = \"host\"\n").unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+        fs::write(root.join("src/modules/mod.rs"), "pub mod app;\n").unwrap();
+
+        assert!(is_starter_host_root(&root));
+
+        let source = host_module_manifest("support-ticket", None).unwrap();
+        assert!(source.contains("pub const MODULE_NAME: &str = \"support-ticket\";"));
+        assert!(
+            source.contains("HostLinkedModule::manifest_only(MODULE_NAME, manifest, MIGRATIONS)")
+        );
+
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn env_remote_modules_are_upserted() {
