@@ -82,6 +82,20 @@ host `Cargo.toml`, `src/lib.rs`, `.env` toggle, and the same install receipt
 from the descriptor's `linked` section. `module add` remains a compatibility
 alias for remote installs.
 
+Install descriptor profiles let a module expose optional setup without baking
+module-specific choices into the CLI. For Redis-backed auth sessions:
+
+```sh
+lenso module install auth --profile redis-session-cache
+```
+
+The `auth` descriptor applies that profile by enabling the
+`lenso-module-auth` dependency's `redis` Cargo feature, writing
+`REDIS_URL=redis://localhost:6379/0` to `.env`, and recording
+`auth.session_cache=redis` in `.lenso/runtime-config-defaults.json`. Provide a
+Redis service separately; the starter Docker Compose file only starts Postgres
+by default.
+
 Use `--no-console-extension` when you want to skip Runtime Console extension
 registration.
 
