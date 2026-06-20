@@ -32,6 +32,16 @@ Use `ModuleManifest` for declarations:
 - Keep the module vertical.
 - Do not import another module's internals.
 - Use the committed OpenAPI and contract artifacts for API-facing work.
+- Prefer `lenso module create <name>` before hand-building a module shape.
+
+## Agent Output
+
+For a new or edited module, leave:
+
+- manifest declarations for routes, data, actions, runtime functions, and console surfaces that actually exist
+- app-owned behavior in the module, not in platform crates
+- one runnable check or smoke path that fails if the module is not wired
+- a short note on what appears in the Runtime Console
 
 ## Checks
 
@@ -41,3 +51,8 @@ When the change affects contracts or manifests, run the repo checks the host exp
 just generated-check
 just arch-check
 ```
+
+## Keep Out
+
+- Do not add a generic CRUD framework before the module needs it.
+- Do not promote app-specific data access into the public host facade.

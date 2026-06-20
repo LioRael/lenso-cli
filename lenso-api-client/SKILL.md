@@ -27,6 +27,16 @@ Do not infer request or response shapes from old examples.
 - Treat the committed contract as authoritative.
 - Keep generated client code out of hand edits.
 - Update backend sources first, then regenerate contracts.
+- Prefer verifying the exact path and envelope before writing wrapper code.
+
+## Agent Output
+
+When consuming an API, leave:
+
+- the contract path used
+- the endpoint and method
+- the request and response shapes
+- one focused command or assertion that verifies the integration
 
 ## Checks
 
@@ -34,3 +44,8 @@ Do not infer request or response shapes from old examples.
 just generate
 just generated-check
 ```
+
+## Keep Out
+
+- Do not infer endpoints from README examples.
+- Do not hand-edit generated clients.

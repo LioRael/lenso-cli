@@ -32,6 +32,15 @@ Start with the manifest:
 - Do not depend on sibling workspace paths for examples.
 - Use the host proxy and console surfaces already provided by Lenso.
 
+## Agent Output
+
+For a remote module, leave:
+
+- a manifest URL such as `/lenso/module/v1/manifest`
+- declared HTTP routes, runtime functions, event handlers, actions, or custom surfaces that are actually served
+- install instructions using `lenso module install <manifest-url>`
+- one package or smoke check that proves the module can run outside the host
+
 ## Checks
 
 ```sh
@@ -39,3 +48,8 @@ pnpm package-readiness
 ```
 
 Use `npm pack --dry-run` before publishing a package change.
+
+## Keep Out
+
+- Do not make the remote module responsible for host auth, retries, queues, or observability.
+- Do not require a sibling Lenso checkout for a publishable example.

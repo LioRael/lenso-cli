@@ -42,9 +42,24 @@ cargo run --bin worker
 - Use `lenso = { features = ["host"] }` as the host facade.
 - Keep app-owned data in the starter, not in the auth anchor.
 - Keep the starter thin and explicit.
+- Keep generated hosts runnable without requiring the framework monorepo.
 
 ## Checks
 
 ```sh
 cargo check --bins
 ```
+
+## Agent Output
+
+When creating or fixing a starter host, leave:
+
+- the scaffolded project path
+- the command used to start it
+- the URL for `/console` when the API is running
+- one focused check result
+
+## Keep Out
+
+- Do not add product-specific CRUD helpers to `lenso::host`.
+- Do not add service orchestration beyond the starter's local process shape.

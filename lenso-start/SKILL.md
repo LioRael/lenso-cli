@@ -28,3 +28,17 @@ Start from the user goal, then route them to the smallest public surface that fi
 
 Ask for the target path if it is still unclear.
 Keep the next step narrow and public.
+
+## Agent Output
+
+Return the chosen path, the next command, and the follow-up skill:
+
+- host app -> `lenso host init <dir>` -> `lenso-starter-host`
+- in-host Rust module -> `lenso module create <name>` -> `lenso-module-authoring`
+- remote module -> `lenso module create <name> --remote` -> `lenso-remote-module-authoring`
+- API client -> committed OpenAPI contract -> `lenso-api-client`
+
+## Keep Out
+
+- Do not design a new framework surface before choosing an existing public path.
+- Do not recommend cloning this repository when a published package or CLI fits.
