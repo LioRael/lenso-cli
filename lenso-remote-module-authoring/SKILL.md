@@ -23,6 +23,7 @@ Start with the manifest:
 - `runtimeFunction(...)`
 - `adminAction(...)`
 - `declarativeCustom(...)`
+- `queryValue(...)`
 - `serveRemoteModule(...)`
 
 ## Host Boundaries
@@ -37,7 +38,7 @@ Start with the manifest:
 For a remote module, leave:
 
 - a manifest URL such as `/lenso/module/v1/manifest`
-- declared HTTP routes, runtime functions, event handlers, actions, or custom surfaces that are actually served
+- declared HTTP routes, runtime functions, event handlers, actions, query values, or custom surfaces that are actually served
 - install instructions using `lenso module install <manifest-url>`
 - one package or smoke check that proves the module can run outside the host
 
