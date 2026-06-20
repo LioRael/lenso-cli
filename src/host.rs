@@ -89,7 +89,7 @@ pub async fn serve(
     } else {
         Some(spawn_cargo_bin(repo_root, "worker")?)
     };
-    eprintln!("Lenso host is serving. Press Ctrl-C to stop.");
+    print_serve_ready(repo_root);
 
     loop {
         tokio::select! {
@@ -151,6 +151,68 @@ fn has_bin(repo_root: &Path, bin: &str) -> bool {
         .join("bin")
         .join(format!("{bin}.rs"))
         .exists()
+}
+
+fn print_serve_ready(repo_root: &Path) {
+    let base_url = serve_base_url(repo_root);
+    eprintln!();
+    eprintln!("Lenso host is serving");
+    eprintln!();
+    eprintln!("  API:     {base_url}");
+    eprintln!("{}", console_line(repo_root, &base_url));
+    eprintln!("  Docs:    {base_url}/docs");
+    eprintln!("  Health:  {base_url}/livez");
+    eprintln!();
+    eprintln!("Press Ctrl-C to stop.");
+}
+
+fn serve_base_url(repo_root: &Path) -> String {
+    let env_host = std::env::var("HTTP_HOST").ok();
+    let env_port = std::env::var("HTTP_PORT").ok();
+    serve_base_url_with(repo_root, env_host.as_deref(), env_port.as_deref())
+}
+
+fn serve_base_url_with(repo_root: &Path, env_host: Option<&str>, env_port: Option<&str>) -> String {
+    let host = env_host
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| dotenv_value(repo_root, "HTTP_HOST"))
+        .unwrap_or_else(|| "127.0.0.1".to_owned());
+    let port = env_port
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| dotenv_value(repo_root, "HTTP_PORT"))
+        .unwrap_or_else(|| "3000".to_owned());
+    format!("http://{}:{}", browser_host(&host), port.trim())
+}
+
+fn dotenv_value(repo_root: &Path, key: &str) -> Option<String> {
+    fs::read_to_string(repo_root.join(".env"))
+        .ok()
+        .and_then(|env| {
+            env.lines().find_map(|line| {
+                let (name, value) = line.split_once('=')?;
+                (name.trim() == key)
+                    .then(|| value.trim().trim_matches('"').trim_matches('\'').to_owned())
+            })
+        })
+}
+
+fn browser_host(host: &str) -> String {
+    match host.trim() {
+        "0.0.0.0" => "127.0.0.1".to_owned(),
+        "::" => "[::1]".to_owned(),
+        host if host.contains(':') && !host.starts_with('[') => format!("[{host}]"),
+        host => host.to_owned(),
+    }
+}
+
+fn console_line(repo_root: &Path, base_url: &str) -> String {
+    if repo_root.join(".lenso/console/dist/index.html").exists() {
+        format!("  Console: {base_url}/console")
+    } else {
+        "  Console: not installed. Run `lenso host update-console`.".to_owned()
+    }
 }
 
 fn cargo_run_args(bin: &str) -> Vec<&str> {
@@ -460,14 +522,45 @@ mod tests {
     }
 
     #[test]
+    fn serve_base_url_reads_env_file_and_browser_host() {
+        let target = temp_dir("lenso-cli-serve-url");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(&target.join(".env"), "HTTP_HOST=0.0.0.0\nHTTP_PORT=4242\n").unwrap();
+
+        assert_eq!(
+            serve_base_url_with(&target, None, None),
+            "http://127.0.0.1:4242"
+        );
+        assert_eq!(
+            serve_base_url_with(&target, Some("localhost"), Some("8080")),
+            "http://localhost:8080"
+        );
+
+        fs::remove_dir_all(target).unwrap();
+    }
+
+    #[test]
+    fn console_line_reports_installed_or_update_command() {
+        let target = temp_dir("lenso-cli-console-line");
+        fs::create_dir_all(target.join(".lenso/console/dist")).unwrap();
+
+        assert_eq!(
+            console_line(&target, "http://127.0.0.1:3000"),
+            "  Console: not installed. Run `lenso host update-console`."
+        );
+
+        fs::write(target.join(".lenso/console/dist/index.html"), "").unwrap();
+        assert_eq!(
+            console_line(&target, "http://127.0.0.1:3000"),
+            "  Console: http://127.0.0.1:3000/console"
+        );
+
+        fs::remove_dir_all(target).unwrap();
+    }
+
+    #[test]
     fn copies_embedded_console_tree() {
-        let target = std::env::temp_dir().join(format!(
-            "lenso-cli-console-copy-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let target = temp_dir("lenso-cli-console-copy");
         let _ = fs::remove_dir_all(&target);
 
         copy_embedded_dir(&CONSOLE_DIR, &target).unwrap();
@@ -478,13 +571,7 @@ mod tests {
 
     #[test]
     fn update_console_matches_packaged_asset_state() {
-        let target = std::env::temp_dir().join(format!(
-            "lenso-cli-console-update-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let target = temp_dir("lenso-cli-console-update");
         fs::create_dir_all(&target).unwrap();
 
         let result = update_console(Some(&target));
@@ -503,5 +590,16 @@ mod tests {
             assert!(result.is_err());
         }
         fs::remove_dir_all(target).unwrap();
+    }
+
+    fn temp_dir(prefix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "{}-{}",
+            prefix,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
     }
 }
