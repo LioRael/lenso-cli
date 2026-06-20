@@ -13,10 +13,24 @@ pub struct RemoteModuleInstallOptions {
     pub console_plan: bool,
     pub dry_run: bool,
     pub env_file: Option<PathBuf>,
+    pub install_profiles: Vec<String>,
     pub module_services_file: Option<PathBuf>,
     pub repo_root: Option<PathBuf>,
     pub run_install_commands: bool,
     pub source: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct LinkedInstallProfileEffects {
+    env: Vec<(String, String)>,
+    runtime_config_defaults: Vec<RuntimeConfigDefault>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RuntimeConfigDefault {
+    service: String,
+    key: String,
+    value: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -186,6 +200,7 @@ type PendingWrites = BTreeMap<PathBuf, String>;
 
 const MODULE_INSTALL_LEDGER_PATH: &str = ".lenso/module-installs.json";
 const CONSOLE_EXTENSION_REGISTRY_PATH: &str = ".lenso/console/extensions/registry.json";
+const RUNTIME_CONFIG_DEFAULTS_PATH: &str = ".lenso/runtime-config-defaults.json";
 const CONSOLE_EXTENSION_ROUTE_PREFIX: &str = "/console/extensions";
 const CONSOLE_BUNDLE_HOST_API: &str = "1";
 
@@ -514,14 +529,16 @@ async fn install_linked_module_descriptor(
     descriptor_reference: &str,
     options: RemoteModuleInstallOptions,
 ) -> Result<()> {
-    let module_name = string_field(descriptor, "name")?.trim();
+    let module_name = string_field(descriptor, "name")?.trim().to_owned();
     if module_name.is_empty() {
         bail!("Linked module descriptor name is required");
     }
+    let (descriptor, install_profile_effects) =
+        apply_linked_install_profiles(descriptor, &options.install_profiles)?;
     let linked = descriptor
         .get("linked")
         .ok_or_else(|| anyhow!("Linked module descriptor linked section is required"))?;
-    let call = string_field(linked, "call")?.trim();
+    let call = string_field(linked, "call")?.trim().to_owned();
     if call.is_empty() {
         bail!("Linked module descriptor linked.call is required");
     }
@@ -538,6 +555,7 @@ async fn install_linked_module_descriptor(
     let console_extension_registry_path = repo_root.join(CONSOLE_EXTENSION_REGISTRY_PATH);
     let host_lib_path = repo_root.join("src/lib.rs");
     let install_ledger_path = repo_root.join(MODULE_INSTALL_LEDGER_PATH);
+    let runtime_config_defaults_path = repo_root.join(RUNTIME_CONFIG_DEFAULTS_PATH);
 
     let dependencies = descriptor
         .get("dependencies")
@@ -549,10 +567,20 @@ async fn install_linked_module_descriptor(
         .collect::<Vec<_>>();
 
     let mut env_file =
-        set_linked_module_enabled_env(&read_text_if_exists(&env_file_path)?, module_name, true);
+        set_linked_module_enabled_env(&read_text_if_exists(&env_file_path)?, &module_name, true);
     for dependency in &dependencies {
         env_file = set_linked_module_enabled_env(&env_file, dependency, true);
     }
+    env_file = apply_manifest_install_env(env_file, &install_profile_effects.env);
+
+    let runtime_config_defaults = if install_profile_effects.runtime_config_defaults.is_empty() {
+        None
+    } else {
+        Some(update_runtime_config_defaults(
+            read_json_if_exists(&runtime_config_defaults_path)?,
+            &install_profile_effects.runtime_config_defaults,
+        )?)
+    };
 
     let dependency_descriptors = dependencies
         .iter()
@@ -591,13 +619,13 @@ async fn install_linked_module_descriptor(
     host_lib = update_host_lib_for_linked_descriptor(
         &host_lib,
         linked.get("use").and_then(Value::as_str),
-        call,
+        &call,
     )?;
     let mut console_manifests = dependency_descriptors
         .iter()
         .map(|(_, descriptor)| descriptor)
         .collect::<Vec<_>>();
-    console_manifests.push(descriptor);
+    console_manifests.push(&descriptor);
     let console_bundle_install = install_runtime_console_bundles_for_manifests(
         &repo_root,
         &console_extension_registry_path,
@@ -609,9 +637,9 @@ async fn install_linked_module_descriptor(
     let install_ledger = update_module_install_ledger(
         &install_ledger_path,
         linked_module_install_ledger_entry(
-            module_name,
+            &module_name,
             descriptor_reference,
-            call,
+            &call,
             &dependencies,
             linked_module_install_writes(
                 &repo_root,
@@ -622,6 +650,9 @@ async fn install_linked_module_descriptor(
                     None
                 },
                 &host_lib_path,
+                runtime_config_defaults
+                    .as_ref()
+                    .map(|_| runtime_config_defaults_path.as_path()),
                 console_bundle_install
                     .registry_changed
                     .then_some(console_extension_registry_path.as_path()),
@@ -646,6 +677,12 @@ async fn install_linked_module_descriptor(
                 println!("- {}", display_relative(&repo_root, file_path));
             }
         }
+        if runtime_config_defaults.is_some() {
+            println!(
+                "- {}",
+                display_relative(&repo_root, &runtime_config_defaults_path)
+            );
+        }
         println!("- {}", display_relative(&repo_root, &install_ledger_path));
         println!("- {module_name}");
         println!("- console bundles: {}", console_bundle_install.bundle_count);
@@ -657,6 +694,9 @@ async fn install_linked_module_descriptor(
         write_file(&cargo_toml_path, cargo_toml.as_bytes())?;
     }
     write_file(&host_lib_path, host_lib.as_bytes())?;
+    if let Some(runtime_config_defaults) = &runtime_config_defaults {
+        write_json(&runtime_config_defaults_path, runtime_config_defaults)?;
+    }
     write_json(&install_ledger_path, &install_ledger)?;
 
     println!("Installed linked module {module_name}.");
@@ -674,6 +714,12 @@ async fn install_linked_module_descriptor(
         for file_path in &console_bundle_install.bundle_files {
             println!("- {}", display_relative(&repo_root, file_path));
         }
+    }
+    if runtime_config_defaults.is_some() {
+        println!(
+            "- {}",
+            display_relative(&repo_root, &runtime_config_defaults_path)
+        );
     }
     println!("- {}", display_relative(&repo_root, &install_ledger_path));
     println!("Console bundles: {}", console_bundle_install.bundle_count);
@@ -2733,6 +2779,38 @@ fn rust_string_literal(value: &str) -> String {
     format!("{value:?}")
 }
 
+fn rust_string_array_literal(values: &[String]) -> String {
+    format!(
+        "[{}]",
+        values
+            .iter()
+            .map(|value| rust_string_literal(value))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn json_string_array(value: &Value, context: &str) -> Result<Vec<String>> {
+    let array = value
+        .as_array()
+        .ok_or_else(|| anyhow!("Linked module descriptor {context} must be an array"))?;
+    array
+        .iter()
+        .map(|value| {
+            let value = value
+                .as_str()
+                .ok_or_else(|| {
+                    anyhow!("Linked module descriptor {context} entries must be strings")
+                })?
+                .trim();
+            if value.is_empty() {
+                bail!("Linked module descriptor {context} entries must be non-empty");
+            }
+            Ok(value.to_owned())
+        })
+        .collect()
+}
+
 fn ts_string_literal(value: &str) -> Result<String> {
     serde_json::to_string(value).context("serialize TypeScript string literal")
 }
@@ -3269,6 +3347,7 @@ fn linked_module_install_writes(
     env_file_path: &Path,
     cargo_toml_path: Option<&Path>,
     host_lib_path: &Path,
+    runtime_config_defaults_path: Option<&Path>,
     console_extension_registry_path: Option<&Path>,
 ) -> Vec<Value> {
     let mut writes = vec![json!({
@@ -3285,6 +3364,12 @@ fn linked_module_install_writes(
         "kind": "hostComposition",
         "path": display_relative(repo_root, host_lib_path),
     }));
+    if let Some(runtime_config_defaults_path) = runtime_config_defaults_path {
+        writes.push(json!({
+            "kind": "runtimeConfigDefaults",
+            "path": display_relative(repo_root, runtime_config_defaults_path),
+        }));
+    }
     if let Some(console_extension_registry_path) = console_extension_registry_path {
         writes.push(json!({
             "kind": "consoleExtensionRegistry",
@@ -3980,6 +4065,43 @@ fn apply_manifest_install_env(source: String, install_env: &[(String, String)]) 
     })
 }
 
+fn update_runtime_config_defaults(
+    source: Option<Value>,
+    defaults: &[RuntimeConfigDefault],
+) -> Result<Value> {
+    let mut state = source.unwrap_or_else(|| json!({ "version": 1, "values": [] }));
+    let object = state
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("Runtime config defaults file must be a JSON object"))?;
+    object.entry("version").or_insert_with(|| json!(1));
+    let values = object
+        .entry("values")
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| anyhow!("Runtime config defaults file values must be an array"))?;
+
+    for default in defaults {
+        upsert_runtime_config_default(values, default);
+    }
+    Ok(state)
+}
+
+fn upsert_runtime_config_default(values: &mut Vec<Value>, default: &RuntimeConfigDefault) {
+    let next = json!({
+        "key": &default.key,
+        "service": &default.service,
+        "value": &default.value,
+    });
+    if let Some(existing) = values.iter_mut().find(|entry| {
+        entry.get("service").and_then(Value::as_str) == Some(default.service.as_str())
+            && entry.get("key").and_then(Value::as_str) == Some(default.key.as_str())
+    }) {
+        *existing = next;
+    } else {
+        values.push(next);
+    }
+}
+
 fn remote_module_install_env(manifest: &Value) -> Result<Vec<(String, String)>> {
     let Some(env) = manifest
         .get("install")
@@ -4580,6 +4702,25 @@ fn builtin_linked_module_descriptor(reference: &str) -> Option<Value> {
             ],
             "linked": {
                 "call": "builtins::auth()"
+            },
+            "install": {
+                "profiles": {
+                    "redis-session-cache": {
+                        "linked": {
+                            "cargo": {
+                                "package": "lenso-module-auth",
+                                "version": "0.1.3",
+                                "features": ["redis"]
+                            }
+                        },
+                        "env": {
+                            "REDIS_URL": "redis://localhost:6379/0"
+                        },
+                        "runtimeConfigDefaults": {
+                            "auth.session_cache": "redis"
+                        }
+                    }
+                }
             }
         })),
         "auth-password" => Some(json!({
@@ -4596,6 +4737,223 @@ fn builtin_linked_module_descriptor(reference: &str) -> Option<Value> {
 
 fn builtin_linked_module_names() -> &'static [&'static str] {
     &["auth", "auth-password"]
+}
+
+fn apply_linked_install_profiles(
+    descriptor: &Value,
+    profiles: &[String],
+) -> Result<(Value, LinkedInstallProfileEffects)> {
+    if profiles.is_empty() {
+        return Ok((descriptor.clone(), LinkedInstallProfileEffects::default()));
+    }
+
+    let mut descriptor = descriptor.clone();
+    let mut effects = LinkedInstallProfileEffects::default();
+    for profile in profiles {
+        let profile = profile.trim();
+        if profile.is_empty() {
+            bail!("Linked module install profile names must be non-empty");
+        }
+        let profile_descriptor = descriptor
+            .get("install")
+            .and_then(|install| install.get("profiles"))
+            .and_then(|profiles| profiles.get(profile))
+            .cloned()
+            .ok_or_else(|| {
+                anyhow!("Linked module descriptor install profile `{profile}` is not declared")
+            })?;
+        let profile_object = profile_descriptor.as_object().ok_or_else(|| {
+            anyhow!("Linked module descriptor install profile `{profile}` must be an object")
+        })?;
+
+        if let Some(linked) = profile_object.get("linked") {
+            merge_linked_install_profile(&mut descriptor, profile, linked)?;
+        }
+        if let Some(env) = profile_object.get("env") {
+            effects.env.extend(install_profile_env(profile, env)?);
+        }
+        if let Some(runtime_config_defaults) = profile_object
+            .get("runtimeConfigDefaults")
+            .or_else(|| profile_object.get("runtime_config_defaults"))
+        {
+            effects
+                .runtime_config_defaults
+                .extend(install_profile_runtime_config_defaults(
+                    profile,
+                    runtime_config_defaults,
+                )?);
+        }
+    }
+
+    Ok((descriptor, effects))
+}
+
+fn merge_linked_install_profile(
+    descriptor: &mut Value,
+    profile: &str,
+    linked: &Value,
+) -> Result<()> {
+    let linked_object = linked.as_object().ok_or_else(|| {
+        anyhow!("Linked module descriptor install profile `{profile}` linked must be an object")
+    })?;
+    let target_linked = descriptor
+        .get_mut("linked")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow!("Linked module descriptor linked section is required"))?;
+
+    for (key, value) in linked_object {
+        if key == "cargo" {
+            merge_linked_cargo_profile(target_linked, profile, value)?;
+        } else {
+            target_linked.insert(key.clone(), value.clone());
+        }
+    }
+    Ok(())
+}
+
+fn merge_linked_cargo_profile(
+    target_linked: &mut Map<String, Value>,
+    profile: &str,
+    cargo: &Value,
+) -> Result<()> {
+    let cargo_object = cargo.as_object().ok_or_else(|| {
+        anyhow!(
+            "Linked module descriptor install profile `{profile}` linked.cargo must be an object"
+        )
+    })?;
+    let target_cargo = target_linked
+        .entry("cargo".to_owned())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let target_cargo = target_cargo.as_object_mut().ok_or_else(|| {
+        anyhow!("Linked module descriptor install profile `{profile}` cannot merge linked.cargo into non-object")
+    })?;
+
+    for (key, value) in cargo_object {
+        if key == "features" {
+            merge_json_string_array(target_cargo, key, value, "linked.cargo.features")?;
+        } else {
+            target_cargo.insert(key.clone(), value.clone());
+        }
+    }
+    Ok(())
+}
+
+fn merge_json_string_array(
+    target: &mut Map<String, Value>,
+    key: &str,
+    value: &Value,
+    context: &str,
+) -> Result<()> {
+    let values = json_string_array(value, context)?;
+    let target_value = target
+        .entry(key.to_owned())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let target_array = target_value
+        .as_array_mut()
+        .ok_or_else(|| anyhow!("Linked module descriptor {context} must be an array"))?;
+
+    for value in values {
+        if !target_array
+            .iter()
+            .any(|item| item.as_str() == Some(&value))
+        {
+            target_array.push(Value::String(value));
+        }
+    }
+    Ok(())
+}
+
+fn install_profile_env(profile: &str, env: &Value) -> Result<Vec<(String, String)>> {
+    let object = env.as_object().ok_or_else(|| {
+        anyhow!("Linked module descriptor install profile `{profile}` env must be an object")
+    })?;
+    let mut values = Vec::new();
+    for (key, value) in object {
+        let key = key.trim();
+        if key.is_empty() {
+            bail!(
+                "Linked module descriptor install profile `{profile}` env keys must be non-empty"
+            );
+        }
+        if key == "REMOTE_MODULES" {
+            bail!(
+                "Linked module descriptor install profile `{profile}` env must not override REMOTE_MODULES"
+            );
+        }
+        let value = value.as_str().ok_or_else(|| {
+            anyhow!(
+                "Linked module descriptor install profile `{profile}` env.{key} must be a string"
+            )
+        })?;
+        values.push((key.to_owned(), value.to_owned()));
+    }
+    Ok(values)
+}
+
+fn install_profile_runtime_config_defaults(
+    profile: &str,
+    runtime_config_defaults: &Value,
+) -> Result<Vec<RuntimeConfigDefault>> {
+    if let Some(object) = runtime_config_defaults.as_object() {
+        let mut values = Vec::new();
+        for (key, value) in object {
+            let key = key.trim();
+            if key.is_empty() {
+                bail!(
+                    "Linked module descriptor install profile `{profile}` runtimeConfigDefaults keys must be non-empty"
+                );
+            }
+            values.push(RuntimeConfigDefault {
+                service: "*".to_owned(),
+                key: key.to_owned(),
+                value: value.clone(),
+            });
+        }
+        return Ok(values);
+    }
+
+    let array = runtime_config_defaults.as_array().ok_or_else(|| {
+        anyhow!(
+            "Linked module descriptor install profile `{profile}` runtimeConfigDefaults must be an object or array"
+        )
+    })?;
+    array
+        .iter()
+        .map(|entry| {
+            let object = entry.as_object().ok_or_else(|| {
+                anyhow!(
+                    "Linked module descriptor install profile `{profile}` runtimeConfigDefaults entries must be objects"
+                )
+            })?;
+            let key = object
+                .get("key")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Linked module descriptor install profile `{profile}` runtimeConfigDefaults[].key is required"
+                    )
+                })?
+                .trim();
+            if key.is_empty() {
+                bail!(
+                    "Linked module descriptor install profile `{profile}` runtimeConfigDefaults[].key must be non-empty"
+                );
+            }
+            Ok(RuntimeConfigDefault {
+                service: object
+                    .get("service")
+                    .and_then(Value::as_str)
+                    .unwrap_or("*")
+                    .trim()
+                    .to_owned(),
+                key: key.to_owned(),
+                value: object
+                    .get("value")
+                    .cloned()
+                    .ok_or_else(|| anyhow!("Linked module descriptor install profile `{profile}` runtimeConfigDefaults[].value is required"))?,
+            })
+        })
+        .collect()
 }
 
 fn looks_like_json_reference(reference: &str) -> bool {
@@ -4617,11 +4975,11 @@ fn update_host_cargo_toml_for_linked_descriptor(
     if package.is_empty() {
         bail!("Linked module descriptor linked.cargo.package is required");
     }
-    if source
-        .lines()
-        .any(|line| line.trim_start().starts_with(&format!("{package} ")))
+    let features = linked_cargo_features(cargo)?;
+    if let Some(updated) =
+        update_existing_host_cargo_dependency_features(source, package, &features)?
     {
-        return Ok(None);
+        return Ok(Some(updated));
     }
     let dependency = linked_cargo_dependency(package, cargo)?;
     Ok(Some(insert_after_needle(
@@ -4632,11 +4990,16 @@ fn update_host_cargo_toml_for_linked_descriptor(
 }
 
 fn linked_cargo_dependency(package: &str, cargo: &Value) -> Result<String> {
+    let features = linked_cargo_features(cargo)?;
     if let Some(path) = cargo.get("path").and_then(Value::as_str) {
-        return Ok(format!(
-            "{package} = {{ path = {} }}",
-            rust_string_literal(path)
-        ));
+        let mut fields = vec![format!("path = {}", rust_string_literal(path))];
+        if !features.is_empty() {
+            fields.push(format!(
+                "features = {}",
+                rust_string_array_literal(&features)
+            ));
+        }
+        return Ok(format!("{package} = {{ {} }}", fields.join(", ")));
     }
     if let Some(git) = cargo.get("git").and_then(Value::as_str) {
         let mut fields = vec![format!("git = {}", rust_string_literal(git))];
@@ -4645,10 +5008,170 @@ fn linked_cargo_dependency(package: &str, cargo: &Value) -> Result<String> {
                 fields.push(format!("{key} = {}", rust_string_literal(value)));
             }
         }
+        if !features.is_empty() {
+            fields.push(format!(
+                "features = {}",
+                rust_string_array_literal(&features)
+            ));
+        }
         return Ok(format!("{package} = {{ {} }}", fields.join(", ")));
     }
     let version = cargo.get("version").and_then(Value::as_str).unwrap_or("*");
-    Ok(format!("{package} = {}", rust_string_literal(version)))
+    if features.is_empty() {
+        Ok(format!("{package} = {}", rust_string_literal(version)))
+    } else {
+        Ok(format!(
+            "{package} = {{ version = {}, features = {} }}",
+            rust_string_literal(version),
+            rust_string_array_literal(&features)
+        ))
+    }
+}
+
+fn linked_cargo_features(cargo: &Value) -> Result<Vec<String>> {
+    cargo.get("features").map_or_else(
+        || Ok(Vec::new()),
+        |features| json_string_array(features, "linked.cargo.features"),
+    )
+}
+
+fn update_existing_host_cargo_dependency_features(
+    source: &str,
+    package: &str,
+    features: &[String],
+) -> Result<Option<String>> {
+    let Some(index) = source
+        .lines()
+        .position(|line| dependency_line_matches_package(line, package))
+    else {
+        return Ok(None);
+    };
+    if features.is_empty() {
+        return Ok(None);
+    }
+
+    let mut lines = source
+        .split('\n')
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let Some(updated_line) = merge_dependency_line_features(&lines[index], package, features)?
+    else {
+        return Ok(None);
+    };
+    lines[index] = updated_line;
+    Ok(Some(lines.join("\n")))
+}
+
+fn dependency_line_matches_package(line: &str, package: &str) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('#') {
+        return false;
+    }
+    let direct_prefix = trimmed.strip_prefix(package).is_some_and(|rest| {
+        let rest = rest.trim_start();
+        rest.starts_with('=')
+    });
+    direct_prefix || trimmed.contains(&format!("package = {}", rust_string_literal(package)))
+}
+
+fn merge_dependency_line_features(
+    line: &str,
+    package: &str,
+    features: &[String],
+) -> Result<Option<String>> {
+    let merged_features = merge_inline_feature_values(line, features)?;
+    if merged_features.len() == inline_feature_values(line)?.len() && line.contains("features") {
+        return Ok(None);
+    }
+    let feature_literal = rust_string_array_literal(&merged_features);
+
+    if let Some((start, end)) = inline_feature_array_range(line)? {
+        let mut updated = String::new();
+        updated.push_str(&line[..start]);
+        updated.push_str(&feature_literal);
+        updated.push_str(&line[end..]);
+        return Ok(Some(updated));
+    }
+
+    if let Some(close_brace) = line.rfind('}') {
+        let before = line[..close_brace].trim_end();
+        let separator = if before.ends_with('{') { " " } else { ", " };
+        return Ok(Some(format!(
+            "{before}{separator}features = {feature_literal} {}",
+            &line[close_brace..]
+        )));
+    }
+
+    let (left, right) = line
+        .split_once('=')
+        .ok_or_else(|| anyhow!("Cargo dependency line for `{package}` must contain `=`"))?;
+    if left.trim() != package {
+        bail!(
+            "Cargo dependency alias for `{package}` must use inline table syntax to add features"
+        );
+    }
+    let version = right.trim();
+    Ok(Some(format!(
+        "{}= {{ version = {version}, features = {feature_literal} }}",
+        left
+    )))
+}
+
+fn merge_inline_feature_values(line: &str, features: &[String]) -> Result<Vec<String>> {
+    let mut values = inline_feature_values(line)?;
+    for feature in features {
+        if !values.contains(feature) {
+            values.push(feature.clone());
+        }
+    }
+    Ok(values)
+}
+
+fn inline_feature_values(line: &str) -> Result<Vec<String>> {
+    let Some((start, end)) = inline_feature_array_range(line)? else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_str(&line[start..end]).with_context(|| "parse Cargo dependency features array")
+}
+
+fn inline_feature_array_range(line: &str) -> Result<Option<(usize, usize)>> {
+    let Some(features_start) = find_inline_feature_key(line) else {
+        return Ok(None);
+    };
+    let after_features = &line[features_start + "features".len()..];
+    let equals_offset = after_features
+        .find('=')
+        .ok_or_else(|| anyhow!("Cargo dependency features field must contain `=`"))?;
+    let after_equals_start = features_start + "features".len() + equals_offset + 1;
+    let after_equals = &line[after_equals_start..];
+    let array_start_offset = after_equals
+        .find('[')
+        .ok_or_else(|| anyhow!("Cargo dependency features field must be an array"))?;
+    let array_start = after_equals_start + array_start_offset;
+    let array_end_offset = line[array_start..]
+        .find(']')
+        .ok_or_else(|| anyhow!("Cargo dependency features array must be closed"))?;
+    Ok(Some((array_start, array_start + array_end_offset + 1)))
+}
+
+fn find_inline_feature_key(line: &str) -> Option<usize> {
+    let mut offset = 0;
+    while let Some(relative_start) = line[offset..].find("features") {
+        let start = offset + relative_start;
+        let before = line[..start].chars().next_back();
+        let after = line[start + "features".len()..].chars().next();
+        let before_ok = before.is_none_or(|character| {
+            !character.is_ascii_alphanumeric() && character != '_' && character != '-'
+        });
+        let after_ok = after.is_none_or(|character| {
+            !character.is_ascii_alphanumeric() && character != '_' && character != '-'
+        });
+        if before_ok && after_ok {
+            return Some(start);
+        }
+        offset = start + "features".len();
+    }
+    None
 }
 
 fn update_host_lib_for_linked_descriptor(
@@ -5183,6 +5706,126 @@ mod tests {
             .expect("cargo should change");
 
         assert!(updated.contains("[dependencies]\nlenso-billing = \"0.1\"\nanyhow = \"1\""));
+    }
+
+    #[test]
+    fn linked_install_profile_merges_generic_effects() {
+        let descriptor = json!({
+            "name": "auth",
+            "source": "linked",
+            "linked": {
+                "call": "builtins::auth()"
+            },
+            "install": {
+                "profiles": {
+                    "redis-session-cache": {
+                        "linked": {
+                            "cargo": {
+                                "package": "lenso-module-auth",
+                                "version": "0.1.3",
+                                "features": ["redis"]
+                            }
+                        },
+                        "env": {
+                            "REDIS_URL": "redis://localhost:6379/0"
+                        },
+                        "runtimeConfigDefaults": {
+                            "auth.session_cache": "redis"
+                        }
+                    }
+                }
+            }
+        });
+
+        let (descriptor, effects) =
+            apply_linked_install_profiles(&descriptor, &["redis-session-cache".to_owned()])
+                .expect("install profile should apply");
+
+        assert_eq!(descriptor["linked"]["call"], "builtins::auth()");
+        assert_eq!(
+            descriptor["linked"]["cargo"],
+            json!({
+                "package": "lenso-module-auth",
+                "version": "0.1.3",
+                "features": ["redis"]
+            })
+        );
+        assert_eq!(
+            effects.env,
+            vec![(
+                "REDIS_URL".to_owned(),
+                "redis://localhost:6379/0".to_owned()
+            )]
+        );
+        assert_eq!(effects.runtime_config_defaults.len(), 1);
+        assert_eq!(effects.runtime_config_defaults[0].service, "*");
+        assert_eq!(effects.runtime_config_defaults[0].key, "auth.session_cache");
+        assert_eq!(effects.runtime_config_defaults[0].value, json!("redis"));
+    }
+
+    #[test]
+    fn linked_descriptor_updates_existing_dependency_features() {
+        let source = "[package]\nname = \"app\"\n\n[dependencies]\nlenso-module-auth = \"0.1.2\"\n";
+        let cargo = json!({
+            "package": "lenso-module-auth",
+            "version": "0.1.2",
+            "features": ["redis"]
+        });
+
+        let updated = update_host_cargo_toml_for_linked_descriptor(source, Some(&cargo))
+            .expect("cargo update")
+            .expect("cargo should change");
+
+        assert!(
+            updated.contains("lenso-module-auth = { version = \"0.1.2\", features = [\"redis\"] }")
+        );
+    }
+
+    #[test]
+    fn linked_descriptor_adds_features_after_default_features_field() {
+        let source = "[dependencies]\nlenso-module-auth = { version = \"0.1.2\", default-features = false }\n";
+        let cargo = json!({
+            "package": "lenso-module-auth",
+            "version": "0.1.2",
+            "features": ["redis"]
+        });
+
+        let updated = update_host_cargo_toml_for_linked_descriptor(source, Some(&cargo))
+            .expect("cargo update")
+            .expect("cargo should change");
+
+        assert!(updated.contains(
+            "lenso-module-auth = { version = \"0.1.2\", default-features = false, features = [\"redis\"] }"
+        ));
+    }
+
+    #[test]
+    fn runtime_config_defaults_upsert_by_service_and_key() {
+        let initial = json!({
+            "version": 1,
+            "values": [
+                { "service": "*", "key": "auth.session_cache", "value": "database" }
+            ]
+        });
+        let updated = update_runtime_config_defaults(
+            Some(initial),
+            &[RuntimeConfigDefault {
+                service: "*".to_owned(),
+                key: "auth.session_cache".to_owned(),
+                value: json!("redis"),
+            }],
+        )
+        .expect("runtime config defaults update");
+
+        assert_eq!(
+            updated,
+            json!({
+                "version": 1,
+                "values": [
+                    { "service": "*", "key": "auth.session_cache", "value": "redis" }
+                ]
+            })
+        );
     }
 
     #[test]

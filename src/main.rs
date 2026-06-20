@@ -142,6 +142,10 @@ struct RemoteModuleInstallArgs {
     #[arg(long)]
     base_url: Option<String>,
 
+    /// Install descriptor profile to apply.
+    #[arg(long = "profile", alias = "with", value_delimiter = ',')]
+    install_profiles: Vec<String>,
+
     /// Skip Runtime Console extension registration.
     #[arg(long = "no-console-extension", alias = "no-console-plan", action = clap::ArgAction::SetFalse, default_value_t = true)]
     console_plan: bool,
@@ -391,6 +395,7 @@ impl From<&RemoteModuleInstallArgs> for module::RemoteModuleInstallOptions {
             console_plan: args.console_plan,
             dry_run: args.dry_run,
             env_file: args.env_file.clone(),
+            install_profiles: args.install_profiles.clone(),
             module_services_file: args.module_services_file.clone(),
             repo_root: args.repo_root.clone(),
             run_install_commands: args.run_install_commands,
