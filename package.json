@@ -1,0 +1,31 @@
+{
+  "name": "@lenso/cli",
+  "version": "0.1.18",
+  "description": "Lenso command-line interface for scaffolding and operating Lenso backend projects.",
+  "license": "MIT",
+  "homepage": "https://github.com/LioRael/lenso-cli",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LioRael/lenso-cli.git"
+  },
+  "bin": {
+    "lenso": "bin/lenso.js"
+  },
+  "files": [
+    "bin",
+    "vendor"
+  ],
+  "scripts": {
+    "check:npm-publish": "node scripts/check-npm-publish.mjs",
+    "check:npm-shim": "node scripts/check-npm-shim.mjs",
+    "package:npm": "node scripts/package-npm.mjs",
+    "prepack": "node scripts/package-npm.mjs",
+    "prepublishOnly": "node scripts/check-npm-publish.mjs"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

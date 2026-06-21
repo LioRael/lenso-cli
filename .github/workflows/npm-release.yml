@@ -1,0 +1,136 @@
+name: npm release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build ${{ matrix.tag }}
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - tag: darwin-arm64
+            os: macos-14
+          - tag: darwin-x64
+            os: macos-13
+          - tag: linux-x64
+            os: ubuntu-latest
+          - tag: win32-x64
+            os: windows-latest
+    steps:
+      - name: Check release secrets
+        run: test -n "$LENSO_RUNTIME_CONSOLE_TOKEN"
+        env:
+          LENSO_RUNTIME_CONSOLE_TOKEN: ${{ secrets.LENSO_RUNTIME_CONSOLE_TOKEN }}
+      - uses: actions/checkout@v6
+        with:
+          path: lenso-cli
+      - uses: actions/checkout@v6
+        with:
+          repository: LioRael/lenso-runtime-console
+          token: ${{ secrets.LENSO_RUNTIME_CONSOLE_TOKEN }}
+          path: lenso-runtime-console
+      - uses: actions/checkout@v6
+        with:
+          repository: LioRael/lenso-auth-module
+          path: lenso-auth-module
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: lenso-cli
+      - run: corepack enable
+      - run: corepack pnpm install --frozen-lockfile
+        working-directory: lenso-runtime-console
+      - run: corepack pnpm build:local
+        working-directory: lenso-runtime-console
+        env:
+          LENSO_CONSOLE_BASE: /console/
+          VITE_API_AUTH_TOKEN: dev-service:admin:runtime.stories.read,auth.users.read,identity.users.read,remote_crm.contacts.read,remote_crm.contacts.sync,hello-action:greetings:write
+          VITE_API_BASE_URL: /
+          VITE_RUNTIME_CONSOLE_MODE: api
+      - name: Copy Runtime Console
+        run: |
+          rm -rf console/dist
+          cp -R ../lenso-runtime-console/dist console/dist
+          test -f console/dist/index.html
+          test -f console/dist/extensions/host/runtime-console-api.js
+          test -f console/dist/extensions/host/react.js
+          test -f console/dist/extensions/host/react-jsx-runtime.js
+          grep -q 'src="/console/assets/' console/dist/index.html
+          grep -q 'href="/console/assets/' console/dist/index.html
+          grep -R -q 'dev-service:admin:runtime.stories.read' console/dist/assets
+          grep -R -q 'auth.users.read' console/dist/assets
+          ! grep -R -q 'function F(){return!1}' console/dist/assets
+        working-directory: lenso-cli
+      - run: npm run check:npm-shim
+        working-directory: lenso-cli
+      - run: npm run package:npm
+        working-directory: lenso-cli
+      - name: Check target artifact
+        run: |
+          if [[ "${{ matrix.tag }}" == win32-* ]]; then
+            test -f "vendor/${{ matrix.tag }}/lenso.exe"
+          else
+            test -x "vendor/${{ matrix.tag }}/lenso"
+          fi
+        working-directory: lenso-cli
+      - name: Smoke bundled binary
+        run: |
+          node bin/lenso.js --version
+          tmpdir="$(mktemp -d)"
+          node bin/lenso.js host init "$tmpdir/app"
+          test -f "$tmpdir/app/.lenso/console/dist/index.html"
+        working-directory: lenso-cli
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lenso-cli-${{ matrix.tag }}
+          path: lenso-cli/vendor
+          if-no-files-found: error
+
+  publish:
+    name: publish @lenso/cli
+    runs-on: ubuntu-latest
+    needs: build
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check release secrets
+        run: test -n "$NPM_TOKEN"
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - uses: actions/checkout@v6
+        with:
+          path: lenso-cli
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: lenso-cli-*
+          path: lenso-cli
+          merge-multiple: true
+      - name: Verify package payload
+        run: |
+          chmod +x vendor/darwin-arm64/lenso vendor/darwin-x64/lenso vendor/linux-x64/lenso
+          find vendor -maxdepth 3 -type f -print
+          npm run check:npm-shim
+          npm run check:npm-publish
+          npm pack --dry-run --ignore-scripts
+        working-directory: lenso-cli
+      - run: npm publish --access public --ignore-scripts
+        working-directory: lenso-cli
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

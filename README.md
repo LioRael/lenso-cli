@@ -5,6 +5,8 @@ Command-line interface for the Lenso backend framework.
 ## Install
 
 ```sh
+npm install -g @lenso/cli
+# or
 cargo install lenso-cli
 ```
 
