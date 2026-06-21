@@ -166,7 +166,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           pattern: lenso-cli-*
-          path: lenso-cli
+          path: lenso-cli/vendor
           merge-multiple: true
       - name: Verify package payload
         run: |
