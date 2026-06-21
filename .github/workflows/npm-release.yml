@@ -7,9 +7,21 @@ permissions:
   contents: read
 
 jobs:
+  preflight:
+    name: check release secrets
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          test -n "$LENSO_RUNTIME_CONSOLE_TOKEN"
+          test -n "$NPM_TOKEN"
+        env:
+          LENSO_RUNTIME_CONSOLE_TOKEN: ${{ secrets.LENSO_RUNTIME_CONSOLE_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
   build:
     name: build ${{ matrix.tag }}
     runs-on: ${{ matrix.os }}
+    needs: preflight
     defaults:
       run:
         shell: bash
@@ -26,10 +38,6 @@ jobs:
           - tag: win32-x64
             os: windows-latest
     steps:
-      - name: Check release secrets
-        run: test -n "$LENSO_RUNTIME_CONSOLE_TOKEN"
-        env:
-          LENSO_RUNTIME_CONSOLE_TOKEN: ${{ secrets.LENSO_RUNTIME_CONSOLE_TOKEN }}
       - uses: actions/checkout@v6
         with:
           path: lenso-cli
