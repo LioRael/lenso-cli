@@ -79,12 +79,20 @@ jobs:
         include:
           - tag: darwin-arm64
             os: macos-14
+            rust-target: ""
+            smoke: true
           - tag: darwin-x64
-            os: macos-13
+            os: macos-14
+            rust-target: x86_64-apple-darwin
+            smoke: false
           - tag: linux-x64
             os: ubuntu-latest
+            rust-target: ""
+            smoke: true
           - tag: win32-x64
             os: windows-latest
+            rust-target: ""
+            smoke: true
     steps:
       - uses: actions/checkout@v6
         with:
@@ -93,6 +101,9 @@ jobs:
         with:
           node-version: 24
       - uses: dtolnay/rust-toolchain@stable
+      - name: Add Rust target
+        if: matrix.rust-target != ''
+        run: rustup target add "${{ matrix.rust-target }}"
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: lenso-cli
@@ -108,6 +119,9 @@ jobs:
         working-directory: lenso-cli
       - run: npm run package:npm
         working-directory: lenso-cli
+        env:
+          LENSO_NPM_TAG: ${{ matrix.tag }}
+          LENSO_CARGO_TARGET: ${{ matrix.rust-target }}
       - name: Check target artifact
         run: |
           if [[ "${{ matrix.tag }}" == win32-* ]]; then
@@ -117,6 +131,7 @@ jobs:
           fi
         working-directory: lenso-cli
       - name: Smoke bundled binary
+        if: matrix.smoke
         run: |
           node bin/lenso.js --version
           tmpdir="$(mktemp -d)"

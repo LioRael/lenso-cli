@@ -8,10 +8,12 @@ const require = createRequire(import.meta.url);
 const { platformTag } = require('../bin/lenso.js');
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
-const tag = platformTag();
-if (!tag) {
-  throw new Error(`unsupported platform ${process.platform}/${process.arch}`);
+const tag = process.env.LENSO_NPM_TAG || platformTag();
+const supportedTags = new Set(['darwin-arm64', 'darwin-x64', 'linux-x64', 'win32-x64']);
+if (!tag || !supportedTags.has(tag)) {
+  throw new Error(`unsupported npm target ${tag ?? `${process.platform}/${process.arch}`}`);
 }
+const cargoTarget = process.env.LENSO_CARGO_TARGET;
 
 const consoleIndex = path.join(root, 'console', 'dist', 'index.html');
 if (!existsSync(consoleIndex)) {
@@ -28,7 +30,12 @@ if (clean.status !== 0) {
   process.exit(clean.status ?? 1);
 }
 
-const build = spawnSync('cargo', ['build', '--release', '--locked'], {
+const buildArgs = ['build', '--release', '--locked'];
+if (cargoTarget) {
+  buildArgs.push('--target', cargoTarget);
+}
+
+const build = spawnSync('cargo', buildArgs, {
   cwd: root,
   stdio: 'inherit'
 });
@@ -36,8 +43,10 @@ if (build.status !== 0) {
   process.exit(build.status ?? 1);
 }
 
-const exe = process.platform === 'win32' ? 'lenso.exe' : 'lenso';
-const src = path.join(root, 'target', 'release', exe);
+const exe = tag.startsWith('win32-') ? 'lenso.exe' : 'lenso';
+const src = cargoTarget
+  ? path.join(root, 'target', cargoTarget, 'release', exe)
+  : path.join(root, 'target', 'release', exe);
 const destDir = path.join(root, 'vendor', tag);
 const dest = path.join(destDir, exe);
 
