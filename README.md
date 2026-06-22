@@ -98,6 +98,18 @@ The `auth` descriptor applies that profile by enabling the
 Redis service separately; the starter Docker Compose file only starts Postgres
 by default.
 
+Reapply an installed module from `.lenso/module-installs.json` with:
+
+```sh
+lenso module update auth
+lenso module update billing --base-url https://example.com/lenso/module/v1
+```
+
+`module update` reuses the recorded `manifestReference` and source. Remote
+updates refresh `REMOTE_MODULES`, service state, install receipts, and copied
+Runtime Console bundles. Linked updates reapply the recorded descriptor or
+builtin module entry.
+
 Use `--no-console-extension` when you want to skip Runtime Console extension
 registration.
 
