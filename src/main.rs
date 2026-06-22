@@ -89,6 +89,8 @@ enum ModuleCommand {
     Install(RemoteModuleInstallArgs),
     /// Add a configured remote module source.
     Add(RemoteModuleInstallArgs),
+    /// Reapply an installed module from its install receipt.
+    Update(ModuleUpdateArgs),
     /// Remove a remote source or disable a linked module.
     Uninstall(RemoteModuleUninstallArgs),
     /// Diagnose installed remote module services.
@@ -181,6 +183,44 @@ struct RemoteModuleUninstallArgs {
     module_services_file: Option<std::path::PathBuf>,
 
     /// Print uninstall changes without writing them.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ModuleUpdateArgs {
+    /// Installed module name.
+    module_name: String,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Environment file to update.
+    #[arg(long)]
+    env_file: Option<std::path::PathBuf>,
+
+    /// Remote module services file.
+    #[arg(long)]
+    module_services_file: Option<std::path::PathBuf>,
+
+    /// Remote module base URL override.
+    #[arg(long)]
+    base_url: Option<String>,
+
+    /// Install descriptor profile to apply.
+    #[arg(long = "profile", alias = "with", value_delimiter = ',')]
+    install_profiles: Vec<String>,
+
+    /// Skip Runtime Console extension registration.
+    #[arg(long = "no-console-extension", alias = "no-console-plan", action = clap::ArgAction::SetFalse, default_value_t = true)]
+    console_plan: bool,
+
+    /// Execute manifest-declared install.commands.
+    #[arg(long)]
+    run_install_commands: bool,
+
+    /// Print update changes without writing them.
     #[arg(long)]
     dry_run: bool,
 }
@@ -416,6 +456,21 @@ impl From<&RemoteModuleUninstallArgs> for module::RemoteModuleUninstallOptions {
     }
 }
 
+impl From<&ModuleUpdateArgs> for module::ModuleUpdateOptions {
+    fn from(args: &ModuleUpdateArgs) -> Self {
+        Self {
+            base_url: args.base_url.clone(),
+            console_plan: args.console_plan,
+            dry_run: args.dry_run,
+            env_file: args.env_file.clone(),
+            install_profiles: args.install_profiles.clone(),
+            module_services_file: args.module_services_file.clone(),
+            repo_root: args.repo_root.clone(),
+            run_install_commands: args.run_install_commands,
+        }
+    }
+}
+
 impl From<&ModuleDoctorArgs> for module::ModuleDoctorOptions {
     fn from(args: &ModuleDoctorArgs) -> Self {
         Self {
@@ -526,6 +581,9 @@ async fn main() -> anyhow::Result<()> {
             }
             ModuleCommand::Add(args) => {
                 module::install_module(&args.manifest_reference, (&args).into()).await?;
+            }
+            ModuleCommand::Update(args) => {
+                module::update_module(&args.module_name, (&args).into()).await?;
             }
             ModuleCommand::Uninstall(args) => {
                 module::uninstall_module(&args.module_name, (&args).into()).await?;

@@ -43,6 +43,18 @@ pub struct RemoteModuleUninstallOptions {
 }
 
 #[derive(Debug, Clone)]
+pub struct ModuleUpdateOptions {
+    pub base_url: Option<String>,
+    pub console_plan: bool,
+    pub dry_run: bool,
+    pub env_file: Option<PathBuf>,
+    pub install_profiles: Vec<String>,
+    pub module_services_file: Option<PathBuf>,
+    pub repo_root: Option<PathBuf>,
+    pub run_install_commands: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct ModuleDoctorOptions {
     pub env_file: Option<PathBuf>,
     pub module_name: Option<String>,
@@ -411,6 +423,123 @@ async fn install_module_descriptor(
             install_linked_module_descriptor(descriptor, descriptor_reference, options).await
         }
     }
+}
+
+pub async fn update_module(module_name: &str, options: ModuleUpdateOptions) -> Result<()> {
+    let module_name = module_name.trim();
+    if module_name.is_empty() {
+        bail!("Module name is required");
+    }
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let ledger_path = repo_root.join(MODULE_INSTALL_LEDGER_PATH);
+    let receipt = module_install_ledger_entry(&ledger_path, module_name)?
+        .ok_or_else(|| anyhow!("Module `{module_name}` is not installed locally"))?;
+    let manifest_reference = receipt
+        .get("manifestReference")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("Module install receipt manifestReference is required"))?;
+    let source = receipt
+        .get("source")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("Module install receipt source is required"))
+        .and_then(parse_module_source)?;
+
+    match source {
+        ModuleSource::Remote => {
+            update_remote_module_from_receipt(
+                module_name,
+                manifest_reference,
+                &receipt,
+                options,
+                repo_root,
+            )
+            .await
+        }
+        ModuleSource::Linked => {
+            update_linked_module_from_receipt(module_name, manifest_reference, options, repo_root)
+                .await
+        }
+    }
+}
+
+async fn update_remote_module_from_receipt(
+    module_name: &str,
+    manifest_reference: &str,
+    receipt: &Value,
+    options: ModuleUpdateOptions,
+    repo_root: PathBuf,
+) -> Result<()> {
+    let manifest = validate_remote_module_manifest(read_json_reference(manifest_reference).await?)?;
+    let manifest_name = string_field(&manifest, "name")?.trim();
+    if manifest_name != module_name {
+        bail!("Installed module `{module_name}` update resolved manifest for `{manifest_name}`");
+    }
+
+    let cleanup =
+        remove_stale_module_console_artifacts(&repo_root, module_name, true, options.dry_run)?;
+    if options.dry_run && !cleanup.is_empty() {
+        println!("Remote module update dry run:");
+        for path in cleanup {
+            println!("- {}", display_relative(&repo_root, &path));
+        }
+    }
+
+    add_remote_module(
+        manifest_reference,
+        RemoteModuleInstallOptions {
+            base_url: options.base_url.clone().or_else(|| {
+                receipt
+                    .get("baseUrl")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            }),
+            console_plan: options.console_plan,
+            dry_run: options.dry_run,
+            env_file: options.env_file,
+            install_profiles: options.install_profiles,
+            module_services_file: options.module_services_file,
+            repo_root: Some(repo_root),
+            run_install_commands: options.run_install_commands,
+            source: "remote".to_owned(),
+        },
+    )
+    .await
+}
+
+async fn update_linked_module_from_receipt(
+    module_name: &str,
+    manifest_reference: &str,
+    options: ModuleUpdateOptions,
+    repo_root: PathBuf,
+) -> Result<()> {
+    if options.base_url.is_some() {
+        bail!("--base-url only applies to remote module updates");
+    }
+
+    let cleanup =
+        remove_stale_module_console_artifacts(&repo_root, module_name, false, options.dry_run)?;
+    if options.dry_run && !cleanup.is_empty() {
+        println!("Linked module update dry run:");
+        for path in cleanup {
+            println!("- {}", display_relative(&repo_root, &path));
+        }
+    }
+
+    install_module(
+        module_update_reference(manifest_reference),
+        RemoteModuleInstallOptions {
+            base_url: None,
+            console_plan: options.console_plan,
+            dry_run: options.dry_run,
+            env_file: options.env_file,
+            install_profiles: options.install_profiles,
+            module_services_file: options.module_services_file,
+            repo_root: Some(repo_root),
+            run_install_commands: options.run_install_commands,
+            source: "linked".to_owned(),
+        },
+    )
+    .await
 }
 
 pub async fn add_remote_module(
@@ -3264,14 +3393,11 @@ fn set_linked_module_enabled_ledger(
     Ok(json!({ "modules": modules.clone(), "version": 1 }))
 }
 
-fn module_install_ledger_source(
-    ledger_path: &Path,
-    module_name: &str,
-) -> Result<Option<ModuleSource>> {
+fn module_install_ledger_entry(ledger_path: &Path, module_name: &str) -> Result<Option<Value>> {
     let Some(ledger) = read_json_if_exists(ledger_path)? else {
         return Ok(None);
     };
-    let source = ledger
+    Ok(ledger
         .get("modules")
         .and_then(Value::as_array)
         .and_then(|modules| {
@@ -3279,9 +3405,26 @@ fn module_install_ledger_source(
                 module.get("moduleName").and_then(Value::as_str) == Some(module_name)
             })
         })
+        .cloned())
+}
+
+fn module_install_ledger_source(
+    ledger_path: &Path,
+    module_name: &str,
+) -> Result<Option<ModuleSource>> {
+    let entry = module_install_ledger_entry(ledger_path, module_name)?;
+    let source = entry
+        .as_ref()
         .and_then(|module| module.get("source"))
         .and_then(Value::as_str);
     source.map(parse_module_source).transpose()
+}
+
+fn module_update_reference(manifest_reference: &str) -> &str {
+    manifest_reference
+        .strip_prefix("builtin:")
+        .or_else(|| manifest_reference.strip_prefix("linked:"))
+        .unwrap_or(manifest_reference)
 }
 
 fn linked_module_uninstall_call(ledger_path: &Path, module_name: &str) -> Result<Option<String>> {
@@ -4722,6 +4865,57 @@ fn remove_runtime_console_bundle_registry_modules(
     })
 }
 
+fn remove_stale_module_console_artifacts(
+    repo_root: &Path,
+    module_name: &str,
+    include_install_plan: bool,
+    dry_run: bool,
+) -> Result<Vec<PathBuf>> {
+    let mut changed = Vec::new();
+    if include_install_plan {
+        let install_plan_path = repo_root.join(".lenso/console-package-install-plan.json");
+        if let Some(install_plan) =
+            remove_console_package_install_plan_module(&install_plan_path, module_name)?
+        {
+            changed.push(install_plan_path.clone());
+            if !dry_run {
+                write_json(&install_plan_path, &install_plan)?;
+            }
+        }
+    }
+
+    let registry_path = repo_root.join(CONSOLE_EXTENSION_REGISTRY_PATH);
+    if let Some(registry) =
+        remove_runtime_console_bundle_registry_module(&registry_path, module_name)?
+    {
+        changed.push(registry_path.clone());
+        if !dry_run {
+            write_json(&registry_path, &registry)?;
+        }
+    }
+
+    let module_slug = slugify(module_name);
+    if module_slug.is_empty() {
+        return Ok(changed);
+    }
+    let module_dir = repo_root
+        .join(".lenso/console/extensions")
+        .join(module_slug);
+    if module_dir.exists() {
+        changed.push(module_dir.clone());
+        if !dry_run {
+            fs::remove_dir_all(&module_dir).with_context(|| {
+                format!(
+                    "remove console extension directory {}",
+                    module_dir.display()
+                )
+            })?;
+        }
+    }
+
+    Ok(changed)
+}
+
 fn module_catalog_entry_from_manifest(
     manifest: &Value,
     manifest_reference: &str,
@@ -5753,6 +5947,102 @@ mod tests {
 
         assert_eq!(updated["modules"].as_array().unwrap().len(), 1);
         assert_eq!(updated["modules"][0]["moduleName"], "auth");
+    }
+
+    #[test]
+    fn install_ledger_entry_is_read_for_module_update() {
+        let path = std::env::temp_dir().join(format!(
+            "lenso-module-update-ledger-{}.json",
+            std::process::id()
+        ));
+        write_json(
+            &path,
+            &json!({
+                "modules": [
+                    {
+                        "baseUrl": "http://127.0.0.1:4100/lenso/module/v1",
+                        "manifestReference": "http://127.0.0.1:4100/lenso/module/v1/manifest",
+                        "moduleName": "crm",
+                        "source": "remote"
+                    }
+                ],
+                "version": 1
+            }),
+        )
+        .unwrap();
+
+        let receipt = module_install_ledger_entry(&path, "crm").unwrap().unwrap();
+        fs::remove_file(&path).ok();
+
+        assert_eq!(
+            receipt.get("manifestReference").and_then(Value::as_str),
+            Some("http://127.0.0.1:4100/lenso/module/v1/manifest")
+        );
+    }
+
+    #[test]
+    fn module_update_reference_strips_receipt_prefixes() {
+        assert_eq!(module_update_reference("builtin:auth"), "auth");
+        assert_eq!(module_update_reference("linked:billing"), "billing");
+        assert_eq!(
+            module_update_reference("./lenso.module.json"),
+            "./lenso.module.json"
+        );
+    }
+
+    #[test]
+    fn module_update_removes_stale_console_artifacts() {
+        let repo_root = std::env::temp_dir().join(format!(
+            "lenso-module-update-console-{}",
+            std::process::id()
+        ));
+        fs::remove_dir_all(&repo_root).ok();
+        write_json(
+            &repo_root.join(".lenso/console-package-install-plan.json"),
+            &json!({
+                "modules": [
+                    { "moduleName": "crm" },
+                    { "moduleName": "billing" }
+                ],
+                "version": 1
+            }),
+        )
+        .unwrap();
+        write_json(
+            &repo_root.join(CONSOLE_EXTENSION_REGISTRY_PATH),
+            &json!({
+                "bundles": [
+                    { "moduleName": "crm" },
+                    { "moduleName": "billing" }
+                ],
+                "version": 1
+            }),
+        )
+        .unwrap();
+        write_file(
+            &repo_root.join(".lenso/console/extensions/crm/crm-console.js"),
+            b"export const crmConsoleModule = {};\n",
+        )
+        .unwrap();
+
+        let changed =
+            remove_stale_module_console_artifacts(&repo_root, "crm", true, false).unwrap();
+
+        let plan = read_json(&repo_root.join(".lenso/console-package-install-plan.json")).unwrap();
+        let registry = read_json(&repo_root.join(CONSOLE_EXTENSION_REGISTRY_PATH)).unwrap();
+        assert_eq!(changed.len(), 3);
+        assert!(!repo_root.join(".lenso/console/extensions/crm").exists());
+        assert_eq!(
+            plan["modules"][0].get("moduleName").and_then(Value::as_str),
+            Some("billing")
+        );
+        assert_eq!(
+            registry["bundles"][0]
+                .get("moduleName")
+                .and_then(Value::as_str),
+            Some("billing")
+        );
+        fs::remove_dir_all(&repo_root).ok();
     }
 
     #[test]
