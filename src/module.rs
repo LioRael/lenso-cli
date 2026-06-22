@@ -5077,7 +5077,7 @@ fn builtin_linked_module_descriptor(reference: &str) -> Option<Value> {
                         "linked": {
                             "cargo": {
                                 "package": "lenso-module-auth",
-                                "version": "0.1.3",
+                                "version": "0.1.4",
                                 "features": ["redis"]
                             }
                         },
@@ -5099,12 +5099,24 @@ fn builtin_linked_module_descriptor(reference: &str) -> Option<Value> {
                 "call": "builtins::auth_password()"
             }
         })),
+        "auth-device" => Some(json!({
+            "name": "auth-device",
+            "source": "linked",
+            "dependencies": ["auth"],
+            "linked": {
+                "call": "auth_device::module::linked_module()",
+                "cargo": {
+                    "package": "lenso-module-auth-device",
+                    "version": "0.1.0"
+                }
+            }
+        })),
         _ => None,
     }
 }
 
 fn builtin_linked_module_names() -> &'static [&'static str] {
-    &["auth", "auth-password"]
+    &["auth", "auth-password", "auth-device"]
 }
 
 fn apply_linked_install_profiles(
@@ -6080,10 +6092,10 @@ mod tests {
 
     #[test]
     fn linked_uninstall_includes_installed_dependents_first() {
-        let host_lib = "HostBuilder::new()\n    .linked_module(builtins::auth())\n    .linked_module(builtins::auth_password())\n    .build()\n";
+        let host_lib = "HostBuilder::new()\n    .linked_module(builtins::auth())\n    .linked_module(builtins::auth_password())\n    .linked_module(auth_device::module::linked_module())\n    .build()\n";
         let modules = linked_modules_to_uninstall("auth", None, "", host_lib).unwrap();
 
-        assert_eq!(modules, vec!["auth-password", "auth"]);
+        assert_eq!(modules, vec!["auth-password", "auth-device", "auth"]);
     }
 
     #[test]
@@ -6179,6 +6191,26 @@ mod tests {
     }
 
     #[test]
+    fn builtin_auth_device_descriptor_declares_external_linked_crate() {
+        let descriptor =
+            builtin_linked_module_descriptor("auth-device").expect("auth-device descriptor");
+
+        assert_eq!(descriptor["source"], "linked");
+        assert_eq!(descriptor["dependencies"], json!(["auth"]));
+        assert_eq!(
+            descriptor["linked"]["call"],
+            "auth_device::module::linked_module()"
+        );
+        assert_eq!(
+            descriptor["linked"]["cargo"],
+            json!({
+                "package": "lenso-module-auth-device",
+                "version": "0.1.0"
+            })
+        );
+    }
+
+    #[test]
     fn linked_descriptor_updates_host_cargo_toml() {
         let source = "[package]\nname = \"app\"\n\n[dependencies]\nanyhow = \"1\"\n";
         let cargo = json!({
@@ -6207,7 +6239,7 @@ mod tests {
                         "linked": {
                             "cargo": {
                                 "package": "lenso-module-auth",
-                                "version": "0.1.3",
+                                "version": "0.1.4",
                                 "features": ["redis"]
                             }
                         },
@@ -6231,7 +6263,7 @@ mod tests {
             descriptor["linked"]["cargo"],
             json!({
                 "package": "lenso-module-auth",
-                "version": "0.1.3",
+                "version": "0.1.4",
                 "features": ["redis"]
             })
         );
