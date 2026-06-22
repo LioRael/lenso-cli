@@ -60,7 +60,7 @@ jobs:
           grep -R -q 'auth.users.read' dist/assets
           ! grep -R -q 'function F(){return!1}' dist/assets
         working-directory: lenso-runtime-console
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: runtime-console-dist
           path: lenso-runtime-console/dist
@@ -107,7 +107,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: lenso-cli
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: runtime-console-dist
           path: lenso-cli/console/dist
@@ -138,7 +138,7 @@ jobs:
           node bin/lenso.js host init "$tmpdir/app"
           test -f "$tmpdir/app/.lenso/console/dist/index.html"
         working-directory: lenso-cli
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: lenso-cli-${{ matrix.tag }}
           path: lenso-cli/vendor
@@ -163,7 +163,7 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: lenso-cli-*
           path: lenso-cli/vendor
