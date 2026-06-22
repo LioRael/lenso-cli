@@ -52,6 +52,7 @@ real auth modules only when the application needs them:
 ```sh
 lenso module install auth
 lenso module install auth-password
+lenso module install auth-device
 ```
 
 ## Add A Remote Module

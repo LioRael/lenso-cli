@@ -74,6 +74,7 @@ lenso console-package create billing
 lenso module install https://example.com/lenso/module/v1/manifest
 lenso module install ./lenso.module.json
 lenso module install auth
+lenso module install auth-device
 ```
 
 `module install` reads `source` from the module descriptor when one is present.
