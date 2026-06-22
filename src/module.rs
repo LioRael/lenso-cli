@@ -5077,7 +5077,7 @@ fn builtin_linked_module_descriptor(reference: &str) -> Option<Value> {
                         "linked": {
                             "cargo": {
                                 "package": "lenso-module-auth",
-                                "version": "0.1.4",
+                                "version": "0.1.5",
                                 "features": ["redis"]
                             }
                         },
@@ -5107,7 +5107,7 @@ fn builtin_linked_module_descriptor(reference: &str) -> Option<Value> {
                 "call": "auth_device::module::linked_module()",
                 "cargo": {
                     "package": "lenso-module-auth-device",
-                    "version": "0.1.0"
+                    "version": "0.1.1"
                 }
             }
         })),
@@ -6205,7 +6205,7 @@ mod tests {
             descriptor["linked"]["cargo"],
             json!({
                 "package": "lenso-module-auth-device",
-                "version": "0.1.0"
+                "version": "0.1.1"
             })
         );
     }
@@ -6239,7 +6239,7 @@ mod tests {
                         "linked": {
                             "cargo": {
                                 "package": "lenso-module-auth",
-                                "version": "0.1.4",
+                                "version": "0.1.5",
                                 "features": ["redis"]
                             }
                         },
@@ -6263,7 +6263,7 @@ mod tests {
             descriptor["linked"]["cargo"],
             json!({
                 "package": "lenso-module-auth",
-                "version": "0.1.4",
+                "version": "0.1.5",
                 "features": ["redis"]
             })
         );
