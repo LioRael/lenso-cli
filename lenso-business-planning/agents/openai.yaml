@@ -1,0 +1,4 @@
+interface:
+  display_name: "Lenso Business Planning"
+  short_description: "Turn vague business ideas into module plans"
+  default_prompt: "Use $lenso-business-planning to turn a vague business idea into a Lenso module plan."
