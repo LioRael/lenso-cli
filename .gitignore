@@ -1,4 +1,5 @@
 /target
 /console/dist
+/console/extensions
 /vendor
 /*.tgz
