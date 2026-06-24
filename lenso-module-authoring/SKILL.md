@@ -1,6 +1,6 @@
 ---
 name: lenso-module-authoring
-description: Use when authoring or editing a Rust Lenso module that depends on the public `lenso` crate, including manifests, HTTP routes, runtime functions, events, lifecycle declarations, and console metadata.
+description: Use when implementing or editing a known Rust Lenso module after the business/module boundary is already chosen, including manifests, HTTP routes, runtime functions, events, lifecycle declarations, and console metadata. For product prompts from scratch, use `lenso-business-planning` first.
 ---
 
 # Lenso Module Authoring

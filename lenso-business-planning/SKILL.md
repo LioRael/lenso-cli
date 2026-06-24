@@ -1,6 +1,6 @@
 ---
 name: lenso-business-planning
-description: Use when a user starts from a broad or vague business idea and wants to build a Lenso business system from zero, especially to clarify requirements, decide whether the work should be a host app, one module, multiple collaborating modules, linked Rust modules, remote modules, or a staged implementation plan.
+description: Use when a user gives a product or business prompt from scratch, including requests like `Build a support ticket module for a Lenso app`, and needs Codex to clarify requirements, choose host vs one module vs multiple collaborating modules, linked Rust vs remote modules, first slice, and follow-up authoring path.
 ---
 
 # Lenso Business Planning
