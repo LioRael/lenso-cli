@@ -16,20 +16,23 @@ cargo install lenso-cli
 lenso host init my-app
 cd my-app
 cp .env.example .env
+lenso host update-console
 lenso serve
 ```
 
 The package name defaults to the target directory name and can be overridden with
 `--name`. Pass `--force` to scaffold into a non-empty directory.
-Release builds of `lenso-cli` also copy the bundled Runtime Console into the
-new project, so the API serves it at `/console` without requiring Node.js or
-pnpm in the host application.
-
-Update the hosted console later by upgrading `lenso-cli` and running:
+Install or update the hosted Runtime Console with:
 
 ```sh
 lenso host update-console
 ```
+
+The command downloads the latest `lenso-runtime-console` release artifact and
+installs it under `.lenso/console`, so the host API can serve `/console`
+without requiring Node.js or pnpm in the host application. For local builds,
+pass `--artifact <dir-or-tar.gz>`. For a pinned release, pass
+`--console-version vX.Y.Z`.
 
 After creating a password user, grant the first Runtime Console admin:
 

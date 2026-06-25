@@ -10,7 +10,6 @@ rust-version = "1.94"
 categories = ["command-line-utilities", "development-tools"]
 keywords = ["cli", "scaffold", "backend", "framework"]
 include = [
-    "console/**",
     "src/**/*.rs",
     "templates/**",
     "README.md",

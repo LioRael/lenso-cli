@@ -1,10 +1,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use include_dir::{Dir, DirEntry, include_dir};
+use reqwest::header::USER_AGENT;
 use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,10 +15,8 @@ use uuid::Uuid;
 /// project that `lenso host init` writes out.
 const TEMPLATE_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/templates/starter-host");
 
-/// Optional prebuilt Runtime Console payload. Release builds populate this
-/// directory before packaging `lenso-cli`; development builds may only contain
-/// the marker file.
-const CONSOLE_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/console");
+const CONSOLE_ARTIFACT_NAME: &str = "lenso-runtime-console.tar.gz";
+const CONSOLE_RELEASE_BASE_URL: &str = "https://github.com/LioRael/lenso-runtime-console/releases";
 const CONSOLE_ADMIN_SCOPE: &str = "console.admin";
 const CONSOLE_ADMIN_USER_SCOPES_KEY: &str = "auth.console_admin_user_scopes";
 const RUNTIME_CONFIG_SERVICE: &str = "*";
@@ -39,6 +38,13 @@ pub struct BootstrapAdminOptions {
     pub scopes: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct UpdateConsoleOptions {
+    pub repo_root: Option<PathBuf>,
+    pub source: Option<PathBuf>,
+    pub version: String,
+}
+
 /// Scaffold a new Lenso host application into `dir`.
 pub fn init(dir: &str, name: Option<&str>, force: bool) -> Result<()> {
     let target = PathBuf::from(dir);
@@ -58,27 +64,30 @@ pub fn init(dir: &str, name: Option<&str>, force: bool) -> Result<()> {
 
     prepare_target(&target, force)?;
     extract(&TEMPLATE_DIR, &target, PathBuf::new(), &rewrites)?;
-    let console_status = install_embedded_console(&target)?;
 
-    print_next_steps(&target, &package_name, console_status);
+    print_next_steps(&target, &package_name);
     Ok(())
 }
 
 /// Refresh hosted Runtime Console assets in an existing Lenso host project.
-pub fn update_console(repo_root: Option<&Path>) -> Result<()> {
-    let target = repo_root.unwrap_or_else(|| Path::new("."));
-    match install_embedded_console(target)? {
-        ConsoleInstallStatus::Installed => {
-            eprintln!(
-                "Updated bundled Runtime Console in {}",
-                target.join(".lenso").join("console").display()
-            );
-            Ok(())
-        }
-        ConsoleInstallStatus::NotPackaged => bail!(
-            "Runtime Console assets were not embedded in this lenso-cli build; install a release build that includes the console"
-        ),
+pub async fn update_console(options: UpdateConsoleOptions) -> Result<()> {
+    let target = options
+        .repo_root
+        .as_deref()
+        .unwrap_or_else(|| Path::new("."));
+    ensure_host_root(target)?;
+
+    if let Some(source) = options.source.as_deref() {
+        install_console_source(source, target)?;
+    } else {
+        install_downloaded_console(&options.version, target).await?;
     }
+
+    eprintln!(
+        "Updated Runtime Console in {}",
+        target.join(".lenso").join("console").display()
+    );
+    Ok(())
 }
 
 /// Grant Runtime Console admin scopes to an existing auth user.
@@ -582,65 +591,220 @@ fn write_file(contents: &[u8], kind: RewriteKind, out: &Path, rewrites: &Rewrite
     Ok(())
 }
 
-fn install_embedded_console(target: &Path) -> Result<ConsoleInstallStatus> {
-    let Some(dist_dir) = CONSOLE_DIR.get_dir("dist") else {
-        return Ok(ConsoleInstallStatus::NotPackaged);
-    };
-    if CONSOLE_DIR.get_file("dist/index.html").is_none() {
-        return Ok(ConsoleInstallStatus::NotPackaged);
-    }
-
-    let console_root = target.join(".lenso").join("console");
-    copy_embedded_dir(dist_dir, &console_root.join("dist"))?;
-
-    if let Some(extensions_dir) = CONSOLE_DIR.get_dir("extensions") {
-        copy_embedded_dir(extensions_dir, &console_root.join("extensions"))?;
-    } else {
-        fs::create_dir_all(console_root.join("extensions"))
-            .with_context(|| format!("create {}", console_root.join("extensions").display()))?;
-    }
-
-    if let Some(host_extensions_dir) = CONSOLE_DIR.get_dir("dist/extensions/host") {
-        copy_embedded_dir(
-            host_extensions_dir,
-            &console_root.join("extensions").join("host"),
-        )?;
-    }
-
-    let registry = console_root.join("extensions").join("registry.json");
-    if !registry.exists() {
-        fs::write(&registry, b"{\"version\":1,\"bundles\":[]}\n")
-            .with_context(|| format!("write {}", registry.display()))?;
-    }
-
-    Ok(ConsoleInstallStatus::Installed)
+async fn install_downloaded_console(version: &str, target: &Path) -> Result<()> {
+    let temp_root = create_temp_dir("lenso-console-download")?;
+    let result = install_downloaded_console_inner(version, target, &temp_root).await;
+    let _ = fs::remove_dir_all(&temp_root);
+    result
 }
 
-fn copy_embedded_dir(dir: &Dir, target: &Path) -> Result<()> {
-    if target.exists() {
-        fs::remove_dir_all(target).with_context(|| format!("remove {}", target.display()))?;
-    }
-    fs::create_dir_all(target).with_context(|| format!("create {}", target.display()))?;
+async fn install_downloaded_console_inner(
+    version: &str,
+    target: &Path,
+    temp_root: &Path,
+) -> Result<()> {
+    let archive = temp_root.join(CONSOLE_ARTIFACT_NAME);
+    let url = console_artifact_url(version);
+    eprintln!("Downloading Runtime Console from {url}");
 
-    for entry in dir.entries() {
-        let name = entry_name(entry)?;
-        let out_path = target.join(name);
-        match entry {
-            DirEntry::Dir(child) => copy_embedded_dir(child, &out_path)?,
-            DirEntry::File(file) => {
-                fs::write(&out_path, file.contents())
-                    .with_context(|| format!("write {}", out_path.display()))?;
-            }
+    let response = reqwest::Client::new()
+        .get(&url)
+        .header(
+            USER_AGENT,
+            format!("lenso-cli/{}", env!("CARGO_PKG_VERSION")),
+        )
+        .send()
+        .await
+        .with_context(|| format!("download Runtime Console artifact from {url}"))?;
+    if !response.status().is_success() {
+        bail!(
+            "Runtime Console artifact download failed: {} {}",
+            response.status(),
+            url
+        );
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .context("read Runtime Console artifact response")?;
+    fs::write(&archive, bytes).with_context(|| format!("write {}", archive.display()))?;
+    install_console_source(&archive, target)
+}
+
+fn console_artifact_url(version: &str) -> String {
+    let version = version.trim();
+    if version.is_empty() || version == "latest" {
+        format!("{CONSOLE_RELEASE_BASE_URL}/latest/download/{CONSOLE_ARTIFACT_NAME}")
+    } else {
+        format!("{CONSOLE_RELEASE_BASE_URL}/download/{version}/{CONSOLE_ARTIFACT_NAME}")
+    }
+}
+
+fn install_console_source(source: &Path, target: &Path) -> Result<()> {
+    if source.is_dir() {
+        return install_console_from_dir(source, target);
+    }
+    if source.is_file() {
+        let temp_root = create_temp_dir("lenso-console-artifact")?;
+        let result = extract_console_archive(source, &temp_root)
+            .and_then(|source_root| install_console_from_dir(&source_root, target));
+        let _ = fs::remove_dir_all(&temp_root);
+        return result;
+    }
+
+    bail!(
+        "Runtime Console source does not exist: {}",
+        source.display()
+    );
+}
+
+fn extract_console_archive(archive: &Path, target: &Path) -> Result<PathBuf> {
+    fs::create_dir_all(target).with_context(|| format!("create {}", target.display()))?;
+    let status = Command::new("tar")
+        .args(["-xzf"])
+        .arg(archive)
+        .args(["-C"])
+        .arg(target)
+        .status()
+        .with_context(|| format!("extract Runtime Console artifact {}", archive.display()))?;
+    if !status.success() {
+        bail!("tar exited with {status}");
+    }
+    Ok(target.to_path_buf())
+}
+
+fn install_console_from_dir(source: &Path, target: &Path) -> Result<()> {
+    let layout = console_source_layout(source)?;
+
+    let console_root = target.join(".lenso").join("console");
+    copy_dir_replace(&layout.dist, &console_root.join("dist"))?;
+
+    let extensions_root = console_root.join("extensions");
+    fs::create_dir_all(&extensions_root)
+        .with_context(|| format!("create {}", extensions_root.display()))?;
+    if let Some(host_extensions) = layout.host_extensions.as_deref() {
+        copy_dir_replace(host_extensions, &extensions_root.join("host"))?;
+    }
+
+    let registry = extensions_root.join("registry.json");
+    if !registry.exists() {
+        if let Some(source_registry) = layout.registry.as_deref() {
+            fs::copy(source_registry, &registry)
+                .with_context(|| format!("copy {}", registry.display()))?;
+        } else {
+            fs::write(&registry, b"{\"version\":1,\"bundles\":[]}\n")
+                .with_context(|| format!("write {}", registry.display()))?;
         }
     }
 
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum ConsoleInstallStatus {
-    Installed,
-    NotPackaged,
+#[derive(Debug)]
+struct ConsoleSourceLayout {
+    dist: PathBuf,
+    host_extensions: Option<PathBuf>,
+    registry: Option<PathBuf>,
+}
+
+fn console_source_layout(source: &Path) -> Result<ConsoleSourceLayout> {
+    if let Some(layout) = console_source_layout_at(source) {
+        return Ok(layout);
+    }
+
+    if source.is_dir() {
+        for entry in fs::read_dir(source).with_context(|| format!("read {}", source.display()))? {
+            let path = entry
+                .with_context(|| format!("read entry in {}", source.display()))?
+                .path();
+            if path.is_dir()
+                && let Some(layout) = console_source_layout_at(&path)
+            {
+                return Ok(layout);
+            }
+        }
+    }
+
+    bail!(
+        "Runtime Console artifact must contain `dist/index.html` or `index.html`: {}",
+        source.display()
+    );
+}
+
+fn console_source_layout_at(root: &Path) -> Option<ConsoleSourceLayout> {
+    let dist = if root.join("dist/index.html").exists() {
+        root.join("dist")
+    } else if root.join("index.html").exists() {
+        root.to_path_buf()
+    } else {
+        return None;
+    };
+
+    let host_extensions = [
+        root.join("extensions").join("host"),
+        dist.join("extensions").join("host"),
+    ]
+    .into_iter()
+    .find(|path| path.is_dir());
+    let registry = [
+        root.join("extensions").join("registry.json"),
+        dist.join("extensions").join("registry.json"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file());
+
+    Some(ConsoleSourceLayout {
+        dist,
+        host_extensions,
+        registry,
+    })
+}
+
+fn copy_dir_replace(source: &Path, target: &Path) -> Result<()> {
+    if target.exists() {
+        fs::remove_dir_all(target).with_context(|| format!("remove {}", target.display()))?;
+    }
+    fs::create_dir_all(target).with_context(|| format!("create {}", target.display()))?;
+    copy_dir_contents(source, target)
+}
+
+fn copy_dir_contents(source: &Path, target: &Path) -> Result<()> {
+    for entry in fs::read_dir(source).with_context(|| format!("read {}", source.display()))? {
+        let entry = entry.with_context(|| format!("read entry in {}", source.display()))?;
+        let out_path = target.join(entry.file_name());
+        if entry
+            .file_type()
+            .with_context(|| format!("read file type {}", entry.path().display()))?
+            .is_dir()
+        {
+            fs::create_dir_all(&out_path)
+                .with_context(|| format!("create {}", out_path.display()))?;
+            copy_dir_contents(&entry.path(), &out_path)?;
+        } else {
+            fs::copy(entry.path(), &out_path)
+                .with_context(|| format!("copy {}", out_path.display()))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn create_temp_dir(prefix: &str) -> Result<PathBuf> {
+    for attempt in 0..100 {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("system clock is before UNIX_EPOCH")?
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("{prefix}-{}-{now}-{attempt}", std::process::id()));
+        match fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error).with_context(|| format!("create {}", path.display())),
+        }
+    }
+    bail!("could not create a temporary directory for {prefix}");
 }
 
 /// Replace the template package name with the requested project name.
@@ -660,27 +824,18 @@ fn rewrite_bin_source(contents: &[u8], rewrites: &Rewrites) -> String {
     text.replace("lenso_starter_host", &rewrites.lib_name)
 }
 
-fn print_next_steps(target: &Path, package_name: &str, console_status: ConsoleInstallStatus) {
+fn print_next_steps(target: &Path, package_name: &str) {
     eprintln!(
         "Created Lenso host project `{package_name}` in {}",
         target.display()
     );
-    match console_status {
-        ConsoleInstallStatus::Installed => {
-            eprintln!("Installed the bundled Runtime Console into .lenso/console.");
-        }
-        ConsoleInstallStatus::NotPackaged => {
-            eprintln!("Runtime Console assets were not embedded in this lenso-cli build.");
-        }
-    }
     eprintln!();
     eprintln!("Next steps:");
     eprintln!("  cd {}", target.display());
     eprintln!("  cp .env.example .env");
+    eprintln!("  lenso host update-console");
     eprintln!("  lenso serve");
-    if console_status == ConsoleInstallStatus::Installed {
-        eprintln!("  open http://127.0.0.1:3000/console");
-    }
+    eprintln!("  open http://127.0.0.1:3000/console");
     eprintln!();
     eprintln!("Install a remote module with `lenso module install <manifest-url>`.");
 }
@@ -822,36 +977,51 @@ mod tests {
     }
 
     #[test]
-    fn copies_embedded_console_tree() {
-        let target = temp_dir("lenso-cli-console-copy");
-        let _ = fs::remove_dir_all(&target);
+    fn installs_console_from_source_dir_preserving_module_extensions() {
+        let source = temp_dir("lenso-cli-console-source");
+        let target = temp_dir("lenso-cli-console-target");
+        fs::create_dir_all(source.join("dist/assets")).unwrap();
+        fs::create_dir_all(source.join("extensions/host")).unwrap();
+        fs::write(source.join("dist/index.html"), "<html></html>").unwrap();
+        fs::write(source.join("dist/assets/app.js"), "console.log('app');").unwrap();
+        fs::write(
+            source.join("extensions/host/runtime-console-api.js"),
+            "export {};",
+        )
+        .unwrap();
 
-        copy_embedded_dir(&CONSOLE_DIR, &target).unwrap();
-        assert!(target.join(".keep").exists());
+        fs::create_dir_all(target.join(".lenso/console/extensions/billing")).unwrap();
+        fs::write(
+            target.join(".lenso/console/extensions/billing/billing-console.js"),
+            "export {};",
+        )
+        .unwrap();
+        fs::write(
+            target.join(".lenso/console/extensions/registry.json"),
+            r#"{"version":1,"bundles":[{"moduleName":"billing"}]}"#,
+        )
+        .unwrap();
 
-        fs::remove_dir_all(target).unwrap();
-    }
+        install_console_from_dir(&source, &target).unwrap();
 
-    #[test]
-    fn update_console_matches_packaged_asset_state() {
-        let target = temp_dir("lenso-cli-console-update");
-        fs::create_dir_all(&target).unwrap();
+        assert!(target.join(".lenso/console/dist/index.html").exists());
+        assert!(target.join(".lenso/console/dist/assets/app.js").exists());
+        assert!(
+            target
+                .join(".lenso/console/extensions/host/runtime-console-api.js")
+                .exists()
+        );
+        assert!(
+            target
+                .join(".lenso/console/extensions/billing/billing-console.js")
+                .exists()
+        );
+        assert_eq!(
+            fs::read_to_string(target.join(".lenso/console/extensions/registry.json")).unwrap(),
+            r#"{"version":1,"bundles":[{"moduleName":"billing"}]}"#
+        );
 
-        let result = update_console(Some(&target));
-
-        if CONSOLE_DIR.get_file("dist/index.html").is_some() {
-            result.unwrap();
-            assert!(target.join(".lenso/console/dist/index.html").exists());
-            if CONSOLE_DIR.get_dir("dist/extensions/host").is_some() {
-                assert!(
-                    target
-                        .join(".lenso/console/extensions/host/runtime-console-api.js")
-                        .exists()
-                );
-            }
-        } else {
-            assert!(result.is_err());
-        }
+        fs::remove_dir_all(source).unwrap();
         fs::remove_dir_all(target).unwrap();
     }
 
