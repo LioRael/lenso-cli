@@ -79,6 +79,31 @@ enum HostCommand {
         #[arg(long)]
         repo_root: Option<std::path::PathBuf>,
     },
+    /// Grant Runtime Console admin scopes to an auth user.
+    BootstrapAdmin(HostBootstrapAdminArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+struct HostBootstrapAdminArgs {
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Environment file to read for `DATABASE_URL`.
+    #[arg(long)]
+    env_file: Option<std::path::PathBuf>,
+
+    /// Auth user id, such as `usr_abc`.
+    #[arg(long)]
+    user_id: Option<String>,
+
+    /// Password-auth identifier, such as an email address.
+    #[arg(long)]
+    identifier: Option<String>,
+
+    /// Extra scope to grant. console.admin is always included.
+    #[arg(long = "scope")]
+    scopes: Vec<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -482,6 +507,18 @@ impl From<&ModuleDoctorArgs> for module::ModuleDoctorOptions {
     }
 }
 
+impl From<&HostBootstrapAdminArgs> for host::BootstrapAdminOptions {
+    fn from(args: &HostBootstrapAdminArgs) -> Self {
+        Self {
+            env_file: args.env_file.clone(),
+            identifier: args.identifier.clone(),
+            repo_root: args.repo_root.clone(),
+            scopes: args.scopes.clone(),
+            user_id: args.user_id.clone(),
+        }
+    }
+}
+
 impl From<&ModuleCreateArgs> for module::ModuleCreateOptions {
     fn from(args: &ModuleCreateArgs) -> Self {
         Self {
@@ -570,6 +607,9 @@ async fn main() -> anyhow::Result<()> {
             HostCommand::Init { dir, name, force } => host::init(&dir, name.as_deref(), force)?,
             HostCommand::UpdateConsole { repo_root } => {
                 host::update_console(repo_root.as_deref())?;
+            }
+            HostCommand::BootstrapAdmin(args) => {
+                host::bootstrap_admin((&args).into()).await?;
             }
         },
         Command::Module { command } => match command {

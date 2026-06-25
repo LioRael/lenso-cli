@@ -5,6 +5,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use include_dir::{Dir, DirEntry, include_dir};
+use serde_json::{Value, json};
+use sqlx::postgres::PgPoolOptions;
+use std::collections::{BTreeMap, BTreeSet};
+use uuid::Uuid;
 
 /// Embedded starter-host template. This is the single source of truth for the
 /// project that `lenso host init` writes out.
@@ -14,12 +18,25 @@ const TEMPLATE_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/templates/starter-ho
 /// directory before packaging `lenso-cli`; development builds may only contain
 /// the marker file.
 const CONSOLE_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/console");
+const CONSOLE_ADMIN_SCOPE: &str = "console.admin";
+const CONSOLE_ADMIN_USER_SCOPES_KEY: &str = "auth.console_admin_user_scopes";
+const RUNTIME_CONFIG_SERVICE: &str = "*";
+const BOOTSTRAP_ACTOR: &str = "lenso-cli:bootstrap-admin";
 
 /// Template-wide rewrite values applied when scaffolding a named project.
 #[derive(Debug, Clone)]
 struct Rewrites {
     package_name: String,
     lib_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct BootstrapAdminOptions {
+    pub repo_root: Option<PathBuf>,
+    pub env_file: Option<PathBuf>,
+    pub user_id: Option<String>,
+    pub identifier: Option<String>,
+    pub scopes: Vec<String>,
 }
 
 /// Scaffold a new Lenso host application into `dir`.
@@ -62,6 +79,30 @@ pub fn update_console(repo_root: Option<&Path>) -> Result<()> {
             "Runtime Console assets were not embedded in this lenso-cli build; install a release build that includes the console"
         ),
     }
+}
+
+/// Grant Runtime Console admin scopes to an existing auth user.
+pub async fn bootstrap_admin(options: BootstrapAdminOptions) -> Result<()> {
+    let repo_root = options
+        .repo_root
+        .as_deref()
+        .unwrap_or_else(|| Path::new("."));
+    ensure_host_root(repo_root)?;
+
+    let database_url = database_url(repo_root, options.env_file.as_deref())?;
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .context("connect to DATABASE_URL")?;
+    let user_id = resolve_bootstrap_user_id(&pool, options.user_id, options.identifier).await?;
+    let granted = bootstrap_scopes(options.scopes);
+    let stored = upsert_console_admin_scopes(&pool, &user_id, &granted).await?;
+
+    eprintln!("Bootstrapped Runtime Console admin user {user_id}.");
+    eprintln!("Stored {CONSOLE_ADMIN_USER_SCOPES_KEY}: {stored}");
+    eprintln!("Restart api/worker for the scope change to apply.");
+    Ok(())
 }
 
 /// Start the local services used by a generated Lenso host project.
@@ -187,15 +228,66 @@ fn serve_base_url_with(repo_root: &Path, env_host: Option<&str>, env_port: Optio
 }
 
 fn dotenv_value(repo_root: &Path, key: &str) -> Option<String> {
-    fs::read_to_string(repo_root.join(".env"))
-        .ok()
-        .and_then(|env| {
-            env.lines().find_map(|line| {
-                let (name, value) = line.split_once('=')?;
-                (name.trim() == key)
-                    .then(|| value.trim().trim_matches('"').trim_matches('\'').to_owned())
-            })
+    dotenv_value_from_path(&repo_root.join(".env"), key)
+}
+
+fn database_url(repo_root: &Path, env_file: Option<&Path>) -> Result<String> {
+    if let Ok(value) = std::env::var("DATABASE_URL")
+        && !value.trim().is_empty()
+    {
+        return Ok(value);
+    }
+    let env_path = env_file.map_or_else(|| repo_root.join(".env"), Path::to_path_buf);
+    dotenv_value_from_path(&env_path, "DATABASE_URL")
+        .filter(|value| !value.trim().is_empty())
+        .with_context(|| format!("DATABASE_URL is not set in env or {}", env_path.display()))
+}
+
+fn dotenv_value_from_path(path: &Path, key: &str) -> Option<String> {
+    let values = dotenv_values(&fs::read_to_string(path).ok()?);
+    let raw = values.get(key)?;
+    Some(expand_env_value(raw, &values))
+}
+
+fn dotenv_values(source: &str) -> BTreeMap<String, String> {
+    source
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            let line = line.strip_prefix("export ").unwrap_or(line);
+            let (key, value) = line.split_once('=')?;
+            Some((key.trim().to_owned(), unquote_env_value(value.trim())))
         })
+        .collect()
+}
+
+fn unquote_env_value(value: &str) -> String {
+    value.trim_matches('"').trim_matches('\'').to_owned()
+}
+
+fn expand_env_value(value: &str, values: &BTreeMap<String, String>) -> String {
+    let mut output = String::new();
+    let mut rest = value;
+    while let Some(start) = rest.find("${") {
+        output.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else {
+            output.push_str(&rest[start..]);
+            return output;
+        };
+        let key = &after[..end];
+        if let Ok(env_value) = std::env::var(key) {
+            output.push_str(&env_value);
+        } else if let Some(file_value) = values.get(key) {
+            output.push_str(file_value);
+        }
+        rest = &after[end + 1..];
+    }
+    output.push_str(rest);
+    output
 }
 
 fn browser_host(host: &str) -> String {
@@ -255,6 +347,128 @@ fn stop_child(label: &str, child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
     eprintln!("Stopped {label}.");
+}
+
+async fn resolve_bootstrap_user_id(
+    pool: &sqlx::PgPool,
+    user_id: Option<String>,
+    identifier: Option<String>,
+) -> Result<String> {
+    match (user_id, identifier) {
+        (Some(_), Some(_)) => bail!("pass either --user-id or --identifier, not both"),
+        (Some(user_id), None) => {
+            let exists = sqlx::query_scalar::<_, String>("select id from auth.users where id = $1")
+                .bind(user_id.trim())
+                .fetch_optional(pool)
+                .await
+                .context("check auth user")?;
+            exists.with_context(|| format!("auth user `{}` was not found", user_id.trim()))
+        }
+        (None, Some(identifier)) => {
+            let normalized = normalize_identifier(&identifier)?;
+            sqlx::query_scalar::<_, String>(
+                "select user_id from auth.identities where provider = 'password' and provider_subject = $1",
+            )
+            .bind(&normalized)
+            .fetch_optional(pool)
+            .await
+            .with_context(|| format!("find password identity `{normalized}`"))?
+            .with_context(|| format!("password identity `{normalized}` was not found"))
+        }
+        (None, None) => bail!("pass --user-id or --identifier"),
+    }
+}
+
+fn normalize_identifier(identifier: &str) -> Result<String> {
+    let trimmed = identifier.trim();
+    if trimmed.is_empty() {
+        bail!("identifier is empty");
+    }
+    if trimmed.contains('@') {
+        Ok(trimmed.to_ascii_lowercase())
+    } else {
+        Ok(trimmed.to_owned())
+    }
+}
+
+fn bootstrap_scopes(scopes: Vec<String>) -> Vec<String> {
+    let mut set = BTreeSet::from([CONSOLE_ADMIN_SCOPE.to_owned()]);
+    set.extend(
+        scopes
+            .into_iter()
+            .map(|scope| scope.trim().to_owned())
+            .filter(|scope| !scope.is_empty()),
+    );
+    set.into_iter().collect()
+}
+
+async fn upsert_console_admin_scopes(
+    pool: &sqlx::PgPool,
+    user_id: &str,
+    scopes: &[String],
+) -> Result<Value> {
+    let mut tx = pool.begin().await.context("begin runtime config update")?;
+    let old_value = sqlx::query_scalar::<_, Value>(
+        "select value from config.setting_values where service = $1 and key = $2",
+    )
+    .bind(RUNTIME_CONFIG_SERVICE)
+    .bind(CONSOLE_ADMIN_USER_SCOPES_KEY)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("load current console admin scopes")?;
+
+    let mut grants = decode_console_admin_scopes(old_value.clone())?;
+    merge_user_scopes(&mut grants, user_id, scopes);
+    let next_value = serde_json::to_value(grants).context("encode console admin scopes")?;
+
+    sqlx::query(
+        r"
+        insert into config.setting_values (service, key, value, updated_at, updated_by)
+        values ($1, $2, $3, now(), $4)
+        on conflict (service, key)
+        do update set value = excluded.value, updated_at = now(), updated_by = excluded.updated_by
+        ",
+    )
+    .bind(RUNTIME_CONFIG_SERVICE)
+    .bind(CONSOLE_ADMIN_USER_SCOPES_KEY)
+    .bind(&next_value)
+    .bind(BOOTSTRAP_ACTOR)
+    .execute(&mut *tx)
+    .await
+    .context("write console admin scopes")?;
+
+    sqlx::query(
+        r"
+        insert into config.setting_audit (id, service, key, old_value, new_value, actor, changed_at)
+        values ($1, $2, $3, $4, $5, $6, now())
+        ",
+    )
+    .bind(Uuid::now_v7())
+    .bind(RUNTIME_CONFIG_SERVICE)
+    .bind(CONSOLE_ADMIN_USER_SCOPES_KEY)
+    .bind(&old_value)
+    .bind(&next_value)
+    .bind(BOOTSTRAP_ACTOR)
+    .execute(&mut *tx)
+    .await
+    .context("audit console admin scope update")?;
+
+    tx.commit().await.context("commit runtime config update")?;
+    Ok(next_value)
+}
+
+fn decode_console_admin_scopes(value: Option<Value>) -> Result<BTreeMap<String, Vec<String>>> {
+    serde_json::from_value(value.unwrap_or_else(|| json!({})))
+        .context("decode auth.console_admin_user_scopes")
+}
+
+fn merge_user_scopes(grants: &mut BTreeMap<String, Vec<String>>, user_id: &str, scopes: &[String]) {
+    let entry = grants.entry(user_id.to_owned()).or_default();
+    for scope in scopes {
+        if !entry.iter().any(|existing| existing == scope) {
+            entry.push(scope.clone());
+        }
+    }
 }
 
 /// Convert a package name to its Cargo library crate name (`-` becomes `_`).
@@ -537,6 +751,55 @@ mod tests {
         );
 
         fs::remove_dir_all(target).unwrap();
+    }
+
+    #[test]
+    fn dotenv_value_expands_template_variables() {
+        let target = temp_dir("lenso-cli-dotenv-expand");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(
+            target.join(".env"),
+            "POSTGRES_HOST_PORT=4545\nDATABASE_URL=postgres://lenso:lenso@localhost:${POSTGRES_HOST_PORT}/lenso\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            dotenv_value(&target, "DATABASE_URL").as_deref(),
+            Some("postgres://lenso:lenso@localhost:4545/lenso")
+        );
+
+        fs::remove_dir_all(target).unwrap();
+    }
+
+    #[test]
+    fn bootstrap_scope_merge_preserves_existing_scopes() {
+        let mut grants =
+            BTreeMap::from([("usr_admin".to_owned(), vec!["auth.users.read".to_owned()])]);
+        merge_user_scopes(
+            &mut grants,
+            "usr_admin",
+            &bootstrap_scopes(vec![
+                "auth.users.read".to_owned(),
+                "identity.users.read".to_owned(),
+            ]),
+        );
+
+        assert_eq!(
+            grants["usr_admin"],
+            vec!["auth.users.read", "console.admin", "identity.users.read"]
+        );
+    }
+
+    #[test]
+    fn bootstrap_identifier_normalizes_email_only() {
+        assert_eq!(
+            normalize_identifier(" Ada@Example.COM ").unwrap(),
+            "ada@example.com"
+        );
+        assert_eq!(
+            normalize_identifier(" +8613800000000 ").unwrap(),
+            "+8613800000000"
+        );
     }
 
     #[test]
