@@ -31,7 +31,7 @@ Update the hosted console later by upgrading `lenso-cli` and running:
 lenso host update-console
 ```
 
-The generated host depends on the Git-pinned `lenso` crate with the `host`
+The generated host depends on the crates.io `lenso` crate with the `host`
 feature, which is the current narrow host API for booting API, worker, and
 migration entrypoints. See
 [`docs/architecture/framework-public-surface.md`](https://github.com/LioRael/lenso/blob/main/docs/architecture/framework-public-surface.md)
@@ -74,6 +74,8 @@ lenso console-package create billing
 lenso module install https://example.com/lenso/module/v1/manifest
 lenso module install ./lenso.module.json
 lenso module install auth
+lenso module install auth-password
+lenso module install auth-oidc
 lenso module install auth-device
 ```
 
