@@ -5077,7 +5077,7 @@ fn builtin_linked_module_descriptor(reference: &str) -> Option<Value> {
                         "linked": {
                             "cargo": {
                                 "package": "lenso-module-auth",
-                                "version": "0.1.5",
+                                "version": "0.1.6",
                                 "features": ["redis"]
                             }
                         },
@@ -6239,7 +6239,7 @@ mod tests {
                         "linked": {
                             "cargo": {
                                 "package": "lenso-module-auth",
-                                "version": "0.1.5",
+                                "version": "0.1.6",
                                 "features": ["redis"]
                             }
                         },
@@ -6263,7 +6263,7 @@ mod tests {
             descriptor["linked"]["cargo"],
             json!({
                 "package": "lenso-module-auth",
-                "version": "0.1.5",
+                "version": "0.1.6",
                 "features": ["redis"]
             })
         );
