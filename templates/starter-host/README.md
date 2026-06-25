@@ -63,6 +63,18 @@ lenso module install auth-password
 lenso module install auth-oidc
 ```
 
+The OIDC provider is loaded but disabled until configured. Runtime Console
+sign-in uses this registered redirect URI:
+
+```text
+http://127.0.0.1:3000/console/oidc/callback
+```
+
+Set `LENSO_MODULE_AUTH_OIDC__ENABLED=true` only with a real issuer, JWKS,
+RSA signing key, and `CONSOLE_REDIRECT_URIS` that includes the callback above.
+When writing JSON values in `.env`, wrap the whole JSON value in single quotes
+so dotenv preserves the inner double quotes.
+
 ## Add A Remote Module
 
 Start a module that exposes a Lenso manifest, then install it into `.env`:
