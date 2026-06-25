@@ -27,7 +27,9 @@ clap = { version = "4", features = ["derive"] }
 include_dir = "0.7"
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
 serde_json = "1.0"
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "json", "uuid"] }
 tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "signal", "time"] }
+uuid = { version = "1", features = ["v7"] }
 
 [lints.rust]
 unsafe_code = "forbid"

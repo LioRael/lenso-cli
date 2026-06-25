@@ -75,6 +75,18 @@ RSA signing key, and `CONSOLE_REDIRECT_URIS` that includes the callback above.
 When writing JSON values in `.env`, wrap the whole JSON value in single quotes
 so dotenv preserves the inner double quotes.
 
+After registering a password user, grant the first Console admin from the host
+root:
+
+```sh
+lenso host bootstrap-admin --identifier admin@example.com
+# or
+lenso host bootstrap-admin --user-id usr_...
+```
+
+Restart `api` and `worker` after bootstrapping; Console admin scopes are loaded
+at startup.
+
 ## Add A Remote Module
 
 Start a module that exposes a Lenso manifest, then install it into `.env`:

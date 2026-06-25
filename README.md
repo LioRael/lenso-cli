@@ -31,6 +31,17 @@ Update the hosted console later by upgrading `lenso-cli` and running:
 lenso host update-console
 ```
 
+After creating a password user, grant the first Runtime Console admin:
+
+```sh
+lenso host bootstrap-admin --identifier admin@example.com
+# or
+lenso host bootstrap-admin --user-id usr_...
+```
+
+`console.admin` is always added. Pass extra `--scope <name>` flags when the
+user should also see scoped module data, then restart the API/worker.
+
 The generated host depends on the crates.io `lenso` crate with the `host`
 feature, which is the current narrow host API for booting API, worker, and
 migration entrypoints. See
