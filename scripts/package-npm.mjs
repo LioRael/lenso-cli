@@ -1,4 +1,4 @@
-import { chmodSync, copyFileSync, existsSync, mkdirSync } from 'node:fs';
+import { chmodSync, copyFileSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import path from 'node:path';
@@ -15,13 +15,7 @@ if (!tag || !supportedTags.has(tag)) {
 }
 const cargoTarget = process.env.LENSO_CARGO_TARGET;
 
-const consoleIndex = path.join(root, 'console', 'dist', 'index.html');
-if (!existsSync(consoleIndex)) {
-  console.error('console/dist/index.html is missing; build and copy Runtime Console dist before npm packing');
-  process.exit(1);
-}
-
-// ponytail: include_dir embeds console files at compile time; clean only this crate before packaging.
+// ponytail: clean only this crate so the npm vendor binary always matches this checkout.
 const clean = spawnSync('cargo', ['clean', '--release', '-p', 'lenso-cli'], {
   cwd: root,
   stdio: 'inherit'

@@ -78,6 +78,14 @@ enum HostCommand {
         /// Lenso host repository root.
         #[arg(long)]
         repo_root: Option<std::path::PathBuf>,
+
+        /// Install from a local artifact directory or .tar.gz instead of downloading.
+        #[arg(long = "artifact")]
+        source: Option<std::path::PathBuf>,
+
+        /// Runtime Console GitHub release version to download.
+        #[arg(long = "console-version", default_value = "latest")]
+        console_version: String,
     },
     /// Grant Runtime Console admin scopes to an auth user.
     BootstrapAdmin(HostBootstrapAdminArgs),
@@ -605,8 +613,17 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Host { command } => match command {
             HostCommand::Init { dir, name, force } => host::init(&dir, name.as_deref(), force)?,
-            HostCommand::UpdateConsole { repo_root } => {
-                host::update_console(repo_root.as_deref())?;
+            HostCommand::UpdateConsole {
+                repo_root,
+                source,
+                console_version,
+            } => {
+                host::update_console(host::UpdateConsoleOptions {
+                    repo_root,
+                    source,
+                    version: console_version,
+                })
+                .await?;
             }
             HostCommand::BootstrapAdmin(args) => {
                 host::bootstrap_admin((&args).into()).await?;
