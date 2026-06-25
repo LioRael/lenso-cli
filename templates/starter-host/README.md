@@ -41,18 +41,26 @@ The API binds to `HTTP_HOST:HTTP_PORT` from `.env` and serves:
 - `POST /v1/app/items` for the authenticated user;
 - `GET /openapi.json`;
 - `GET /docs`;
+- `POST /v1/auth/password/register`;
+- `POST /v1/auth/password/login`;
+- `GET /.well-known/openid-configuration`;
+- `GET /.well-known/jwks.json`;
+- `GET /oauth/authorize`;
+- `POST /oauth/token`;
 - Runtime Console frontend under `/console`;
 - Runtime Console admin APIs under `/admin/*`;
 - installed remote module HTTP proxies under `/modules/{module}/http/*`.
 
-The starter keeps `LENSO_COMPOSITION_PROFILE=core` and does not install an auth
-module by default. Local development can use `Bearer dev-user:<id>` tokens; add
-real auth modules only when the application needs them:
+The starter uses `LENSO_COMPOSITION_PROFILE=demo`, which includes the
+first-party auth anchor, password auth, and OIDC provider modules. Local
+development can still use `Bearer dev-user:<id>` tokens. Set
+`LENSO_COMPOSITION_PROFILE=core` when you want only core platform modules and
+then install auth explicitly:
 
 ```sh
 lenso module install auth
 lenso module install auth-password
-lenso module install auth-device
+lenso module install auth-oidc
 ```
 
 ## Add A Remote Module
