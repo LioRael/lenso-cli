@@ -13,7 +13,7 @@ Start from the user goal, then route them to the smallest public surface that fi
 ## Public Paths
 
 - Business planning from a vague prompt: use `lenso-business-planning`
-- Rust module on the host: use `cargo add lenso@0.3.10`
+- Rust module on the host: use `cargo add lenso@0.3.16`
 - Remote module: use `pnpm add @lenso/remote-module-kit@0.1.1`
 - Host starter app: scaffold with the standalone CLI via `lenso host init <dir>`
 - OpenAPI client work: use the committed `contracts/openapi/app-api.v1.yaml`

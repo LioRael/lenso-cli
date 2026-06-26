@@ -13,7 +13,7 @@ Keep declarations serializable and keep host internals out of the module API.
 ## Start Here
 
 ```sh
-cargo add lenso@0.3.10
+cargo add lenso@0.3.16
 ```
 
 Use `ModuleManifest` for declarations:
