@@ -30,10 +30,10 @@ enum Command {
         #[command(subcommand)]
         command: ModuleCommand,
     },
-    /// Manage Runtime Console package registration.
-    ConsolePackage {
+    /// Manage Runtime Console assets, access, and packages.
+    Console {
         #[command(subcommand)]
-        command: ConsolePackageCommand,
+        command: ConsoleCommand,
     },
 }
 
@@ -73,26 +73,10 @@ enum HostCommand {
         #[arg(long)]
         force: bool,
     },
-    /// Refresh the hosted Runtime Console assets in a host project.
-    UpdateConsole {
-        /// Lenso host repository root.
-        #[arg(long)]
-        repo_root: Option<std::path::PathBuf>,
-
-        /// Install from a local artifact directory or .tar.gz instead of downloading.
-        #[arg(long = "artifact")]
-        source: Option<std::path::PathBuf>,
-
-        /// Runtime Console GitHub release version to download.
-        #[arg(long = "console-version", default_value = "latest")]
-        console_version: String,
-    },
-    /// Grant Runtime Console admin scopes to an auth user.
-    BootstrapAdmin(HostBootstrapAdminArgs),
 }
 
 #[derive(Debug, Args, Clone)]
-struct HostBootstrapAdminArgs {
+struct ConsoleBootstrapAdminArgs {
     /// Lenso host repository root.
     #[arg(long)]
     repo_root: Option<std::path::PathBuf>,
@@ -112,6 +96,34 @@ struct HostBootstrapAdminArgs {
     /// Extra scope to grant. console.admin is always included.
     #[arg(long = "scope")]
     scopes: Vec<String>,
+}
+
+#[derive(Debug, Subcommand)]
+enum ConsoleCommand {
+    /// Refresh the hosted Runtime Console assets in a host project.
+    Update(ConsoleUpdateArgs),
+    /// Grant Runtime Console admin scopes to an auth user.
+    BootstrapAdmin(ConsoleBootstrapAdminArgs),
+    /// Manage Runtime Console package registration.
+    Package {
+        #[command(subcommand)]
+        command: ConsolePackageCommand,
+    },
+}
+
+#[derive(Debug, Args, Clone)]
+struct ConsoleUpdateArgs {
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Install from a local artifact directory or .tar.gz instead of downloading.
+    #[arg(long = "artifact")]
+    source: Option<std::path::PathBuf>,
+
+    /// Runtime Console GitHub release version to download.
+    #[arg(long = "console-version", default_value = "latest")]
+    console_version: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -515,8 +527,8 @@ impl From<&ModuleDoctorArgs> for module::ModuleDoctorOptions {
     }
 }
 
-impl From<&HostBootstrapAdminArgs> for host::BootstrapAdminOptions {
-    fn from(args: &HostBootstrapAdminArgs) -> Self {
+impl From<&ConsoleBootstrapAdminArgs> for host::BootstrapAdminOptions {
+    fn from(args: &ConsoleBootstrapAdminArgs) -> Self {
         Self {
             env_file: args.env_file.clone(),
             identifier: args.identifier.clone(),
@@ -613,21 +625,27 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Host { command } => match command {
             HostCommand::Init { dir, name, force } => host::init(&dir, name.as_deref(), force)?,
-            HostCommand::UpdateConsole {
-                repo_root,
-                source,
-                console_version,
-            } => {
+        },
+        Command::Console { command } => match command {
+            ConsoleCommand::Update(args) => {
                 host::update_console(host::UpdateConsoleOptions {
-                    repo_root,
-                    source,
-                    version: console_version,
+                    repo_root: args.repo_root,
+                    source: args.source,
+                    version: args.console_version,
                 })
                 .await?;
             }
-            HostCommand::BootstrapAdmin(args) => {
+            ConsoleCommand::BootstrapAdmin(args) => {
                 host::bootstrap_admin((&args).into()).await?;
             }
+            ConsoleCommand::Package { command } => match command {
+                ConsolePackageCommand::Create(args) => {
+                    module::create_console_package((&args).into()).await?;
+                }
+                ConsolePackageCommand::ApplyPlan(args) => {
+                    module::apply_console_package_install_plan((&args).into()).await?;
+                }
+            },
         },
         Command::Module { command } => match command {
             ModuleCommand::Create(args) => {
@@ -659,14 +677,6 @@ async fn main() -> anyhow::Result<()> {
                     module::install_module(&args.manifest_reference, (&args).into()).await?;
                 }
             },
-        },
-        Command::ConsolePackage { command } => match command {
-            ConsolePackageCommand::Create(args) => {
-                module::create_console_package((&args).into()).await?;
-            }
-            ConsolePackageCommand::ApplyPlan(args) => {
-                module::apply_console_package_install_plan((&args).into()).await?;
-            }
         },
     }
 

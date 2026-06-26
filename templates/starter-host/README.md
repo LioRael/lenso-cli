@@ -79,9 +79,9 @@ After registering a password user, grant the first Console admin from the host
 root:
 
 ```sh
-lenso host bootstrap-admin --identifier admin@example.com
+lenso console bootstrap-admin --identifier admin@example.com
 # or
-lenso host bootstrap-admin --user-id usr_...
+lenso console bootstrap-admin --user-id usr_...
 ```
 
 Restart `api` and `worker` after bootstrapping; Console admin scopes are loaded

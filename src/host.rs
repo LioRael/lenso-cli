@@ -20,7 +20,7 @@ const CONSOLE_RELEASE_BASE_URL: &str = "https://github.com/LioRael/lenso-runtime
 const CONSOLE_ADMIN_SCOPE: &str = "console.admin";
 const CONSOLE_ADMIN_USER_SCOPES_KEY: &str = "auth.console_admin_user_scopes";
 const RUNTIME_CONFIG_SERVICE: &str = "*";
-const BOOTSTRAP_ACTOR: &str = "lenso-cli:bootstrap-admin";
+const BOOTSTRAP_ACTOR: &str = "lenso-cli:console-bootstrap-admin";
 
 /// Template-wide rewrite values applied when scaffolding a named project.
 #[derive(Debug, Clone)]
@@ -312,7 +312,7 @@ fn console_line(repo_root: &Path, base_url: &str) -> String {
     if repo_root.join(".lenso/console/dist/index.html").exists() {
         format!("  Console: {base_url}/console")
     } else {
-        "  Console: not installed. Run `lenso host update-console`.".to_owned()
+        "  Console: not installed. Run `lenso console update`.".to_owned()
     }
 }
 
@@ -833,7 +833,7 @@ fn print_next_steps(target: &Path, package_name: &str) {
     eprintln!("Next steps:");
     eprintln!("  cd {}", target.display());
     eprintln!("  cp .env.example .env");
-    eprintln!("  lenso host update-console");
+    eprintln!("  lenso console update");
     eprintln!("  lenso serve");
     eprintln!("  open http://127.0.0.1:3000/console");
     eprintln!();
@@ -964,7 +964,7 @@ mod tests {
 
         assert_eq!(
             console_line(&target, "http://127.0.0.1:3000"),
-            "  Console: not installed. Run `lenso host update-console`."
+            "  Console: not installed. Run `lenso console update`."
         );
 
         fs::write(target.join(".lenso/console/dist/index.html"), "").unwrap();
