@@ -16,7 +16,7 @@ cargo install lenso-cli
 lenso host init my-app
 cd my-app
 cp .env.example .env
-lenso host update-console
+lenso console update
 lenso serve
 ```
 
@@ -25,7 +25,7 @@ The package name defaults to the target directory name and can be overridden wit
 Install or update the hosted Runtime Console with:
 
 ```sh
-lenso host update-console
+lenso console update
 ```
 
 The command downloads the latest `lenso-runtime-console` release artifact and
@@ -37,9 +37,9 @@ pass `--artifact <dir-or-tar.gz>`. For a pinned release, pass
 After creating a password user, grant the first Runtime Console admin:
 
 ```sh
-lenso host bootstrap-admin --identifier admin@example.com
+lenso console bootstrap-admin --identifier admin@example.com
 # or
-lenso host bootstrap-admin --user-id usr_...
+lenso console bootstrap-admin --user-id usr_...
 ```
 
 `console.admin` is always added. Pass extra `--scope <name>` flags when the
@@ -79,7 +79,7 @@ lenso module create billing --remote --output-dir ../module-packages
 The Runtime Console package generator is available directly as:
 
 ```sh
-lenso console-package create billing
+lenso console package create billing
 ```
 
 ## Install a module
