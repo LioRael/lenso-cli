@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,6 +10,7 @@ use serde_json::{Map, Value, json};
 
 #[derive(Debug, Clone)]
 pub struct RemoteModuleInstallOptions {
+    pub allow_incompatible: bool,
     pub base_url: Option<String>,
     pub console_plan: bool,
     pub dry_run: bool,
@@ -44,6 +46,7 @@ pub struct RemoteModuleUninstallOptions {
 
 #[derive(Debug, Clone)]
 pub struct ModuleUpdateOptions {
+    pub allow_incompatible: bool,
     pub base_url: Option<String>,
     pub console_plan: bool,
     pub dry_run: bool,
@@ -57,9 +60,51 @@ pub struct ModuleUpdateOptions {
 #[derive(Debug, Clone)]
 pub struct ModuleDoctorOptions {
     pub env_file: Option<PathBuf>,
+    pub json: bool,
     pub module_name: Option<String>,
     pub module_services_file: Option<PathBuf>,
     pub repo_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModuleServiceListOptions {
+    pub json: bool,
+    pub module_name: Option<String>,
+    pub module_services_file: Option<PathBuf>,
+    pub repo_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModuleServiceExportOptions {
+    pub format: String,
+    pub module_name: String,
+    pub module_services_file: Option<PathBuf>,
+    pub repo_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModuleServiceStatusOptions {
+    pub json: bool,
+    pub module_name: String,
+    pub module_services_file: Option<PathBuf>,
+    pub repo_root: Option<PathBuf>,
+    pub service_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModuleServiceStartOptions {
+    pub module_name: String,
+    pub module_services_file: Option<PathBuf>,
+    pub repo_root: Option<PathBuf>,
+    pub service_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModuleServiceStopOptions {
+    pub module_name: String,
+    pub module_services_file: Option<PathBuf>,
+    pub repo_root: Option<PathBuf>,
+    pub service_name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -186,19 +231,105 @@ impl RemoteModuleServiceDoctorStatus {
         match self {
             Self::Ready => "ready",
             Self::Disabled => "disabled",
-            Self::ManualNotReady => "manual_not_ready",
-            Self::NotConfigured => "not_configured",
-            Self::NotReady => "not_ready",
-            Self::StaleState => "stale_or_starting",
+            Self::ManualNotReady => "service_not_ready",
+            Self::NotConfigured => "source_not_configured",
+            Self::NotReady => "service_not_ready",
+            Self::StaleState => "stale_lock_or_pid",
         }
     }
 
     fn is_issue(self) -> bool {
         matches!(
             self,
-            Self::NotConfigured | Self::NotReady | Self::StaleState
+            Self::ManualNotReady | Self::NotConfigured | Self::NotReady | Self::StaleState
         )
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModuleDoctorReport {
+    issue_count: usize,
+    sources_checked: usize,
+    services_checked: usize,
+    sources: Vec<ModuleDoctorSourceReport>,
+    services: Vec<ModuleDoctorServiceReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModuleDoctorSourceReport {
+    module_name: String,
+    installed: bool,
+    configured: bool,
+    enabled: bool,
+    base_url: Option<String>,
+    manifest_url: Option<String>,
+    manifest_status: ModuleDoctorManifestStatus,
+    fix: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ModuleDoctorManifestStatus {
+    Reachable,
+    Unreachable,
+    Skipped,
+    NotConfigured,
+}
+
+impl ModuleDoctorManifestStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Reachable => "reachable",
+            Self::Unreachable => "unreachable",
+            Self::Skipped => "skipped",
+            Self::NotConfigured => "not_configured",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModuleDoctorServiceReport {
+    module_name: String,
+    service_name: String,
+    status: String,
+    ready_url: String,
+    process: String,
+    command: Option<String>,
+    lock_file: Option<String>,
+    pid_file: Option<String>,
+    fix: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModuleServiceListReport {
+    services: Vec<ModuleServiceListItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModuleServiceListItem {
+    module_name: String,
+    service_name: String,
+    auto_start: bool,
+    command: String,
+    ready_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModuleServiceStatusReport {
+    module_name: String,
+    service_name: String,
+    status: String,
+    ready: bool,
+    ready_url: String,
+    auto_start: bool,
+    lock_file: Option<String>,
+    pid_file: Option<String>,
 }
 
 #[derive(Debug)]
@@ -215,6 +346,12 @@ const CONSOLE_EXTENSION_REGISTRY_PATH: &str = ".lenso/console/extensions/registr
 const RUNTIME_CONFIG_DEFAULTS_PATH: &str = ".lenso/runtime-config-defaults.json";
 const CONSOLE_EXTENSION_ROUTE_PREFIX: &str = "/console/extensions";
 const CONSOLE_BUNDLE_HOST_API: &str = "1";
+const REMOTE_PROTOCOL_VERSION: &str = "1";
+const SUPPORTED_SERVICE_MODULE_FEATURES: &[&str] = &[
+    "console.package-api.1",
+    "service.lifecycle",
+    "service.status",
+];
 
 pub async fn create_module(options: ModuleCreateOptions) -> Result<()> {
     if options.remote {
@@ -487,6 +624,7 @@ async fn update_remote_module_from_receipt(
     add_remote_module(
         manifest_reference,
         RemoteModuleInstallOptions {
+            allow_incompatible: options.allow_incompatible,
             base_url: options.base_url.clone().or_else(|| {
                 receipt
                     .get("baseUrl")
@@ -528,6 +666,7 @@ async fn update_linked_module_from_receipt(
     install_module(
         module_update_reference(manifest_reference),
         RemoteModuleInstallOptions {
+            allow_incompatible: options.allow_incompatible,
             base_url: None,
             console_plan: options.console_plan,
             dry_run: options.dry_run,
@@ -564,6 +703,11 @@ pub async fn add_remote_module(
             .unwrap_or_else(|| Path::new(".lenso/module-services.json")),
     );
     let manifest = validate_remote_module_manifest(read_json_reference(manifest_reference).await?)?;
+    if let Some(issue) = remote_module_manifest_compatibility_issue(&manifest)
+        && !options.allow_incompatible
+    {
+        bail!("{issue}; rerun with --allow-incompatible to record an operator override");
+    }
     let module_name = string_field(&manifest, "name")?.trim().to_owned();
     let base_url = derive_remote_base_url(options.base_url.as_deref(), manifest_reference)?;
     let install_env = remote_module_install_env(&manifest)?;
@@ -590,6 +734,7 @@ pub async fn add_remote_module(
             &module_name,
             manifest_reference,
             &base_url,
+            &manifest,
             remote_module_install_writes(
                 &repo_root,
                 &env_file_path,
@@ -637,7 +782,7 @@ pub async fn add_remote_module(
         write_json(&module_services_path, module_services)?;
     }
 
-    println!("Added remote module {module_name}.");
+    println!("Added service module {module_name}.");
     println!("Updated:");
     println!("- {}", display_relative(&repo_root, &env_file_path));
     if console_bundle_install.registry_changed {
@@ -1068,7 +1213,7 @@ pub async fn uninstall_remote_module(
         return Ok(());
     }
 
-    println!("Uninstalled remote module {module_name}.");
+    println!("Uninstalled service module {module_name}.");
     println!("Next steps:");
     println!("- restart the API and worker");
 
@@ -1096,6 +1241,36 @@ pub async fn doctor_module(options: ModuleDoctorOptions) -> Result<()> {
         .as_deref()
         .map(str::trim)
         .filter(|module_name| !module_name.is_empty());
+    let report = build_module_doctor_report(
+        &repo_root,
+        &env_file_path,
+        &module_services_path,
+        requested_module,
+    )
+    .await?;
+
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_module_doctor_report(&repo_root, &env_file_path, &module_services_path, &report);
+    }
+
+    if report.issue_count > 0 {
+        bail!(
+            "Module doctor found {} service module issue(s)",
+            report.issue_count
+        );
+    }
+
+    Ok(())
+}
+
+async fn build_module_doctor_report(
+    repo_root: &Path,
+    env_file_path: &Path,
+    module_services_path: &Path,
+    requested_module: Option<&str>,
+) -> Result<ModuleDoctorReport> {
     let env_source = read_text_if_exists(&env_file_path)?;
     let remote_modules = remote_module_entries_from_env_source(&env_source);
     let service_states = read_remote_module_service_states(&module_services_path)?;
@@ -1107,15 +1282,65 @@ pub async fn doctor_module(options: ModuleDoctorOptions) -> Result<()> {
         .build()
         .context("build module doctor HTTP client")?;
     let mut issue_count = 0usize;
-    let mut checked_count = 0usize;
+    let mut sources = Vec::new();
+    let mut services = Vec::new();
 
-    println!("Module doctor:");
-    println!("- env: {}", display_relative(&repo_root, &env_file_path));
-    println!(
-        "- services: {}",
-        display_relative(&repo_root, &module_services_path)
-    );
-    println!("- remote modules: {}", remote_modules.len());
+    for (module_name, base_url) in remote_modules.iter().filter(|(module_name, _)| {
+        requested_module.is_none_or(|requested| module_name == requested)
+    }) {
+        let enabled = module_enabled_from_env_source(&env_source, module_name);
+        let installed =
+            module_install_ledger_entry(&repo_root.join(MODULE_INSTALL_LEDGER_PATH), module_name)?
+                .is_some();
+        let mut fix = None;
+        let mut manifest_url = None;
+        let mut manifest_status = ModuleDoctorManifestStatus::Skipped;
+        if !enabled {
+            fix = Some("enable the service module if it should load".to_owned());
+        } else if let Some(url) = remote_module_manifest_url(base_url) {
+            let manifest_ready = remote_service_ready_url(&client, &url).await;
+            manifest_status = if manifest_ready {
+                ModuleDoctorManifestStatus::Reachable
+            } else {
+                issue_count += 1;
+                fix = Some(
+                    "start the service or fix REMOTE_MODULES for this manifest URL".to_owned(),
+                );
+                ModuleDoctorManifestStatus::Unreachable
+            };
+            manifest_url = Some(url);
+        }
+        sources.push(ModuleDoctorSourceReport {
+            module_name: module_name.to_owned(),
+            installed,
+            configured: true,
+            enabled,
+            base_url: Some(base_url.to_owned()),
+            manifest_url,
+            manifest_status,
+            fix,
+        });
+    }
+
+    if let Some(module_name) = requested_module {
+        let has_source = remote_modules.iter().any(|(name, _)| name == module_name);
+        let has_service_state = service_states
+            .iter()
+            .any(|state| state.module_name == module_name);
+        if !has_source && !has_service_state {
+            issue_count += 1;
+            sources.push(ModuleDoctorSourceReport {
+                module_name: module_name.to_owned(),
+                installed: false,
+                configured: false,
+                enabled: false,
+                base_url: None,
+                manifest_url: None,
+                manifest_status: ModuleDoctorManifestStatus::NotConfigured,
+                fix: Some("install the service module or add it to REMOTE_MODULES".to_owned()),
+            });
+        }
+    }
 
     for state in service_states
         .iter()
@@ -1127,7 +1352,6 @@ pub async fn doctor_module(options: ModuleDoctorOptions) -> Result<()> {
         let enabled = module_enabled_from_env_source(&env_source, &state.module_name);
 
         for service in &state.services {
-            checked_count += 1;
             let ready = remote_service_ready_url(&client, &service.ready_url).await;
             let lock_file_path = remote_module_service_state_path(
                 services_state_dir,
@@ -1154,44 +1378,390 @@ pub async fn doctor_module(options: ModuleDoctorOptions) -> Result<()> {
             if status.is_issue() {
                 issue_count += 1;
             }
-
-            println!(
-                "- {}/{}: {}",
-                state.module_name,
-                service.name,
-                status.label()
-            );
-            println!("  readyUrl: {}", service.ready_url);
-            if !ready {
-                println!("  command: {}", service.command);
-            }
-            if lock_exists || pid_exists {
-                println!(
-                    "  state: lock={} pid={}",
-                    display_relative(&repo_root, &lock_file_path),
-                    display_relative(&repo_root, &pid_file_path)
-                );
-            }
-            if let Some(fix) = remote_module_service_doctor_fix(status) {
-                println!("  fix: {fix}");
-            }
+            services.push(ModuleDoctorServiceReport {
+                module_name: state.module_name.clone(),
+                service_name: service.name.clone(),
+                status: status.label().to_owned(),
+                ready_url: service.ready_url.clone(),
+                process: if service.auto_start {
+                    "host-started".to_owned()
+                } else {
+                    "manual".to_owned()
+                },
+                command: (!ready).then(|| service.command.clone()),
+                lock_file: lock_exists.then(|| display_relative(repo_root, &lock_file_path)),
+                pid_file: pid_exists.then(|| display_relative(repo_root, &pid_file_path)),
+                fix: remote_module_service_doctor_fix(status).map(ToOwned::to_owned),
+            });
         }
     }
 
-    if checked_count == 0 {
-        if let Some(module_name) = requested_module {
-            println!("- services checked: 0 for {module_name}");
-        } else {
-            println!("- services checked: 0");
+    Ok(ModuleDoctorReport {
+        issue_count,
+        sources_checked: sources.len(),
+        services_checked: services.len(),
+        sources,
+        services,
+    })
+}
+
+fn print_module_doctor_report(
+    repo_root: &Path,
+    env_file_path: &Path,
+    module_services_path: &Path,
+    report: &ModuleDoctorReport,
+) {
+    println!("Module doctor:");
+    println!("- env: {}", display_relative(repo_root, env_file_path));
+    println!(
+        "- services: {}",
+        display_relative(repo_root, module_services_path)
+    );
+    println!("- service modules: {}", report.sources.len());
+    println!("Sources:");
+    for source in &report.sources {
+        println!(
+            "- {}: {}",
+            source.module_name,
+            if source.configured {
+                "configured"
+            } else {
+                "source_not_configured"
+            }
+        );
+        println!(
+            "  installed: {}",
+            if source.installed { "yes" } else { "no" }
+        );
+        if let Some(base_url) = &source.base_url {
+            println!("  baseUrl: {base_url}");
         }
+        if let Some(manifest_url) = &source.manifest_url {
+            println!("  manifest: {manifest_url}");
+        }
+        println!("  manifestStatus: {}", source.manifest_status.label());
+        if let Some(fix) = &source.fix {
+            println!("  fix: {fix}");
+        }
+    }
+
+    println!("Services:");
+    for service in &report.services {
+        println!(
+            "- {}/{}: {}",
+            service.module_name, service.service_name, service.status
+        );
+        println!("  readyUrl: {}", service.ready_url);
+        println!("  process: {}", service.process);
+        if let Some(command) = &service.command {
+            println!("  command: {command}");
+        }
+        if service.lock_file.is_some() || service.pid_file.is_some() {
+            println!(
+                "  state: lock={} pid={}",
+                service.lock_file.as_deref().unwrap_or("-"),
+                service.pid_file.as_deref().unwrap_or("-")
+            );
+        }
+        if let Some(fix) = &service.fix {
+            println!("  fix: {fix}");
+        }
+    }
+    println!("- services checked: {}", report.services_checked);
+    println!("- sources checked: {}", report.sources_checked);
+}
+
+pub async fn list_module_services(options: ModuleServiceListOptions) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let module_services_path =
+        resolve_module_services_file_path(&repo_root, options.module_services_file.as_deref());
+    let states = read_remote_module_service_states(&module_services_path)?;
+    let services = module_service_list_items(&states, options.module_name.as_deref());
+    let report = ModuleServiceListReport { services };
+
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }
-    println!("- services checked: {checked_count}");
-    if issue_count > 0 {
-        bail!("Module doctor found {issue_count} issue(s)");
+
+    println!("MODULE\tSERVICE\tPROCESS\tREADY URL");
+    for service in &report.services {
+        println!(
+            "{}\t{}\t{}\t{}",
+            service.module_name,
+            service.service_name,
+            service_process_label(service.auto_start),
+            service.ready_url
+        );
+    }
+    Ok(())
+}
+
+pub async fn export_module_services(options: ModuleServiceExportOptions) -> Result<()> {
+    if options.format.trim() != "compose" {
+        bail!(
+            "Unsupported service export format `{}`; expected `compose`",
+            options.format
+        );
+    }
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let module_services_path =
+        resolve_module_services_file_path(&repo_root, options.module_services_file.as_deref());
+    let states = read_remote_module_service_states(&module_services_path)?;
+    let state = states
+        .iter()
+        .find(|state| state.module_name == options.module_name)
+        .ok_or_else(|| anyhow!("Service module not found: {}", options.module_name))?;
+    print!("{}", compose_service_export_source(state));
+    Ok(())
+}
+
+fn compose_service_export_source(state: &RemoteModuleServiceState) -> String {
+    let mut source = "services:\n".to_owned();
+    for service in &state.services {
+        source.push_str(&compose_service_source(state, service));
+    }
+    source
+}
+
+fn compose_service_source(
+    state: &RemoteModuleServiceState,
+    service: &RemoteModuleServiceInstallSpec,
+) -> String {
+    let service_key = format!("{}-{}", slugify(&state.module_name), slugify(&service.name));
+    format!(
+        "  {service_key}:\n    command: >-\n      {}\n    working_dir: {}\n    restart: unless-stopped\n    labels:\n      lenso.module: {}\n      lenso.service: {}\n      lenso.ready_url: {}\n",
+        service.command,
+        service.cwd.as_deref().unwrap_or("."),
+        state.module_name,
+        service.name,
+        service.ready_url
+    )
+}
+
+pub async fn status_module_service(options: ModuleServiceStatusOptions) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let module_services_path =
+        resolve_module_services_file_path(&repo_root, options.module_services_file.as_deref());
+    let states = read_remote_module_service_states(&module_services_path)?;
+    let (module_name, service) =
+        find_module_service(&states, &options.module_name, &options.service_name)?;
+    let report = module_service_status_report(
+        &repo_root,
+        module_services_path
+            .parent()
+            .unwrap_or_else(|| Path::new(".")),
+        &module_name,
+        &service,
+    )
+    .await?;
+
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
     }
 
+    println!(
+        "{}/{}: {}",
+        report.module_name, report.service_name, report.status
+    );
+    println!("readyUrl: {}", report.ready_url);
+    println!(
+        "state: lock={} pid={}",
+        report.lock_file.as_deref().unwrap_or("-"),
+        report.pid_file.as_deref().unwrap_or("-")
+    );
     Ok(())
+}
+
+pub async fn start_module_service(options: ModuleServiceStartOptions) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let module_services_path =
+        resolve_module_services_file_path(&repo_root, options.module_services_file.as_deref());
+    let states = read_remote_module_service_states(&module_services_path)?;
+    let (module_name, service) =
+        find_module_service(&states, &options.module_name, &options.service_name)?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(800))
+        .build()
+        .context("build module service HTTP client")?;
+    if remote_service_ready_url(&client, &service.ready_url).await {
+        println!("{}/{} already ready", module_name, service.name);
+        return Ok(());
+    }
+
+    let services_state_dir = module_services_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    let lock_file_path =
+        remote_module_service_state_path(services_state_dir, &module_name, &service, "lock");
+    let pid_file_path =
+        remote_module_service_state_path(services_state_dir, &module_name, &service, "pid");
+    if lock_file_path.exists() || pid_file_path.exists() {
+        bail!(
+            "{}/{} already has local state; run `lenso module service stop {} {}` first",
+            module_name,
+            service.name,
+            module_name,
+            service.name
+        );
+    }
+
+    let cwd = service
+        .cwd
+        .as_deref()
+        .map(|cwd| resolve_path(&repo_root, Path::new(cwd)))
+        .unwrap_or_else(|| repo_root.clone());
+    // ponytail: local dev process control; a real supervisor belongs in deployment tooling.
+    let child = shell_command(&service.command)
+        .current_dir(cwd)
+        .spawn()
+        .with_context(|| format!("start service module {}/{}", module_name, service.name))?;
+    write_service_lock(&lock_file_path)?;
+    write_file(&pid_file_path, format!("{}\n", child.id()).as_bytes())?;
+    println!(
+        "Started service module {}/{} with pid {}.",
+        module_name,
+        service.name,
+        child.id()
+    );
+    Ok(())
+}
+
+pub async fn stop_module_service(options: ModuleServiceStopOptions) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let module_services_path =
+        resolve_module_services_file_path(&repo_root, options.module_services_file.as_deref());
+    let states = read_remote_module_service_states(&module_services_path)?;
+    let (module_name, service) =
+        find_module_service(&states, &options.module_name, &options.service_name)?;
+    let services_state_dir = module_services_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    let lock_file_path =
+        remote_module_service_state_path(services_state_dir, &module_name, &service, "lock");
+    let pid_file_path =
+        remote_module_service_state_path(services_state_dir, &module_name, &service, "pid");
+    if !pid_file_path.exists() {
+        println!("{}/{} not running", module_name, service.name);
+        return Ok(());
+    }
+    let pid = read_text(&pid_file_path)?.trim().to_owned();
+    let status = Command::new("kill")
+        .arg(&pid)
+        .status()
+        .with_context(|| format!("stop service module {}/{}", module_name, service.name))?;
+    if !status.success() {
+        bail!("kill failed for pid {pid}");
+    }
+    let _ = fs::remove_file(&pid_file_path);
+    let _ = fs::remove_file(&lock_file_path);
+    println!("Stopped service module {}/{}.", module_name, service.name);
+    Ok(())
+}
+
+fn resolve_module_services_file_path(
+    repo_root: &Path,
+    module_services_file: Option<&Path>,
+) -> PathBuf {
+    resolve_path(
+        repo_root,
+        module_services_file.unwrap_or_else(|| Path::new(".lenso/module-services.json")),
+    )
+}
+
+fn module_service_list_items(
+    states: &[RemoteModuleServiceState],
+    requested_module: Option<&str>,
+) -> Vec<ModuleServiceListItem> {
+    states
+        .iter()
+        .filter(|state| requested_module.is_none_or(|module_name| state.module_name == module_name))
+        .flat_map(|state| {
+            state.services.iter().map(|service| ModuleServiceListItem {
+                module_name: state.module_name.clone(),
+                service_name: service.name.clone(),
+                auto_start: service.auto_start,
+                command: service.command.clone(),
+                ready_url: service.ready_url.clone(),
+            })
+        })
+        .collect()
+}
+
+fn find_module_service(
+    states: &[RemoteModuleServiceState],
+    module_name: &str,
+    service_name: &str,
+) -> Result<(String, RemoteModuleServiceInstallSpec)> {
+    states
+        .iter()
+        .find(|state| state.module_name == module_name)
+        .and_then(|state| {
+            state
+                .services
+                .iter()
+                .find(|service| service.name == service_name)
+                .cloned()
+                .map(|service| (state.module_name.clone(), service))
+        })
+        .ok_or_else(|| anyhow!("Service module service not found: {module_name}/{service_name}"))
+}
+
+async fn module_service_status_report(
+    repo_root: &Path,
+    services_state_dir: &Path,
+    module_name: &str,
+    service: &RemoteModuleServiceInstallSpec,
+) -> Result<ModuleServiceStatusReport> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(800))
+        .build()
+        .context("build module service HTTP client")?;
+    let ready = remote_service_ready_url(&client, &service.ready_url).await;
+    let lock_file_path =
+        remote_module_service_state_path(services_state_dir, module_name, service, "lock");
+    let pid_file_path =
+        remote_module_service_state_path(services_state_dir, module_name, service, "pid");
+    let lock_exists = lock_file_path.exists();
+    let pid_exists = pid_file_path.exists();
+    let status = if ready {
+        "ready"
+    } else if lock_exists || pid_exists {
+        "stale_lock_or_pid"
+    } else {
+        "service_not_ready"
+    };
+    Ok(ModuleServiceStatusReport {
+        module_name: module_name.to_owned(),
+        service_name: service.name.clone(),
+        status: status.to_owned(),
+        ready,
+        ready_url: service.ready_url.clone(),
+        auto_start: service.auto_start,
+        lock_file: lock_exists.then(|| display_relative(repo_root, &lock_file_path)),
+        pid_file: pid_exists.then(|| display_relative(repo_root, &pid_file_path)),
+    })
+}
+
+fn service_process_label(auto_start: bool) -> &'static str {
+    if auto_start { "host-started" } else { "manual" }
+}
+
+fn write_service_lock(lock_file_path: &Path) -> Result<()> {
+    if let Some(parent) = lock_file_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create directory {}", parent.display()))?;
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(lock_file_path)
+        .with_context(|| format!("create {}", lock_file_path.display()))?;
+    write_file(
+        lock_file_path,
+        format!("owner_pid={}\n", std::process::id()).as_bytes(),
+    )
 }
 
 pub async fn add_module_catalog_entry(
@@ -1384,7 +1954,7 @@ async fn create_remote_module(options: ModuleCreateOptions) -> Result<()> {
     )?;
 
     if options.dry_run {
-        println!("Remote module dry run:");
+        println!("Service module dry run:");
         for file_path in pending_writes.keys() {
             println!("- {}", display_relative(&output_root, file_path));
         }
@@ -1393,7 +1963,7 @@ async fn create_remote_module(options: ModuleCreateOptions) -> Result<()> {
 
     write_pending_files(&pending_writes)?;
 
-    println!("Created remote module package {package_root_name}.");
+    println!("Created service module package {package_root_name}.");
     println!("Next steps:");
     println!("- pnpm --dir {package_root_name}/backend dev");
     println!("- lenso module install http://127.0.0.1:4100/lenso/module/v1/manifest");
@@ -2328,12 +2898,17 @@ fn queue_remote_module_files(
     queue_write(
         pending_writes,
         package_root.join("lenso.module.json"),
-        json_string_pretty(&remote_manifest_json(context))?,
+        json_string_pretty(&remote_manifest_json(context, package_root_name))?,
     );
     queue_write(
         pending_writes,
         package_root.join("catalog-entry.json"),
         json_string_pretty(&remote_catalog_entry_json(context))?,
+    );
+    queue_write(
+        pending_writes,
+        package_root.join("module-services.local.json"),
+        json_string_pretty(&remote_module_services_local_json(context))?,
     );
     queue_write(
         pending_writes,
@@ -2344,6 +2919,11 @@ fn queue_remote_module_files(
         pending_writes,
         package_root.join("README.md"),
         remote_package_readme(&context.module_id, package_root_name),
+    );
+    queue_write(
+        pending_writes,
+        package_root.join("RUNBOOK.md"),
+        remote_package_runbook(&context.module_id),
     );
     queue_write(
         pending_writes,
@@ -2392,7 +2972,7 @@ fn queue_remote_module_files(
     Ok(())
 }
 
-fn remote_manifest_json(context: &ConsolePackageContext) -> Value {
+fn remote_manifest_json(context: &ConsolePackageContext, package_root_name: &str) -> Value {
     json!({
         "admin": {
             "entities": [
@@ -2425,6 +3005,11 @@ fn remote_manifest_json(context: &ConsolePackageContext) -> Value {
             "kind": "schema",
         },
         "capabilities": [context.capability],
+        "compatibility": {
+            "consolePackageApi": CONSOLE_BUNDLE_HOST_API,
+            "remoteProtocolVersion": REMOTE_PROTOCOL_VERSION,
+            "requiredHostFeatures": SUPPORTED_SERVICE_MODULE_FEATURES,
+        },
         "console": [
             {
                 "area": context.area,
@@ -2475,6 +3060,22 @@ fn remote_manifest_json(context: &ConsolePackageContext) -> Value {
                 },
             ],
         },
+        "install": {
+            "services": [
+                {
+                    "autoStart": true,
+                    "command": "pnpm --dir backend dev",
+                    "cwd": format!("../{package_root_name}"),
+                    "name": "api",
+                    "readyTimeoutMs": 12000,
+                    "readyUrl": "http://127.0.0.1:4100/lenso/module/v1/status",
+                },
+            ],
+        },
+        "deployment": {
+            "commands": ["pnpm --dir backend dev"],
+            "target": "container-paas",
+        },
         "name": context.module_id,
         "runtime": {
             "functions": [
@@ -2490,14 +3091,47 @@ fn remote_manifest_json(context: &ConsolePackageContext) -> Value {
                 },
             ],
         },
+        "service": {
+            "name": "api",
+            "requiredEnv": ["PORT"],
+            "statusUrl": "http://127.0.0.1:4100/lenso/module/v1/status",
+            "transports": ["http"],
+            "version": "0.1.0",
+        },
         "source": "remote",
         "version": "0.1.0",
+    })
+}
+
+fn remote_module_services_local_json(context: &ConsolePackageContext) -> Value {
+    json!({
+        "modules": [
+            {
+                "moduleName": context.module_id,
+                "services": [
+                    {
+                        "autoStart": true,
+                        "command": "pnpm --dir backend dev",
+                        "cwd": ".",
+                        "name": "api",
+                        "readyTimeoutMs": 12000,
+                        "readyUrl": "http://127.0.0.1:4100/lenso/module/v1/status",
+                    },
+                ],
+            },
+        ],
+        "version": 1,
     })
 }
 
 fn remote_catalog_entry_json(context: &ConsolePackageContext) -> Value {
     json!({
         "baseUrl": "https://example.com/lenso/module/v1",
+        "compatibility": {
+            "consolePackageApi": CONSOLE_BUNDLE_HOST_API,
+            "remoteProtocolVersion": REMOTE_PROTOCOL_VERSION,
+            "requiredHostFeatures": SUPPORTED_SERVICE_MODULE_FEATURES,
+        },
         "consolePackages": [
             {
                 "exportName": context.module_name,
@@ -2505,8 +3139,19 @@ fn remote_catalog_entry_json(context: &ConsolePackageContext) -> Value {
                 "route": context.route,
             },
         ],
+        "deployment": {
+            "commands": ["pnpm --dir backend dev"],
+            "target": "container-paas",
+        },
         "manifestReference": "https://example.com/lenso/module/v1/manifest",
         "name": context.module_id,
+        "service": {
+            "name": "api",
+            "requiredEnv": ["PORT"],
+            "statusUrl": "https://example.com/lenso/module/v1/status",
+            "transports": ["http"],
+            "version": "0.1.0",
+        },
         "source": "remote",
         "summary": format!("{} workspace and operations", context.label),
         "version": "0.1.0",
@@ -2520,6 +3165,11 @@ fn remote_root_package_json(module_id: &str) -> Result<String> {
         "scripts": {
             "check": "pnpm --dir backend check && pnpm --dir console check",
             "dev": "pnpm --dir backend dev",
+            "service:export": format!("lenso module service export --module {module_id} --module-services-file module-services.local.json"),
+            "service:list": "lenso module service list --module-services-file module-services.local.json",
+            "service:start": format!("lenso module service start {module_id} api --module-services-file module-services.local.json"),
+            "service:status": format!("lenso module service status {module_id} api --module-services-file module-services.local.json"),
+            "service:stop": format!("lenso module service stop {module_id} api --module-services-file module-services.local.json"),
             "smoke": "pnpm --dir backend smoke",
         },
         "type": "module",
@@ -2531,13 +3181,15 @@ fn remote_package_readme(module_id: &str, package_root_name: &str) -> String {
     format!(
         r#"# {}
 
-Remote Lenso module package scaffold.
+Lenso service module package scaffold.
 
 ## Shape
 
 - `lenso.module.json`: install-time module manifest.
 - `catalog-entry.json`: optional local catalog entry for discovery.
-- `backend/`: remote module backend implementation.
+- `module-services.local.json`: local service lifecycle file for CLI checks.
+- `RUNBOOK.md`: create, run, install, inspect, and troubleshoot steps.
+- `backend/`: service module backend implementation.
 - `console/`: optional Runtime Console package.
 - `contracts/`: module-owned event and runtime-function contracts.
 
@@ -2549,12 +3201,21 @@ pnpm smoke
 pnpm check
 ```
 
+The backend prints the manifest and status URLs on startup. The generated
+service lifecycle sample treats the status URL as the readiness check:
+
+```sh
+lenso module service list --module-services-file module-services.local.json
+lenso module service status {module_id} api --module-services-file module-services.local.json
+```
+
 ## Install
 
-Expose the remote module protocol from a stable base URL such as:
+Expose the service module protocol from a stable base URL such as:
 
 ```text
 GET https://example.com/lenso/module/v1/manifest
+GET https://example.com/lenso/module/v1/status
 ```
 
 Use `catalog-entry.json` as the local discovery record, or add the manifest
@@ -2577,47 +3238,115 @@ If the manifest is inspected from a local file, provide the runtime base URL:
 lenso module install ./lenso.module.json --base-url https://example.com/lenso/module/v1
 ```
 
-Optional install-time host work can be declared in `lenso.module.json`:
+The generated `lenso.module.json` also declares a local service process:
 
 ```json
 {{
   "install": {{
-    "env": {{
-      "{}_API_BASE_URL": "https://example.com"
-    }},
-    "commands": [
-      {{ "command": "pnpm --dir ../lenso-runtime-console install" }}
-    ],
     "services": [
       {{
-        "name": "{}-api",
-        "command": "pnpm --dir ../{}-backend dev",
-        "readyUrl": "https://example.com/lenso/module/v1/manifest",
-        "autoStart": true
+        "name": "api",
+        "command": "pnpm --dir backend dev",
+        "cwd": "../{package_root_name}",
+        "readyUrl": "http://127.0.0.1:4100/lenso/module/v1/status"
       }}
     ]
   }}
 }}
 ```
 
-Env values are written to the host `.env`. Commands are recorded in the install
-plan and only run when the operator passes `--run-install-commands`. Services
-are stored in `.lenso/module-services.json` and started before the host loads
-remote modules on API/worker startup.
+Adjust `cwd` if the host app and this package are not sibling directories.
+Services are stored in the host `.lenso/module-services.json` and started
+before the host loads service modules on API/worker startup.
+
+## Operator Loop
+
+```sh
+lenso module install http://127.0.0.1:4100/lenso/module/v1/manifest
+lenso module service list
+lenso module doctor {module_id} --json
+```
+
+Runtime Console should show the service module as installed, configured, and
+ready once the host API/worker restart with the configured source.
 
 This scaffold lives in `{package_root_name}` and should stay separate from a
 host application's linked `modules/` workspace.
 "#,
         title_case(module_id),
-        module_id.replace('-', "_").to_ascii_uppercase(),
-        module_id,
-        module_id
+    )
+}
+
+fn remote_package_runbook(module_id: &str) -> String {
+    format!(
+        r#"# Service Module Runbook
+
+## 1. Create
+
+This package is an independently running Lenso service module. Keep the module
+name, capabilities, route names, runtime function names, and event names stable
+if you later extract it from a linked module.
+
+## 2. Run
+
+```sh
+pnpm install
+pnpm dev
+```
+
+The backend listens on `PORT` or `4100` and exposes:
+
+```text
+GET http://127.0.0.1:4100/lenso/module/v1/manifest
+```
+
+## 3. Inspect Local Service State
+
+From this package root:
+
+```sh
+lenso module service list --module-services-file module-services.local.json
+lenso module service status {module_id} api --module-services-file module-services.local.json
+lenso module service start {module_id} api --module-services-file module-services.local.json
+lenso module service stop {module_id} api --module-services-file module-services.local.json
+```
+
+## 4. Install Into A Host
+
+From the host app root:
+
+```sh
+lenso module install http://127.0.0.1:4100/lenso/module/v1/manifest
+lenso module doctor {module_id} --json
+```
+
+Restart the host API and worker after installation so they load the configured
+service source and any service process declaration.
+
+## 5. Observe
+
+Runtime Console evidence should stay on the host side:
+
+- Modules shows installed / configured / ready.
+- Remote Calls shows proxied HTTP, action, and runtime calls.
+- Runtime Story links host-owned runtime work back to this service module.
+- Technical Operations records retries, queues, and operational failures.
+
+## 6. Troubleshoot
+
+| State | Meaning | Next action |
+| --- | --- | --- |
+| `manifest_unreachable` | Host cannot fetch the service manifest. | Start the backend or fix `REMOTE_MODULES`. |
+| `service_not_ready` | The lifecycle ready URL failed. | Run the service or inspect its logs. |
+| `restart_pending` | `.env` or service state changed after host startup. | Restart API and worker. |
+| `stale_state` | Lock/pid state exists but readiness failed. | Stop the service or remove stale lock/pid files. |
+"#
     )
 }
 
 fn remote_backend_readme(module_id: &str) -> String {
     format!(
-        r#"# Remote module backend
+        r#"# Service module backend
 
 The generated Node server exposes the {module_id} manifest at:
 
@@ -2636,7 +3365,7 @@ pnpm dev
 Replace `src/server.mjs` with the language or framework you prefer as the
 module grows.
 
-The backend should expose the remote module protocol expected by
+The backend should expose the service module protocol expected by
 `platform-module-remote`, including a stable manifest endpoint and any declared
 schema-admin, action, HTTP proxy, or runtime-function endpoints.
 
@@ -2704,6 +3433,11 @@ const contactsEntity = defineSchemaEntity({{
 const module = defineRemoteModule({{
   admin: schemaAdmin([contactsEntity]),
   capabilities: [{}],
+  compatibility: {{
+    console_package_api: "1",
+    remote_protocol_version: "1",
+    required_host_features: ["service.status"],
+  }},
   console: [
     {{
       area: {},
@@ -2764,6 +3498,17 @@ const module = defineRemoteModule({{
       version: 1,
     }}),
   ],
+  service: {{
+    deployment: {{
+      commands: ["pnpm --dir backend dev"],
+      target: "container-paas",
+    }},
+    name: "api",
+    required_env: ["PORT"],
+    status_path: "/lenso/module/v1/status",
+    transports: ["http"],
+    version: "0.1.0",
+  }},
   version: "0.1.0",
 }});
 
@@ -2793,8 +3538,9 @@ await serveRemoteModule(module, {{
     }},
   }},
   port: Number(process.env.PORT ?? 4100),
-  onReady: ({{ manifestUrl }}) => {{
+  onReady: ({{ manifestUrl, statusUrl }}) => {{
     console.log({} + manifestUrl);
+    console.log("Status: " + statusUrl);
   }},
 }});
 "#,
@@ -2891,7 +3637,7 @@ try {{
 }
 
 fn remote_contracts_readme() -> String {
-    "# Module-owned contracts\n\nKeep event and runtime-function JSON Schema contracts here.\n\nThe host may validate these before installing or enabling a remote module.\n".to_owned()
+    "# Module-owned contracts\n\nKeep event and runtime-function JSON Schema contracts here.\n\nThe host may validate these before installing or enabling a service module.\n".to_owned()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3144,6 +3890,89 @@ fn validate_remote_module_manifest(manifest: Value) -> Result<Value> {
         bail!("Remote module manifest console must be an array");
     }
     Ok(manifest)
+}
+
+fn remote_module_manifest_compatibility_issue(manifest: &Value) -> Option<String> {
+    let compatibility = manifest.get("compatibility")?;
+    let module_name = manifest
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("module");
+    if let Some(lenso) = compatibility.get("lenso") {
+        if let Some(min_version) = lenso
+            .get("minVersion")
+            .or_else(|| lenso.get("min_version"))
+            .and_then(Value::as_str)
+            && !matches!(
+                compare_versions(env!("CARGO_PKG_VERSION"), min_version),
+                Some(Ordering::Equal | Ordering::Greater)
+            )
+        {
+            return Some(format!(
+                "{module_name} requires Lenso >= {min_version}; CLI is {}",
+                env!("CARGO_PKG_VERSION")
+            ));
+        }
+        if let Some(max_version) = lenso
+            .get("maxVersion")
+            .or_else(|| lenso.get("max_version"))
+            .and_then(Value::as_str)
+            && !matches!(
+                compare_versions(env!("CARGO_PKG_VERSION"), max_version),
+                Some(Ordering::Equal | Ordering::Less)
+            )
+        {
+            return Some(format!(
+                "{module_name} supports Lenso <= {max_version}; CLI is {}",
+                env!("CARGO_PKG_VERSION")
+            ));
+        }
+    }
+    if let Some(console_package_api) = compatibility
+        .get("consolePackageApi")
+        .or_else(|| compatibility.get("console_package_api"))
+        .and_then(Value::as_str)
+        && console_package_api != CONSOLE_BUNDLE_HOST_API
+    {
+        return Some(format!(
+            "{module_name} requires console package API {console_package_api}; host supports {CONSOLE_BUNDLE_HOST_API}"
+        ));
+    }
+    if let Some(protocol_version) = compatibility
+        .get("remoteProtocolVersion")
+        .or_else(|| compatibility.get("remote_protocol_version"))
+        .and_then(Value::as_str)
+        && protocol_version != REMOTE_PROTOCOL_VERSION
+    {
+        return Some(format!(
+            "{module_name} requires remote protocol {protocol_version}; host supports {REMOTE_PROTOCOL_VERSION}"
+        ));
+    }
+    let unsupported_feature = compatibility
+        .get("requiredHostFeatures")
+        .or_else(|| compatibility.get("required_host_features"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .find(|feature| !SUPPORTED_SERVICE_MODULE_FEATURES.contains(feature));
+    unsupported_feature
+        .map(|feature| format!("{module_name} requires unsupported host feature {feature}"))
+}
+
+fn compare_versions(left: &str, right: &str) -> Option<Ordering> {
+    Some(parse_version(left)?.cmp(&parse_version(right)?))
+}
+
+fn parse_version(value: &str) -> Option<[u64; 3]> {
+    let mut parts = value.split('.');
+    let major = parts.next()?.parse::<u64>().ok()?;
+    let minor = parts.next()?.parse::<u64>().ok()?;
+    let patch = parts.next()?.parse::<u64>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some([major, minor, patch])
 }
 
 async fn read_json_reference(reference: &str) -> Result<Value> {
@@ -3568,13 +4397,14 @@ fn remote_module_install_ledger_entry(
     module_name: &str,
     manifest_reference: &str,
     base_url: &str,
+    manifest: &Value,
     writes: Vec<Value>,
     install_env: &[(String, String)],
     install_commands: &[InstallCommandSpec],
     install_services: &[RemoteModuleServiceInstallSpec],
     console_package_count: usize,
 ) -> Value {
-    json!({
+    let mut entry = json!({
         "baseUrl": base_url,
         "enabled": true,
         "install": {
@@ -3587,7 +4417,11 @@ fn remote_module_install_ledger_entry(
         "moduleName": module_name,
         "source": "remote",
         "writes": writes,
-    })
+    });
+    copy_optional_manifest_field(manifest, &mut entry, "compatibility");
+    copy_optional_manifest_field(manifest, &mut entry, "deployment");
+    copy_optional_manifest_field(manifest, &mut entry, "service");
+    entry
 }
 
 fn linked_module_install_ledger_entry(
@@ -3615,6 +4449,12 @@ fn linked_module_install_ledger_entry(
         "source": "linked",
         "writes": writes,
     })
+}
+
+fn copy_optional_manifest_field(manifest: &Value, entry: &mut Value, field: &str) {
+    if let Some(value) = manifest.get(field) {
+        entry[field] = value.clone();
+    }
 }
 
 fn simple_linked_module_install_ledger_entry(
@@ -5621,6 +6461,18 @@ fn remote_module_entries_from_env_source(source: &str) -> Vec<(String, String)> 
     parse_remote_module_entries(current_value)
 }
 
+fn remote_module_manifest_url(base_url: &str) -> Option<String> {
+    let base_url = base_url.trim().trim_end_matches('/');
+    if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
+        return None;
+    }
+    Some(if base_url.ends_with("/manifest") {
+        base_url.to_owned()
+    } else {
+        format!("{base_url}/manifest")
+    })
+}
+
 fn format_remote_module_entries(entries: &[(String, String)]) -> String {
     entries
         .iter()
@@ -5829,6 +6681,27 @@ fn write_json(path: &Path, value: &Value) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn remote_context() -> ConsolePackageContext {
+        ConsolePackageContext {
+            area: "Support".to_owned(),
+            capability: "support.ticket.read".to_owned(),
+            component_name: "SupportTicketModule".to_owned(),
+            icon: "life-buoy".to_owned(),
+            label: "Support Ticket".to_owned(),
+            manifest_name: "supportTicketManifest".to_owned(),
+            module_id: "support-ticket".to_owned(),
+            module_name: "supportTicketModule".to_owned(),
+            package_dir: PathBuf::from("console"),
+            package_name: "@acme/lenso-support-ticket-console".to_owned(),
+            package_private: true,
+            package_slug: "support-ticket-console".to_owned(),
+            registry_source: "support-ticket.console.json".to_owned(),
+            route: "/support/tickets".to_owned(),
+            runtime_console_api_version: "1".to_owned(),
+            surface_name: "tickets".to_owned(),
+        }
+    }
+
     #[test]
     fn starter_host_module_scaffold_uses_internal_module_layout() {
         let root =
@@ -5848,6 +6721,57 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn remote_scaffold_manifest_declares_service_lifecycle() {
+        let manifest = remote_manifest_json(&remote_context(), "lenso-support-ticket");
+
+        assert_eq!(manifest["name"], json!("support-ticket"));
+        assert_eq!(manifest["install"]["services"][0]["name"], json!("api"));
+        assert_eq!(
+            manifest["install"]["services"][0]["readyUrl"],
+            json!("http://127.0.0.1:4100/lenso/module/v1/status")
+        );
+        assert_eq!(
+            manifest["service"]["statusUrl"],
+            json!("http://127.0.0.1:4100/lenso/module/v1/status")
+        );
+        assert_eq!(
+            manifest["compatibility"]["remoteProtocolVersion"],
+            json!("1")
+        );
+        assert_eq!(
+            manifest["install"]["services"][0]["cwd"],
+            json!("../lenso-support-ticket")
+        );
+    }
+
+    #[test]
+    fn remote_scaffold_writes_local_service_state_sample() {
+        let value = remote_module_services_local_json(&remote_context());
+        let states = parse_remote_module_service_states(&value).unwrap();
+
+        assert_eq!(states[0].module_name, "support-ticket");
+        assert_eq!(states[0].services[0].name, "api");
+        assert_eq!(states[0].services[0].cwd.as_deref(), Some("."));
+        assert!(states[0].services[0].auto_start);
+    }
+
+    #[test]
+    fn remote_scaffold_docs_include_lifecycle_operator_commands() {
+        let readme = remote_package_readme("support-ticket", "lenso-support-ticket");
+        let runbook = remote_package_runbook("support-ticket");
+        let package_json = remote_root_package_json("support-ticket").unwrap();
+
+        assert!(readme.contains(
+            "lenso module service list --module-services-file module-services.local.json"
+        ));
+        assert!(readme.contains("lenso module doctor support-ticket --json"));
+        assert!(runbook.contains("lenso module service start support-ticket api"));
+        assert!(runbook.contains("Runtime Console evidence should stay on the host side"));
+        assert!(package_json.contains("\"service:export\""));
+        assert!(package_json.contains("\"service:status\""));
     }
 
     #[test]
@@ -6515,10 +7439,148 @@ mod tests {
             remote_module_service_doctor_status(true, true, false, false, false, false),
             RemoteModuleServiceDoctorStatus::ManualNotReady
         );
+        assert!(
+            remote_module_service_doctor_status(true, true, false, false, false, false).is_issue()
+        );
         assert_eq!(
             remote_module_service_doctor_status(false, true, true, true, false, false),
             RemoteModuleServiceDoctorStatus::NotConfigured
         );
+    }
+
+    #[test]
+    fn remote_manifest_url_only_checks_http_sources() {
+        assert_eq!(
+            remote_module_manifest_url("https://example.com/lenso/module/v1"),
+            Some("https://example.com/lenso/module/v1/manifest".to_owned())
+        );
+        assert_eq!(
+            remote_module_manifest_url("https://example.com/lenso/module/v1/manifest"),
+            Some("https://example.com/lenso/module/v1/manifest".to_owned())
+        );
+        assert_eq!(remote_module_manifest_url("grpc://example.com:50051"), None);
+    }
+
+    #[test]
+    fn remote_manifest_compatibility_blocks_unsupported_protocol() {
+        let manifest = json!({
+            "compatibility": {
+                "remoteProtocolVersion": "99"
+            },
+            "name": "billing"
+        });
+
+        let issue = remote_module_manifest_compatibility_issue(&manifest).unwrap();
+
+        assert!(issue.contains("requires remote protocol 99"));
+    }
+
+    #[test]
+    fn remote_install_receipt_keeps_service_metadata() {
+        let manifest = json!({
+            "compatibility": { "remoteProtocolVersion": "1" },
+            "deployment": { "target": "container-paas" },
+            "service": { "name": "api", "statusUrl": "http://127.0.0.1:4100/status" }
+        });
+
+        let receipt = remote_module_install_ledger_entry(
+            "billing",
+            "http://127.0.0.1:4100/manifest",
+            "http://127.0.0.1:4100",
+            &manifest,
+            Vec::new(),
+            &[],
+            &[],
+            &[],
+            0,
+        );
+
+        assert_eq!(receipt["service"]["name"], json!("api"));
+        assert_eq!(receipt["deployment"]["target"], json!("container-paas"));
+        assert_eq!(
+            receipt["compatibility"]["remoteProtocolVersion"],
+            json!("1")
+        );
+    }
+
+    #[test]
+    fn compose_export_uses_declared_service_state() {
+        let source = compose_service_export_source(&RemoteModuleServiceState {
+            module_name: "support-ticket".to_owned(),
+            services: vec![RemoteModuleServiceInstallSpec {
+                name: "api".to_owned(),
+                command: "pnpm start".to_owned(),
+                cwd: Some("examples/support-ticket".to_owned()),
+                ready_url: "http://127.0.0.1:4110/lenso/module/v1/status".to_owned(),
+                ready_timeout_ms: 10_000,
+                auto_start: true,
+            }],
+        });
+
+        assert!(source.contains("support-ticket-api:"));
+        assert!(source.contains("pnpm start"));
+        assert!(source.contains("lenso.ready_url"));
+    }
+
+    #[test]
+    fn doctor_manifest_status_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_value(ModuleDoctorManifestStatus::Unreachable).unwrap(),
+            json!("unreachable")
+        );
+    }
+
+    #[test]
+    fn module_service_list_items_filter_by_module() {
+        let states = vec![
+            RemoteModuleServiceState {
+                module_name: "crm".to_owned(),
+                services: vec![RemoteModuleServiceInstallSpec {
+                    name: "api".to_owned(),
+                    command: "pnpm dev".to_owned(),
+                    cwd: None,
+                    ready_url: "http://127.0.0.1:4100/readyz".to_owned(),
+                    ready_timeout_ms: 10_000,
+                    auto_start: true,
+                }],
+            },
+            RemoteModuleServiceState {
+                module_name: "billing".to_owned(),
+                services: vec![RemoteModuleServiceInstallSpec {
+                    name: "api".to_owned(),
+                    command: "node server.mjs".to_owned(),
+                    cwd: None,
+                    ready_url: "http://127.0.0.1:4200/readyz".to_owned(),
+                    ready_timeout_ms: 10_000,
+                    auto_start: false,
+                }],
+            },
+        ];
+
+        let items = module_service_list_items(&states, Some("billing"));
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].module_name, "billing");
+        assert_eq!(items[0].service_name, "api");
+        assert_eq!(items[0].auto_start, false);
+    }
+
+    #[test]
+    fn module_service_list_report_serializes_camel_case() {
+        let report = ModuleServiceListReport {
+            services: vec![ModuleServiceListItem {
+                module_name: "support-ticket".to_owned(),
+                service_name: "api".to_owned(),
+                auto_start: true,
+                command: "pnpm dev".to_owned(),
+                ready_url: "http://127.0.0.1:4110/readyz".to_owned(),
+            }],
+        };
+        let value = serde_json::to_value(report).unwrap();
+
+        assert_eq!(value["services"][0]["moduleName"], json!("support-ticket"));
+        assert_eq!(value["services"][0]["serviceName"], json!("api"));
+        assert_eq!(value["services"][0]["autoStart"], json!(true));
     }
 
     #[test]

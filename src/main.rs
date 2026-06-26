@@ -128,24 +128,29 @@ struct ConsoleUpdateArgs {
 
 #[derive(Debug, Subcommand)]
 enum ModuleCommand {
-    /// Create a linked or remote module scaffold.
+    /// Create a linked module or service module scaffold.
     Create(ModuleCreateArgs),
     /// Install a remote source or enable a linked module.
     Install(RemoteModuleInstallArgs),
-    /// Add a configured remote module source.
+    /// Add a configured service module source.
     Add(RemoteModuleInstallArgs),
     /// Reapply an installed module from its install receipt.
     Update(ModuleUpdateArgs),
     /// Remove a remote source or disable a linked module.
     Uninstall(RemoteModuleUninstallArgs),
-    /// Diagnose installed remote module services.
+    /// Diagnose installed service modules.
     Doctor(ModuleDoctorArgs),
+    /// Inspect and manage declared service-module processes.
+    Service {
+        #[command(subcommand)]
+        command: ModuleServiceCommand,
+    },
     /// Manage a local module catalog.
     Catalog {
         #[command(subcommand)]
         command: ModuleCatalogCommand,
     },
-    /// Install remote modules.
+    /// Install service modules.
     Marketplace {
         #[command(subcommand)]
         command: ModuleMarketplaceCommand,
@@ -154,14 +159,120 @@ enum ModuleCommand {
 
 #[derive(Debug, Subcommand)]
 enum ModuleCatalogCommand {
-    /// Add a remote module manifest to the local catalog.
+    /// Add a service module manifest to the local catalog.
     Add(ModuleCatalogAddArgs),
 }
 
 #[derive(Debug, Subcommand)]
 enum ModuleMarketplaceCommand {
-    /// Install a remote module from its manifest.
+    /// Install a service module from its manifest.
     Install(RemoteModuleInstallArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum ModuleServiceCommand {
+    /// List declared service-module services.
+    List(ModuleServiceListArgs),
+    /// Export a deployment fragment for declared service-module services.
+    Export(ModuleServiceExportArgs),
+    /// Show one service-module service with local state.
+    Status(ModuleServiceStatusArgs),
+    /// Start a declared service-module service in the background.
+    Start(ModuleServiceStartArgs),
+    /// Stop a declared service-module service started by the CLI or host.
+    Stop(ModuleServiceStopArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+struct ModuleServiceListArgs {
+    /// Optional module name to list.
+    module_name: Option<String>,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Remote module services file.
+    #[arg(long)]
+    module_services_file: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ModuleServiceExportArgs {
+    /// Module name.
+    #[arg(long = "module")]
+    module_name: String,
+
+    /// Export format.
+    #[arg(long, default_value = "compose")]
+    format: String,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Remote module services file.
+    #[arg(long)]
+    module_services_file: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ModuleServiceStatusArgs {
+    /// Module name.
+    module_name: String,
+
+    /// Service name.
+    service_name: String,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Remote module services file.
+    #[arg(long)]
+    module_services_file: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ModuleServiceStartArgs {
+    /// Module name.
+    module_name: String,
+
+    /// Service name.
+    service_name: String,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Remote module services file.
+    #[arg(long)]
+    module_services_file: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ModuleServiceStopArgs {
+    /// Module name.
+    module_name: String,
+
+    /// Service name.
+    service_name: String,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Remote module services file.
+    #[arg(long)]
+    module_services_file: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -204,6 +315,10 @@ struct RemoteModuleInstallArgs {
     /// Print install changes without writing them.
     #[arg(long)]
     dry_run: bool,
+
+    /// Allow install when manifest compatibility metadata does not match this host.
+    #[arg(long)]
+    allow_incompatible: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -268,6 +383,10 @@ struct ModuleUpdateArgs {
     /// Print update changes without writing them.
     #[arg(long)]
     dry_run: bool,
+
+    /// Allow update when manifest compatibility metadata does not match this host.
+    #[arg(long)]
+    allow_incompatible: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -286,6 +405,10 @@ struct ModuleDoctorArgs {
     /// Remote module services file.
     #[arg(long)]
     module_services_file: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -331,7 +454,7 @@ struct ModuleCreateArgs {
     #[arg(long)]
     repo_root: Option<std::path::PathBuf>,
 
-    /// Directory for standalone remote packages.
+    /// Directory for standalone service module packages.
     #[arg(long)]
     output_dir: Option<std::path::PathBuf>,
 
@@ -363,7 +486,7 @@ struct ModuleCreateArgs {
     #[arg(long)]
     source: Option<String>,
 
-    /// Create a standalone remote module package.
+    /// Create a standalone service module package.
     #[arg(long)]
     remote: bool,
 
@@ -476,6 +599,7 @@ struct ConsolePackageApplyPlanArgs {
 impl From<&RemoteModuleInstallArgs> for module::RemoteModuleInstallOptions {
     fn from(args: &RemoteModuleInstallArgs) -> Self {
         Self {
+            allow_incompatible: args.allow_incompatible,
             base_url: args.base_url.clone(),
             console_plan: args.console_plan,
             dry_run: args.dry_run,
@@ -504,6 +628,7 @@ impl From<&RemoteModuleUninstallArgs> for module::RemoteModuleUninstallOptions {
 impl From<&ModuleUpdateArgs> for module::ModuleUpdateOptions {
     fn from(args: &ModuleUpdateArgs) -> Self {
         Self {
+            allow_incompatible: args.allow_incompatible,
             base_url: args.base_url.clone(),
             console_plan: args.console_plan,
             dry_run: args.dry_run,
@@ -520,9 +645,66 @@ impl From<&ModuleDoctorArgs> for module::ModuleDoctorOptions {
     fn from(args: &ModuleDoctorArgs) -> Self {
         Self {
             env_file: args.env_file.clone(),
+            json: args.json,
             module_name: args.module_name.clone(),
             module_services_file: args.module_services_file.clone(),
             repo_root: args.repo_root.clone(),
+        }
+    }
+}
+
+impl From<&ModuleServiceListArgs> for module::ModuleServiceListOptions {
+    fn from(args: &ModuleServiceListArgs) -> Self {
+        Self {
+            json: args.json,
+            module_name: args.module_name.clone(),
+            module_services_file: args.module_services_file.clone(),
+            repo_root: args.repo_root.clone(),
+        }
+    }
+}
+
+impl From<&ModuleServiceExportArgs> for module::ModuleServiceExportOptions {
+    fn from(args: &ModuleServiceExportArgs) -> Self {
+        Self {
+            format: args.format.clone(),
+            module_name: args.module_name.clone(),
+            module_services_file: args.module_services_file.clone(),
+            repo_root: args.repo_root.clone(),
+        }
+    }
+}
+
+impl From<&ModuleServiceStatusArgs> for module::ModuleServiceStatusOptions {
+    fn from(args: &ModuleServiceStatusArgs) -> Self {
+        Self {
+            json: args.json,
+            module_name: args.module_name.clone(),
+            module_services_file: args.module_services_file.clone(),
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
+        }
+    }
+}
+
+impl From<&ModuleServiceStartArgs> for module::ModuleServiceStartOptions {
+    fn from(args: &ModuleServiceStartArgs) -> Self {
+        Self {
+            module_name: args.module_name.clone(),
+            module_services_file: args.module_services_file.clone(),
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
+        }
+    }
+}
+
+impl From<&ModuleServiceStopArgs> for module::ModuleServiceStopOptions {
+    fn from(args: &ModuleServiceStopArgs) -> Self {
+        Self {
+            module_name: args.module_name.clone(),
+            module_services_file: args.module_services_file.clone(),
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
         }
     }
 }
@@ -666,6 +848,23 @@ async fn main() -> anyhow::Result<()> {
             ModuleCommand::Doctor(args) => {
                 module::doctor_module((&args).into()).await?;
             }
+            ModuleCommand::Service { command } => match command {
+                ModuleServiceCommand::List(args) => {
+                    module::list_module_services((&args).into()).await?;
+                }
+                ModuleServiceCommand::Export(args) => {
+                    module::export_module_services((&args).into()).await?;
+                }
+                ModuleServiceCommand::Status(args) => {
+                    module::status_module_service((&args).into()).await?;
+                }
+                ModuleServiceCommand::Start(args) => {
+                    module::start_module_service((&args).into()).await?;
+                }
+                ModuleServiceCommand::Stop(args) => {
+                    module::stop_module_service((&args).into()).await?;
+                }
+            },
             ModuleCommand::Catalog { command } => match command {
                 ModuleCatalogCommand::Add(args) => {
                     module::add_module_catalog_entry(&args.manifest_reference, (&args).into())

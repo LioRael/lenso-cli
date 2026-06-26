@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use include_dir::{Dir, DirEntry, include_dir};
@@ -126,6 +126,7 @@ pub async fn serve(
 
     if !skip_db {
         run(repo_root, "docker", &["compose", "up", "-d", "postgres"])?;
+        wait_for_database(repo_root, Duration::from_secs(30)).await?;
     }
     if !skip_migrate {
         run(repo_root, "cargo", &cargo_run_args("migrate"))?;
@@ -167,6 +168,35 @@ pub async fn serve(
             }
         }
     }
+}
+
+async fn wait_for_database(repo_root: &Path, timeout: Duration) -> Result<()> {
+    let database_url = database_url(repo_root, None)?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(1))
+            .connect(&database_url)
+            .await
+        {
+            Ok(pool) => {
+                pool.close().await;
+                return Ok(());
+            }
+            Err(error) if Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                tracing_retry_database_wait(&error);
+            }
+            Err(error) => {
+                return Err(error).context("wait for generated host database readiness");
+            }
+        }
+    }
+}
+
+fn tracing_retry_database_wait(error: &sqlx::Error) {
+    eprintln!("Waiting for database readiness: {error}");
 }
 
 /// Reject names that cannot be a Cargo package name.
@@ -837,7 +867,7 @@ fn print_next_steps(target: &Path, package_name: &str) {
     eprintln!("  lenso serve");
     eprintln!("  open http://127.0.0.1:3000/console");
     eprintln!();
-    eprintln!("Install a remote module with `lenso module install <manifest-url>`.");
+    eprintln!("Install a service module with `lenso module install <manifest-url>`.");
 }
 
 #[cfg(test)]
@@ -914,13 +944,13 @@ mod tests {
         fs::create_dir_all(&target).unwrap();
         fs::write(
             target.join(".env"),
-            "POSTGRES_HOST_PORT=4545\nDATABASE_URL=postgres://lenso:lenso@localhost:${POSTGRES_HOST_PORT}/lenso\n",
+            "POSTGRES_HOST_PORT=4545\nDATABASE_URL=postgres://lenso:lenso@127.0.0.1:${POSTGRES_HOST_PORT}/lenso\n",
         )
         .unwrap();
 
         assert_eq!(
             dotenv_value(&target, "DATABASE_URL").as_deref(),
-            Some("postgres://lenso:lenso@localhost:4545/lenso")
+            Some("postgres://lenso:lenso@127.0.0.1:4545/lenso")
         );
 
         fs::remove_dir_all(target).unwrap();

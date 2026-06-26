@@ -70,7 +70,7 @@ workspace package:
 lenso module create billing --with-console
 ```
 
-For a standalone remote package:
+For a standalone service module package:
 
 ```sh
 lenso module create billing --remote --output-dir ../module-packages
@@ -94,12 +94,12 @@ lenso module install auth-device
 ```
 
 `module install` reads `source` from the module descriptor when one is present.
-Remote modules update `REMOTE_MODULES`, copy declared Runtime Console bundles to
+Service modules update `REMOTE_MODULES`, copy declared Runtime Console bundles to
 `.lenso/console/extensions`, update `.lenso/console/extensions/registry.json`,
 and record `.lenso/module-installs.json` in one step. Linked modules update the
 host `Cargo.toml`, `src/lib.rs`, `.env` toggle, and the same install receipt
 from the descriptor's `linked` section. `module add` remains a compatibility
-alias for remote installs.
+alias for service module installs.
 
 Install descriptor profiles let a module expose optional setup without baking
 module-specific choices into the CLI. For Redis-backed auth sessions:
@@ -130,32 +130,47 @@ builtin module entry.
 Use `--no-console-extension` when you want to skip Runtime Console extension
 registration.
 
-Remote manifests may also declare `install.env` values and `install.commands`.
-Env values are written to `.env`; commands are run only when you pass:
+Service module manifests may also declare `install.env` values and
+`install.commands`. Env values are written to `.env`; commands are run only when
+you pass:
 
 ```sh
 lenso module install https://example.com/lenso/module/v1/manifest --run-install-commands
 ```
 
-For long-running remote module backends, declare `install.services`. These are
-stored in `.lenso/module-services.json` and started before the host loads remote
-modules on API/worker startup. Services started by the host are tracked with
+For long-running service module backends, declare `install.services`. These are
+stored in `.lenso/module-services.json` and started before the host loads
+service modules on API/worker startup. Services started by the host are tracked with
 `.lock`/`.pid` files and stopped when the owning API/worker process exits;
 services that are already ready before startup are treated as external and are
 not stopped by the host.
 
-Diagnose installed remote-module service state with:
+Diagnose installed service module state with:
 
 ```sh
 lenso module doctor
 lenso module doctor billing
+lenso module doctor billing --json
 ```
 
-The doctor reads `REMOTE_MODULES` and `.lenso/module-services.json`, checks
-service `readyUrl` endpoints, and points to stale `.lock`/`.pid` files when a
-host-started service did not become ready.
+The doctor reads `REMOTE_MODULES`, `.lenso/module-installs.json`, and
+`.lenso/module-services.json`. It reports whether the service module is
+installed, configured, whether an HTTP manifest is reachable, whether managed
+service `readyUrl` endpoints are ready, and which stale `.lock`/`.pid` files
+may be blocking a host-started service.
 
-Remove the local remote-module source, install receipt, service state, Runtime
+Export declared service processes as a Compose fragment when handing the
+service module to deployment tooling:
+
+```sh
+lenso module service export --module billing --format compose
+```
+
+If a manifest declares incompatible `compatibility` metadata, install stops
+before writing host-local state. Use `--allow-incompatible` only when an
+operator deliberately accepts that override.
+
+Remove the local service module source, install receipt, service state, Runtime
 Console extension registry entry, and copied bundle files with:
 
 ```sh

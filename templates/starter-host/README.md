@@ -49,7 +49,7 @@ The API binds to `HTTP_HOST:HTTP_PORT` from `.env` and serves:
 - `POST /oauth/token`;
 - Runtime Console frontend under `/console`;
 - Runtime Console admin APIs under `/admin/*`;
-- installed remote module HTTP proxies under `/modules/{module}/http/*`.
+- installed service module HTTP proxies under `/modules/{module}/http/*`.
 
 The starter uses `LENSO_COMPOSITION_PROFILE=demo`, which includes the
 first-party auth anchor, password auth, and OIDC provider modules. Local
@@ -87,17 +87,23 @@ lenso console bootstrap-admin --user-id usr_...
 Restart `api` and `worker` after bootstrapping; Console admin scopes are loaded
 at startup.
 
-## Add A Remote Module
+## Add A Service Module
 
 Start a module that exposes a Lenso manifest, then install it into `.env`:
 
 ```sh
 lenso module install http://127.0.0.1:4100/lenso/module/v1/manifest
+lenso module service list
+lenso module doctor <module-name> --json
 ```
 
-Restart `api` and `worker` after changing module configuration.
+Restart `api` and `worker` after changing module configuration. Runtime
+Console `/console` should then show the service module as installed,
+configured, and ready. If doctor reports `restart_pending`, restart the host;
+if it reports `manifest_unreachable` or `service_not_ready`, start the module
+service or fix the manifest base URL.
 
-User-facing remote-module examples live in
+User-facing service module examples live in
 <https://github.com/LioRael/lenso-examples>.
 
 ## Add A Linked Module
