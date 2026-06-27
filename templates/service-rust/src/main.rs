@@ -1,10 +1,10 @@
 use axum::{Json, Router, routing::get};
-use lenso_service::{ModuleManifest, ServiceContract, ServiceHealth, ServiceProvider};
+use serde_json::{Value, json};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().any(|arg| arg == "--check") {
-        println!("{}", serde_json::to_string_pretty(&service_contract())?);
+        println!("{}", serde_json::to_string_pretty(&service_manifest())?);
         return Ok(());
     }
 
@@ -22,29 +22,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn manifest() -> Json<ServiceContract> {
-    Json(service_contract())
+async fn manifest() -> Json<Value> {
+    Json(service_manifest())
 }
 
-fn service_contract() -> ServiceContract {
-    ServiceContract::new(
-        "{{service_name}}",
-        vec![
-            ModuleManifest::builder("{{module_name}}")
-                .capabilities(vec!["{{module_name}}.read".to_owned()])
-                .build(),
+fn service_manifest() -> Value {
+    json!({
+        "name": "{{service_name}}",
+        "version": "0.1.0",
+        "provider": {
+            "name": "{{service_name}}",
+            "summary": "{{service_label}} provider",
+        },
+        "compatibility": {
+            "remoteProtocolVersion": "1",
+            "requiredHostFeatures": ["service.status"],
+        },
+        "install": {
+            "services": [
+                {
+                    "name": "{{service_name}}",
+                    "command": "cargo run",
+                    "cwd": {{service_cwd}},
+                    "readyUrl": "http://127.0.0.1:4100/lenso/service/v1/status",
+                    "autoStart": true,
+                    "readyTimeoutMs": 10000,
+                },
+            ],
+        },
+        "modules": [
+            {
+                "name": "{{module_name}}",
+                "version": "0.1.0",
+                "capabilities": ["{{module_name}}.read"],
+            },
         ],
-    )
-    .version("0.1.0")
-    .provider(ServiceProvider {
-        name: "{{service_name}}".to_owned(),
-        vendor: None,
-        summary: Some("{{service_label}} provider".to_owned()),
-        homepage: None,
-    })
-    .health(ServiceHealth {
-        ready_url: Some("http://127.0.0.1:4100/lenso/service/v1/ready".to_owned()),
-        status_url: Some("http://127.0.0.1:4100/lenso/service/v1/status".to_owned()),
-        ..ServiceHealth::default()
     })
 }

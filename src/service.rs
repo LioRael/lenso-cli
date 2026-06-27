@@ -7,6 +7,8 @@ use anyhow::{Context, Result, bail};
 use crate::{ServiceCreateArgs, ServiceDevArgs, ServiceLanguage, host, module};
 
 type PendingWrites = BTreeMap<PathBuf, String>;
+const LOCAL_SERVICE_INSTALL_COMMAND: &str =
+    "lenso service install ./lenso.service.json --base-url http://127.0.0.1:4100/lenso/service/v1";
 
 #[derive(Debug, Clone)]
 pub(crate) struct ServiceCreateOptions {
@@ -147,12 +149,9 @@ fn finish_service_create(
     write_pending_files(&pending_writes)?;
     println!("Created service {}.", scaffold.service_name);
     println!("Next steps:");
-    println!(
-        "- cd {}",
-        display_relative(&scaffold.output_root, &scaffold.target_dir)
-    );
+    println!("- cd {}", scaffold.target_dir_display);
     println!("- {check_command}");
-    println!("- lenso service install {}", scaffold.manifest_install_path);
+    println!("- {LOCAL_SERVICE_INSTALL_COMMAND}");
     if let Some(note) = &scaffold.publish_note {
         println!("- {note}");
     }
@@ -163,7 +162,6 @@ fn finish_service_create(
 struct ServiceScaffold {
     crate_name: String,
     lenso_service_dependency: String,
-    manifest_install_path: String,
     module_name: String,
     output_root: PathBuf,
     package_name: String,
@@ -175,6 +173,7 @@ struct ServiceScaffold {
     service_label: String,
     service_name: String,
     target_dir: PathBuf,
+    target_dir_display: String,
 }
 
 fn service_scaffold(options: &ServiceCreateOptions) -> Result<ServiceScaffold> {
@@ -198,10 +197,6 @@ fn service_scaffold(options: &ServiceCreateOptions) -> Result<ServiceScaffold> {
     Ok(ServiceScaffold {
         crate_name: snake_case(&service_name),
         lenso_service_dependency: dependencies.lenso_service_dependency,
-        manifest_install_path: display_relative(
-            &current_dir,
-            &target_dir.join("lenso.service.json"),
-        ),
         module_name: module_name.clone(),
         output_root,
         package_name: service_name.clone(),
@@ -212,6 +207,7 @@ fn service_scaffold(options: &ServiceCreateOptions) -> Result<ServiceScaffold> {
         service_kit_dependency: dependencies.service_kit_dependency,
         service_label: label_from_slug(&module_name),
         service_name,
+        target_dir_display: display_relative(&current_dir, &target_dir),
         target_dir,
     })
 }
@@ -400,8 +396,6 @@ mod tests {
         ServiceScaffold {
             crate_name: "support_suite_provider".to_owned(),
             lenso_service_dependency: "lenso-service = \"0.1.0\"".to_owned(),
-            manifest_install_path: "../services/support-suite-provider/lenso.service.json"
-                .to_owned(),
             module_name: "support-suite".to_owned(),
             output_root: PathBuf::from("/tmp/services"),
             package_name: "support-suite-provider".to_owned(),
@@ -413,7 +407,16 @@ mod tests {
             service_label: "Support Suite".to_owned(),
             service_name: "support-suite-provider".to_owned(),
             target_dir: PathBuf::from("/tmp/services/support-suite-provider"),
+            target_dir_display: "/tmp/services/support-suite-provider".to_owned(),
         }
+    }
+
+    #[test]
+    fn install_command_uses_local_manifest_and_base_url() {
+        assert_eq!(
+            LOCAL_SERVICE_INSTALL_COMMAND,
+            "lenso service install ./lenso.service.json --base-url http://127.0.0.1:4100/lenso/service/v1"
+        );
     }
 
     #[test]

@@ -2,8 +2,8 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Duration;
+use std::process::{Child, Command};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Map, Value, json};
@@ -1824,7 +1824,7 @@ pub async fn start_module_service(options: ModuleServiceStartOptions) -> Result<
         .map(|cwd| resolve_path(&repo_root, Path::new(cwd)))
         .unwrap_or_else(|| repo_root.clone());
     // ponytail: local dev process control; a real supervisor belongs in deployment tooling.
-    let child = shell_command(&service.command)
+    let mut child = shell_command(&service.command)
         .current_dir(cwd)
         .spawn()
         .with_context(|| format!("start service {}/{}", module_name, service.name))?;
@@ -1836,6 +1836,15 @@ pub async fn start_module_service(options: ModuleServiceStartOptions) -> Result<
         service.name,
         child.id()
     );
+    wait_for_started_module_service_ready(
+        &client,
+        &mut child,
+        &module_name,
+        &service,
+        &lock_file_path,
+        &pid_file_path,
+    )
+    .await?;
     Ok(())
 }
 
@@ -6069,6 +6078,45 @@ async fn remote_service_ready_url(client: &reqwest::Client, ready_url: &str) -> 
         .send()
         .await
         .is_ok_and(|response| response.status().is_success())
+}
+
+async fn wait_for_started_module_service_ready(
+    client: &reqwest::Client,
+    child: &mut Child,
+    module_name: &str,
+    service: &RemoteModuleServiceInstallSpec,
+    lock_file_path: &Path,
+    pid_file_path: &Path,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_millis(service.ready_timeout_ms);
+    loop {
+        if remote_service_ready_url(client, &service.ready_url).await {
+            println!("{}/{} ready", module_name, service.name);
+            return Ok(());
+        }
+        if let Some(status) = child
+            .try_wait()
+            .with_context(|| format!("check service {}/{}", module_name, service.name))?
+        {
+            let _ = fs::remove_file(pid_file_path);
+            let _ = fs::remove_file(lock_file_path);
+            bail!(
+                "service {}/{} exited before ready: {status}",
+                module_name,
+                service.name
+            );
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "service {}/{} did not become ready at {} within {}ms",
+                module_name,
+                service.name,
+                service.ready_url,
+                service.ready_timeout_ms
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 }
 
 fn remote_module_service_doctor_status(

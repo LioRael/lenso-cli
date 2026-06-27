@@ -118,8 +118,11 @@ Install a service directly when you already have a service manifest URL:
 
 ```sh
 lenso service install https://example.com/lenso/service/v1/manifest
-lenso service install ./lenso.service.json
+lenso service install ./lenso.service.json --base-url http://127.0.0.1:4100/lenso/service/v1
 ```
+
+Local manifest files need `--base-url` so the host records the runtime service
+endpoint rather than the file path.
 
 Service installs update `REMOTE_MODULES`, copy declared Runtime Console bundles to
 `.lenso/console/extensions`, update `.lenso/console/extensions/registry.json`,
