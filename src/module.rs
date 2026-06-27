@@ -71,8 +71,10 @@ pub struct ServiceManifestCheckOptions {
     pub cwd: Option<PathBuf>,
     pub json: bool,
     pub manifest_url: Option<String>,
+    pub operation: Option<String>,
     pub ready_timeout_ms: u64,
     pub ready_url: Option<String>,
+    pub sample_input: Option<PathBuf>,
     pub serve_command: Option<String>,
 }
 
@@ -2378,8 +2380,23 @@ pub async fn check_service_manifest_reference(
         .iter()
         .filter_map(|module| module.get("name").and_then(Value::as_str))
         .collect::<Vec<_>>();
+    let operations = service_manifest_operations(&manifest, options.operation.as_deref());
+    if let Some(operation) = options.operation.as_deref()
+        && operations.is_empty()
+    {
+        bail!("Service operation `{operation}` was not found in manifest");
+    }
+    let sample_input = if let Some(path) = options.sample_input.as_deref() {
+        Some(
+            read_json(path)
+                .with_context(|| format!("read service check sample input {}", path.display()))?,
+        )
+    } else {
+        None
+    };
     let probes = if let Some(manifest_url) = manifest_url.as_deref() {
-        service_check_probe_summary(&manifest, manifest_url).await?
+        service_check_operation_probe_summary(&operations, manifest_url, sample_input.as_ref())
+            .await?
     } else {
         Vec::new()
     };
@@ -2389,7 +2406,11 @@ pub async fn check_service_manifest_reference(
         .find(|probe| probe.get("status").and_then(Value::as_str) == Some("failed"))
     {
         bail!(
-            "Service probe failed: {} {}",
+            "Service probe failed: {} {} {}",
+            failed_probe
+                .get("operationId")
+                .and_then(Value::as_str)
+                .unwrap_or("-"),
             failed_probe
                 .get("method")
                 .and_then(Value::as_str)
@@ -2409,6 +2430,7 @@ pub async fn check_service_manifest_reference(
                 "manifestReference": manifest_reference,
                 "manifestUrl": manifest_url,
                 "modules": module_names,
+                "operations": operations,
                 "probes": probes,
                 "readyUrl": ready_url,
                 "service": name,
@@ -2427,6 +2449,7 @@ pub async fn check_service_manifest_reference(
             declarations["runtimeFunctions"],
             declarations["eventHandlers"]
         );
+        println!("Service operations: {}", operations.len());
         if let Some(ready_url) = ready_url {
             println!("Ready URL: {ready_url}");
         }
@@ -2434,16 +2457,24 @@ pub async fn check_service_manifest_reference(
             println!("Manifest URL: {manifest_url}");
         }
         if !probes.is_empty() {
-            println!("Safe probes:");
+            println!("Probes:");
             for probe in probes {
                 println!(
-                    "- {} {} {}",
+                    "- {} {} {} {}",
                     probe
                         .get("status")
                         .and_then(Value::as_str)
                         .unwrap_or("skip"),
+                    probe
+                        .get("operationId")
+                        .and_then(Value::as_str)
+                        .unwrap_or("-"),
                     probe.get("method").and_then(Value::as_str).unwrap_or("-"),
-                    probe.get("url").and_then(Value::as_str).unwrap_or("-")
+                    probe
+                        .get("url")
+                        .or_else(|| probe.get("reason"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("-")
                 );
             }
         }
@@ -2576,16 +2607,8 @@ fn infer_ready_url_from_manifest_url(manifest_url: &str) -> Option<String> {
         .map(|base| format!("{base}/status"))
 }
 
-async fn service_check_probe_summary(manifest: &Value, manifest_url: &str) -> Result<Vec<Value>> {
-    let service_base_url = manifest_url
-        .strip_suffix("/manifest")
-        .unwrap_or(manifest_url)
-        .to_owned();
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_millis(800))
-        .build()
-        .context("build service probe HTTP client")?;
-    let mut probes = Vec::new();
+fn service_manifest_operations(manifest: &Value, filter: Option<&str>) -> Vec<Value> {
+    let mut operations = Vec::new();
     for module in manifest
         .get("modules")
         .and_then(Value::as_array)
@@ -2608,32 +2631,243 @@ async fn service_check_probe_summary(manifest: &Value, manifest_url: &str) -> Re
                 .unwrap_or("")
                 .to_ascii_uppercase();
             let path = route.get("path").and_then(Value::as_str).unwrap_or("");
-            if method != "GET" || path.contains('{') || path.contains(':') {
-                probes.push(json!({
+            let operation = route.get("operation");
+            let operation_id = operation_id(operation)
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| format!("{module_name}/http/{method}:{path}"));
+            let safe_probe_spec = operation_safe_probe(operation).cloned();
+            let legacy_safe_probe = operation.is_none()
+                && method == "GET"
+                && !path.contains('{')
+                && !path.contains(':');
+            push_manifest_operation(
+                &mut operations,
+                filter,
+                json!({
+                    "capability": route.get("capability").and_then(Value::as_str),
+                    "kind": "http_route",
                     "method": method,
                     "module": module_name,
+                    "operationId": operation_id,
                     "path": path,
-                    "status": "skipped",
-                }));
-                continue;
-            }
-            let url = join_url_path(
-                &service_base_url,
-                &format!("modules/{module_name}/{}", path.trim_start_matches('/')),
+                    "safeProbe": safe_probe_spec.is_some() || legacy_safe_probe,
+                    "safeProbeSpec": safe_probe_spec,
+                }),
             );
-            let status = if remote_service_ready_url(&client, &url).await {
-                "ok"
-            } else {
-                "failed"
-            };
-            probes.push(json!({
-                "method": method,
-                "module": module_name,
-                "path": path,
-                "status": status,
-                "url": url,
-            }));
         }
+        for function in module
+            .get("runtime")
+            .and_then(|runtime| runtime.get("functions"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let name = function.get("name").and_then(Value::as_str).unwrap_or("");
+            let operation = function.get("operation");
+            let operation_id = operation_id(operation)
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| format!("{module_name}/runtime/{name}"));
+            let safe_probe_spec = operation_safe_probe(operation).cloned();
+            push_manifest_operation(
+                &mut operations,
+                filter,
+                json!({
+                    "kind": "runtime_function",
+                    "module": module_name,
+                    "name": name,
+                    "operationId": operation_id,
+                    "safeProbe": safe_probe_spec.is_some(),
+                    "safeProbeSpec": safe_probe_spec,
+                }),
+            );
+        }
+        for handler in module
+            .get("events")
+            .and_then(|events| events.get("handlers"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let name = handler
+                .get("name")
+                .or_else(|| handler.get("event"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let operation = handler.get("operation");
+            let operation_id = operation_id(operation)
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| format!("{module_name}/event/{name}"));
+            let safe_probe_spec = operation_safe_probe(operation).cloned();
+            push_manifest_operation(
+                &mut operations,
+                filter,
+                json!({
+                    "eventName": handler.get("eventName").or_else(|| handler.get("event_name")).and_then(Value::as_str),
+                    "kind": "event_handler",
+                    "module": module_name,
+                    "name": name,
+                    "operationId": operation_id,
+                    "safeProbe": safe_probe_spec.is_some(),
+                    "safeProbeSpec": safe_probe_spec,
+                }),
+            );
+        }
+        let admin = module.get("admin");
+        let include_admin_actions = admin
+            .and_then(|admin| admin.get("kind"))
+            .and_then(Value::as_str)
+            .is_none_or(|kind| kind == "declarative_custom");
+        if include_admin_actions {
+            for action in admin
+                .and_then(|admin| admin.get("actions"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let name = action.get("name").and_then(Value::as_str).unwrap_or("");
+                let operation = action.get("operation");
+                let operation_id = operation_id(operation)
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| format!("{module_name}/action/{name}"));
+                let safe_probe_spec = operation_safe_probe(operation).cloned();
+                push_manifest_operation(
+                    &mut operations,
+                    filter,
+                    json!({
+                        "capability": action.get("capability").and_then(Value::as_str),
+                        "kind": "admin_action",
+                        "module": module_name,
+                        "name": name,
+                        "operationId": operation_id,
+                        "safeProbe": safe_probe_spec.is_some(),
+                        "safeProbeSpec": safe_probe_spec,
+                    }),
+                );
+            }
+        }
+    }
+    operations.sort_by(|left, right| {
+        left.get("operationId")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .cmp(
+                right
+                    .get("operationId")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+            )
+    });
+    operations
+}
+
+fn operation_id(operation: Option<&Value>) -> Option<&str> {
+    operation
+        .and_then(|operation| {
+            operation
+                .get("operationId")
+                .or_else(|| operation.get("operation_id"))
+        })
+        .and_then(Value::as_str)
+}
+
+fn operation_safe_probe(operation: Option<&Value>) -> Option<&Value> {
+    operation.and_then(|operation| {
+        operation
+            .get("safeProbe")
+            .or_else(|| operation.get("safe_probe"))
+    })
+}
+
+fn push_manifest_operation(operations: &mut Vec<Value>, filter: Option<&str>, operation: Value) {
+    let operation_id = operation.get("operationId").and_then(Value::as_str);
+    if filter.is_none_or(|filter| operation_id == Some(filter)) {
+        operations.push(operation);
+    }
+}
+
+async fn service_check_operation_probe_summary(
+    operations: &[Value],
+    manifest_url: &str,
+    _sample_input: Option<&Value>,
+) -> Result<Vec<Value>> {
+    let service_base_url = manifest_url
+        .strip_suffix("/manifest")
+        .unwrap_or(manifest_url)
+        .to_owned();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(800))
+        .build()
+        .context("build service probe HTTP client")?;
+    let mut probes = Vec::new();
+    for operation in operations {
+        let kind = operation.get("kind").and_then(Value::as_str).unwrap_or("");
+        let operation_id = operation
+            .get("operationId")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        if kind != "http_route" {
+            probes.push(json!({
+                "kind": kind,
+                "operationId": operation_id,
+                "reason": "operation kind is not probed",
+                "status": "skipped",
+            }));
+            continue;
+        }
+        if operation.get("safeProbe").and_then(Value::as_bool) != Some(true) {
+            probes.push(json!({
+                "kind": kind,
+                "operationId": operation_id,
+                "reason": "safeProbe not declared",
+                "status": "skipped",
+            }));
+            continue;
+        }
+        let probe = operation.get("safeProbeSpec");
+        let method = probe
+            .and_then(|probe| probe.get("method"))
+            .and_then(Value::as_str)
+            .or_else(|| operation.get("method").and_then(Value::as_str))
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        let path = probe
+            .and_then(|probe| probe.get("path"))
+            .and_then(Value::as_str)
+            .or_else(|| operation.get("path").and_then(Value::as_str))
+            .unwrap_or("");
+        let module_name = operation
+            .get("module")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if method != "GET" || path.contains('{') || path.contains(':') {
+            probes.push(json!({
+                "kind": kind,
+                "method": method,
+                "operationId": operation_id,
+                "path": path,
+                "reason": "only literal HTTP GET safe probes are supported",
+                "status": "skipped",
+            }));
+            continue;
+        }
+        let url = join_url_path(
+            &service_base_url,
+            &format!("modules/{module_name}/{}", path.trim_start_matches('/')),
+        );
+        let status = if remote_service_ready_url(&client, &url).await {
+            "checked"
+        } else {
+            "failed"
+        };
+        probes.push(json!({
+            "kind": kind,
+            "method": method,
+            "module": module_name,
+            "operationId": operation_id,
+            "path": path,
+            "status": status,
+            "url": url,
+        }));
     }
     Ok(probes)
 }
@@ -9491,6 +9725,147 @@ mod tests {
             service_check_manifest_url("./lenso.service.json", Some(&manifest), None).as_deref(),
             Some("http://127.0.0.1:4110/lenso/service/v1/manifest")
         );
+    }
+
+    #[test]
+    fn service_manifest_operations_include_kinds_and_safe_probe_state() {
+        let manifest = json!({
+            "modules": [
+                {
+                    "admin": {
+                        "kind": "declarative_custom",
+                        "actions": [
+                            {
+                                "capability": "support_ticket.tickets.write",
+                                "name": "assign_ticket"
+                            }
+                        ]
+                    },
+                    "events": {
+                        "handlers": [
+                            {
+                                "name": "ticket_created",
+                                "operation": {
+                                    "operationId": "support-ticket/event/ticket-created-handler"
+                                }
+                            }
+                        ]
+                    },
+                    "http_routes": [
+                        {
+                            "capability": "support_ticket.tickets.read",
+                            "method": "GET",
+                            "operation": {
+                                "operationId": "support-ticket/http/list",
+                                "safeProbe": {
+                                    "method": "GET",
+                                    "path": "/tickets"
+                                }
+                            },
+                            "path": "/tickets"
+                        }
+                    ],
+                    "name": "support-ticket",
+                    "runtime": {
+                        "functions": [
+                            { "name": "support-ticket.reindex.v1" }
+                        ]
+                    }
+                }
+            ],
+            "name": "support-suite-provider",
+            "version": "0.1.0"
+        });
+
+        let operations = service_manifest_operations(&manifest, None);
+
+        assert_eq!(
+            operations
+                .iter()
+                .map(|operation| operation["operationId"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "support-ticket/action/assign_ticket",
+                "support-ticket/event/ticket-created-handler",
+                "support-ticket/http/list",
+                "support-ticket/runtime/support-ticket.reindex.v1",
+            ]
+        );
+        assert_eq!(operations[0]["kind"], json!("admin_action"));
+        assert_eq!(operations[0]["name"], json!("assign_ticket"));
+        assert_eq!(operations[0]["safeProbe"], json!(false));
+        assert_eq!(operations[1]["kind"], json!("event_handler"));
+        assert_eq!(operations[1]["name"], json!("ticket_created"));
+        assert_eq!(operations[1]["safeProbe"], json!(false));
+        assert_eq!(operations[2]["kind"], json!("http_route"));
+        assert_eq!(operations[2]["method"], json!("GET"));
+        assert_eq!(operations[2]["path"], json!("/tickets"));
+        assert_eq!(operations[2]["safeProbe"], json!(true));
+        assert_eq!(operations[3]["kind"], json!("runtime_function"));
+        assert_eq!(operations[3]["name"], json!("support-ticket.reindex.v1"));
+        assert_eq!(operations[3]["safeProbe"], json!(false));
+    }
+
+    #[test]
+    fn service_manifest_operations_filter_by_operation_id() {
+        let manifest = json!({
+            "modules": [
+                {
+                    "httpRoutes": [
+                        { "method": "GET", "path": "/tickets" },
+                        { "method": "GET", "path": "/tickets/{id}" }
+                    ],
+                    "name": "support-ticket"
+                }
+            ],
+            "name": "support-suite-provider",
+            "version": "0.1.0"
+        });
+
+        let operations =
+            service_manifest_operations(&manifest, Some("support-ticket/http/GET:/tickets/{id}"));
+
+        assert_eq!(operations.len(), 1);
+        assert_eq!(
+            operations[0]["operationId"],
+            "support-ticket/http/GET:/tickets/{id}"
+        );
+        assert_eq!(operations[0]["path"], "/tickets/{id}");
+    }
+
+    #[tokio::test]
+    async fn service_check_operation_probe_summary_skips_unsafe_operations() {
+        let operations = vec![
+            json!({
+                "kind": "runtime_function",
+                "module": "support-ticket",
+                "name": "support-ticket.reindex.v1",
+                "operationId": "support-ticket/runtime/support-ticket.reindex.v1",
+                "safeProbe": false
+            }),
+            json!({
+                "kind": "http_route",
+                "method": "POST",
+                "module": "support-ticket",
+                "operationId": "support-ticket/http/POST:/tickets",
+                "path": "/tickets",
+                "safeProbe": true
+            }),
+        ];
+
+        let probes = service_check_operation_probe_summary(
+            &operations,
+            "http://127.0.0.1:4110/lenso/service/v1/manifest",
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(probes.len(), 2);
+        assert_eq!(probes[0]["operationId"], operations[0]["operationId"]);
+        assert_eq!(probes[0]["status"], "skipped");
+        assert_eq!(probes[1]["operationId"], operations[1]["operationId"]);
+        assert_eq!(probes[1]["status"], "skipped");
     }
 
     #[test]

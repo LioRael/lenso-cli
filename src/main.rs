@@ -275,6 +275,14 @@ struct ServiceCheckArgs {
     #[arg(long)]
     manifest_url: Option<String>,
 
+    /// Only check one operation id.
+    #[arg(long)]
+    operation: Option<String>,
+
+    /// JSON sample input used for explicit safe probes.
+    #[arg(long)]
+    sample_input: Option<std::path::PathBuf>,
+
     /// Ready wait timeout in milliseconds.
     #[arg(long, default_value_t = 10_000)]
     ready_timeout_ms: u64,
@@ -1182,8 +1190,10 @@ async fn main() -> anyhow::Result<()> {
                             cwd: args.cwd.clone(),
                             json: args.json,
                             manifest_url: args.manifest_url.clone(),
+                            operation: args.operation.clone(),
                             ready_timeout_ms: args.ready_timeout_ms,
                             ready_url: args.ready_url.clone(),
+                            sample_input: args.sample_input.clone(),
                             serve_command: args.serve_command.clone(),
                         },
                     )
@@ -1298,6 +1308,35 @@ mod tests {
         );
         assert!(args.json);
         assert_eq!(args.serve_command.as_deref(), Some("pnpm start"));
+    }
+
+    #[test]
+    fn parses_service_check_operation_filter_and_sample_input() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "service",
+            "check",
+            "./lenso.service.json",
+            "--operation",
+            "support-ticket/http/GET:/tickets",
+            "--sample-input",
+            "fixtures/probe.json",
+        ]);
+        let Command::Service {
+            command: ServiceCommand::Check(args),
+        } = cli.command
+        else {
+            panic!("expected service check");
+        };
+
+        assert_eq!(
+            args.operation.as_deref(),
+            Some("support-ticket/http/GET:/tickets")
+        );
+        assert_eq!(
+            args.sample_input.as_deref(),
+            Some(std::path::Path::new("fixtures/probe.json"))
+        );
     }
 
     #[test]
