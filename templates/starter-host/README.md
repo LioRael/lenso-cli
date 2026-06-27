@@ -89,12 +89,12 @@ at startup.
 
 ## Add A Service Module
 
-Start a module that exposes a Lenso manifest, then install it into `.env`:
+Start a service that exposes a Lenso service manifest, then install it into `.env`:
 
 ```sh
-lenso module install http://127.0.0.1:4100/lenso/module/v1/manifest
-lenso module service list
-lenso module doctor <module-name> --json
+lenso service install http://127.0.0.1:4100/lenso/service/v1/manifest
+lenso service list
+lenso service doctor <module-name> --json
 ```
 
 Restart `api` and `worker` after changing module configuration. Runtime

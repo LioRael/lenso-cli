@@ -7,8 +7,7 @@ use anyhow::{Context, Result, bail};
 use crate::{ServiceCreateArgs, ServiceDevArgs, ServiceLanguage, host, module};
 
 type PendingWrites = BTreeMap<PathBuf, String>;
-const LOCAL_SERVICE_INSTALL_COMMAND: &str =
-    "lenso service install ./lenso.service.json --base-url http://127.0.0.1:4100/lenso/service/v1";
+const LOCAL_SERVICE_BASE_URL: &str = "http://127.0.0.1:4100/lenso/service/v1";
 
 #[derive(Debug, Clone)]
 pub(crate) struct ServiceCreateOptions {
@@ -151,7 +150,10 @@ fn finish_service_create(
     println!("Next steps:");
     println!("- cd {}", scaffold.target_dir_display);
     println!("- {check_command}");
-    println!("- {LOCAL_SERVICE_INSTALL_COMMAND}");
+    println!(
+        "- {}",
+        local_service_install_command(&scaffold.repo_root_display)
+    );
     if let Some(note) = &scaffold.publish_note {
         println!("- {note}");
     }
@@ -168,6 +170,7 @@ struct ServiceScaffold {
     pnpm_workspace_overrides: String,
     publish_note: Option<String>,
     remote_module_kit_dependency: String,
+    repo_root_display: String,
     service_cwd: String,
     service_kit_dependency: String,
     service_label: String,
@@ -203,6 +206,7 @@ fn service_scaffold(options: &ServiceCreateOptions) -> Result<ServiceScaffold> {
         pnpm_workspace_overrides: dependencies.pnpm_workspace_overrides,
         publish_note: dependencies.publish_note,
         remote_module_kit_dependency: dependencies.remote_module_kit_dependency,
+        repo_root_display: current_dir.to_string_lossy().to_string(),
         service_cwd: json_string(&display_relative(&current_dir, &target_dir)),
         service_kit_dependency: dependencies.service_kit_dependency,
         service_label: label_from_slug(&module_name),
@@ -314,6 +318,24 @@ fn toml_string(path: &Path) -> String {
         .replace('"', "\\\"")
 }
 
+fn local_service_install_command(repo_root: &str) -> String {
+    format!(
+        "lenso service install ./lenso.service.json --base-url {LOCAL_SERVICE_BASE_URL} --repo-root {}",
+        shell_arg(repo_root)
+    )
+}
+
+fn shell_arg(value: &str) -> String {
+    if value
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || "/._-:".contains(character))
+    {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
 fn provided_module_name(service_name: &str) -> String {
     service_name
         .strip_suffix("-provider")
@@ -402,6 +424,7 @@ mod tests {
             pnpm_workspace_overrides: String::new(),
             publish_note: None,
             remote_module_kit_dependency: json_string("0.1.3"),
+            repo_root_display: "/tmp/host".to_owned(),
             service_cwd: json_string("../services/support-suite-provider"),
             service_kit_dependency: json_string("0.1.0"),
             service_label: "Support Suite".to_owned(),
@@ -413,10 +436,13 @@ mod tests {
 
     #[test]
     fn install_command_uses_local_manifest_and_base_url() {
+        let command = local_service_install_command(&scaffold().repo_root_display);
+
         assert_eq!(
-            LOCAL_SERVICE_INSTALL_COMMAND,
-            "lenso service install ./lenso.service.json --base-url http://127.0.0.1:4100/lenso/service/v1"
+            command,
+            "lenso service install ./lenso.service.json --base-url http://127.0.0.1:4100/lenso/service/v1 --repo-root /tmp/host"
         );
+        assert!(!command.contains("support-suite-provider"));
     }
 
     #[test]
