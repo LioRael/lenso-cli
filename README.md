@@ -81,6 +81,12 @@ The generated provider includes a `lenso.service.json` manifest and a minimal
 service process. A service name ending in `-provider` or `-service` provides a
 module named without that suffix, so `support-suite-provider` provides
 `support-suite`.
+When this command runs from a framework checkout with sibling `lenso` and
+`lenso-runtime-console` repositories, the scaffold uses local path/file
+dependencies so `cargo check` or `pnpm install` can run before the packages are
+published. Outside that checkout it keeps the future-publish version
+dependencies and prints a note to replace them with local paths until
+`lenso-service` and `@lenso/service-kit` are published.
 
 The older standalone module package generator is still available as:
 

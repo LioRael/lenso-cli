@@ -81,6 +81,12 @@ fn create_ts_service(options: ServiceCreateOptions) -> Result<()> {
     );
     queue_template(
         &mut pending_writes,
+        scaffold.target_dir.join("pnpm-workspace.yaml"),
+        include_str!("../templates/service-ts/pnpm-workspace.yaml.tmpl"),
+        &scaffold,
+    );
+    queue_template(
+        &mut pending_writes,
         scaffold.target_dir.join("src/server.ts"),
         include_str!("../templates/service-ts/src/server.ts"),
         &scaffold,
@@ -146,16 +152,26 @@ fn finish_service_create(
         display_relative(&scaffold.output_root, &scaffold.target_dir)
     );
     println!("- {check_command}");
-    println!("- lenso service install ./lenso.service.json");
+    println!("- lenso service install {}", scaffold.manifest_install_path);
+    if let Some(note) = &scaffold.publish_note {
+        println!("- {note}");
+    }
     Ok(())
 }
 
 #[derive(Debug)]
 struct ServiceScaffold {
     crate_name: String,
+    lenso_service_dependency: String,
+    manifest_install_path: String,
     module_name: String,
     output_root: PathBuf,
     package_name: String,
+    pnpm_workspace_overrides: String,
+    publish_note: Option<String>,
+    remote_module_kit_dependency: String,
+    service_cwd: String,
+    service_kit_dependency: String,
     service_label: String,
     service_name: String,
     target_dir: PathBuf,
@@ -166,22 +182,34 @@ fn service_scaffold(options: &ServiceCreateOptions) -> Result<ServiceScaffold> {
     if service_name.is_empty() {
         bail!("Service name is required");
     }
+    let current_dir = std::env::current_dir().context("resolve current directory")?;
     let output_root = options
         .output_dir
         .as_deref()
         .map(Path::to_path_buf)
-        .unwrap_or(std::env::current_dir().context("resolve current directory")?);
-    let output_root = absolutize(&output_root)?;
+        .unwrap_or_else(|| current_dir.clone());
+    let output_root = absolutize_from(&current_dir, &output_root);
     let target_dir = output_root.join(&service_name);
     if target_dir.exists() {
         bail!("Service directory already exists: {}", target_dir.display());
     }
     let module_name = provided_module_name(&service_name);
+    let dependencies = service_dependencies();
     Ok(ServiceScaffold {
         crate_name: snake_case(&service_name),
+        lenso_service_dependency: dependencies.lenso_service_dependency,
+        manifest_install_path: display_relative(
+            &current_dir,
+            &target_dir.join("lenso.service.json"),
+        ),
         module_name: module_name.clone(),
         output_root,
         package_name: service_name.clone(),
+        pnpm_workspace_overrides: dependencies.pnpm_workspace_overrides,
+        publish_note: dependencies.publish_note,
+        remote_module_kit_dependency: dependencies.remote_module_kit_dependency,
+        service_cwd: json_string(&display_relative(&current_dir, &target_dir)),
+        service_kit_dependency: dependencies.service_kit_dependency,
         service_label: label_from_slug(&module_name),
         service_name,
         target_dir,
@@ -194,13 +222,100 @@ fn queue_template(
     template: &str,
     scaffold: &ServiceScaffold,
 ) {
-    let contents = template
+    let contents = render_template(template, scaffold);
+    pending_writes.insert(path, contents);
+}
+
+fn render_template(template: &str, scaffold: &ServiceScaffold) -> String {
+    template
         .replace("{{service_name}}", &scaffold.service_name)
         .replace("{{service_label}}", &scaffold.service_label)
         .replace("{{module_name}}", &scaffold.module_name)
         .replace("{{package_name}}", &scaffold.package_name)
-        .replace("{{crate_name}}", &scaffold.crate_name);
-    pending_writes.insert(path, contents);
+        .replace("{{crate_name}}", &scaffold.crate_name)
+        .replace(
+            "{{service_kit_dependency}}",
+            &scaffold.service_kit_dependency,
+        )
+        .replace(
+            "{{remote_module_kit_dependency}}",
+            &scaffold.remote_module_kit_dependency,
+        )
+        .replace("{{service_cwd}}", &scaffold.service_cwd)
+        .replace(
+            "{{pnpm_workspace_overrides}}",
+            &scaffold.pnpm_workspace_overrides,
+        )
+        .replace(
+            "{{lenso_service_dependency}}",
+            &scaffold.lenso_service_dependency,
+        )
+}
+
+#[derive(Debug)]
+struct ServiceDependencyPlan {
+    lenso_service_dependency: String,
+    pnpm_workspace_overrides: String,
+    publish_note: Option<String>,
+    remote_module_kit_dependency: String,
+    service_kit_dependency: String,
+}
+
+fn service_dependencies() -> ServiceDependencyPlan {
+    let Some(framework_root) = find_framework_root() else {
+        return ServiceDependencyPlan {
+            lenso_service_dependency: "lenso-service = \"0.1.0\"".to_owned(),
+            pnpm_workspace_overrides: String::new(),
+            publish_note: Some(
+                "@lenso/service-kit and lenso-service must be published, or replace dependencies with local paths.".to_owned(),
+            ),
+            remote_module_kit_dependency: json_string("0.1.3"),
+            service_kit_dependency: json_string("0.1.0"),
+        };
+    };
+
+    let service_kit = framework_root.join("lenso-runtime-console/packages/service-kit");
+    let remote_module_kit = framework_root.join("lenso-runtime-console/packages/remote-module-kit");
+    let lenso_service = framework_root.join("lenso/crates/lenso-service");
+    ServiceDependencyPlan {
+        lenso_service_dependency: format!(
+            "lenso-service = {{ path = \"{}\" }}",
+            toml_string(&lenso_service)
+        ),
+        pnpm_workspace_overrides: format!(
+            "overrides:\n  \"@lenso/remote-module-kit\": {}\n",
+            json_string(&format!("file:{}", remote_module_kit.display()))
+        ),
+        publish_note: None,
+        remote_module_kit_dependency: json_string(&format!("file:{}", remote_module_kit.display())),
+        service_kit_dependency: json_string(&format!("file:{}", service_kit.display())),
+    }
+}
+
+fn find_framework_root() -> Option<PathBuf> {
+    let mut current = std::env::current_dir().ok()?;
+    loop {
+        if current
+            .join("lenso-runtime-console/packages/service-kit")
+            .is_dir()
+            && current.join("lenso/crates/lenso-service").is_dir()
+        {
+            return Some(current);
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
+fn json_string(value: &str) -> String {
+    serde_json::to_string(value).expect("string serialization is infallible")
+}
+
+fn toml_string(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
 }
 
 fn provided_module_name(service_name: &str) -> String {
@@ -246,13 +361,11 @@ fn label_from_slug(value: &str) -> String {
         .join(" ")
 }
 
-fn absolutize(path: &Path) -> Result<PathBuf> {
+fn absolutize_from(base: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() {
-        Ok(path.to_path_buf())
+        path.to_path_buf()
     } else {
-        Ok(std::env::current_dir()
-            .context("resolve current directory")?
-            .join(path))
+        base.join(path)
     }
 }
 
@@ -276,4 +389,100 @@ fn write_file(path: &Path, contents: &[u8]) -> Result<()> {
             .with_context(|| format!("create directory {}", parent.display()))?;
     }
     fs::write(path, contents).with_context(|| format!("write {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn scaffold() -> ServiceScaffold {
+        ServiceScaffold {
+            crate_name: "support_suite_provider".to_owned(),
+            lenso_service_dependency: "lenso-service = \"0.1.0\"".to_owned(),
+            manifest_install_path: "../services/support-suite-provider/lenso.service.json"
+                .to_owned(),
+            module_name: "support-suite".to_owned(),
+            output_root: PathBuf::from("/tmp/services"),
+            package_name: "support-suite-provider".to_owned(),
+            pnpm_workspace_overrides: String::new(),
+            publish_note: None,
+            remote_module_kit_dependency: json_string("0.1.3"),
+            service_cwd: json_string("../services/support-suite-provider"),
+            service_kit_dependency: json_string("0.1.0"),
+            service_label: "Support Suite".to_owned(),
+            service_name: "support-suite-provider".to_owned(),
+            target_dir: PathBuf::from("/tmp/services/support-suite-provider"),
+        }
+    }
+
+    #[test]
+    fn ts_manifest_records_install_services() {
+        let source = render_template(
+            include_str!("../templates/service-ts/lenso.service.json.tmpl"),
+            &scaffold(),
+        );
+        assert_no_template_tokens(&source);
+        let manifest: Value = serde_json::from_str(&source).unwrap();
+
+        assert_eq!(
+            manifest["install"]["services"][0]["name"],
+            "support-suite-provider"
+        );
+        assert_eq!(manifest["install"]["services"][0]["command"], "pnpm start");
+        assert_eq!(
+            manifest["install"]["services"][0]["readyUrl"],
+            "http://127.0.0.1:4100/lenso/service/v1/status"
+        );
+        assert_eq!(manifest["install"]["services"][0]["autoStart"], json!(true));
+        assert_eq!(
+            manifest["install"]["services"][0]["readyTimeoutMs"],
+            json!(10_000)
+        );
+    }
+
+    #[test]
+    fn rust_manifest_records_install_services() {
+        let source = render_template(
+            include_str!("../templates/service-rust/lenso.service.json.tmpl"),
+            &scaffold(),
+        );
+        assert_no_template_tokens(&source);
+        let manifest: Value = serde_json::from_str(&source).unwrap();
+
+        assert_eq!(
+            manifest["install"]["services"][0]["name"],
+            "support-suite-provider"
+        );
+        assert_eq!(manifest["install"]["services"][0]["command"], "cargo run");
+        assert_eq!(
+            manifest["install"]["services"][0]["readyUrl"],
+            "http://127.0.0.1:4100/lenso/service/v1/status"
+        );
+        assert_eq!(manifest["install"]["services"][0]["autoStart"], json!(true));
+        assert_eq!(
+            manifest["install"]["services"][0]["readyTimeoutMs"],
+            json!(10_000)
+        );
+    }
+
+    #[test]
+    fn package_templates_render_without_tokens() {
+        let scaffold = scaffold();
+        for template in [
+            include_str!("../templates/service-ts/package.json.tmpl"),
+            include_str!("../templates/service-ts/pnpm-workspace.yaml.tmpl"),
+            include_str!("../templates/service-rust/Cargo.toml.tmpl"),
+            include_str!("../templates/service-ts/src/service.ts"),
+            include_str!("../templates/service-ts/src/server.ts"),
+            include_str!("../templates/service-rust/src/main.rs"),
+        ] {
+            assert_no_template_tokens(&render_template(template, &scaffold));
+        }
+    }
+
+    fn assert_no_template_tokens(source: &str) {
+        assert!(!source.contains("{{"), "{source}");
+        assert!(!source.contains("}}"), "{source}");
+    }
 }
