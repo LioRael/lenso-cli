@@ -2386,17 +2386,13 @@ pub async fn check_service_manifest_reference(
     {
         bail!("Service operation `{operation}` was not found in manifest");
     }
-    let sample_input = if let Some(path) = options.sample_input.as_deref() {
-        Some(
-            read_json(path)
-                .with_context(|| format!("read service check sample input {}", path.display()))?,
-        )
-    } else {
-        None
-    };
     let probes = if let Some(manifest_url) = manifest_url.as_deref() {
-        service_check_operation_probe_summary(&operations, manifest_url, sample_input.as_ref())
-            .await?
+        service_check_operation_probe_summary(
+            &operations,
+            manifest_url,
+            options.sample_input.as_deref(),
+        )
+        .await?
     } else {
         Vec::new()
     };
@@ -2792,7 +2788,7 @@ fn push_manifest_operation(operations: &mut Vec<Value>, filter: Option<&str>, op
 async fn service_check_operation_probe_summary(
     operations: &[Value],
     manifest_url: &str,
-    _sample_input: Option<&Value>,
+    _sample_input: Option<&Path>,
 ) -> Result<Vec<Value>> {
     let service_base_url = manifest_url
         .strip_suffix("/manifest")
@@ -2859,7 +2855,7 @@ async fn service_check_operation_probe_summary(
             &format!("modules/{module_name}/{}", path.trim_start_matches('/')),
         );
         let status = if remote_service_ready_url(&client, &url).await {
-            "checked"
+            "ok"
         } else {
             "failed"
         };
@@ -9884,6 +9880,84 @@ mod tests {
         assert_eq!(probes.len(), 2);
         assert_eq!(probes[0]["status"], "skipped");
         assert_eq!(probes[1]["status"], "skipped");
+    }
+
+    #[tokio::test]
+    async fn service_check_does_not_read_unused_sample_input() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let manifest_path = std::env::temp_dir().join(format!(
+            "lenso-service-check-unused-sample-input-{nonce}.json"
+        ));
+        let missing_sample_input =
+            std::env::temp_dir().join(format!("lenso-missing-sample-input-{nonce}.json"));
+        write_json(
+            &manifest_path,
+            &json!({
+                "modules": [
+                    { "name": "support-ticket" }
+                ],
+                "name": "support-suite-provider",
+                "version": "0.1.0"
+            }),
+        )
+        .unwrap();
+
+        let result = check_service_manifest_reference(
+            manifest_path.to_str().unwrap(),
+            ServiceManifestCheckOptions {
+                cwd: None,
+                json: true,
+                manifest_url: None,
+                operation: None,
+                ready_timeout_ms: 10_000,
+                ready_url: None,
+                sample_input: Some(missing_sample_input),
+                serve_command: None,
+            },
+        )
+        .await;
+        fs::remove_file(&manifest_path).ok();
+
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn service_check_operation_probe_summary_uses_ok_status_for_success() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0; 1024];
+            let _ = stream.read(&mut buffer);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+        let operations = vec![json!({
+            "kind": "http_route",
+            "method": "GET",
+            "module": "support-ticket",
+            "operationId": "support-ticket/http/GET:/tickets",
+            "path": "/tickets",
+            "safeProbe": true
+        })];
+
+        let probes = service_check_operation_probe_summary(
+            &operations,
+            &format!("http://{addr}/lenso/service/v1/manifest"),
+            None,
+        )
+        .await
+        .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(probes.len(), 1);
+        assert_eq!(probes[0]["status"], "ok");
     }
 
     #[tokio::test]
