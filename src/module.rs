@@ -2771,11 +2771,15 @@ fn operation_id(operation: Option<&Value>) -> Option<&str> {
 }
 
 fn operation_safe_probe(operation: Option<&Value>) -> Option<&Value> {
-    operation.and_then(|operation| {
+    let probe = operation.and_then(|operation| {
         operation
             .get("safeProbe")
             .or_else(|| operation.get("safe_probe"))
-    })
+    })?;
+    match probe {
+        Value::Bool(true) | Value::Object(_) => Some(probe),
+        _ => None,
+    }
 }
 
 fn push_manifest_operation(operations: &mut Vec<Value>, filter: Option<&str>, operation: Value) {
@@ -9831,6 +9835,55 @@ mod tests {
             "support-ticket/http/GET:/tickets/{id}"
         );
         assert_eq!(operations[0]["path"], "/tickets/{id}");
+    }
+
+    #[tokio::test]
+    async fn service_manifest_operations_safe_probe_false_is_skipped() {
+        let manifest = json!({
+            "modules": [
+                {
+                    "httpRoutes": [
+                        {
+                            "method": "GET",
+                            "operation": {
+                                "operationId": "support-ticket/http/camel-false",
+                                "safeProbe": false
+                            },
+                            "path": "/tickets"
+                        },
+                        {
+                            "method": "GET",
+                            "operation": {
+                                "operationId": "support-ticket/http/snake-false",
+                                "safe_probe": false
+                            },
+                            "path": "/tickets/open"
+                        }
+                    ],
+                    "name": "support-ticket"
+                }
+            ],
+            "name": "support-suite-provider",
+            "version": "0.1.0"
+        });
+
+        let operations = service_manifest_operations(&manifest, None);
+
+        assert_eq!(operations.len(), 2);
+        assert_eq!(operations[0]["safeProbe"], json!(false));
+        assert_eq!(operations[1]["safeProbe"], json!(false));
+
+        let probes = service_check_operation_probe_summary(
+            &operations,
+            "http://127.0.0.1:4110/lenso/service/v1/manifest",
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(probes.len(), 2);
+        assert_eq!(probes[0]["status"], "skipped");
+        assert_eq!(probes[1]["status"], "skipped");
     }
 
     #[tokio::test]

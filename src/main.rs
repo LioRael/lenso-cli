@@ -1055,6 +1055,16 @@ fn looks_like_manifest_reference(reference: &str) -> bool {
         || reference.contains("/manifest")
 }
 
+fn service_check_uses_manifest(args: &ServiceCheckArgs) -> bool {
+    args.serve_command.is_some()
+        || args.operation.is_some()
+        || args.sample_input.is_some()
+        || args
+            .manifest_reference
+            .as_deref()
+            .is_some_and(looks_like_manifest_reference)
+}
+
 fn warn_module_install_manifest_reference(reference: &str) {
     if looks_like_manifest_reference(reference) {
         eprintln!(
@@ -1176,12 +1186,7 @@ async fn main() -> anyhow::Result<()> {
                 module::doctor_module((&args).into()).await?;
             }
             ServiceCommand::Check(args) => {
-                let checks_manifest = args.serve_command.is_some()
-                    || args
-                        .manifest_reference
-                        .as_deref()
-                        .is_some_and(looks_like_manifest_reference);
-                if checks_manifest {
+                if service_check_uses_manifest(&args) {
                     module::check_service_manifest_reference(
                         args.manifest_reference
                             .as_deref()
@@ -1337,6 +1342,37 @@ mod tests {
             args.sample_input.as_deref(),
             Some(std::path::Path::new("fixtures/probe.json"))
         );
+    }
+
+    #[test]
+    fn service_check_operation_options_use_manifest_check_mode() {
+        let cli = Cli::parse_from(["lenso", "service", "check", "--operation", "missing"]);
+        let Command::Service {
+            command: ServiceCommand::Check(args),
+        } = cli.command
+        else {
+            panic!("expected service check");
+        };
+
+        assert!(service_check_uses_manifest(&args));
+        assert_eq!(args.manifest_reference.as_deref(), None);
+
+        let cli = Cli::parse_from([
+            "lenso",
+            "service",
+            "check",
+            "--sample-input",
+            "fixtures/probe.json",
+        ]);
+        let Command::Service {
+            command: ServiceCommand::Check(args),
+        } = cli.command
+        else {
+            panic!("expected service check");
+        };
+
+        assert!(service_check_uses_manifest(&args));
+        assert_eq!(args.manifest_reference.as_deref(), None);
     }
 
     #[test]
