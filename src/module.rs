@@ -1839,6 +1839,29 @@ pub async fn start_module_service(options: ModuleServiceStartOptions) -> Result<
     Ok(())
 }
 
+pub async fn start_declared_module_services(
+    repo_root: Option<&Path>,
+    module_services_file: Option<&Path>,
+) -> Result<()> {
+    let repo_root = repo_root.unwrap_or_else(|| Path::new("."));
+    let module_services_path = resolve_module_services_file_path(repo_root, module_services_file);
+    let states = read_remote_module_service_states(&module_services_path)?;
+    for state in states {
+        for service in state.services {
+            if service.auto_start {
+                start_module_service(ModuleServiceStartOptions {
+                    module_name: state.module_name.clone(),
+                    service_name: service.name.clone(),
+                    module_services_file: Some(module_services_path.clone()),
+                    repo_root: Some(repo_root.to_path_buf()),
+                })
+                .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn stop_module_service(options: ModuleServiceStopOptions) -> Result<()> {
     let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
     let module_services_path =

@@ -70,7 +70,19 @@ workspace package:
 lenso module create billing --with-console
 ```
 
-For a standalone service package:
+For a standalone service provider:
+
+```sh
+lenso service create support-suite-provider --lang ts --output-dir ../services
+lenso service create support-suite-provider --lang rust --output-dir ../services
+```
+
+The generated provider includes a `lenso.service.json` manifest and a minimal
+service process. A service name ending in `-provider` or `-service` provides a
+module named without that suffix, so `support-suite-provider` provides
+`support-suite`.
+
+The older standalone module package generator is still available as:
 
 ```sh
 lenso module create billing --remote --output-dir ../module-packages
@@ -158,6 +170,14 @@ service-provided modules on API/worker startup. Services started by the host are
 `.lock`/`.pid` files and stopped when the owning API/worker process exits;
 services that are already ready before startup are treated as external and are
 not stopped by the host.
+
+During local development, start declared service providers and then the host
+with:
+
+```sh
+lenso service dev
+lenso service dev --skip-db --skip-migrate
+```
 
 Diagnose installed service state with:
 

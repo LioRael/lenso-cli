@@ -1,5 +1,6 @@
 mod host;
 mod module;
+mod service;
 
 use clap::{Args, Parser, Subcommand};
 
@@ -176,6 +177,10 @@ enum ModuleMarketplaceCommand {
 
 #[derive(Debug, Subcommand)]
 enum ServiceCommand {
+    /// Create a service provider scaffold.
+    Create(ServiceCreateArgs),
+    /// Start service providers, then run the generated host.
+    Dev(ServiceDevArgs),
     /// Install a service manifest.
     Install(RemoteModuleInstallArgs),
     /// Remove a service provider and its provided modules.
@@ -194,6 +199,53 @@ enum ServiceCommand {
     Start(ModuleServiceStartArgs),
     /// Stop a declared service started by the CLI or host.
     Stop(ModuleServiceStopArgs),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum ServiceLanguage {
+    Rust,
+    Ts,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceCreateArgs {
+    /// Service provider name, such as support-suite-provider.
+    name: String,
+
+    /// Generated service language.
+    #[arg(long, value_enum)]
+    lang: ServiceLanguage,
+
+    /// Directory that receives the service directory.
+    #[arg(long)]
+    output_dir: Option<std::path::PathBuf>,
+
+    /// Print files without writing them.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceDevArgs {
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Remote module services file.
+    #[arg(long)]
+    module_services_file: Option<std::path::PathBuf>,
+
+    /// Do not start the template Postgres service.
+    #[arg(long)]
+    skip_db: bool,
+
+    /// Do not run migrations before starting services.
+    #[arg(long)]
+    skip_migrate: bool,
+
+    /// Run API and worker as separate local processes.
+    #[arg(long)]
+    separate_worker: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -921,6 +973,12 @@ async fn main() -> anyhow::Result<()> {
             },
         },
         Command::Service { command } => match command {
+            ServiceCommand::Create(args) => {
+                service::create_service((&args).into())?;
+            }
+            ServiceCommand::Dev(args) => {
+                service::dev_service((&args).into()).await?;
+            }
             ServiceCommand::Install(args) => {
                 module::install_module(&args.manifest_reference, (&args).into()).await?;
             }
@@ -949,4 +1007,44 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_service_create_ts() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "service",
+            "create",
+            "support-suite-provider",
+            "--lang",
+            "ts",
+        ]);
+
+        let Command::Service {
+            command: ServiceCommand::Create(args),
+        } = cli.command
+        else {
+            panic!("expected service create");
+        };
+
+        assert_eq!(args.name, "support-suite-provider");
+        assert_eq!(args.lang, ServiceLanguage::Ts);
+    }
+
+    #[test]
+    fn parses_service_dev() {
+        let cli = Cli::parse_from(["lenso", "service", "dev", "--skip-db"]);
+        let Command::Service {
+            command: ServiceCommand::Dev(args),
+        } = cli.command
+        else {
+            panic!("expected service dev");
+        };
+
+        assert!(args.skip_db);
+    }
 }

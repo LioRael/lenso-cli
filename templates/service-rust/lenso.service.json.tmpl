@@ -1,0 +1,19 @@
+{
+  "name": "{{service_name}}",
+  "version": "0.1.0",
+  "provider": {
+    "name": "{{service_name}}",
+    "summary": "{{service_label}} provider"
+  },
+  "compatibility": {
+    "remoteProtocolVersion": "1",
+    "requiredHostFeatures": ["service.status"]
+  },
+  "modules": [
+    {
+      "name": "{{module_name}}",
+      "version": "0.1.0",
+      "capabilities": ["{{module_name}}.read"]
+    }
+  ]
+}
