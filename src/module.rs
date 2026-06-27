@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -2155,6 +2155,41 @@ pub async fn add_module_catalog_entry(
     Ok(())
 }
 
+pub async fn check_service_manifest_reference(
+    manifest_reference: &str,
+    json_output: bool,
+) -> Result<()> {
+    let manifest = validate_service_manifest(read_json_reference(manifest_reference).await?)?;
+    let name = string_field(&manifest, "name")?.trim();
+    let version = string_field(&manifest, "version")?.trim();
+    let modules = manifest
+        .get("modules")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("Service manifest modules must be an array"))?;
+    let module_names = modules
+        .iter()
+        .filter_map(|module| module.get("name").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "manifestReference": manifest_reference,
+                "modules": module_names,
+                "service": name,
+                "status": "ok",
+                "version": version,
+            }))
+            .context("serialize service manifest check")?
+        );
+    } else {
+        println!("Service manifest ok: {name} {version}");
+        println!("Provided modules: {}", module_names.join(", "));
+    }
+    Ok(())
+}
+
 pub async fn apply_console_package_install_plan(
     options: ConsolePackageApplyPlanOptions,
 ) -> Result<AppliedConsolePlan> {
@@ -4297,6 +4332,22 @@ fn validate_service_manifest(manifest: Value) -> Result<Value> {
     if version.trim().is_empty() {
         bail!("Service manifest version is required");
     }
+    validate_service_provider(&manifest)?;
+    validate_named_object_array(manifest.get("config"), "$.config", "key")?;
+    validate_named_object_array(manifest.get("env"), "$.env", "name")?;
+    validate_service_string_array(
+        manifest
+            .get("requiredEnv")
+            .or_else(|| manifest.get("required_env")),
+        "$.requiredEnv",
+    )?;
+    validate_service_compatibility(&manifest)?;
+    validate_service_local_process(
+        manifest
+            .get("localProcess")
+            .or_else(|| manifest.get("local_process")),
+    )?;
+    validate_service_install(&manifest)?;
     let modules = manifest
         .get("modules")
         .and_then(Value::as_array)
@@ -4304,8 +4355,8 @@ fn validate_service_manifest(manifest: Value) -> Result<Value> {
     if modules.is_empty() {
         bail!("Service manifest modules must not be empty");
     }
-    let mut module_names = Vec::new();
-    for module in modules {
+    let mut module_names = BTreeSet::new();
+    for (index, module) in modules.iter().enumerate() {
         if !module.is_object() {
             bail!("Service manifest modules entries must be objects");
         }
@@ -4313,12 +4364,125 @@ fn validate_service_manifest(manifest: Value) -> Result<Value> {
         if module_name.is_empty() {
             bail!("Service manifest module name is required");
         }
-        if module_names.contains(&module_name) {
+        if !module_names.insert(module_name.to_owned()) {
             bail!("Service manifest module `{module_name}` is declared more than once");
         }
-        module_names.push(module_name);
+        validate_service_string_array(
+            module.get("capabilities"),
+            &format!("$.modules[{index}].capabilities"),
+        )?;
+        validate_service_string_array(
+            module.get("dependencies"),
+            &format!("$.modules[{index}].dependencies"),
+        )?;
     }
     Ok(manifest)
+}
+
+fn validate_service_provider(manifest: &Value) -> Result<()> {
+    let Some(provider) = manifest.get("provider") else {
+        return Ok(());
+    };
+    let provider = provider
+        .as_object()
+        .ok_or_else(|| anyhow!("Service manifest $.provider must be an object"))?;
+    require_service_string(provider.get("name"), "$.provider.name")
+}
+
+fn validate_service_compatibility(manifest: &Value) -> Result<()> {
+    let Some(compatibility) = manifest.get("compatibility") else {
+        return Ok(());
+    };
+    let compatibility = compatibility
+        .as_object()
+        .ok_or_else(|| anyhow!("Service manifest $.compatibility must be an object"))?;
+    validate_service_string_array(
+        compatibility
+            .get("requiredHostFeatures")
+            .or_else(|| compatibility.get("required_host_features")),
+        "$.compatibility.requiredHostFeatures",
+    )
+}
+
+fn validate_named_object_array(value: Option<&Value>, path: &str, name_field: &str) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let array = value
+        .as_array()
+        .ok_or_else(|| anyhow!("Service manifest {path} must be an array"))?;
+    for (index, item) in array.iter().enumerate() {
+        let object = item
+            .as_object()
+            .ok_or_else(|| anyhow!("Service manifest {path}[{index}] must be an object"))?;
+        require_service_string(
+            object.get(name_field),
+            &format!("{path}[{index}].{name_field}"),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_service_local_process(value: Option<&Value>) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow!("Service manifest $.localProcess must be an object"))?;
+    require_service_string(object.get("command"), "$.localProcess.command")
+}
+
+fn validate_service_install(manifest: &Value) -> Result<()> {
+    let Some(install) = manifest.get("install") else {
+        return Ok(());
+    };
+    let install = install
+        .as_object()
+        .ok_or_else(|| anyhow!("Service manifest $.install must be an object"))?;
+    let Some(services) = install.get("services") else {
+        return Ok(());
+    };
+    let services = services
+        .as_array()
+        .ok_or_else(|| anyhow!("Service manifest $.install.services must be an array"))?;
+    for (index, service) in services.iter().enumerate() {
+        let service = service.as_object().ok_or_else(|| {
+            anyhow!("Service manifest $.install.services[{index}] must be an object")
+        })?;
+        require_service_string(
+            service.get("name"),
+            &format!("$.install.services[{index}].name"),
+        )?;
+        require_service_string(
+            service.get("command"),
+            &format!("$.install.services[{index}].command"),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_service_string_array(value: Option<&Value>, path: &str) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let array = value
+        .as_array()
+        .ok_or_else(|| anyhow!("Service manifest {path} must be an array"))?;
+    for (index, item) in array.iter().enumerate() {
+        require_service_string(Some(item), &format!("{path}[{index}]"))?;
+    }
+    Ok(())
+}
+
+fn require_service_string(value: Option<&Value>, path: &str) -> Result<()> {
+    if value
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Ok(());
+    }
+    bail!("Service manifest {path} must be a non-empty string")
 }
 
 fn service_module_install_manifests(
@@ -8417,6 +8581,39 @@ mod tests {
             services[0].ready_url,
             "http://127.0.0.1:4110/lenso/service/v1/status"
         );
+    }
+
+    #[test]
+    fn service_manifest_validation_reports_contract_paths() {
+        let missing_command = validate_service_manifest(json!({
+            "install": {
+                "services": [
+                    { "name": "support-service" }
+                ]
+            },
+            "modules": [
+                { "name": "support-ticket" }
+            ],
+            "name": "support-service",
+            "version": "0.1.0"
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(missing_command.contains("$.install.services[0].command"));
+
+        let bad_capability = validate_service_manifest(json!({
+            "modules": [
+                {
+                    "capabilities": ["support.tickets.read", 42],
+                    "name": "support-ticket"
+                }
+            ],
+            "name": "support-service",
+            "version": "0.1.0"
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(bad_capability.contains("$.modules[0].capabilities[1]"));
     }
 
     #[test]

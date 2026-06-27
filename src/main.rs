@@ -187,8 +187,8 @@ enum ServiceCommand {
     Uninstall(RemoteModuleUninstallArgs),
     /// Diagnose installed services and their provided modules.
     Doctor(ModuleDoctorArgs),
-    /// Check configured service state. Alias for doctor in this V5 slice.
-    Check(ModuleDoctorArgs),
+    /// Check a service manifest or configured service state.
+    Check(ServiceCheckArgs),
     /// List declared services.
     List(ModuleServiceListArgs),
     /// Export a deployment fragment for declared services.
@@ -246,6 +246,28 @@ struct ServiceDevArgs {
     /// Run API and worker as separate local processes.
     #[arg(long)]
     separate_worker: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceCheckArgs {
+    /// Service manifest URL/path, or optional module name for installed-service checks.
+    manifest_reference: Option<String>,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Environment file to read when checking installed services.
+    #[arg(long)]
+    env_file: Option<std::path::PathBuf>,
+
+    /// Remote module services file.
+    #[arg(long)]
+    module_services_file: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -732,6 +754,18 @@ impl From<&ModuleDoctorArgs> for module::ModuleDoctorOptions {
     }
 }
 
+impl From<&ServiceCheckArgs> for module::ModuleDoctorOptions {
+    fn from(args: &ServiceCheckArgs) -> Self {
+        Self {
+            env_file: args.env_file.clone(),
+            json: args.json,
+            module_name: args.manifest_reference.clone(),
+            module_services_file: args.module_services_file.clone(),
+            repo_root: args.repo_root.clone(),
+        }
+    }
+}
+
 impl From<&ModuleServiceListArgs> for module::ModuleServiceListOptions {
     fn from(args: &ModuleServiceListArgs) -> Self {
         Self {
@@ -985,8 +1019,19 @@ async fn main() -> anyhow::Result<()> {
             ServiceCommand::Uninstall(args) => {
                 module::uninstall_remote_module(&args.module_name, (&args).into()).await?;
             }
-            ServiceCommand::Doctor(args) | ServiceCommand::Check(args) => {
+            ServiceCommand::Doctor(args) => {
                 module::doctor_module((&args).into()).await?;
+            }
+            ServiceCommand::Check(args) => {
+                if let Some(reference) = args
+                    .manifest_reference
+                    .as_deref()
+                    .filter(|reference| looks_like_manifest_reference(reference))
+                {
+                    module::check_service_manifest_reference(reference, args.json).await?;
+                } else {
+                    module::doctor_module((&args).into()).await?;
+                }
             }
             ServiceCommand::List(args) => {
                 module::list_module_services((&args).into()).await?;
@@ -1046,5 +1091,28 @@ mod tests {
         };
 
         assert!(args.skip_db);
+    }
+
+    #[test]
+    fn parses_service_check_manifest_reference() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "service",
+            "check",
+            "./lenso.service.json",
+            "--json",
+        ]);
+        let Command::Service {
+            command: ServiceCommand::Check(args),
+        } = cli.command
+        else {
+            panic!("expected service check");
+        };
+
+        assert_eq!(
+            args.manifest_reference.as_deref(),
+            Some("./lenso.service.json")
+        );
+        assert!(args.json);
     }
 }
