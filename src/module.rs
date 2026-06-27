@@ -67,6 +67,45 @@ pub struct ModuleDoctorOptions {
 }
 
 #[derive(Debug, Clone)]
+pub struct ServiceManifestCheckOptions {
+    pub cwd: Option<PathBuf>,
+    pub json: bool,
+    pub manifest_url: Option<String>,
+    pub ready_timeout_ms: u64,
+    pub ready_url: Option<String>,
+    pub serve_command: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceDiffOptions {
+    pub json: bool,
+    pub manifest_reference: String,
+    pub repo_root: Option<PathBuf>,
+    pub service_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceUpgradeOptions {
+    pub allow_incompatible: bool,
+    pub base_url: Option<String>,
+    pub dry_run: bool,
+    pub env_file: Option<PathBuf>,
+    pub manifest_reference: String,
+    pub module_services_file: Option<PathBuf>,
+    pub repo_root: Option<PathBuf>,
+    pub service_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceRollbackOptions {
+    pub dry_run: bool,
+    pub env_file: Option<PathBuf>,
+    pub module_services_file: Option<PathBuf>,
+    pub repo_root: Option<PathBuf>,
+    pub service_name: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct ModuleServiceListOptions {
     pub json: bool,
     pub module_name: Option<String>,
@@ -821,7 +860,7 @@ pub async fn add_remote_module(
     );
     let manifest = read_json_reference(manifest_reference).await?;
     if is_service_manifest(&manifest) {
-        return add_service_manifest(
+        return add_service_manifest_with_paths(
             manifest_reference,
             validate_service_manifest(manifest)?,
             &options,
@@ -951,7 +990,42 @@ pub async fn add_remote_module(
     Ok(())
 }
 
-async fn add_service_manifest(
+async fn add_service_manifest_with_options(
+    manifest_reference: &str,
+    manifest: Value,
+    options: &RemoteModuleInstallOptions,
+) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let env_file_path = resolve_path(
+        &repo_root,
+        options
+            .env_file
+            .as_deref()
+            .unwrap_or_else(|| Path::new(".env")),
+    );
+    let console_extension_registry_path = repo_root.join(CONSOLE_EXTENSION_REGISTRY_PATH);
+    let install_ledger_path = repo_root.join(MODULE_INSTALL_LEDGER_PATH);
+    let module_services_path = resolve_path(
+        &repo_root,
+        options
+            .module_services_file
+            .as_deref()
+            .unwrap_or_else(|| Path::new(".lenso/module-services.json")),
+    );
+    add_service_manifest_with_paths(
+        manifest_reference,
+        manifest,
+        options,
+        &repo_root,
+        &env_file_path,
+        &console_extension_registry_path,
+        &install_ledger_path,
+        &module_services_path,
+    )
+    .await
+}
+
+async fn add_service_manifest_with_paths(
     manifest_reference: &str,
     manifest: Value,
     options: &RemoteModuleInstallOptions,
@@ -991,6 +1065,9 @@ async fn add_service_manifest(
     for module_manifest in &module_manifests {
         let module_name = string_field(module_manifest, "name")?.trim().to_owned();
         let module_base_url = service_module_base_url(&base_url, &module_name);
+        let previous_manifest_snapshot =
+            module_install_ledger_entry_value(&install_ledger, &module_name)
+                .and_then(|entry| entry.get("serviceManifestSnapshot").cloned());
         let console_bundle_install = install_runtime_console_bundles(
             repo_root,
             console_extension_registry_path,
@@ -1020,6 +1097,10 @@ async fn add_service_manifest(
             &install_services,
             console_bundle_install.bundle_count,
         );
+        entry["serviceManifestSnapshot"] = manifest.clone();
+        if let Some(previous_manifest_snapshot) = previous_manifest_snapshot {
+            entry["previousServiceManifestSnapshot"] = previous_manifest_snapshot;
+        }
         if let Some(service) = entry.get_mut("service").and_then(Value::as_object_mut) {
             service.insert("baseUrl".to_owned(), json!(base_url.clone()));
             service.insert(
@@ -1409,6 +1490,9 @@ pub async fn uninstall_remote_module(
     );
     let console_extension_registry_path = repo_root.join(CONSOLE_EXTENSION_REGISTRY_PATH);
     let target = remote_uninstall_target(&install_ledger_path, module_name)?;
+    for warning in remote_uninstall_dependency_warnings(&install_ledger_path, &target)? {
+        eprintln!("warning: {warning}");
+    }
     let console_extension_module_dirs = target
         .module_names
         .iter()
@@ -1787,12 +1871,6 @@ pub async fn list_module_services(options: ModuleServiceListOptions) -> Result<(
 }
 
 pub async fn export_module_services(options: ModuleServiceExportOptions) -> Result<()> {
-    if options.format.trim() != "compose" {
-        bail!(
-            "Unsupported service export format `{}`; expected `compose`",
-            options.format
-        );
-    }
     let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
     let module_services_path =
         resolve_module_services_file_path(&repo_root, options.module_services_file.as_deref());
@@ -1801,7 +1879,16 @@ pub async fn export_module_services(options: ModuleServiceExportOptions) -> Resu
         .iter()
         .find(|state| state.module_name == options.module_name)
         .ok_or_else(|| anyhow!("Service module not found: {}", options.module_name))?;
-    print!("{}", compose_service_export_source(state));
+    let receipt = installed_service_receipt(&repo_root, &options.module_name).ok();
+    match options.format.trim() {
+        "compose" => print!("{}", compose_service_export_source(state)),
+        "systemd" => print!("{}", systemd_service_export_source(state)),
+        "dockerfile" => print!("{}", dockerfile_service_export_source(state)),
+        "env" => print!("{}", env_service_export_source(state, receipt.as_ref())),
+        other => bail!(
+            "Unsupported service export format `{other}`; expected compose, systemd, dockerfile, or env"
+        ),
+    }
     Ok(())
 }
 
@@ -1826,6 +1913,65 @@ fn compose_service_source(
         service.name,
         service.ready_url
     )
+}
+
+fn systemd_service_export_source(state: &RemoteModuleServiceState) -> String {
+    let mut source = String::new();
+    for service in &state.services {
+        let unit_name = format!(
+            "lenso-{}-{}",
+            slugify(&state.module_name),
+            slugify(&service.name)
+        );
+        source.push_str(&format!(
+            "# {unit_name}.service\n[Unit]\nDescription=Lenso service {} / {}\nAfter=network.target\n\n[Service]\nWorkingDirectory={}\nExecStart=/bin/sh -lc '{}'\nRestart=always\nEnvironment=LENSO_READY_URL={}\n\n[Install]\nWantedBy=multi-user.target\n\n",
+            state.module_name,
+            service.name,
+            shell_single_quote(service.cwd.as_deref().unwrap_or(".")),
+            shell_single_quote(&service.command),
+            service.ready_url
+        ));
+    }
+    source
+}
+
+fn dockerfile_service_export_source(state: &RemoteModuleServiceState) -> String {
+    let Some(service) = state.services.first() else {
+        return "# no services declared\n".to_owned();
+    };
+    format!(
+        "# Generated for Lenso service {} / {}\nFROM node:22-slim\nWORKDIR /app\nCOPY . .\nEXPOSE 4100\nCMD [\"sh\", \"-lc\", \"{}\"]\n",
+        state.module_name,
+        service.name,
+        json_escaped_string(&service.command)
+    )
+}
+
+fn env_service_export_source(state: &RemoteModuleServiceState, receipt: Option<&Value>) -> String {
+    let mut source = format!("# Lenso service env for {}\n", state.module_name);
+    let manifest = receipt.and_then(|receipt| receipt.get("serviceManifestSnapshot"));
+    for key in manifest.map(service_env_set).unwrap_or_default() {
+        source.push_str(&format!("{key}=\n"));
+    }
+    for service in &state.services {
+        source.push_str(&format!(
+            "LENSO_{}_READY_URL={}\n",
+            snake_case(&service.name).to_ascii_uppercase(),
+            service.ready_url
+        ));
+    }
+    source
+}
+
+fn shell_single_quote(value: &str) -> String {
+    value.replace('\'', "'\\''")
+}
+
+fn json_escaped_string(value: &str) -> String {
+    serde_json::to_string(value)
+        .unwrap_or_else(|_| "\"\"".to_owned())
+        .trim_matches('"')
+        .to_owned()
 }
 
 pub async fn status_module_service(options: ModuleServiceStatusOptions) -> Result<()> {
@@ -2157,9 +2303,71 @@ pub async fn add_module_catalog_entry(
 
 pub async fn check_service_manifest_reference(
     manifest_reference: &str,
-    json_output: bool,
+    options: ServiceManifestCheckOptions,
 ) -> Result<()> {
-    let manifest = validate_service_manifest(read_json_reference(manifest_reference).await?)?;
+    let initial_manifest = if manifest_reference.starts_with("http://")
+        || manifest_reference.starts_with("https://")
+    {
+        None
+    } else {
+        Some(validate_service_manifest(
+            read_json_reference(manifest_reference).await?,
+        )?)
+    };
+    let manifest_url = service_check_manifest_url(
+        manifest_reference,
+        initial_manifest.as_ref(),
+        options.manifest_url.as_deref(),
+    );
+    let ready_url = service_check_ready_url(
+        initial_manifest.as_ref(),
+        manifest_url.as_deref(),
+        options.ready_url.as_deref(),
+    );
+    let mut process = if let Some(command) = options.serve_command.as_deref() {
+        let ready_url = ready_url.as_deref().ok_or_else(|| {
+            anyhow!(
+                "Service check needs --ready-url or a manifest health/install ready URL when using --serve-command"
+            )
+        })?;
+        let manifest_url = manifest_url.as_deref().ok_or_else(|| {
+            anyhow!(
+                "Service check needs --manifest-url or an inferable manifest URL when using --serve-command"
+            )
+        })?;
+        let mut process = ManagedCheckProcess::spawn(command, options.cwd.as_deref())?;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(800))
+            .build()
+            .context("build service check HTTP client")?;
+        wait_for_service_check_ready(
+            &client,
+            &mut process.child,
+            ready_url,
+            options.ready_timeout_ms,
+        )
+        .await?;
+        let fetched_manifest = client
+            .get(manifest_url)
+            .send()
+            .await
+            .with_context(|| format!("fetch service manifest {manifest_url}"))?
+            .error_for_status()
+            .with_context(|| format!("fetch service manifest {manifest_url}"))?
+            .json::<Value>()
+            .await
+            .context("parse service manifest JSON")?;
+        Some((process, validate_service_manifest(fetched_manifest)?))
+    } else {
+        None
+    };
+    let manifest = if let Some((_, manifest)) = process.as_ref() {
+        manifest.clone()
+    } else if let Some(manifest) = initial_manifest {
+        manifest
+    } else {
+        validate_service_manifest(read_json_reference(manifest_reference).await?)?
+    };
     let name = string_field(&manifest, "name")?.trim();
     let version = string_field(&manifest, "version")?.trim();
     let modules = manifest
@@ -2170,13 +2378,39 @@ pub async fn check_service_manifest_reference(
         .iter()
         .filter_map(|module| module.get("name").and_then(Value::as_str))
         .collect::<Vec<_>>();
+    let probes = if let Some(manifest_url) = manifest_url.as_deref() {
+        service_check_probe_summary(&manifest, manifest_url).await?
+    } else {
+        Vec::new()
+    };
+    let declarations = service_check_declaration_summary(&manifest);
+    if let Some(failed_probe) = probes
+        .iter()
+        .find(|probe| probe.get("status").and_then(Value::as_str) == Some("failed"))
+    {
+        bail!(
+            "Service probe failed: {} {}",
+            failed_probe
+                .get("method")
+                .and_then(Value::as_str)
+                .unwrap_or("-"),
+            failed_probe
+                .get("url")
+                .and_then(Value::as_str)
+                .unwrap_or("-")
+        );
+    }
 
-    if json_output {
+    if options.json {
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({
+                "declarations": declarations,
                 "manifestReference": manifest_reference,
+                "manifestUrl": manifest_url,
                 "modules": module_names,
+                "probes": probes,
+                "readyUrl": ready_url,
                 "service": name,
                 "status": "ok",
                 "version": version,
@@ -2186,8 +2420,620 @@ pub async fn check_service_manifest_reference(
     } else {
         println!("Service manifest ok: {name} {version}");
         println!("Provided modules: {}", module_names.join(", "));
+        println!(
+            "Declared operations: routes={} actions={} runtime={} events={}",
+            declarations["routes"],
+            declarations["actions"],
+            declarations["runtimeFunctions"],
+            declarations["eventHandlers"]
+        );
+        if let Some(ready_url) = ready_url {
+            println!("Ready URL: {ready_url}");
+        }
+        if let Some(manifest_url) = manifest_url {
+            println!("Manifest URL: {manifest_url}");
+        }
+        if !probes.is_empty() {
+            println!("Safe probes:");
+            for probe in probes {
+                println!(
+                    "- {} {} {}",
+                    probe
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("skip"),
+                    probe.get("method").and_then(Value::as_str).unwrap_or("-"),
+                    probe.get("url").and_then(Value::as_str).unwrap_or("-")
+                );
+            }
+        }
+    }
+    drop(process.take());
+    Ok(())
+}
+
+struct ManagedCheckProcess {
+    child: Child,
+}
+
+impl ManagedCheckProcess {
+    fn spawn(command: &str, cwd: Option<&Path>) -> Result<Self> {
+        let mut process = Command::new("sh");
+        process.arg("-c").arg(command);
+        if let Some(cwd) = cwd {
+            process.current_dir(cwd);
+        }
+        let child = process
+            .spawn()
+            .with_context(|| format!("start service check command `{command}`"))?;
+        Ok(Self { child })
+    }
+}
+
+impl Drop for ManagedCheckProcess {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+async fn wait_for_service_check_ready(
+    client: &reqwest::Client,
+    child: &mut Child,
+    ready_url: &str,
+    ready_timeout_ms: u64,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_millis(ready_timeout_ms);
+    loop {
+        if remote_service_ready_url(client, ready_url).await {
+            return Ok(());
+        }
+        if let Some(status) = child.try_wait().context("check service command status")? {
+            bail!("service command exited before ready: {status}");
+        }
+        if Instant::now() >= deadline {
+            bail!("service did not become ready at {ready_url} within {ready_timeout_ms}ms");
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn service_check_manifest_url(
+    manifest_reference: &str,
+    manifest: Option<&Value>,
+    explicit_manifest_url: Option<&str>,
+) -> Option<String> {
+    explicit_manifest_url
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            manifest
+                .and_then(|manifest| manifest.get("health"))
+                .and_then(|health| {
+                    health
+                        .get("manifestUrl")
+                        .or_else(|| health.get("manifest_url"))
+                })
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            manifest
+                .and_then(service_check_first_ready_url)
+                .and_then(|url| infer_manifest_url_from_ready_url(&url))
+        })
+        .or_else(|| {
+            (manifest_reference.starts_with("http://")
+                || manifest_reference.starts_with("https://"))
+            .then(|| manifest_reference.to_owned())
+        })
+}
+
+fn service_check_ready_url(
+    manifest: Option<&Value>,
+    manifest_url: Option<&str>,
+    explicit_ready_url: Option<&str>,
+) -> Option<String> {
+    explicit_ready_url
+        .map(ToOwned::to_owned)
+        .or_else(|| manifest.and_then(service_check_first_ready_url))
+        .or_else(|| manifest_url.and_then(infer_ready_url_from_manifest_url))
+}
+
+fn service_check_first_ready_url(manifest: &Value) -> Option<String> {
+    manifest
+        .get("health")
+        .and_then(|health| {
+            health
+                .get("readyUrl")
+                .or_else(|| health.get("ready_url"))
+                .or_else(|| health.get("statusUrl"))
+                .or_else(|| health.get("status_url"))
+        })
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            manifest
+                .get("install")
+                .and_then(|install| install.get("services"))
+                .and_then(Value::as_array)
+                .and_then(|services| services.first())
+                .and_then(|service| service.get("readyUrl").or_else(|| service.get("ready_url")))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+}
+
+fn infer_manifest_url_from_ready_url(ready_url: &str) -> Option<String> {
+    ready_url
+        .strip_suffix("/status")
+        .or_else(|| ready_url.strip_suffix("/ready"))
+        .map(|base| format!("{base}/manifest"))
+}
+
+fn infer_ready_url_from_manifest_url(manifest_url: &str) -> Option<String> {
+    manifest_url
+        .strip_suffix("/manifest")
+        .map(|base| format!("{base}/status"))
+}
+
+async fn service_check_probe_summary(manifest: &Value, manifest_url: &str) -> Result<Vec<Value>> {
+    let service_base_url = manifest_url
+        .strip_suffix("/manifest")
+        .unwrap_or(manifest_url)
+        .to_owned();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(800))
+        .build()
+        .context("build service probe HTTP client")?;
+    let mut probes = Vec::new();
+    for module in manifest
+        .get("modules")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(module_name) = module.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        for route in module
+            .get("http_routes")
+            .or_else(|| module.get("httpRoutes"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let method = route
+                .get("method")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_ascii_uppercase();
+            let path = route.get("path").and_then(Value::as_str).unwrap_or("");
+            if method != "GET" || path.contains('{') || path.contains(':') {
+                probes.push(json!({
+                    "method": method,
+                    "module": module_name,
+                    "path": path,
+                    "status": "skipped",
+                }));
+                continue;
+            }
+            let url = join_url_path(
+                &service_base_url,
+                &format!("modules/{module_name}/{}", path.trim_start_matches('/')),
+            );
+            let status = if remote_service_ready_url(&client, &url).await {
+                "ok"
+            } else {
+                "failed"
+            };
+            probes.push(json!({
+                "method": method,
+                "module": module_name,
+                "path": path,
+                "status": status,
+                "url": url,
+            }));
+        }
+    }
+    Ok(probes)
+}
+
+fn service_check_declaration_summary(manifest: &Value) -> Value {
+    let mut routes = 0usize;
+    let mut actions = 0usize;
+    let mut runtime_functions = 0usize;
+    let mut event_handlers = 0usize;
+    for module in manifest
+        .get("modules")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        routes += module
+            .get("http_routes")
+            .or_else(|| module.get("httpRoutes"))
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        actions += module
+            .get("admin")
+            .and_then(|admin| admin.get("actions"))
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        runtime_functions += module
+            .get("runtime")
+            .and_then(|runtime| runtime.get("functions"))
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        event_handlers += module
+            .get("events")
+            .and_then(|events| events.get("handlers"))
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+    }
+    json!({
+        "actions": actions,
+        "eventHandlers": event_handlers,
+        "routes": routes,
+        "runtimeFunctions": runtime_functions,
+    })
+}
+
+pub async fn diff_service(options: ServiceDiffOptions) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let receipt = installed_service_receipt(&repo_root, &options.service_name)?;
+    let current = receipt
+        .get("serviceManifestSnapshot")
+        .ok_or_else(|| {
+            anyhow!(
+                "Service `{}` has no manifest snapshot; reinstall or upgrade it once before diff",
+                options.service_name
+            )
+        })?
+        .clone();
+    let candidate =
+        validate_service_manifest(read_json_reference(&options.manifest_reference).await?)?;
+    ensure_service_name_matches(&candidate, &options.service_name)?;
+    let diff = service_manifest_diff(&current, &candidate);
+
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&diff)?);
+    } else {
+        print_service_manifest_diff(&options.service_name, &diff);
     }
     Ok(())
+}
+
+pub async fn upgrade_service(options: ServiceUpgradeOptions) -> Result<()> {
+    let candidate =
+        validate_service_manifest(read_json_reference(&options.manifest_reference).await?)?;
+    ensure_service_name_matches(&candidate, &options.service_name)?;
+    let install_options = RemoteModuleInstallOptions {
+        allow_incompatible: options.allow_incompatible,
+        base_url: options.base_url,
+        console_plan: false,
+        dry_run: options.dry_run,
+        env_file: options.env_file,
+        install_profiles: Vec::new(),
+        module_services_file: options.module_services_file,
+        repo_root: options.repo_root,
+        run_install_commands: false,
+        source: "remote".to_owned(),
+    };
+    add_service_manifest_with_options(&options.manifest_reference, candidate, &install_options)
+        .await
+}
+
+pub async fn rollback_service(options: ServiceRollbackOptions) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let receipt = installed_service_receipt(&repo_root, &options.service_name)?;
+    let previous = receipt
+        .get("previousServiceManifestSnapshot")
+        .ok_or_else(|| {
+            anyhow!(
+                "Service `{}` has no previous manifest snapshot to roll back to",
+                options.service_name
+            )
+        })?
+        .clone();
+    let previous = validate_service_manifest(previous)?;
+    let manifest_reference = receipt
+        .get("service")
+        .and_then(|service| service.get("manifestReference"))
+        .or_else(|| receipt.get("manifestReference"))
+        .and_then(Value::as_str)
+        .unwrap_or("rollback:lenso.service.json")
+        .to_owned();
+    let install_options = RemoteModuleInstallOptions {
+        allow_incompatible: true,
+        base_url: service_receipt_base_url(&receipt),
+        console_plan: false,
+        dry_run: options.dry_run,
+        env_file: options.env_file,
+        install_profiles: Vec::new(),
+        module_services_file: options.module_services_file,
+        repo_root: options.repo_root,
+        run_install_commands: false,
+        source: "remote".to_owned(),
+    };
+    add_service_manifest_with_options(&manifest_reference, previous, &install_options).await
+}
+
+fn installed_service_receipt(repo_root: &Path, service_name: &str) -> Result<Value> {
+    let ledger_path = repo_root.join(MODULE_INSTALL_LEDGER_PATH);
+    let ledger = read_json_if_exists(&ledger_path)?
+        .ok_or_else(|| anyhow!("Module install ledger not found: {}", ledger_path.display()))?;
+    let modules = ledger
+        .get("modules")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("Module install ledger modules must be an array"))?;
+    modules
+        .iter()
+        .find(|entry| {
+            entry.get("moduleName").and_then(Value::as_str) == Some(service_name)
+                || service_receipt_name(entry) == Some(service_name)
+        })
+        .cloned()
+        .ok_or_else(|| anyhow!("Installed service not found: {service_name}"))
+}
+
+fn ensure_service_name_matches(manifest: &Value, expected: &str) -> Result<()> {
+    let actual = string_field(manifest, "name")?.trim();
+    if actual != expected {
+        bail!("Service manifest is for `{actual}`, expected `{expected}`");
+    }
+    Ok(())
+}
+
+fn service_manifest_diff(current: &Value, candidate: &Value) -> Value {
+    let current_modules = service_module_name_set(current);
+    let candidate_modules = service_module_name_set(candidate);
+    let all_modules = current_modules
+        .union(&candidate_modules)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let capability_changes = all_modules
+        .iter()
+        .filter_map(|module| {
+            let current = service_module_string_set(current, module, "capabilities");
+            let candidate = service_module_string_set(candidate, module, "capabilities");
+            let added = set_added(&current, &candidate);
+            let removed = set_removed(&current, &candidate);
+            (!added.is_empty() || !removed.is_empty()).then(|| {
+                json!({
+                    "added": added,
+                    "module": module,
+                    "removed": removed,
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    let operation_changes = all_modules
+        .iter()
+        .filter_map(|module| {
+            let current = service_module_operation_set(current, module);
+            let candidate = service_module_operation_set(candidate, module);
+            let added = set_added(&current, &candidate);
+            let removed = set_removed(&current, &candidate);
+            (!added.is_empty() || !removed.is_empty()).then(|| {
+                json!({
+                    "added": added,
+                    "module": module,
+                    "removed": removed,
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    let current_env = service_env_set(current);
+    let candidate_env = service_env_set(candidate);
+    let current_config = service_config_set(current);
+    let candidate_config = service_config_set(candidate);
+
+    json!({
+        "capabilities": capability_changes,
+        "compatibilityChanged": current.get("compatibility") != candidate.get("compatibility"),
+        "config": {
+            "added": set_added(&current_config, &candidate_config),
+            "removed": set_removed(&current_config, &candidate_config),
+        },
+        "env": {
+            "added": set_added(&current_env, &candidate_env),
+            "removed": set_removed(&current_env, &candidate_env),
+        },
+        "modules": {
+            "added": set_added(&current_modules, &candidate_modules),
+            "removed": set_removed(&current_modules, &candidate_modules),
+        },
+        "operations": operation_changes,
+    })
+}
+
+fn print_service_manifest_diff(service_name: &str, diff: &Value) {
+    println!("Service diff: {service_name}");
+    print_diff_group("modules added", &diff["modules"]["added"]);
+    print_diff_group("modules removed", &diff["modules"]["removed"]);
+    print_diff_group("env added", &diff["env"]["added"]);
+    print_diff_group("env removed", &diff["env"]["removed"]);
+    print_diff_group("config added", &diff["config"]["added"]);
+    print_diff_group("config removed", &diff["config"]["removed"]);
+    println!(
+        "compatibility changed: {}",
+        diff.get("compatibilityChanged")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    );
+    for change in diff
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        println!(
+            "capabilities {}: +{} -{}",
+            change.get("module").and_then(Value::as_str).unwrap_or("-"),
+            json_string_list(&change["added"]).join(", "),
+            json_string_list(&change["removed"]).join(", ")
+        );
+    }
+    for change in diff
+        .get("operations")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        println!(
+            "operations {}: +{} -{}",
+            change.get("module").and_then(Value::as_str).unwrap_or("-"),
+            json_string_list(&change["added"]).join(", "),
+            json_string_list(&change["removed"]).join(", ")
+        );
+    }
+}
+
+fn print_diff_group(label: &str, value: &Value) {
+    let items = json_string_list(value);
+    if !items.is_empty() {
+        println!("{label}: {}", items.join(", "));
+    }
+}
+
+fn json_string_list(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn service_module_name_set(manifest: &Value) -> BTreeSet<String> {
+    manifest
+        .get("modules")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|module| module.get("name").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn service_module<'a>(manifest: &'a Value, module_name: &str) -> Option<&'a Value> {
+    manifest
+        .get("modules")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|module| module.get("name").and_then(Value::as_str) == Some(module_name))
+}
+
+fn service_module_string_set(manifest: &Value, module_name: &str, key: &str) -> BTreeSet<String> {
+    service_module(manifest, module_name)
+        .and_then(|module| module.get(key))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn service_module_operation_set(manifest: &Value, module_name: &str) -> BTreeSet<String> {
+    let Some(module) = service_module(manifest, module_name) else {
+        return BTreeSet::new();
+    };
+    let mut operations = BTreeSet::new();
+    for route in module
+        .get("http_routes")
+        .or_else(|| module.get("httpRoutes"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let (Some(method), Some(path)) = (
+            route.get("method").and_then(Value::as_str),
+            route.get("path").and_then(Value::as_str),
+        ) {
+            operations.insert(format!("route:{method} {path}"));
+        }
+    }
+    for function in module
+        .get("runtime")
+        .and_then(|runtime| runtime.get("functions"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(name) = function.get("name").and_then(Value::as_str) {
+            operations.insert(format!("runtime:{name}"));
+        }
+    }
+    for handler in module
+        .get("events")
+        .and_then(|events| events.get("handlers"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(name) = handler
+            .get("event")
+            .or_else(|| handler.get("name"))
+            .and_then(Value::as_str)
+        {
+            operations.insert(format!("event:{name}"));
+        }
+    }
+    for action in module
+        .get("admin")
+        .and_then(|admin| admin.get("actions"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(name) = action.get("name").and_then(Value::as_str) {
+            operations.insert(format!("action:{name}"));
+        }
+    }
+    operations
+}
+
+fn service_env_set(manifest: &Value) -> BTreeSet<String> {
+    let mut values = manifest
+        .get("requiredEnv")
+        .or_else(|| manifest.get("required_env"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>();
+    values.extend(
+        manifest
+            .get("env")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|field| field.get("name").and_then(Value::as_str))
+            .map(ToOwned::to_owned),
+    );
+    values
+}
+
+fn service_config_set(manifest: &Value) -> BTreeSet<String> {
+    manifest
+        .get("config")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|field| field.get("key").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn set_added(left: &BTreeSet<String>, right: &BTreeSet<String>) -> Vec<String> {
+    right.difference(left).cloned().collect()
+}
+
+fn set_removed(left: &BTreeSet<String>, right: &BTreeSet<String>) -> Vec<String> {
+    left.difference(right).cloned().collect()
 }
 
 pub async fn apply_console_package_install_plan(
@@ -4669,6 +5515,42 @@ fn remote_uninstall_target(
     }
 }
 
+fn remote_uninstall_dependency_warnings(
+    install_ledger_path: &Path,
+    target: &RemoteUninstallTarget,
+) -> Result<Vec<String>> {
+    let Some(ledger) = read_json_if_exists(install_ledger_path)? else {
+        return Ok(Vec::new());
+    };
+    let removed = target
+        .module_names
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    Ok(ledger
+        .get("modules")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let module_name = entry.get("moduleName").and_then(Value::as_str)?;
+            if removed.contains(module_name) {
+                return None;
+            }
+            let dependency = entry
+                .get("dependencies")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .find(|dependency| removed.contains(dependency))?;
+            Some(format!(
+                "`{module_name}` still declares dependency on removed module `{dependency}`"
+            ))
+        })
+        .collect())
+}
+
 fn service_receipt_module_names(modules: &[Value], provider_name: &str) -> Vec<String> {
     modules
         .iter()
@@ -5011,7 +5893,14 @@ fn module_install_ledger_entry(ledger_path: &Path, module_name: &str) -> Result<
     let Some(ledger) = read_json_if_exists(ledger_path)? else {
         return Ok(None);
     };
-    Ok(ledger
+    Ok(module_install_ledger_entry_value(&ledger, module_name).cloned())
+}
+
+fn module_install_ledger_entry_value<'a>(
+    ledger: &'a Value,
+    module_name: &str,
+) -> Option<&'a Value> {
+    ledger
         .get("modules")
         .and_then(Value::as_array)
         .and_then(|modules| {
@@ -5019,7 +5908,6 @@ fn module_install_ledger_entry(ledger_path: &Path, module_name: &str) -> Result<
                 module.get("moduleName").and_then(Value::as_str) == Some(module_name)
             })
         })
-        .cloned())
 }
 
 fn module_install_ledger_source(
@@ -5204,6 +6092,7 @@ fn remote_module_install_ledger_entry(
         "writes": writes,
     });
     copy_optional_manifest_field(manifest, &mut entry, "compatibility");
+    copy_optional_manifest_field(manifest, &mut entry, "dependencies");
     copy_optional_manifest_field(manifest, &mut entry, "deployment");
     copy_optional_manifest_field(manifest, &mut entry, "service");
     entry
@@ -8584,6 +9473,27 @@ mod tests {
     }
 
     #[test]
+    fn service_check_infers_urls_from_ready_url() {
+        let manifest = json!({
+            "health": {
+                "readyUrl": "http://127.0.0.1:4110/lenso/service/v1/status"
+            },
+            "modules": [{ "name": "support-ticket" }],
+            "name": "support-service",
+            "version": "0.1.0"
+        });
+
+        assert_eq!(
+            service_check_ready_url(Some(&manifest), None, None).as_deref(),
+            Some("http://127.0.0.1:4110/lenso/service/v1/status")
+        );
+        assert_eq!(
+            service_check_manifest_url("./lenso.service.json", Some(&manifest), None).as_deref(),
+            Some("http://127.0.0.1:4110/lenso/service/v1/manifest")
+        );
+    }
+
+    #[test]
     fn service_manifest_validation_reports_contract_paths() {
         let missing_command = validate_service_manifest(json!({
             "install": {
@@ -8614,6 +9524,50 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(bad_capability.contains("$.modules[0].capabilities[1]"));
+    }
+
+    #[test]
+    fn service_manifest_diff_reports_modules_capabilities_and_operations() {
+        let current = json!({
+            "modules": [
+                {
+                    "capabilities": ["support.read"],
+                    "http_routes": [{ "method": "GET", "path": "/tickets" }],
+                    "name": "support-ticket"
+                }
+            ],
+            "name": "support-service",
+            "requiredEnv": ["PORT"],
+            "version": "0.1.0"
+        });
+        let candidate = json!({
+            "config": [{ "key": "support.mode" }],
+            "modules": [
+                {
+                    "capabilities": ["support.read", "support.write"],
+                    "http_routes": [
+                        { "method": "GET", "path": "/tickets" },
+                        { "method": "POST", "path": "/tickets" }
+                    ],
+                    "name": "support-ticket"
+                },
+                { "name": "support-kb" }
+            ],
+            "name": "support-service",
+            "requiredEnv": ["PORT", "SUPPORT_API_KEY"],
+            "version": "0.2.0"
+        });
+
+        let diff = service_manifest_diff(&current, &candidate);
+
+        assert_eq!(diff["modules"]["added"], json!(["support-kb"]));
+        assert_eq!(diff["env"]["added"], json!(["SUPPORT_API_KEY"]));
+        assert_eq!(diff["config"]["added"], json!(["support.mode"]));
+        assert_eq!(diff["capabilities"][0]["added"], json!(["support.write"]));
+        assert_eq!(
+            diff["operations"][0]["added"],
+            json!(["route:POST /tickets"])
+        );
     }
 
     #[test]
@@ -8699,7 +9653,7 @@ mod tests {
 
     #[test]
     fn compose_export_uses_declared_service_state() {
-        let source = compose_service_export_source(&RemoteModuleServiceState {
+        let state = RemoteModuleServiceState {
             module_name: "support-ticket".to_owned(),
             services: vec![RemoteModuleServiceInstallSpec {
                 name: "api".to_owned(),
@@ -8709,11 +9663,15 @@ mod tests {
                 ready_timeout_ms: 10_000,
                 auto_start: true,
             }],
-        });
+        };
+        let source = compose_service_export_source(&state);
 
         assert!(source.contains("support-ticket-api:"));
         assert!(source.contains("pnpm start"));
         assert!(source.contains("lenso.ready_url"));
+        assert!(systemd_service_export_source(&state).contains("ExecStart=/bin/sh -lc"));
+        assert!(dockerfile_service_export_source(&state).contains("CMD [\"sh\", \"-lc\""));
+        assert!(env_service_export_source(&state, None).contains("LENSO_API_READY_URL="));
     }
 
     #[test]
