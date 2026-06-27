@@ -30,6 +30,11 @@ enum Command {
         #[command(subcommand)]
         command: ModuleCommand,
     },
+    /// Install, diagnose, and operate Lenso services.
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
     /// Manage Runtime Console assets, access, and packages.
     Console {
         #[command(subcommand)]
@@ -128,19 +133,19 @@ struct ConsoleUpdateArgs {
 
 #[derive(Debug, Subcommand)]
 enum ModuleCommand {
-    /// Create a linked module or service module scaffold.
+    /// Create a linked module or service scaffold.
     Create(ModuleCreateArgs),
     /// Install a remote source or enable a linked module.
     Install(RemoteModuleInstallArgs),
-    /// Add a configured service module source.
+    /// Add a configured service source.
     Add(RemoteModuleInstallArgs),
     /// Reapply an installed module from its install receipt.
     Update(ModuleUpdateArgs),
     /// Remove a remote source or disable a linked module.
     Uninstall(RemoteModuleUninstallArgs),
-    /// Diagnose installed service modules.
+    /// Diagnose installed services.
     Doctor(ModuleDoctorArgs),
-    /// Inspect and manage declared service-module processes.
+    /// Inspect and manage declared service processes.
     Service {
         #[command(subcommand)]
         command: ModuleServiceCommand,
@@ -150,7 +155,7 @@ enum ModuleCommand {
         #[command(subcommand)]
         command: ModuleCatalogCommand,
     },
-    /// Install service modules.
+    /// Install services.
     Marketplace {
         #[command(subcommand)]
         command: ModuleMarketplaceCommand,
@@ -159,27 +164,49 @@ enum ModuleCommand {
 
 #[derive(Debug, Subcommand)]
 enum ModuleCatalogCommand {
-    /// Add a service module manifest to the local catalog.
+    /// Add a service manifest to the local catalog.
     Add(ModuleCatalogAddArgs),
 }
 
 #[derive(Debug, Subcommand)]
 enum ModuleMarketplaceCommand {
-    /// Install a service module from its manifest.
+    /// Install a service from its manifest.
     Install(RemoteModuleInstallArgs),
 }
 
 #[derive(Debug, Subcommand)]
-enum ModuleServiceCommand {
-    /// List declared service-module services.
+enum ServiceCommand {
+    /// Install a service manifest.
+    Install(RemoteModuleInstallArgs),
+    /// Remove a service provider and its provided modules.
+    Uninstall(RemoteModuleUninstallArgs),
+    /// Diagnose installed services and their provided modules.
+    Doctor(ModuleDoctorArgs),
+    /// Check configured service state. Alias for doctor in this V5 slice.
+    Check(ModuleDoctorArgs),
+    /// List declared services.
     List(ModuleServiceListArgs),
-    /// Export a deployment fragment for declared service-module services.
+    /// Export a deployment fragment for declared services.
     Export(ModuleServiceExportArgs),
-    /// Show one service-module service with local state.
+    /// Show one service with local state.
     Status(ModuleServiceStatusArgs),
-    /// Start a declared service-module service in the background.
+    /// Start a declared service in the background.
     Start(ModuleServiceStartArgs),
-    /// Stop a declared service-module service started by the CLI or host.
+    /// Stop a declared service started by the CLI or host.
+    Stop(ModuleServiceStopArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum ModuleServiceCommand {
+    /// List declared services.
+    List(ModuleServiceListArgs),
+    /// Export a deployment fragment for declared services.
+    Export(ModuleServiceExportArgs),
+    /// Show one service with local state.
+    Status(ModuleServiceStatusArgs),
+    /// Start a declared service in the background.
+    Start(ModuleServiceStartArgs),
+    /// Stop a declared service started by the CLI or host.
     Stop(ModuleServiceStopArgs),
 }
 
@@ -454,7 +481,7 @@ struct ModuleCreateArgs {
     #[arg(long)]
     repo_root: Option<std::path::PathBuf>,
 
-    /// Directory for standalone service module packages.
+    /// Directory for standalone service packages.
     #[arg(long)]
     output_dir: Option<std::path::PathBuf>,
 
@@ -486,7 +513,7 @@ struct ModuleCreateArgs {
     #[arg(long)]
     source: Option<String>,
 
-    /// Create a standalone service module package.
+    /// Create a standalone service package.
     #[arg(long)]
     remote: bool,
 
@@ -791,6 +818,21 @@ impl From<&ConsolePackageApplyPlanArgs> for module::ConsolePackageApplyPlanOptio
     }
 }
 
+fn looks_like_manifest_reference(reference: &str) -> bool {
+    reference.starts_with("http://")
+        || reference.starts_with("https://")
+        || reference.ends_with(".json")
+        || reference.contains("/manifest")
+}
+
+fn warn_module_install_manifest_reference(reference: &str) {
+    if looks_like_manifest_reference(reference) {
+        eprintln!(
+            "warning: `lenso module install <manifest>` is deprecated for service manifests; use `lenso service install <manifest>` or `lenso module install <module-name>`."
+        );
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -834,6 +876,7 @@ async fn main() -> anyhow::Result<()> {
                 module::create_module((&args).into()).await?;
             }
             ModuleCommand::Install(args) => {
+                warn_module_install_manifest_reference(&args.manifest_reference);
                 module::install_module(&args.manifest_reference, (&args).into()).await?;
             }
             ModuleCommand::Add(args) => {
@@ -876,6 +919,32 @@ async fn main() -> anyhow::Result<()> {
                     module::install_module(&args.manifest_reference, (&args).into()).await?;
                 }
             },
+        },
+        Command::Service { command } => match command {
+            ServiceCommand::Install(args) => {
+                module::install_module(&args.manifest_reference, (&args).into()).await?;
+            }
+            ServiceCommand::Uninstall(args) => {
+                module::uninstall_remote_module(&args.module_name, (&args).into()).await?;
+            }
+            ServiceCommand::Doctor(args) | ServiceCommand::Check(args) => {
+                module::doctor_module((&args).into()).await?;
+            }
+            ServiceCommand::List(args) => {
+                module::list_module_services((&args).into()).await?;
+            }
+            ServiceCommand::Export(args) => {
+                module::export_module_services((&args).into()).await?;
+            }
+            ServiceCommand::Status(args) => {
+                module::status_module_service((&args).into()).await?;
+            }
+            ServiceCommand::Start(args) => {
+                module::start_module_service((&args).into()).await?;
+            }
+            ServiceCommand::Stop(args) => {
+                module::stop_module_service((&args).into()).await?;
+            }
         },
     }
 
