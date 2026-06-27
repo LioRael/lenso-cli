@@ -346,6 +346,7 @@ struct RepoPaths {
 
 type PendingWrites = BTreeMap<PathBuf, String>;
 
+const MODULE_CATALOG_PATH: &str = ".lenso/module-catalog.json";
 const MODULE_INSTALL_LEDGER_PATH: &str = ".lenso/module-installs.json";
 const CONSOLE_EXTENSION_REGISTRY_PATH: &str = ".lenso/console/extensions/registry.json";
 const RUNTIME_CONFIG_DEFAULTS_PATH: &str = ".lenso/runtime-config-defaults.json";
@@ -534,13 +535,53 @@ pub async fn install_module(
     options: RemoteModuleInstallOptions,
 ) -> Result<()> {
     if let Some(descriptor) = read_install_descriptor(module_reference).await? {
+        if let Some(manifest_reference) = catalog_service_manifest_reference(&descriptor) {
+            return add_remote_module(manifest_reference, options).await;
+        }
         return install_module_descriptor(&descriptor, module_reference, options).await;
+    }
+
+    if !looks_like_json_reference(module_reference)
+        && let Some(manifest_reference) = local_catalog_service_manifest_reference(
+            module_reference,
+            options.repo_root.as_deref(),
+        )?
+    {
+        return add_remote_module(&manifest_reference, options).await;
     }
 
     match parse_module_source(&options.source)? {
         ModuleSource::Remote => add_remote_module(module_reference, options).await,
         ModuleSource::Linked => install_linked_module(module_reference, options),
     }
+}
+
+fn catalog_service_manifest_reference(entry: &Value) -> Option<&str> {
+    entry
+        .get("serviceManifest")
+        .or_else(|| entry.get("service_manifest"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn local_catalog_service_manifest_reference(
+    module_name: &str,
+    repo_root: Option<&Path>,
+) -> Result<Option<String>> {
+    let repo_root = resolve_repo_root(repo_root)?;
+    let Some(catalog) = read_json_if_exists(&repo_root.join(MODULE_CATALOG_PATH))? else {
+        return Ok(None);
+    };
+    let modules = catalog
+        .get("modules")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("Module catalog modules must be an array"))?;
+    Ok(modules
+        .iter()
+        .find(|entry| entry.get("name").and_then(Value::as_str) == Some(module_name))
+        .and_then(catalog_service_manifest_reference)
+        .map(ToOwned::to_owned))
 }
 
 async fn install_module_descriptor(
@@ -2017,7 +2058,7 @@ pub async fn add_module_catalog_entry(
         options
             .catalog_file
             .as_deref()
-            .unwrap_or_else(|| Path::new(".lenso/module-catalog.json")),
+            .unwrap_or_else(|| Path::new(MODULE_CATALOG_PATH)),
     );
     let manifest = read_json_reference(manifest_reference).await?;
     let is_service = is_service_manifest(&manifest);
@@ -7482,6 +7523,21 @@ mod tests {
         assert_eq!(parse_module_source("remote").unwrap(), ModuleSource::Remote);
         assert_eq!(parse_module_source("linked").unwrap(), ModuleSource::Linked);
         assert!(parse_module_source("wasm").is_err());
+    }
+
+    #[test]
+    fn catalog_service_entry_resolves_to_service_manifest() {
+        let entry = serde_json::json!({
+            "name": "support-ticket",
+            "source": "service",
+            "providedBy": "support-suite-provider",
+            "serviceManifest": "http://127.0.0.1:4110/lenso/service/v1/manifest"
+        });
+
+        assert_eq!(
+            catalog_service_manifest_reference(&entry),
+            Some("http://127.0.0.1:4110/lenso/service/v1/manifest")
+        );
     }
 
     #[test]
