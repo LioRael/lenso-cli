@@ -201,6 +201,8 @@ enum ServiceCommand {
     Export(ModuleServiceExportArgs),
     /// Show one service with local state.
     Status(ModuleServiceStatusArgs),
+    /// Show local logs for a declared service.
+    Logs(ModuleServiceLogsArgs),
     /// Start a declared service in the background.
     Start(ModuleServiceStartArgs),
     /// Stop a declared service started by the CLI or host.
@@ -384,6 +386,8 @@ enum ModuleServiceCommand {
     Export(ModuleServiceExportArgs),
     /// Show one service with local state.
     Status(ModuleServiceStatusArgs),
+    /// Show local logs for a declared service.
+    Logs(ModuleServiceLogsArgs),
     /// Start a declared service in the background.
     Start(ModuleServiceStartArgs),
     /// Stop a declared service started by the CLI or host.
@@ -446,6 +450,27 @@ struct ModuleServiceStatusArgs {
     /// Print machine-readable JSON.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ModuleServiceLogsArgs {
+    /// Module name.
+    module_name: String,
+
+    /// Service name.
+    service_name: String,
+
+    /// Number of log lines to print.
+    #[arg(long, default_value_t = 100)]
+    tail: usize,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Remote module services file.
+    #[arg(long)]
+    module_services_file: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -944,6 +969,18 @@ impl From<&ModuleServiceStatusArgs> for module::ModuleServiceStatusOptions {
     }
 }
 
+impl From<&ModuleServiceLogsArgs> for module::ModuleServiceLogsOptions {
+    fn from(args: &ModuleServiceLogsArgs) -> Self {
+        Self {
+            module_name: args.module_name.clone(),
+            module_services_file: args.module_services_file.clone(),
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
+            tail: args.tail,
+        }
+    }
+}
+
 impl From<&ModuleServiceStartArgs> for module::ModuleServiceStartOptions {
     fn from(args: &ModuleServiceStartArgs) -> Self {
         Self {
@@ -1141,6 +1178,9 @@ async fn main() -> anyhow::Result<()> {
                 ModuleServiceCommand::Status(args) => {
                     module::status_module_service((&args).into()).await?;
                 }
+                ModuleServiceCommand::Logs(args) => {
+                    module::logs_module_service((&args).into()).await?;
+                }
                 ModuleServiceCommand::Start(args) => {
                     module::start_module_service((&args).into()).await?;
                 }
@@ -1215,6 +1255,9 @@ async fn main() -> anyhow::Result<()> {
             }
             ServiceCommand::Status(args) => {
                 module::status_module_service((&args).into()).await?;
+            }
+            ServiceCommand::Logs(args) => {
+                module::logs_module_service((&args).into()).await?;
             }
             ServiceCommand::Start(args) => {
                 module::start_module_service((&args).into()).await?;
@@ -1422,5 +1465,28 @@ mod tests {
             panic!("expected service rollback");
         };
         assert!(rollback_args.dry_run);
+    }
+
+    #[test]
+    fn parses_service_logs() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "service",
+            "logs",
+            "support-ticket",
+            "api",
+            "--tail",
+            "100",
+        ]);
+        let Command::Service {
+            command: ServiceCommand::Logs(args),
+        } = cli.command
+        else {
+            panic!("expected service logs");
+        };
+
+        assert_eq!(args.module_name, "support-ticket");
+        assert_eq!(args.service_name, "api");
+        assert_eq!(args.tail, 100);
     }
 }

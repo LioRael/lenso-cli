@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -130,6 +130,15 @@ pub struct ModuleServiceStatusOptions {
     pub module_services_file: Option<PathBuf>,
     pub repo_root: Option<PathBuf>,
     pub service_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModuleServiceLogsOptions {
+    pub module_name: String,
+    pub module_services_file: Option<PathBuf>,
+    pub repo_root: Option<PathBuf>,
+    pub service_name: String,
+    pub tail: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -2011,6 +2020,33 @@ pub async fn status_module_service(options: ModuleServiceStatusOptions) -> Resul
     Ok(())
 }
 
+pub async fn logs_module_service(options: ModuleServiceLogsOptions) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let module_services_path =
+        resolve_module_services_file_path(&repo_root, options.module_services_file.as_deref());
+    let states = read_remote_module_service_states(&module_services_path)?;
+    let (module_name, service) =
+        find_module_service(&states, &options.module_name, &options.service_name)?;
+    let log_file_path = module_service_log_path(&repo_root, &module_name, &service.name);
+    if !log_file_path.exists() {
+        bail!(
+            "No local log file for {}/{}; start it with `lenso service start {} {}`",
+            module_name,
+            service.name,
+            module_name,
+            service.name
+        );
+    }
+
+    // ponytail: local dev logs are read whole; stream from EOF if these get large.
+    let contents = read_text(&log_file_path)
+        .with_context(|| format!("read service log {}", log_file_path.display()))?;
+    for line in tail_lines(&contents, options.tail) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
 pub async fn start_module_service(options: ModuleServiceStartOptions) -> Result<()> {
     let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
     let module_services_path =
@@ -2049,18 +2085,34 @@ pub async fn start_module_service(options: ModuleServiceStartOptions) -> Result<
         .as_deref()
         .map(|cwd| resolve_path(&repo_root, Path::new(cwd)))
         .unwrap_or_else(|| repo_root.clone());
+    let log_file_path = module_service_log_path(&repo_root, &module_name, &service.name);
+    if let Some(parent) = log_file_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create directory {}", parent.display()))?;
+    }
+    let log_file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_file_path)
+        .with_context(|| format!("open service log {}", log_file_path.display()))?;
+    let stderr_log = log_file
+        .try_clone()
+        .with_context(|| format!("clone service log {}", log_file_path.display()))?;
     // ponytail: local dev process control; a real supervisor belongs in deployment tooling.
     let mut child = shell_command(&service.command)
         .current_dir(cwd)
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(stderr_log))
         .spawn()
         .with_context(|| format!("start service {}/{}", module_name, service.name))?;
     write_service_lock(&lock_file_path)?;
     write_file(&pid_file_path, format!("{}\n", child.id()).as_bytes())?;
     println!(
-        "Started service {}/{} with pid {}.",
+        "Started service {}/{} with pid {}. Logs: {}",
         module_name,
         service.name,
-        child.id()
+        child.id(),
+        display_relative(&repo_root, &log_file_path)
     );
     wait_for_started_module_service_ready(
         &client,
@@ -7533,6 +7585,21 @@ fn remote_module_service_doctor_fix(
     }
 }
 
+fn module_service_log_path(repo_root: &Path, module_name: &str, service_name: &str) -> PathBuf {
+    repo_root
+        .join(".lenso/service-logs")
+        .join(remote_module_service_state_segment(module_name))
+        .join(format!(
+            "{}.log",
+            remote_module_service_state_segment(service_name)
+        ))
+}
+
+fn tail_lines(contents: &str, tail: usize) -> Vec<&str> {
+    let lines = contents.lines().collect::<Vec<_>>();
+    lines[lines.len().saturating_sub(tail)..].to_vec()
+}
+
 fn remote_module_service_state_path(
     services_state_dir: &Path,
     module_name: &str,
@@ -10254,6 +10321,25 @@ mod tests {
             path,
             PathBuf::from(".lenso/remote-crm-module-api-worker.lock")
         );
+    }
+
+    #[test]
+    fn module_service_log_path_sanitizes_names() {
+        let path = module_service_log_path(Path::new("/repo"), "CRM Module", "API Worker");
+
+        assert_eq!(
+            path,
+            PathBuf::from("/repo/.lenso/service-logs/crm-module/api-worker.log")
+        );
+    }
+
+    #[test]
+    fn tail_lines_returns_requested_suffix() {
+        let lines = tail_lines("one\ntwo\nthree\n", 2);
+
+        assert_eq!(lines, vec!["two", "three"]);
+        assert_eq!(tail_lines("one\ntwo\n", 10), vec!["one", "two"]);
+        assert!(tail_lines("one\ntwo\n", 0).is_empty());
     }
 
     #[test]
