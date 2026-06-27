@@ -534,14 +534,18 @@ pub async fn install_module(
     module_reference: &str,
     options: RemoteModuleInstallOptions,
 ) -> Result<()> {
+    let source = parse_module_source(&options.source)?;
     if let Some(descriptor) = read_install_descriptor(module_reference).await? {
-        if let Some(manifest_reference) = catalog_service_manifest_reference(&descriptor) {
+        if should_resolve_service_catalog_entry(source)
+            && let Some(manifest_reference) = catalog_service_manifest_reference(&descriptor)
+        {
             return add_remote_module(manifest_reference, options).await;
         }
         return install_module_descriptor(&descriptor, module_reference, options).await;
     }
 
-    if !looks_like_json_reference(module_reference)
+    if should_resolve_service_catalog_entry(source)
+        && !looks_like_json_reference(module_reference)
         && let Some(manifest_reference) = local_catalog_service_manifest_reference(
             module_reference,
             options.repo_root.as_deref(),
@@ -550,19 +554,53 @@ pub async fn install_module(
         return add_remote_module(&manifest_reference, options).await;
     }
 
-    match parse_module_source(&options.source)? {
+    match source {
         ModuleSource::Remote => add_remote_module(module_reference, options).await,
         ModuleSource::Linked => install_linked_module(module_reference, options),
     }
+}
+
+fn should_resolve_service_catalog_entry(source: ModuleSource) -> bool {
+    matches!(source, ModuleSource::Remote)
 }
 
 fn catalog_service_manifest_reference(entry: &Value) -> Option<&str> {
     entry
         .get("serviceManifest")
         .or_else(|| entry.get("service_manifest"))
+        .or_else(|| {
+            catalog_entry_is_service(entry)
+                .then(|| entry.get("manifestReference"))
+                .flatten()
+        })
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
+}
+
+fn catalog_service_manifest_reference_for_module<'a>(
+    entry: &'a Value,
+    module_name: &str,
+) -> Option<&'a str> {
+    let entry_name_matches = entry.get("name").and_then(Value::as_str) == Some(module_name);
+    let provided_module_matches = catalog_entry_is_service(entry)
+        && entry
+            .get("modules")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|module| module.get("name").and_then(Value::as_str) == Some(module_name));
+
+    (entry_name_matches || provided_module_matches)
+        .then(|| catalog_service_manifest_reference(entry))
+        .flatten()
+}
+
+fn catalog_entry_is_service(entry: &Value) -> bool {
+    entry
+        .get("source")
+        .and_then(Value::as_str)
+        .is_some_and(|source| source.eq_ignore_ascii_case("service"))
 }
 
 fn local_catalog_service_manifest_reference(
@@ -579,8 +617,7 @@ fn local_catalog_service_manifest_reference(
         .ok_or_else(|| anyhow!("Module catalog modules must be an array"))?;
     Ok(modules
         .iter()
-        .find(|entry| entry.get("name").and_then(Value::as_str) == Some(module_name))
-        .and_then(catalog_service_manifest_reference)
+        .find_map(|entry| catalog_service_manifest_reference_for_module(entry, module_name))
         .map(ToOwned::to_owned))
 }
 
@@ -7538,6 +7575,27 @@ mod tests {
             catalog_service_manifest_reference(&entry),
             Some("http://127.0.0.1:4110/lenso/service/v1/manifest")
         );
+    }
+
+    #[test]
+    fn provider_catalog_entry_resolves_provided_module_to_manifest_reference() {
+        let entry = serde_json::json!({
+            "name": "support-suite-provider",
+            "source": "service",
+            "manifestReference": "http://127.0.0.1:4110/lenso/service/v1/manifest",
+            "modules": [{ "name": "support-ticket" }]
+        });
+
+        assert_eq!(
+            catalog_service_manifest_reference_for_module(&entry, "support-ticket"),
+            Some("http://127.0.0.1:4110/lenso/service/v1/manifest")
+        );
+    }
+
+    #[test]
+    fn linked_source_skips_service_catalog_resolution() {
+        assert!(should_resolve_service_catalog_entry(ModuleSource::Remote));
+        assert!(!should_resolve_service_catalog_entry(ModuleSource::Linked));
     }
 
     #[test]
