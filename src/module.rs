@@ -22,6 +22,14 @@ pub struct RemoteModuleInstallOptions {
     pub source: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct ModuleReleaseInspectOptions {
+    pub base_url: Option<String>,
+    pub check: bool,
+    pub json: bool,
+    pub repo_root: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 struct LinkedInstallProfileEffects {
     env: Vec<(String, String)>,
@@ -779,6 +787,179 @@ async fn install_module_release_descriptor(
         reference: descriptor_reference.to_owned(),
     };
     add_remote_module_with_context(&service_reference, options, Some(&release_context)).await
+}
+
+pub async fn inspect_module_release(
+    release_reference: &str,
+    options: ModuleReleaseInspectOptions,
+) -> Result<()> {
+    let (descriptor_reference, descriptor) =
+        read_module_release_descriptor_for_inspect(release_reference, options.repo_root.as_deref())
+            .await?;
+    let release = validate_module_release_descriptor(descriptor)?;
+    let provider = module_release_provider(&release)?;
+    let provider_name = required_provider_string(provider, "name")?;
+    let service_package = optional_provider_string(provider, "servicePackage", "service_package");
+    let service_manifest =
+        optional_provider_string(provider, "serviceManifest", "service_manifest");
+    let service_reference = module_release_service_reference(&descriptor_reference, &release)?;
+    let base_url = options
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            release
+                .get("baseUrl")
+                .or_else(|| release.get("base_url"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        });
+    let issues = module_release_inspect_issues(&service_reference, base_url.as_deref());
+    let status = if issues.is_empty() {
+        "ready"
+    } else {
+        "needs_attention"
+    };
+    let install_command =
+        module_release_install_command(&descriptor_reference, base_url.as_deref());
+    let catalog_command =
+        module_release_catalog_command(&descriptor_reference, base_url.as_deref());
+
+    if options.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "baseUrl": base_url,
+                "catalogCommand": catalog_command,
+                "installCommand": install_command,
+                "issues": &issues,
+                "name": string_field(&release, "name")?.trim(),
+                "provider": {
+                    "name": provider_name,
+                    "serviceManifest": service_manifest,
+                    "servicePackage": service_package,
+                },
+                "releaseReference": descriptor_reference,
+                "serviceReference": service_reference,
+                "status": status,
+                "version": string_field(&release, "version")?.trim(),
+            }))
+            .context("serialize module release inspect report")?
+        );
+    } else {
+        println!(
+            "Module release {}@{}",
+            string_field(&release, "name")?.trim(),
+            string_field(&release, "version")?.trim()
+        );
+        println!("- status: {status}");
+        println!("- release: {descriptor_reference}");
+        println!("- provider: {provider_name}");
+        if let Some(service_package) = service_package {
+            println!("- service package: {service_package}");
+        }
+        if let Some(service_manifest) = service_manifest {
+            println!("- service manifest: {service_manifest}");
+        }
+        println!("- service reference: {service_reference}");
+        println!(
+            "- base URL: {}",
+            base_url
+                .as_deref()
+                .unwrap_or("<required for local artifacts>")
+        );
+        println!("- install: {install_command}");
+        println!("- catalog: {catalog_command}");
+        if !issues.is_empty() {
+            println!("Issues:");
+            for issue in &issues {
+                println!("- {issue}");
+            }
+        }
+    }
+
+    if options.check && !issues.is_empty() {
+        bail!("Module release check failed: {}", issues.join("; "));
+    }
+    Ok(())
+}
+
+async fn read_module_release_descriptor_for_inspect(
+    release_reference: &str,
+    repo_root: Option<&Path>,
+) -> Result<(String, Value)> {
+    if let Some(descriptor) = read_install_descriptor(release_reference).await? {
+        return Ok((release_reference.to_owned(), descriptor));
+    }
+    if !looks_like_json_reference(release_reference)
+        && let Some((descriptor_reference, descriptor)) =
+            local_catalog_module_release_descriptor(release_reference, repo_root)?
+    {
+        return Ok((descriptor_reference, descriptor));
+    }
+    bail!(
+        "Module release `{release_reference}` was not found as a file, URL, or local catalog entry"
+    );
+}
+
+fn module_release_inspect_issues(service_reference: &str, base_url: Option<&str>) -> Vec<String> {
+    let mut issues = Vec::new();
+    if base_url.is_none() && !http_manifest_reference(service_reference) {
+        issues.push(
+            "installing this release needs --base-url because its service reference is not an HTTP /manifest URL"
+                .to_owned(),
+        );
+    }
+    issues
+}
+
+fn module_release_install_command(release_reference: &str, base_url: Option<&str>) -> String {
+    format!(
+        "lenso module install {release_reference}{}",
+        base_url
+            .map(|base_url| format!(" --base-url {base_url}"))
+            .unwrap_or_default()
+    )
+}
+
+fn module_release_catalog_command(release_reference: &str, base_url: Option<&str>) -> String {
+    format!(
+        "lenso module catalog add {release_reference}{}",
+        base_url
+            .map(|base_url| format!(" --base-url {base_url}"))
+            .unwrap_or_default()
+    )
+}
+
+fn http_manifest_reference(reference: &str) -> bool {
+    (reference.starts_with("http://") || reference.starts_with("https://"))
+        && reference.trim_end_matches('/').ends_with("/manifest")
+}
+
+fn required_provider_string<'a>(provider: &'a Map<String, Value>, field: &str) -> Result<&'a str> {
+    provider
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("Module release provider.{field} is required"))
+}
+
+fn optional_provider_string<'a>(
+    provider: &'a Map<String, Value>,
+    camel_field: &str,
+    snake_field: &str,
+) -> Option<&'a str> {
+    provider
+        .get(camel_field)
+        .or_else(|| provider.get(snake_field))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 pub async fn update_module(module_name: &str, options: ModuleUpdateOptions) -> Result<()> {
@@ -10584,6 +10765,87 @@ mod tests {
             catalog["modules"][0]["baseUrl"],
             json!("http://127.0.0.1:4110/lenso/service/v1")
         );
+        fs::remove_dir_all(repo_root).ok();
+    }
+
+    #[tokio::test]
+    async fn module_release_check_requires_base_url_for_local_package() {
+        let repo_root = std::env::temp_dir().join(format!(
+            "lenso-module-release-inspect-{}",
+            uuid::Uuid::now_v7()
+        ));
+        fs::create_dir_all(&repo_root).unwrap();
+        let release_path = repo_root.join("lenso.module-release.json");
+        write_json(
+            &release_path,
+            &json!({
+                "protocol": "lenso.module-release.v1",
+                "name": "support-ticket",
+                "version": "0.5.0",
+                "source": "service",
+                "provider": {
+                    "name": "support-suite-provider",
+                    "servicePackage": "lenso.service-package.json"
+                }
+            }),
+        )
+        .unwrap();
+
+        let error = inspect_module_release(
+            &release_path.to_string_lossy(),
+            ModuleReleaseInspectOptions {
+                base_url: None,
+                check: true,
+                json: true,
+                repo_root: None,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains(
+                "needs --base-url because its service reference is not an HTTP /manifest URL"
+            ),
+            "{error}"
+        );
+        fs::remove_dir_all(repo_root).ok();
+    }
+
+    #[tokio::test]
+    async fn module_release_check_accepts_base_url_for_local_package() {
+        let repo_root = std::env::temp_dir().join(format!(
+            "lenso-module-release-inspect-base-url-{}",
+            uuid::Uuid::now_v7()
+        ));
+        fs::create_dir_all(&repo_root).unwrap();
+        let release_path = repo_root.join("lenso.module-release.json");
+        write_json(
+            &release_path,
+            &json!({
+                "protocol": "lenso.module-release.v1",
+                "name": "support-ticket",
+                "version": "0.5.0",
+                "source": "service",
+                "provider": {
+                    "name": "support-suite-provider",
+                    "servicePackage": "lenso.service-package.json"
+                }
+            }),
+        )
+        .unwrap();
+
+        inspect_module_release(
+            &release_path.to_string_lossy(),
+            ModuleReleaseInspectOptions {
+                base_url: Some("http://127.0.0.1:4110/lenso/service/v1".to_owned()),
+                check: true,
+                json: true,
+                repo_root: None,
+            },
+        )
+        .await
+        .unwrap();
         fs::remove_dir_all(repo_root).ok();
     }
 

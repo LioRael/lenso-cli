@@ -106,6 +106,9 @@ lenso service install dist/lenso-service/support-suite-provider/lenso.service-pa
 Install a packaged module release with the module command:
 
 ```sh
+lenso module release inspect dist/lenso-service/support-suite-provider/modules/support-ticket/lenso.module-release.json
+lenso module release check dist/lenso-service/support-suite-provider/modules/support-ticket/lenso.module-release.json \
+  --base-url http://127.0.0.1:4100/lenso/service/v1
 lenso module install dist/lenso-service/support-suite-provider/modules/support-ticket/lenso.module-release.json \
   --base-url http://127.0.0.1:4100/lenso/service/v1
 lenso module catalog add dist/lenso-service/support-suite-provider/modules/support-ticket/lenso.module-release.json \

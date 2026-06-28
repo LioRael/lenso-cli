@@ -146,6 +146,11 @@ enum ModuleCommand {
     Uninstall(RemoteModuleUninstallArgs),
     /// Diagnose installed services.
     Doctor(ModuleDoctorArgs),
+    /// Inspect and validate module release artifacts.
+    Release {
+        #[command(subcommand)]
+        command: ModuleReleaseCommand,
+    },
     /// Inspect and manage declared service processes.
     Service {
         #[command(subcommand)]
@@ -167,6 +172,14 @@ enum ModuleCommand {
 enum ModuleCatalogCommand {
     /// Add a service manifest to the local catalog.
     Add(ModuleCatalogAddArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum ModuleReleaseCommand {
+    /// Inspect a module release artifact or local catalog entry.
+    Inspect(ModuleReleaseInspectArgs),
+    /// Validate a module release artifact or local catalog entry.
+    Check(ModuleReleaseInspectArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -579,6 +592,24 @@ struct RemoteModuleInstallArgs {
 }
 
 #[derive(Debug, Args, Clone)]
+struct ModuleReleaseInspectArgs {
+    /// Module release artifact path/URL, or local catalog module name.
+    release_reference: String,
+
+    /// Lenso host repository root for resolving catalog module names.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Runtime service base URL to use when installing local package artifacts.
+    #[arg(long)]
+    base_url: Option<String>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
 struct RemoteModuleUninstallArgs {
     /// Module name.
     module_name: String,
@@ -866,6 +897,17 @@ impl From<&RemoteModuleInstallArgs> for module::RemoteModuleInstallOptions {
             repo_root: args.repo_root.clone(),
             run_install_commands: args.run_install_commands,
             source: args.source.clone(),
+        }
+    }
+}
+
+impl From<&ModuleReleaseInspectArgs> for module::ModuleReleaseInspectOptions {
+    fn from(args: &ModuleReleaseInspectArgs) -> Self {
+        Self {
+            base_url: args.base_url.clone(),
+            check: false,
+            json: args.json,
+            repo_root: args.repo_root.clone(),
         }
     }
 }
@@ -1193,6 +1235,16 @@ async fn main() -> anyhow::Result<()> {
             ModuleCommand::Doctor(args) => {
                 module::doctor_module((&args).into()).await?;
             }
+            ModuleCommand::Release { command } => match command {
+                ModuleReleaseCommand::Inspect(args) => {
+                    module::inspect_module_release(&args.release_reference, (&args).into()).await?;
+                }
+                ModuleReleaseCommand::Check(args) => {
+                    let mut options: module::ModuleReleaseInspectOptions = (&args).into();
+                    options.check = true;
+                    module::inspect_module_release(&args.release_reference, options).await?;
+                }
+            },
             ModuleCommand::Service { command } => match command {
                 ModuleServiceCommand::List(args) => {
                     module::list_module_services((&args).into()).await?;
