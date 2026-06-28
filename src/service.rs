@@ -109,15 +109,37 @@ pub(crate) async fn package_service(options: ServicePackageOptions) -> Result<()
             &plan.package_manifest_output,
             format!("{package_source}\n").as_bytes(),
         )?;
+        for release in &plan.module_release_outputs {
+            let release_source = serde_json::to_string_pretty(&module_release_manifest(
+                &plan.metadata,
+                &release.module,
+            ))
+            .context("serialize module release manifest")?;
+            write_file(&release.path, format!("{release_source}\n").as_bytes())?;
+        }
     }
     print_service_package_report(&plan, options.check, options.json)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ServicePackageMetadata {
-    modules: Vec<String>,
+struct ServicePackageModuleMetadata {
+    capabilities: Vec<String>,
+    dependencies: Vec<String>,
     name: String,
     version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ServicePackageMetadata {
+    modules: Vec<ServicePackageModuleMetadata>,
+    name: String,
+    version: String,
+}
+
+#[derive(Debug)]
+struct ModuleReleaseOutput {
+    module: ServicePackageModuleMetadata,
+    path: PathBuf,
 }
 
 #[derive(Debug)]
@@ -125,6 +147,7 @@ struct ServicePackagePlan {
     manifest: Value,
     manifest_reference: String,
     metadata: ServicePackageMetadata,
+    module_release_outputs: Vec<ModuleReleaseOutput>,
     package_dir: PathBuf,
     package_manifest_output: PathBuf,
     service_manifest_output: PathBuf,
@@ -144,12 +167,26 @@ async fn service_package_plan(options: &ServicePackageOptions) -> Result<Service
     let metadata = service_package_metadata(&manifest)?;
     let output_dir = absolutize_from(&service_dir, &options.output_dir);
     let package_dir = output_dir.join(&metadata.name);
+    let module_release_outputs = metadata
+        .modules
+        .iter()
+        .map(|module| {
+            Ok(ModuleReleaseOutput {
+                module: module.clone(),
+                path: package_dir
+                    .join("modules")
+                    .join(module_release_path_segment(&module.name)?)
+                    .join("lenso.module-release.json"),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     Ok(ServicePackagePlan {
         manifest,
         manifest_reference,
         package_manifest_output: package_dir.join("lenso.service-package.json"),
         service_manifest_output: package_dir.join("lenso.service.json"),
+        module_release_outputs,
         package_dir,
         metadata,
     })
@@ -190,16 +227,16 @@ fn service_package_metadata(manifest: &Value) -> Result<ServicePackageMetadata> 
     }
     let name = required_manifest_string(manifest, "name", "Service manifest name")?;
     let version = required_manifest_string(manifest, "version", "Service manifest version")?;
-    let Some(modules) = manifest.get("modules").and_then(Value::as_array) else {
+    let Some(raw_modules) = manifest.get("modules").and_then(Value::as_array) else {
         bail!("Service manifest modules must be an array");
     };
-    if modules.is_empty() {
+    if raw_modules.is_empty() {
         bail!("Service manifest modules must not be empty");
     }
 
     let mut seen_modules = BTreeSet::new();
-    let mut module_names = Vec::new();
-    for module in modules {
+    let mut modules = Vec::new();
+    for module in raw_modules {
         if !module.is_object() {
             bail!("Service manifest module entries must be objects");
         }
@@ -207,14 +244,49 @@ fn service_package_metadata(manifest: &Value) -> Result<ServicePackageMetadata> 
         if !seen_modules.insert(module_name.to_owned()) {
             bail!("Service manifest module `{module_name}` is declared more than once");
         }
-        module_names.push(module_name.to_owned());
+        let version = module
+            .get("version")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(version)
+            .to_owned();
+        modules.push(ServicePackageModuleMetadata {
+            capabilities: optional_manifest_string_array(module, "capabilities")?,
+            dependencies: optional_manifest_string_array(module, "dependencies")?,
+            name: module_name.to_owned(),
+            version,
+        });
     }
 
     Ok(ServicePackageMetadata {
-        modules: module_names,
+        modules,
         name: name.to_owned(),
         version: version.to_owned(),
     })
+}
+
+fn optional_manifest_string_array(value: &Value, field: &str) -> Result<Vec<String>> {
+    let Some(raw_values) = value.get(field) else {
+        return Ok(Vec::new());
+    };
+    let Some(values) = raw_values.as_array() else {
+        bail!("Service manifest module {field} must be an array");
+    };
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Service manifest module {field}[{index}] is required")
+                })
+        })
+        .collect()
 }
 
 fn required_manifest_string<'a>(value: &'a Value, field: &str, label: &str) -> Result<&'a str> {
@@ -234,24 +306,68 @@ fn service_package_manifest(metadata: &ServicePackageMetadata) -> Value {
         "name": metadata.name,
         "version": metadata.version,
         "serviceManifest": "lenso.service.json",
-        "modules": metadata.modules,
+        "modules": module_names(&metadata.modules),
     })
+}
+
+fn module_release_manifest(
+    metadata: &ServicePackageMetadata,
+    module: &ServicePackageModuleMetadata,
+) -> Value {
+    serde_json::json!({
+        "protocol": "lenso.module-release.v1",
+        "name": module.name,
+        "version": module.version,
+        "source": "service",
+        "summary": format!("{} module from {}", module.name, metadata.name),
+        "provider": {
+            "name": metadata.name,
+            "servicePackage": "../../lenso.service-package.json"
+        },
+        "capabilities": module.capabilities,
+        "dependencies": module.dependencies,
+    })
+}
+
+fn module_names(modules: &[ServicePackageModuleMetadata]) -> Vec<String> {
+    modules.iter().map(|module| module.name.clone()).collect()
+}
+
+fn module_release_path_segment(module_name: &str) -> Result<&str> {
+    if module_name.contains('/')
+        || module_name.contains('\\')
+        || module_name == "."
+        || module_name == ".."
+    {
+        bail!("Service manifest module `{module_name}` cannot be used as a release path");
+    }
+    Ok(module_name)
 }
 
 fn print_service_package_report(plan: &ServicePackagePlan, check: bool, json: bool) -> Result<()> {
     if json {
         let status = if check { "checked" } else { "packaged" };
+        let mut files = vec![
+            path_string(&plan.service_manifest_output),
+            path_string(&plan.package_manifest_output),
+        ];
+        files.extend(
+            plan.module_release_outputs
+                .iter()
+                .map(|release| path_string(&release.path)),
+        );
         let report = serde_json::json!({
             "status": status,
             "name": plan.metadata.name,
             "version": plan.metadata.version,
-            "modules": plan.metadata.modules,
+            "modules": module_names(&plan.metadata.modules),
             "manifestReference": plan.manifest_reference,
             "packageDir": path_string(&plan.package_dir),
-            "files": [
-                path_string(&plan.service_manifest_output),
-                path_string(&plan.package_manifest_output)
-            ],
+            "moduleReleases": plan.module_release_outputs.iter().map(|release| serde_json::json!({
+                "module": release.module.name,
+                "path": path_string(&release.path),
+            })).collect::<Vec<_>>(),
+            "files": files,
         });
         println!(
             "{}",
@@ -268,12 +384,18 @@ fn print_service_package_report(plan: &ServicePackagePlan, check: bool, json: bo
             plan.metadata.name, plan.metadata.version
         );
     }
-    println!("- modules: {}", plan.metadata.modules.join(", "));
+    println!(
+        "- modules: {}",
+        module_names(&plan.metadata.modules).join(", ")
+    );
     println!("- manifest: {}", plan.manifest_reference);
     println!("- package: {}", plan.package_dir.display());
     if !check {
         println!("- wrote: {}", plan.service_manifest_output.display());
         println!("- wrote: {}", plan.package_manifest_output.display());
+        for release in &plan.module_release_outputs {
+            println!("- wrote: {}", release.path.display());
+        }
     }
     Ok(())
 }
@@ -735,7 +857,20 @@ mod tests {
         assert_eq!(
             metadata,
             ServicePackageMetadata {
-                modules: vec!["support-ticket".to_owned(), "support-inbox".to_owned()],
+                modules: vec![
+                    ServicePackageModuleMetadata {
+                        capabilities: Vec::new(),
+                        dependencies: Vec::new(),
+                        name: "support-ticket".to_owned(),
+                        version: "0.2.0".to_owned(),
+                    },
+                    ServicePackageModuleMetadata {
+                        capabilities: Vec::new(),
+                        dependencies: Vec::new(),
+                        name: "support-inbox".to_owned(),
+                        version: "0.2.0".to_owned(),
+                    },
+                ],
                 name: "support-suite-provider".to_owned(),
                 version: "0.2.0".to_owned(),
             }
@@ -761,7 +896,12 @@ mod tests {
                 "name": "support-suite-provider",
                 "version": "0.2.0",
                 "modules": [
-                    {"name": "support-ticket"}
+                    {
+                        "capabilities": ["support_ticket.tickets.read"],
+                        "dependencies": ["auth"],
+                        "name": "support-ticket",
+                        "version": "0.2.1"
+                    }
                 ]
             }))
             .unwrap(),
@@ -788,6 +928,27 @@ mod tests {
 
         assert_eq!(package_manifest["protocol"], "lenso.service-package.v1");
         assert_eq!(package_manifest["modules"], json!(["support-ticket"]));
+        let module_release: Value = serde_json::from_str(
+            &fs::read_to_string(
+                service_dir.join(
+                    "dist/services/support-suite-provider/modules/support-ticket/lenso.module-release.json",
+                ),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(module_release["protocol"], "lenso.module-release.v1");
+        assert_eq!(module_release["name"], "support-ticket");
+        assert_eq!(module_release["version"], "0.2.1");
+        assert_eq!(
+            module_release["provider"]["servicePackage"],
+            "../../lenso.service-package.json"
+        );
+        assert_eq!(
+            module_release["capabilities"],
+            json!(["support_ticket.tickets.read"])
+        );
+        assert_eq!(module_release["dependencies"], json!(["auth"]));
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -761,9 +761,18 @@ async fn install_module_descriptor(
 async fn install_module_release_descriptor(
     descriptor: &Value,
     descriptor_reference: &str,
-    options: RemoteModuleInstallOptions,
+    mut options: RemoteModuleInstallOptions,
 ) -> Result<()> {
     let release = validate_module_release_descriptor(descriptor.clone())?;
+    if options.base_url.is_none() {
+        options.base_url = descriptor
+            .get("baseUrl")
+            .or_else(|| descriptor.get("base_url"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+    }
     let service_reference = module_release_service_reference(descriptor_reference, &release)?;
     let release_context = ModuleReleaseInstallContext {
         manifest: release,
@@ -2494,6 +2503,7 @@ pub async fn add_module_catalog_entry(
         modules.push(module_release_catalog_entry_from_manifest(
             &manifest,
             manifest_reference,
+            options.base_url.as_deref(),
             options.summary.as_deref(),
         )?);
 
@@ -8315,6 +8325,7 @@ fn module_catalog_entry_from_manifest(
 fn module_release_catalog_entry_from_manifest(
     manifest: &Value,
     manifest_reference: &str,
+    base_url: Option<&str>,
     summary: Option<&str>,
 ) -> Result<Value> {
     let mut entry = json!({
@@ -8329,6 +8340,9 @@ fn module_release_catalog_entry_from_manifest(
         "summary": summary.or_else(|| manifest.get("summary").and_then(Value::as_str)).unwrap_or("-"),
         "version": string_field(manifest, "version")?.trim(),
     });
+    if let Some(base_url) = base_url.map(str::trim).filter(|value| !value.is_empty()) {
+        entry["baseUrl"] = json!(base_url);
+    }
     copy_optional_manifest_field(manifest, &mut entry, "capabilities");
     copy_optional_manifest_field(manifest, &mut entry, "dependencies");
     copy_optional_manifest_field(manifest, &mut entry, "compatibility");
@@ -10445,6 +10459,7 @@ mod tests {
                         "manifestReference": release_path.to_string_lossy().to_string(),
                         "name": "support-ticket",
                         "version": "0.4.0",
+                        "baseUrl": "http://127.0.0.1:4110/lenso/service/v1",
                         "source": "service",
                         "provider": {
                             "name": "support-suite-provider",
@@ -10460,7 +10475,7 @@ mod tests {
             "support-ticket",
             RemoteModuleInstallOptions {
                 allow_incompatible: false,
-                base_url: Some("http://127.0.0.1:4110/lenso/service/v1".to_owned()),
+                base_url: None,
                 console_plan: false,
                 dry_run: false,
                 env_file: None,
@@ -10519,7 +10534,7 @@ mod tests {
         add_module_catalog_entry(
             &release_path.to_string_lossy(),
             ModuleCatalogAddOptions {
-                base_url: None,
+                base_url: Some("http://127.0.0.1:4110/lenso/service/v1".to_owned()),
                 catalog_file: None,
                 dry_run: false,
                 repo_root: Some(repo_root.clone()),
@@ -10542,6 +10557,10 @@ mod tests {
         assert_eq!(
             catalog["modules"][0]["provider"]["name"],
             json!("support-suite-provider")
+        );
+        assert_eq!(
+            catalog["modules"][0]["baseUrl"],
+            json!("http://127.0.0.1:4110/lenso/service/v1")
         );
         fs::remove_dir_all(repo_root).ok();
     }

@@ -90,9 +90,11 @@ lenso service package --check
 lenso service package --output-dir dist/lenso-service
 ```
 
-The package artifact contains the canonical `lenso.service.json` plus
-`lenso.service-package.json`, a small delivery manifest that records the service
-name, version, and provided module names.
+The package artifact contains the canonical `lenso.service.json`,
+`lenso.service-package.json`, and one
+`modules/<module>/lenso.module-release.json` file for each provided module.
+The service package records the provider name, version, and provided module
+names; each module release is the business-module install entrypoint.
 Install either manifest directly. For a local package artifact, still pass the
 runtime service base URL:
 
@@ -101,14 +103,13 @@ lenso service install dist/lenso-service/support-suite-provider/lenso.service-pa
   --base-url http://127.0.0.1:4100/lenso/service/v1
 ```
 
-A service can also publish a module release for the business module it provides.
-The release artifact is installed with the module command and points at a
-service package or service manifest:
+Install a packaged module release with the module command:
 
 ```sh
-lenso module install ./lenso.module-release.json \
+lenso module install dist/lenso-service/support-suite-provider/modules/support-ticket/lenso.module-release.json \
   --base-url http://127.0.0.1:4100/lenso/service/v1
-lenso module catalog add ./lenso.module-release.json
+lenso module catalog add dist/lenso-service/support-suite-provider/modules/support-ticket/lenso.module-release.json \
+  --base-url http://127.0.0.1:4100/lenso/service/v1
 lenso module install support-ticket
 ```
 
