@@ -586,12 +586,23 @@ pub async fn install_module(
 ) -> Result<()> {
     let source = parse_module_source(&options.source)?;
     if let Some(descriptor) = read_install_descriptor(module_reference).await? {
+        if is_module_release_descriptor(&descriptor) {
+            return install_module_descriptor(&descriptor, module_reference, options).await;
+        }
         if should_resolve_service_catalog_entry(source)
             && let Some(manifest_reference) = catalog_service_manifest_reference(&descriptor)
         {
             return add_remote_module(manifest_reference, options).await;
         }
         return install_module_descriptor(&descriptor, module_reference, options).await;
+    }
+
+    if should_resolve_service_catalog_entry(source)
+        && !looks_like_json_reference(module_reference)
+        && let Some((descriptor_reference, descriptor)) =
+            local_catalog_module_release_descriptor(module_reference, options.repo_root.as_deref())?
+    {
+        return install_module_descriptor(&descriptor, &descriptor_reference, options).await;
     }
 
     if should_resolve_service_catalog_entry(source)
@@ -615,6 +626,9 @@ fn should_resolve_service_catalog_entry(source: ModuleSource) -> bool {
 }
 
 fn catalog_service_manifest_reference(entry: &Value) -> Option<&str> {
+    if catalog_entry_is_module_release(entry) {
+        return catalog_module_release_service_reference(entry);
+    }
     entry
         .get("serviceManifest")
         .or_else(|| entry.get("service_manifest"))
@@ -653,6 +667,52 @@ fn catalog_entry_is_service(entry: &Value) -> bool {
         .is_some_and(|source| source.eq_ignore_ascii_case("service"))
 }
 
+fn catalog_entry_is_module_release(entry: &Value) -> bool {
+    entry.get("protocol").and_then(Value::as_str) == Some("lenso.module-release.v1")
+}
+
+fn catalog_module_release_service_reference(entry: &Value) -> Option<&str> {
+    let provider = entry.get("provider").unwrap_or(entry);
+    provider
+        .get("servicePackage")
+        .or_else(|| provider.get("service_package"))
+        .or_else(|| provider.get("serviceManifest"))
+        .or_else(|| provider.get("service_manifest"))
+        .or_else(|| provider.get("manifestReference"))
+        .or_else(|| provider.get("manifest_reference"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn local_catalog_module_release_descriptor(
+    module_name: &str,
+    repo_root: Option<&Path>,
+) -> Result<Option<(String, Value)>> {
+    let repo_root = resolve_repo_root(repo_root)?;
+    let Some(catalog) = read_json_if_exists(&repo_root.join(MODULE_CATALOG_PATH))? else {
+        return Ok(None);
+    };
+    let modules = catalog
+        .get("modules")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("Module catalog modules must be an array"))?;
+    Ok(modules
+        .iter()
+        .find(|entry| {
+            catalog_entry_is_module_release(entry)
+                && entry.get("name").and_then(Value::as_str) == Some(module_name)
+        })
+        .map(|entry| {
+            let reference = entry
+                .get("manifestReference")
+                .and_then(Value::as_str)
+                .unwrap_or(module_name)
+                .to_owned();
+            (reference, entry.clone())
+        }))
+}
+
 fn local_catalog_service_manifest_reference(
     module_name: &str,
     repo_root: Option<&Path>,
@@ -676,6 +736,9 @@ async fn install_module_descriptor(
     descriptor_reference: &str,
     options: RemoteModuleInstallOptions,
 ) -> Result<()> {
+    if is_module_release_descriptor(descriptor) {
+        return install_module_release_descriptor(descriptor, descriptor_reference, options).await;
+    }
     match parse_module_source(string_field(descriptor, "source")?)? {
         ModuleSource::Remote => {
             let manifest_reference = descriptor
@@ -693,6 +756,20 @@ async fn install_module_descriptor(
             install_linked_module_descriptor(descriptor, descriptor_reference, options).await
         }
     }
+}
+
+async fn install_module_release_descriptor(
+    descriptor: &Value,
+    descriptor_reference: &str,
+    options: RemoteModuleInstallOptions,
+) -> Result<()> {
+    let release = validate_module_release_descriptor(descriptor.clone())?;
+    let service_reference = module_release_service_reference(descriptor_reference, &release)?;
+    let release_context = ModuleReleaseInstallContext {
+        manifest: release,
+        reference: descriptor_reference.to_owned(),
+    };
+    add_remote_module_with_context(&service_reference, options, Some(&release_context)).await
 }
 
 pub async fn update_module(module_name: &str, options: ModuleUpdateOptions) -> Result<()> {
@@ -852,6 +929,14 @@ pub async fn add_remote_module(
     manifest_reference: &str,
     options: RemoteModuleInstallOptions,
 ) -> Result<()> {
+    add_remote_module_with_context(manifest_reference, options, None).await
+}
+
+async fn add_remote_module_with_context(
+    manifest_reference: &str,
+    options: RemoteModuleInstallOptions,
+    module_release_context: Option<&ModuleReleaseInstallContext>,
+) -> Result<()> {
     let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
     let env_file_path = resolve_path(
         &repo_root,
@@ -891,6 +976,7 @@ pub async fn add_remote_module(
             &install_ledger_path,
             &module_services_path,
             Some(&package_context),
+            module_release_context,
         )
         .await;
     }
@@ -905,6 +991,7 @@ pub async fn add_remote_module(
             &install_ledger_path,
             &module_services_path,
             None,
+            module_release_context,
         )
         .await;
     }
@@ -1031,6 +1118,7 @@ async fn add_service_manifest_with_options(
     manifest: Value,
     options: &RemoteModuleInstallOptions,
     package_context: Option<&ServicePackageInstallContext>,
+    module_release_context: Option<&ModuleReleaseInstallContext>,
 ) -> Result<()> {
     let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
     let env_file_path = resolve_path(
@@ -1059,6 +1147,7 @@ async fn add_service_manifest_with_options(
         &install_ledger_path,
         &module_services_path,
         package_context,
+        module_release_context,
     )
     .await
 }
@@ -1095,6 +1184,12 @@ struct ServicePackageInstallContext {
     reference: String,
 }
 
+#[derive(Debug)]
+struct ModuleReleaseInstallContext {
+    manifest: Value,
+    reference: String,
+}
+
 async fn add_service_manifest_with_paths(
     manifest_reference: &str,
     manifest: Value,
@@ -1105,6 +1200,7 @@ async fn add_service_manifest_with_paths(
     install_ledger_path: &Path,
     module_services_path: &Path,
     package_context: Option<&ServicePackageInstallContext>,
+    module_release_context: Option<&ModuleReleaseInstallContext>,
 ) -> Result<()> {
     if let Some(issue) = remote_module_manifest_compatibility_issue(&manifest)
         && !options.allow_incompatible
@@ -1119,6 +1215,12 @@ async fn add_service_manifest_with_paths(
     let install_services = service_manifest_install_services(&manifest, &service_name, &base_url)?;
     let module_manifests =
         service_module_install_manifests(&manifest, manifest_reference, &base_url)?;
+    if let Some(module_release_context) = module_release_context {
+        ensure_module_release_matches_service_manifest(
+            &module_release_context.manifest,
+            &manifest,
+        )?;
+    }
     let env_file = apply_manifest_install_env(
         update_remote_modules_env(env_file_path, &service_name, &base_url)?,
         &install_env,
@@ -1183,6 +1285,18 @@ async fn add_service_manifest_with_paths(
             entry["servicePackage"] = json!({
                 "manifestReference": package_context.reference.clone(),
                 "manifestSnapshot": package_context.manifest.clone(),
+            });
+        }
+        if let Some(module_release_context) = module_release_context
+            && module_release_context
+                .manifest
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| name == module_name)
+        {
+            entry["moduleRelease"] = json!({
+                "manifestReference": module_release_context.reference.clone(),
+                "manifestSnapshot": module_release_context.manifest.clone(),
             });
         }
         install_ledger = upsert_module_install_ledger_entry(install_ledger, entry)?;
@@ -2364,6 +2478,40 @@ pub async fn add_module_catalog_entry(
             .unwrap_or_else(|| Path::new(MODULE_CATALOG_PATH)),
     );
     let manifest = read_json_reference(manifest_reference).await?;
+    if is_module_release_descriptor(&manifest) {
+        let manifest = validate_module_release_descriptor(manifest)?;
+        let module_name = string_field(&manifest, "name")?.trim().to_owned();
+        let version = string_field(&manifest, "version")?.trim().to_owned();
+        let mut catalog = read_json_if_exists(&catalog_file_path)?
+            .unwrap_or_else(|| json!({ "modules": [], "version": 1 }));
+        let modules = catalog
+            .get_mut("modules")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| anyhow!("Module catalog modules must be an array"))?;
+        modules.retain(|entry| {
+            entry.get("name").and_then(Value::as_str) != Some(module_name.as_str())
+        });
+        modules.push(module_release_catalog_entry_from_manifest(
+            &manifest,
+            manifest_reference,
+            options.summary.as_deref(),
+        )?);
+
+        if options.dry_run {
+            println!("Module catalog dry run:");
+            println!("- {}", display_relative(&repo_root, &catalog_file_path));
+            println!("- {module_name} {version}");
+            return Ok(());
+        }
+
+        write_json(&catalog_file_path, &catalog)?;
+        println!("Added module release {module_name} to module catalog.");
+        println!("Updated:");
+        println!("- {}", display_relative(&repo_root, &catalog_file_path));
+        println!("Install:");
+        println!("- lenso module install {module_name}");
+        return Ok(());
+    }
     let service_package = if is_service_package_manifest(&manifest) {
         let package = validate_service_package_manifest(manifest.clone())?;
         let service_manifest_reference =
@@ -3108,6 +3256,7 @@ pub async fn upgrade_service(options: ServiceUpgradeOptions) -> Result<()> {
         candidate,
         &install_options,
         package_context.as_ref(),
+        None,
     )
     .await
 }
@@ -3144,7 +3293,8 @@ pub async fn rollback_service(options: ServiceRollbackOptions) -> Result<()> {
         run_install_commands: false,
         source: "remote".to_owned(),
     };
-    add_service_manifest_with_options(&manifest_reference, previous, &install_options, None).await
+    add_service_manifest_with_options(&manifest_reference, previous, &install_options, None, None)
+        .await
 }
 
 fn installed_service_receipt(repo_root: &Path, service_name: &str) -> Result<Value> {
@@ -5559,6 +5709,96 @@ fn is_service_package_manifest(manifest: &Value) -> bool {
     manifest.get("protocol").and_then(Value::as_str) == Some("lenso.service-package.v1")
 }
 
+fn is_module_release_descriptor(manifest: &Value) -> bool {
+    manifest.get("protocol").and_then(Value::as_str) == Some("lenso.module-release.v1")
+}
+
+fn validate_module_release_descriptor(manifest: Value) -> Result<Value> {
+    if !manifest.is_object() {
+        bail!("Module release must be a JSON object");
+    }
+    if manifest.get("protocol").and_then(Value::as_str) != Some("lenso.module-release.v1") {
+        bail!("Module release protocol must be lenso.module-release.v1");
+    }
+    let name = string_field(&manifest, "name")?.trim();
+    if name.is_empty() {
+        bail!("Module release name is required");
+    }
+    let version = string_field(&manifest, "version")?.trim();
+    if version.is_empty() {
+        bail!("Module release version is required");
+    }
+    let source = string_field(&manifest, "source")?.trim();
+    if !source.eq_ignore_ascii_case("service") {
+        bail!("Module release source must be service");
+    }
+    validate_service_string_array(manifest.get("capabilities"), "$.capabilities")?;
+    validate_service_string_array(manifest.get("dependencies"), "$.dependencies")?;
+    module_release_provider(&manifest)?;
+    Ok(manifest)
+}
+
+fn module_release_provider(manifest: &Value) -> Result<&Map<String, Value>> {
+    manifest
+        .get("provider")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("Module release provider must be an object"))
+}
+
+fn module_release_service_reference(release_reference: &str, release: &Value) -> Result<String> {
+    let provider = module_release_provider(release)?;
+    let service_reference = provider
+        .get("servicePackage")
+        .or_else(|| provider.get("service_package"))
+        .or_else(|| provider.get("serviceManifest"))
+        .or_else(|| provider.get("service_manifest"))
+        .or_else(|| provider.get("manifestReference"))
+        .or_else(|| provider.get("manifest_reference"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow!(
+                "Module release provider.servicePackage or provider.serviceManifest is required"
+            )
+        })?;
+    resolve_reference_from_base(
+        release_reference,
+        service_reference,
+        "module release provider",
+    )
+}
+
+fn ensure_module_release_matches_service_manifest(
+    release: &Value,
+    service_manifest: &Value,
+) -> Result<()> {
+    let release_name = string_field(release, "name")?.trim();
+    let release_version = string_field(release, "version")?.trim();
+    let service_version = string_field(service_manifest, "version")?.trim();
+    let service_name = string_field(service_manifest, "name")?.trim();
+    let module = service_manifest
+        .get("modules")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|module| module.get("name").and_then(Value::as_str) == Some(release_name))
+        .ok_or_else(|| {
+            anyhow!("Module release `{release_name}` is not provided by service `{service_name}`")
+        })?;
+    let module_version = module
+        .get("version")
+        .and_then(Value::as_str)
+        .unwrap_or(service_version)
+        .trim();
+    if release_version != module_version {
+        bail!(
+            "Module release `{release_name}` version {release_version} points at module version {module_version}"
+        );
+    }
+    Ok(())
+}
+
 fn validate_service_package_manifest(manifest: Value) -> Result<Value> {
     if !manifest.is_object() {
         bail!("Service package must be a JSON object");
@@ -5602,29 +5842,34 @@ fn validate_service_package_manifest(manifest: Value) -> Result<Value> {
 
 fn service_package_manifest_reference(package_reference: &str, package: &Value) -> Result<String> {
     let service_manifest = string_field(package, "serviceManifest")?.trim();
-    if service_manifest.starts_with("http://")
-        || service_manifest.starts_with("https://")
-        || service_manifest.starts_with("file://")
-        || Path::new(service_manifest).is_absolute()
+    resolve_reference_from_base(package_reference, service_manifest, "serviceManifest")
+}
+
+fn resolve_reference_from_base(
+    base_reference: &str,
+    reference: &str,
+    field_name: &str,
+) -> Result<String> {
+    if reference.starts_with("http://")
+        || reference.starts_with("https://")
+        || reference.starts_with("file://")
+        || Path::new(reference).is_absolute()
     {
-        return Ok(service_manifest.to_owned());
+        return Ok(reference.to_owned());
     }
-    if package_reference.starts_with("http://") || package_reference.starts_with("https://") {
-        return Ok(reqwest::Url::parse(package_reference)
-            .with_context(|| format!("parse package URL {package_reference}"))?
-            .join(service_manifest)
-            .with_context(|| format!("resolve serviceManifest {service_manifest}"))?
+    if base_reference.starts_with("http://") || base_reference.starts_with("https://") {
+        return Ok(reqwest::Url::parse(base_reference)
+            .with_context(|| format!("parse base URL {base_reference}"))?
+            .join(reference)
+            .with_context(|| format!("resolve {field_name} {reference}"))?
             .to_string());
     }
-    let package_path = package_reference
+    let package_path = base_reference
         .strip_prefix("file://")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(package_reference));
+        .unwrap_or_else(|| PathBuf::from(base_reference));
     let package_dir = package_path.parent().unwrap_or_else(|| Path::new("."));
-    Ok(package_dir
-        .join(service_manifest)
-        .to_string_lossy()
-        .to_string())
+    Ok(package_dir.join(reference).to_string_lossy().to_string())
 }
 
 fn ensure_service_package_matches_manifest(
@@ -8067,6 +8312,29 @@ fn module_catalog_entry_from_manifest(
     }))
 }
 
+fn module_release_catalog_entry_from_manifest(
+    manifest: &Value,
+    manifest_reference: &str,
+    summary: Option<&str>,
+) -> Result<Value> {
+    let mut entry = json!({
+        "manifestReference": manifest_reference,
+        "name": string_field(manifest, "name")?.trim(),
+        "protocol": "lenso.module-release.v1",
+        "provider": manifest
+            .get("provider")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+        "source": "service",
+        "summary": summary.or_else(|| manifest.get("summary").and_then(Value::as_str)).unwrap_or("-"),
+        "version": string_field(manifest, "version")?.trim(),
+    });
+    copy_optional_manifest_field(manifest, &mut entry, "capabilities");
+    copy_optional_manifest_field(manifest, &mut entry, "dependencies");
+    copy_optional_manifest_field(manifest, &mut entry, "compatibility");
+    Ok(entry)
+}
+
 fn service_catalog_entry_from_manifest(
     manifest: &Value,
     manifest_reference: &str,
@@ -10035,6 +10303,245 @@ mod tests {
         assert_eq!(
             entry["servicePackage"]["manifestSnapshot"]["protocol"],
             json!("lenso.service-package.v1")
+        );
+        fs::remove_dir_all(repo_root).ok();
+    }
+
+    #[tokio::test]
+    async fn module_release_install_records_release_provenance() {
+        let repo_root = std::env::temp_dir().join(format!(
+            "lenso-module-release-install-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let package_dir = repo_root.join("artifact");
+        fs::create_dir_all(&package_dir).unwrap();
+        write_json(
+            &package_dir.join("lenso.service.json"),
+            &json!({
+                "name": "support-suite-provider",
+                "protocol": "lenso.service.v1",
+                "version": "0.3.0",
+                "modules": [
+                    {
+                        "capabilities": ["support_ticket.tickets.read"],
+                        "name": "support-ticket",
+                        "version": "0.3.0"
+                    }
+                ]
+            }),
+        )
+        .unwrap();
+        write_json(
+            &package_dir.join("lenso.service-package.json"),
+            &json!({
+                "protocol": "lenso.service-package.v1",
+                "name": "support-suite-provider",
+                "version": "0.3.0",
+                "serviceManifest": "lenso.service.json",
+                "modules": ["support-ticket"]
+            }),
+        )
+        .unwrap();
+        let release_path = package_dir.join("lenso.module-release.json");
+        write_json(
+            &release_path,
+            &json!({
+                "protocol": "lenso.module-release.v1",
+                "name": "support-ticket",
+                "version": "0.3.0",
+                "source": "service",
+                "provider": {
+                    "name": "support-suite-provider",
+                    "servicePackage": "lenso.service-package.json"
+                },
+                "capabilities": ["support_ticket.tickets.read"]
+            }),
+        )
+        .unwrap();
+
+        install_module(
+            &release_path.to_string_lossy(),
+            RemoteModuleInstallOptions {
+                allow_incompatible: false,
+                base_url: Some("http://127.0.0.1:4110/lenso/service/v1".to_owned()),
+                console_plan: false,
+                dry_run: false,
+                env_file: None,
+                install_profiles: Vec::new(),
+                module_services_file: None,
+                repo_root: Some(repo_root.clone()),
+                run_install_commands: false,
+                source: "remote".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let ledger = read_json(&repo_root.join(MODULE_INSTALL_LEDGER_PATH)).unwrap();
+        let entry = ledger["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["moduleName"] == "support-ticket")
+            .unwrap();
+
+        assert_eq!(
+            entry["moduleRelease"]["manifestReference"],
+            json!(release_path.to_string_lossy().to_string())
+        );
+        assert_eq!(
+            entry["moduleRelease"]["manifestSnapshot"]["protocol"],
+            json!("lenso.module-release.v1")
+        );
+        assert_eq!(
+            entry["servicePackage"]["manifestSnapshot"]["protocol"],
+            json!("lenso.service-package.v1")
+        );
+        fs::remove_dir_all(repo_root).ok();
+    }
+
+    #[tokio::test]
+    async fn module_catalog_install_resolves_module_release() {
+        let repo_root = std::env::temp_dir().join(format!(
+            "lenso-module-release-catalog-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let package_dir = repo_root.join("artifact");
+        fs::create_dir_all(&package_dir).unwrap();
+        write_json(
+            &package_dir.join("lenso.service.json"),
+            &json!({
+                "name": "support-suite-provider",
+                "protocol": "lenso.service.v1",
+                "version": "0.4.0",
+                "modules": [
+                    {
+                        "name": "support-ticket",
+                        "version": "0.4.0"
+                    }
+                ]
+            }),
+        )
+        .unwrap();
+        write_json(
+            &package_dir.join("lenso.service-package.json"),
+            &json!({
+                "protocol": "lenso.service-package.v1",
+                "name": "support-suite-provider",
+                "version": "0.4.0",
+                "serviceManifest": "lenso.service.json",
+                "modules": ["support-ticket"]
+            }),
+        )
+        .unwrap();
+        let release_path = package_dir.join("lenso.module-release.json");
+        write_json(
+            &repo_root.join(MODULE_CATALOG_PATH),
+            &json!({
+                "version": 1,
+                "modules": [
+                    {
+                        "protocol": "lenso.module-release.v1",
+                        "manifestReference": release_path.to_string_lossy().to_string(),
+                        "name": "support-ticket",
+                        "version": "0.4.0",
+                        "source": "service",
+                        "provider": {
+                            "name": "support-suite-provider",
+                            "servicePackage": "lenso.service-package.json"
+                        }
+                    }
+                ]
+            }),
+        )
+        .unwrap();
+
+        install_module(
+            "support-ticket",
+            RemoteModuleInstallOptions {
+                allow_incompatible: false,
+                base_url: Some("http://127.0.0.1:4110/lenso/service/v1".to_owned()),
+                console_plan: false,
+                dry_run: false,
+                env_file: None,
+                install_profiles: Vec::new(),
+                module_services_file: None,
+                repo_root: Some(repo_root.clone()),
+                run_install_commands: false,
+                source: "remote".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let ledger = read_json(&repo_root.join(MODULE_INSTALL_LEDGER_PATH)).unwrap();
+        let entry = ledger["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["moduleName"] == "support-ticket")
+            .unwrap();
+
+        assert_eq!(
+            entry["moduleRelease"]["manifestReference"],
+            json!(release_path.to_string_lossy().to_string())
+        );
+        assert_eq!(
+            entry["moduleRelease"]["manifestSnapshot"]["version"],
+            json!("0.4.0")
+        );
+        fs::remove_dir_all(repo_root).ok();
+    }
+
+    #[tokio::test]
+    async fn module_catalog_add_records_module_release_entry() {
+        let repo_root = std::env::temp_dir().join(format!(
+            "lenso-module-release-catalog-add-{}",
+            uuid::Uuid::now_v7()
+        ));
+        let release_path = repo_root.join("lenso.module-release.json");
+        write_json(
+            &release_path,
+            &json!({
+                "protocol": "lenso.module-release.v1",
+                "name": "support-ticket",
+                "version": "0.5.0",
+                "source": "service",
+                "provider": {
+                    "name": "support-suite-provider",
+                    "serviceManifest": "http://127.0.0.1:4110/lenso/service/v1/manifest"
+                },
+                "capabilities": ["support_ticket.tickets.read"]
+            }),
+        )
+        .unwrap();
+
+        add_module_catalog_entry(
+            &release_path.to_string_lossy(),
+            ModuleCatalogAddOptions {
+                base_url: None,
+                catalog_file: None,
+                dry_run: false,
+                repo_root: Some(repo_root.clone()),
+                summary: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let catalog = read_json(&repo_root.join(MODULE_CATALOG_PATH)).unwrap();
+        assert_eq!(catalog["modules"][0]["name"], json!("support-ticket"));
+        assert_eq!(
+            catalog["modules"][0]["protocol"],
+            json!("lenso.module-release.v1")
+        );
+        assert_eq!(
+            catalog["modules"][0]["manifestReference"],
+            json!(release_path.to_string_lossy().to_string())
+        );
+        assert_eq!(
+            catalog["modules"][0]["provider"]["name"],
+            json!("support-suite-provider")
         );
         fs::remove_dir_all(repo_root).ok();
     }
