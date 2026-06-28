@@ -93,6 +93,14 @@ lenso service package --output-dir dist/lenso-service
 The package artifact contains the canonical `lenso.service.json` plus
 `lenso.service-package.json`, a small delivery manifest that records the service
 name, version, and provided module names.
+Install either manifest directly. For a local package artifact, still pass the
+runtime service base URL:
+
+```sh
+lenso service install dist/lenso-service/support-suite-provider/lenso.service-package.json \
+  --base-url http://127.0.0.1:4100/lenso/service/v1
+```
+
 When this command runs from a framework checkout with sibling `lenso` and
 `lenso-runtime-console` repositories, the scaffold uses local path/file
 dependencies so `cargo check` or `pnpm install` can run before the packages are
