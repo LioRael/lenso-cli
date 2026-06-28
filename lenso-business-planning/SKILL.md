@@ -1,6 +1,6 @@
 ---
 name: lenso-business-planning
-description: Use when a user gives a product or business prompt from scratch, including requests like `Build a support ticket module for a Lenso app`, and needs Codex to clarify requirements, choose host vs one module vs multiple collaborating modules, linked Rust vs remote modules, first slice, and follow-up authoring path.
+description: Use when a user gives a product or business prompt from scratch, including requests like `Build a support ticket module for a Lenso app`, and needs Codex to clarify requirements, choose host vs one module vs multiple collaborating modules, linked Rust vs service modules, first slice, and follow-up authoring path.
 ---
 
 # Lenso Business Planning
@@ -29,7 +29,7 @@ Do not ask for exhaustive product requirements before giving a path.
 1. Restate the business goal in one sentence.
 2. Pick the first useful slice that can be scaffolded, checked, and verified in `/console`.
 3. Decide whether the work belongs in a host app, an existing module, one new module, or multiple modules.
-4. Decide whether each new module should be a linked Rust module or a remote module.
+4. Decide whether each new module should stay linked in Rust or be provided by a service.
 5. Sketch the required declarations: manifest, HTTP routes, schema-admin data, admin actions, runtime functions, events, lifecycle jobs, console surfaces, config, and dependencies.
 6. Identify cross-module collaboration through declared dependencies, events, host-owned queues, remote HTTP/proxy surfaces, or public APIs.
 7. Leave the next concrete command and follow-up skill.
@@ -42,7 +42,12 @@ Split into multiple modules when capabilities can be installed separately, have 
 
 Choose a linked Rust module when the capability is first-party, should ship in the same deployable host, needs local transactions, or is the fastest path to prove the product slice.
 
-Choose a remote module when the capability is third-party, team-owned outside the host, JavaScript or TypeScript based, publishable on its own, or already needs an out-of-process service boundary.
+Choose a service when the capability is third-party, team-owned outside the host, JavaScript or TypeScript based, publishable on its own, or already needs an out-of-process service boundary.
+
+When choosing a service, include the operator loop in the first slice:
+run the service, install the manifest, check `lenso service list`, check
+`lenso service doctor <module> --json`, and verify Runtime Console Modules,
+Remote Calls, and Runtime Story.
 
 Keep the host thin. Put business-owned behavior in modules unless the work is pure host setup, auth/config anchoring, or deployment wiring.
 
@@ -61,12 +66,12 @@ Use these follow-up routes:
 
 - blank host -> `lenso host init <dir>` -> `lenso-starter-host`
 - in-host module -> `lenso module create <name>` -> `lenso-module-authoring`
-- remote module -> `lenso module create <name> --remote` -> `lenso-remote-module-authoring`
+- service -> `@lenso/service-kit` -> `lenso-remote-module-authoring` -> service lifecycle checks
 - API client or integration check -> committed OpenAPI contract -> `lenso-api-client`
 
 ## Keep Out
 
-- Do not split a vague business into microservices before boundaries are real.
+- Do not split a vague business into services before boundaries are real.
 - Do not build a generic CRUD framework before a real module needs it.
 - Do not cross-import module internals; use declared seams or host-owned collaboration.
 - Do not require cloning the framework monorepo when public CLI, crates, packages, or skills fit.
