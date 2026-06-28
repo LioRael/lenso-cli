@@ -81,6 +81,47 @@ The generated provider includes a `lenso.service.json` manifest and a minimal
 service process. A service name ending in `-provider` or `-service` provides a
 module named without that suffix, so `support-suite-provider` provides
 `support-suite`.
+Generated TS and Rust services also support `--check-release` to print the
+development module release descriptor before packaging.
+Before handing a service to another app or deployment pipeline, package-check
+the project and then emit a local service artifact:
+
+```sh
+cd ../services/support-suite-provider
+lenso service package --check
+lenso service package --output-dir dist/lenso-service
+```
+
+The package artifact contains the canonical `lenso.service.json`,
+`lenso.service-package.json`, and one
+`modules/<module>/lenso.module-release.json` file for each provided module.
+The service package records the provider name, version, and provided module
+names; each module release is the business-module install entrypoint.
+Install either manifest directly. For a local package artifact, still pass the
+runtime service base URL:
+
+```sh
+lenso service install dist/lenso-service/support-suite-provider/lenso.service-package.json \
+  --base-url http://127.0.0.1:4100/lenso/service/v1
+```
+
+Install a packaged module release with the module command:
+
+```sh
+lenso module release inspect dist/lenso-service/support-suite-provider/modules/support-ticket/lenso.module-release.json
+lenso module release check dist/lenso-service/support-suite-provider/modules/support-ticket/lenso.module-release.json \
+  --base-url http://127.0.0.1:4100/lenso/service/v1
+lenso module install dist/lenso-service/support-suite-provider/modules/support-ticket/lenso.module-release.json \
+  --base-url http://127.0.0.1:4100/lenso/service/v1
+lenso module catalog add dist/lenso-service/support-suite-provider/modules/support-ticket/lenso.module-release.json \
+  --base-url http://127.0.0.1:4100/lenso/service/v1
+lenso module install support-ticket
+```
+
+`lenso.module-release.v1` is the module release channel. It records the module
+name, version, capabilities, and provider pointer while installation still
+resolves to a host-owned service source and writes the normal service receipt.
+
 When this command runs from a framework checkout with sibling `lenso` and
 `lenso-runtime-console` repositories, the scaffold uses local path/file
 dependencies so `cargo check` or `pnpm install` can run before the packages are
@@ -113,6 +154,9 @@ lenso module install auth-device
 For V5 service-backed modules, `module install <name>` is the business-capability
 entrypoint: the catalog resolves the provider service, installs it when needed,
 then enables the requested module.
+For V10 module releases, `module install <module-release.json>` first resolves
+the release to its provider service package or service manifest, then records
+`moduleRelease` provenance in `.lenso/module-installs.json`.
 
 Install a service directly when you already have a service manifest URL:
 
