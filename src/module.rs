@@ -8328,18 +8328,32 @@ fn module_release_catalog_entry_from_manifest(
     base_url: Option<&str>,
     summary: Option<&str>,
 ) -> Result<Value> {
+    let provider = module_release_provider(manifest)?;
+    let provider_name = provider
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("Module release provider.name is required"))?;
     let mut entry = json!({
         "manifestReference": manifest_reference,
         "name": string_field(manifest, "name")?.trim(),
         "protocol": "lenso.module-release.v1",
-        "provider": manifest
-            .get("provider")
-            .cloned()
-            .unwrap_or_else(|| json!({})),
+        "providedBy": provider_name,
+        "provider": Value::Object(provider.clone()),
         "source": "service",
         "summary": summary.or_else(|| manifest.get("summary").and_then(Value::as_str)).unwrap_or("-"),
         "version": string_field(manifest, "version")?.trim(),
     });
+    if let Some(service_manifest) = provider
+        .get("serviceManifest")
+        .or_else(|| provider.get("service_manifest"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        entry["serviceManifest"] = json!(service_manifest);
+    }
     if let Some(base_url) = base_url.map(str::trim).filter(|value| !value.is_empty()) {
         entry["baseUrl"] = json!(base_url);
     }
@@ -10557,6 +10571,14 @@ mod tests {
         assert_eq!(
             catalog["modules"][0]["provider"]["name"],
             json!("support-suite-provider")
+        );
+        assert_eq!(
+            catalog["modules"][0]["providedBy"],
+            json!("support-suite-provider")
+        );
+        assert_eq!(
+            catalog["modules"][0]["serviceManifest"],
+            json!("http://127.0.0.1:4110/lenso/service/v1/manifest")
         );
         assert_eq!(
             catalog["modules"][0]["baseUrl"],
