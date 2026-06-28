@@ -7,6 +7,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", serde_json::to_string_pretty(&service_manifest())?);
         return Ok(());
     }
+    if std::env::args().any(|arg| arg == "--check-release") {
+        println!("{}", serde_json::to_string_pretty(&module_release())?);
+        return Ok(());
+    }
 
     let port = std::env::var("PORT")
         .ok()
@@ -57,5 +61,19 @@ fn service_manifest() -> Value {
                 "capabilities": ["{{module_name}}.read"],
             },
         ],
+    })
+}
+
+fn module_release() -> Value {
+    json!({
+        "protocol": "lenso.module-release.v1",
+        "name": "{{module_name}}",
+        "version": "0.1.0",
+        "source": "service",
+        "provider": {
+            "name": "{{service_name}}",
+            "serviceManifest": "http://127.0.0.1:4100/lenso/service/v1/manifest",
+        },
+        "capabilities": ["{{module_name}}.read"],
     })
 }

@@ -1,8 +1,22 @@
-import { defineModule, defineService } from "@lenso/service-kit";
+import {
+  defineModule,
+  defineModuleRelease,
+  defineService,
+} from "@lenso/service-kit";
 
 export const providedModule = defineModule({
   name: "{{module_name}}",
   version: "0.1.0",
+  capabilities: ["{{module_name}}.read"],
+});
+
+export const moduleRelease = defineModuleRelease({
+  name: "{{module_name}}",
+  version: "0.1.0",
+  provider: {
+    name: "{{service_name}}",
+    serviceManifest: "http://127.0.0.1:4100/lenso/service/v1/manifest",
+  },
   capabilities: ["{{module_name}}.read"],
 });
 

@@ -843,6 +843,27 @@ mod tests {
     }
 
     #[test]
+    fn service_code_templates_expose_module_release_checks() {
+        let ts_service = render_template(
+            include_str!("../templates/service-ts/src/service.ts"),
+            &scaffold(),
+        );
+        let ts_server = render_template(
+            include_str!("../templates/service-ts/src/server.ts"),
+            &scaffold(),
+        );
+        let rust_server = render_template(
+            include_str!("../templates/service-rust/src/main.rs"),
+            &scaffold(),
+        );
+
+        assert!(ts_service.contains("defineModuleRelease"));
+        assert!(ts_server.contains("--check-release"));
+        assert!(rust_server.contains("fn module_release()"));
+        assert!(rust_server.contains("--check-release"));
+    }
+
+    #[test]
     fn service_package_metadata_lists_declared_modules() {
         let metadata = service_package_metadata(&json!({
             "name": "support-suite-provider",

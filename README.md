@@ -81,6 +81,8 @@ The generated provider includes a `lenso.service.json` manifest and a minimal
 service process. A service name ending in `-provider` or `-service` provides a
 module named without that suffix, so `support-suite-provider` provides
 `support-suite`.
+Generated TS and Rust services also support `--check-release` to print the
+development module release descriptor before packaging.
 Before handing a service to another app or deployment pipeline, package-check
 the project and then emit a local service artifact:
 
