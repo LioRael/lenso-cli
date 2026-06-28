@@ -81,6 +81,18 @@ The generated provider includes a `lenso.service.json` manifest and a minimal
 service process. A service name ending in `-provider` or `-service` provides a
 module named without that suffix, so `support-suite-provider` provides
 `support-suite`.
+Before handing a service to another app or deployment pipeline, package-check
+the project and then emit a local service artifact:
+
+```sh
+cd ../services/support-suite-provider
+lenso service package --check
+lenso service package --output-dir dist/lenso-service
+```
+
+The package artifact contains the canonical `lenso.service.json` plus
+`lenso.service-package.json`, a small delivery manifest that records the service
+name, version, and provided module names.
 When this command runs from a framework checkout with sibling `lenso` and
 `lenso-runtime-console` repositories, the scaffold uses local path/file
 dependencies so `cargo check` or `pnpm install` can run before the packages are

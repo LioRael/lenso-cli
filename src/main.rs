@@ -181,6 +181,8 @@ enum ServiceCommand {
     Create(ServiceCreateArgs),
     /// Start service providers, then run the generated host.
     Dev(ServiceDevArgs),
+    /// Package a service provider project for distribution.
+    Package(ServicePackageArgs),
     /// Install a service manifest.
     Install(RemoteModuleInstallArgs),
     /// Remove a service provider and its provided modules.
@@ -254,6 +256,29 @@ struct ServiceDevArgs {
     /// Run API and worker as separate local processes.
     #[arg(long)]
     separate_worker: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServicePackageArgs {
+    /// Service provider project directory.
+    #[arg(default_value = ".")]
+    service_dir: std::path::PathBuf,
+
+    /// Service manifest path or URL. Paths are relative to the service directory unless absolute.
+    #[arg(long, default_value = "lenso.service.json")]
+    manifest: String,
+
+    /// Directory that receives package artifacts, relative to the service directory unless absolute.
+    #[arg(long, default_value = "dist/lenso-service")]
+    output_dir: std::path::PathBuf,
+
+    /// Validate the package inputs and planned artifact without writing files.
+    #[arg(long)]
+    check: bool,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -1207,6 +1232,9 @@ async fn main() -> anyhow::Result<()> {
             ServiceCommand::Dev(args) => {
                 service::dev_service((&args).into()).await?;
             }
+            ServiceCommand::Package(args) => {
+                service::package_service((&args).into()).await?;
+            }
             ServiceCommand::Install(args) => {
                 module::install_module(&args.manifest_reference, (&args).into()).await?;
             }
@@ -1330,6 +1358,40 @@ mod tests {
         };
 
         assert!(args.skip_db);
+    }
+
+    #[test]
+    fn parses_service_package() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "service",
+            "package",
+            "../services/support-suite-provider",
+            "--manifest",
+            "service.json",
+            "--output-dir",
+            "../dist/services",
+            "--check",
+            "--json",
+        ]);
+        let Command::Service {
+            command: ServiceCommand::Package(args),
+        } = cli.command
+        else {
+            panic!("expected service package");
+        };
+
+        assert_eq!(
+            args.service_dir.as_path(),
+            std::path::Path::new("../services/support-suite-provider")
+        );
+        assert_eq!(args.manifest, "service.json");
+        assert_eq!(
+            args.output_dir.as_path(),
+            std::path::Path::new("../dist/services")
+        );
+        assert!(args.check);
+        assert!(args.json);
     }
 
     #[test]
