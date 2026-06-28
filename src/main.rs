@@ -1,5 +1,6 @@
 mod host;
 mod module;
+mod service;
 
 use clap::{Args, Parser, Subcommand};
 
@@ -29,6 +30,11 @@ enum Command {
     Module {
         #[command(subcommand)]
         command: ModuleCommand,
+    },
+    /// Install, diagnose, and operate Lenso services.
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
     },
     /// Manage Runtime Console assets, access, and packages.
     Console {
@@ -128,24 +134,29 @@ struct ConsoleUpdateArgs {
 
 #[derive(Debug, Subcommand)]
 enum ModuleCommand {
-    /// Create a linked or remote module scaffold.
+    /// Create a linked module or service scaffold.
     Create(ModuleCreateArgs),
     /// Install a remote source or enable a linked module.
     Install(RemoteModuleInstallArgs),
-    /// Add a configured remote module source.
+    /// Add a configured service source.
     Add(RemoteModuleInstallArgs),
     /// Reapply an installed module from its install receipt.
     Update(ModuleUpdateArgs),
     /// Remove a remote source or disable a linked module.
     Uninstall(RemoteModuleUninstallArgs),
-    /// Diagnose installed remote module services.
+    /// Diagnose installed services.
     Doctor(ModuleDoctorArgs),
+    /// Inspect and manage declared service processes.
+    Service {
+        #[command(subcommand)]
+        command: ModuleServiceCommand,
+    },
     /// Manage a local module catalog.
     Catalog {
         #[command(subcommand)]
         command: ModuleCatalogCommand,
     },
-    /// Install remote modules.
+    /// Install services.
     Marketplace {
         #[command(subcommand)]
         command: ModuleMarketplaceCommand,
@@ -154,14 +165,346 @@ enum ModuleCommand {
 
 #[derive(Debug, Subcommand)]
 enum ModuleCatalogCommand {
-    /// Add a remote module manifest to the local catalog.
+    /// Add a service manifest to the local catalog.
     Add(ModuleCatalogAddArgs),
 }
 
 #[derive(Debug, Subcommand)]
 enum ModuleMarketplaceCommand {
-    /// Install a remote module from its manifest.
+    /// Install a service from its manifest.
     Install(RemoteModuleInstallArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum ServiceCommand {
+    /// Create a service provider scaffold.
+    Create(ServiceCreateArgs),
+    /// Start service providers, then run the generated host.
+    Dev(ServiceDevArgs),
+    /// Install a service manifest.
+    Install(RemoteModuleInstallArgs),
+    /// Remove a service provider and its provided modules.
+    Uninstall(RemoteModuleUninstallArgs),
+    /// Show changes between installed and candidate service manifests.
+    Diff(ServiceDiffArgs),
+    /// Upgrade an installed service from a candidate manifest.
+    Upgrade(ServiceUpgradeArgs),
+    /// Roll back a service to the previous installed manifest snapshot.
+    Rollback(ServiceRollbackArgs),
+    /// Diagnose installed services and their provided modules.
+    Doctor(ModuleDoctorArgs),
+    /// Check a service manifest or configured service state.
+    Check(ServiceCheckArgs),
+    /// List declared services.
+    List(ModuleServiceListArgs),
+    /// Export a deployment fragment for declared services.
+    Export(ModuleServiceExportArgs),
+    /// Show one service with local state.
+    Status(ModuleServiceStatusArgs),
+    /// Show local logs for a declared service.
+    Logs(ModuleServiceLogsArgs),
+    /// Start a declared service in the background.
+    Start(ModuleServiceStartArgs),
+    /// Stop a declared service started by the CLI or host.
+    Stop(ModuleServiceStopArgs),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum ServiceLanguage {
+    Rust,
+    Ts,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceCreateArgs {
+    /// Service provider name, such as support-suite-provider.
+    name: String,
+
+    /// Generated service language.
+    #[arg(long, value_enum)]
+    lang: ServiceLanguage,
+
+    /// Directory that receives the service directory.
+    #[arg(long)]
+    output_dir: Option<std::path::PathBuf>,
+
+    /// Print files without writing them.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceDevArgs {
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Remote module services file.
+    #[arg(long)]
+    module_services_file: Option<std::path::PathBuf>,
+
+    /// Do not start the template Postgres service.
+    #[arg(long)]
+    skip_db: bool,
+
+    /// Do not run migrations before starting services.
+    #[arg(long)]
+    skip_migrate: bool,
+
+    /// Run API and worker as separate local processes.
+    #[arg(long)]
+    separate_worker: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceCheckArgs {
+    /// Service manifest URL/path, or optional module name for installed-service checks.
+    manifest_reference: Option<String>,
+
+    /// Start this command before checking readiness and manifest fetch.
+    #[arg(long)]
+    serve_command: Option<String>,
+
+    /// Working directory for --serve-command.
+    #[arg(long)]
+    cwd: Option<std::path::PathBuf>,
+
+    /// Ready/status URL to poll when using --serve-command.
+    #[arg(long)]
+    ready_url: Option<String>,
+
+    /// Manifest URL to fetch after --serve-command becomes ready.
+    #[arg(long)]
+    manifest_url: Option<String>,
+
+    /// Only check one operation id.
+    #[arg(long)]
+    operation: Option<String>,
+
+    /// JSON sample input used for explicit safe probes.
+    #[arg(long)]
+    sample_input: Option<std::path::PathBuf>,
+
+    /// Ready wait timeout in milliseconds.
+    #[arg(long, default_value_t = 10_000)]
+    ready_timeout_ms: u64,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Environment file to read when checking installed services.
+    #[arg(long)]
+    env_file: Option<std::path::PathBuf>,
+
+    /// Remote module services file.
+    #[arg(long)]
+    module_services_file: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceDiffArgs {
+    /// Installed service provider name.
+    service_name: String,
+
+    /// Candidate service manifest URL/path.
+    manifest_reference: String,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceUpgradeArgs {
+    /// Installed service provider name.
+    service_name: String,
+
+    /// Candidate service manifest URL/path.
+    manifest_reference: String,
+
+    /// Remote service base URL for local manifest files.
+    #[arg(long)]
+    base_url: Option<String>,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Environment file to update.
+    #[arg(long)]
+    env_file: Option<std::path::PathBuf>,
+
+    /// Remote module services file.
+    #[arg(long)]
+    module_services_file: Option<std::path::PathBuf>,
+
+    /// Print changes without writing them.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Allow upgrade when compatibility metadata does not match this host.
+    #[arg(long)]
+    allow_incompatible: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceRollbackArgs {
+    /// Installed service provider name.
+    service_name: String,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Environment file to update.
+    #[arg(long)]
+    env_file: Option<std::path::PathBuf>,
+
+    /// Remote module services file.
+    #[arg(long)]
+    module_services_file: Option<std::path::PathBuf>,
+
+    /// Print changes without writing them.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum ModuleServiceCommand {
+    /// List declared services.
+    List(ModuleServiceListArgs),
+    /// Export a deployment fragment for declared services.
+    Export(ModuleServiceExportArgs),
+    /// Show one service with local state.
+    Status(ModuleServiceStatusArgs),
+    /// Show local logs for a declared service.
+    Logs(ModuleServiceLogsArgs),
+    /// Start a declared service in the background.
+    Start(ModuleServiceStartArgs),
+    /// Stop a declared service started by the CLI or host.
+    Stop(ModuleServiceStopArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+struct ModuleServiceListArgs {
+    /// Optional module name to list.
+    module_name: Option<String>,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Remote module services file.
+    #[arg(long)]
+    module_services_file: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ModuleServiceExportArgs {
+    /// Module name.
+    #[arg(long = "module")]
+    module_name: String,
+
+    /// Export format.
+    #[arg(long, default_value = "compose")]
+    format: String,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Remote module services file.
+    #[arg(long)]
+    module_services_file: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ModuleServiceStatusArgs {
+    /// Module name.
+    module_name: String,
+
+    /// Service name.
+    service_name: String,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Remote module services file.
+    #[arg(long)]
+    module_services_file: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ModuleServiceLogsArgs {
+    /// Module name.
+    module_name: String,
+
+    /// Service name.
+    service_name: String,
+
+    /// Number of log lines to print.
+    #[arg(long, default_value_t = 100)]
+    tail: usize,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Remote module services file.
+    #[arg(long)]
+    module_services_file: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ModuleServiceStartArgs {
+    /// Module name.
+    module_name: String,
+
+    /// Service name.
+    service_name: String,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Remote module services file.
+    #[arg(long)]
+    module_services_file: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ModuleServiceStopArgs {
+    /// Module name.
+    module_name: String,
+
+    /// Service name.
+    service_name: String,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Remote module services file.
+    #[arg(long)]
+    module_services_file: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -204,6 +547,10 @@ struct RemoteModuleInstallArgs {
     /// Print install changes without writing them.
     #[arg(long)]
     dry_run: bool,
+
+    /// Allow install when manifest compatibility metadata does not match this host.
+    #[arg(long)]
+    allow_incompatible: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -268,6 +615,10 @@ struct ModuleUpdateArgs {
     /// Print update changes without writing them.
     #[arg(long)]
     dry_run: bool,
+
+    /// Allow update when manifest compatibility metadata does not match this host.
+    #[arg(long)]
+    allow_incompatible: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -286,6 +637,10 @@ struct ModuleDoctorArgs {
     /// Remote module services file.
     #[arg(long)]
     module_services_file: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -331,7 +686,7 @@ struct ModuleCreateArgs {
     #[arg(long)]
     repo_root: Option<std::path::PathBuf>,
 
-    /// Directory for standalone remote packages.
+    /// Directory for standalone service packages.
     #[arg(long)]
     output_dir: Option<std::path::PathBuf>,
 
@@ -363,7 +718,7 @@ struct ModuleCreateArgs {
     #[arg(long)]
     source: Option<String>,
 
-    /// Create a standalone remote module package.
+    /// Create a standalone service package.
     #[arg(long)]
     remote: bool,
 
@@ -476,6 +831,7 @@ struct ConsolePackageApplyPlanArgs {
 impl From<&RemoteModuleInstallArgs> for module::RemoteModuleInstallOptions {
     fn from(args: &RemoteModuleInstallArgs) -> Self {
         Self {
+            allow_incompatible: args.allow_incompatible,
             base_url: args.base_url.clone(),
             console_plan: args.console_plan,
             dry_run: args.dry_run,
@@ -504,6 +860,7 @@ impl From<&RemoteModuleUninstallArgs> for module::RemoteModuleUninstallOptions {
 impl From<&ModuleUpdateArgs> for module::ModuleUpdateOptions {
     fn from(args: &ModuleUpdateArgs) -> Self {
         Self {
+            allow_incompatible: args.allow_incompatible,
             base_url: args.base_url.clone(),
             console_plan: args.console_plan,
             dry_run: args.dry_run,
@@ -520,9 +877,128 @@ impl From<&ModuleDoctorArgs> for module::ModuleDoctorOptions {
     fn from(args: &ModuleDoctorArgs) -> Self {
         Self {
             env_file: args.env_file.clone(),
+            json: args.json,
             module_name: args.module_name.clone(),
             module_services_file: args.module_services_file.clone(),
             repo_root: args.repo_root.clone(),
+        }
+    }
+}
+
+impl From<&ServiceCheckArgs> for module::ModuleDoctorOptions {
+    fn from(args: &ServiceCheckArgs) -> Self {
+        Self {
+            env_file: args.env_file.clone(),
+            json: args.json,
+            module_name: args.manifest_reference.clone(),
+            module_services_file: args.module_services_file.clone(),
+            repo_root: args.repo_root.clone(),
+        }
+    }
+}
+
+impl From<&ServiceDiffArgs> for module::ServiceDiffOptions {
+    fn from(args: &ServiceDiffArgs) -> Self {
+        Self {
+            json: args.json,
+            manifest_reference: args.manifest_reference.clone(),
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
+        }
+    }
+}
+
+impl From<&ServiceUpgradeArgs> for module::ServiceUpgradeOptions {
+    fn from(args: &ServiceUpgradeArgs) -> Self {
+        Self {
+            allow_incompatible: args.allow_incompatible,
+            base_url: args.base_url.clone(),
+            dry_run: args.dry_run,
+            env_file: args.env_file.clone(),
+            manifest_reference: args.manifest_reference.clone(),
+            module_services_file: args.module_services_file.clone(),
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
+        }
+    }
+}
+
+impl From<&ServiceRollbackArgs> for module::ServiceRollbackOptions {
+    fn from(args: &ServiceRollbackArgs) -> Self {
+        Self {
+            dry_run: args.dry_run,
+            env_file: args.env_file.clone(),
+            module_services_file: args.module_services_file.clone(),
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
+        }
+    }
+}
+
+impl From<&ModuleServiceListArgs> for module::ModuleServiceListOptions {
+    fn from(args: &ModuleServiceListArgs) -> Self {
+        Self {
+            json: args.json,
+            module_name: args.module_name.clone(),
+            module_services_file: args.module_services_file.clone(),
+            repo_root: args.repo_root.clone(),
+        }
+    }
+}
+
+impl From<&ModuleServiceExportArgs> for module::ModuleServiceExportOptions {
+    fn from(args: &ModuleServiceExportArgs) -> Self {
+        Self {
+            format: args.format.clone(),
+            module_name: args.module_name.clone(),
+            module_services_file: args.module_services_file.clone(),
+            repo_root: args.repo_root.clone(),
+        }
+    }
+}
+
+impl From<&ModuleServiceStatusArgs> for module::ModuleServiceStatusOptions {
+    fn from(args: &ModuleServiceStatusArgs) -> Self {
+        Self {
+            json: args.json,
+            module_name: args.module_name.clone(),
+            module_services_file: args.module_services_file.clone(),
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
+        }
+    }
+}
+
+impl From<&ModuleServiceLogsArgs> for module::ModuleServiceLogsOptions {
+    fn from(args: &ModuleServiceLogsArgs) -> Self {
+        Self {
+            module_name: args.module_name.clone(),
+            module_services_file: args.module_services_file.clone(),
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
+            tail: args.tail,
+        }
+    }
+}
+
+impl From<&ModuleServiceStartArgs> for module::ModuleServiceStartOptions {
+    fn from(args: &ModuleServiceStartArgs) -> Self {
+        Self {
+            module_name: args.module_name.clone(),
+            module_services_file: args.module_services_file.clone(),
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
+        }
+    }
+}
+
+impl From<&ModuleServiceStopArgs> for module::ModuleServiceStopOptions {
+    fn from(args: &ModuleServiceStopArgs) -> Self {
+        Self {
+            module_name: args.module_name.clone(),
+            module_services_file: args.module_services_file.clone(),
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
         }
     }
 }
@@ -609,6 +1085,31 @@ impl From<&ConsolePackageApplyPlanArgs> for module::ConsolePackageApplyPlanOptio
     }
 }
 
+fn looks_like_manifest_reference(reference: &str) -> bool {
+    reference.starts_with("http://")
+        || reference.starts_with("https://")
+        || reference.ends_with(".json")
+        || reference.contains("/manifest")
+}
+
+fn service_check_uses_manifest(args: &ServiceCheckArgs) -> bool {
+    args.serve_command.is_some()
+        || args.operation.is_some()
+        || args.sample_input.is_some()
+        || args
+            .manifest_reference
+            .as_deref()
+            .is_some_and(looks_like_manifest_reference)
+}
+
+fn warn_module_install_manifest_reference(reference: &str) {
+    if looks_like_manifest_reference(reference) {
+        eprintln!(
+            "warning: `lenso module install <manifest>` is deprecated for service manifests; use `lenso service install <manifest>` or `lenso module install <module-name>`."
+        );
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -652,6 +1153,7 @@ async fn main() -> anyhow::Result<()> {
                 module::create_module((&args).into()).await?;
             }
             ModuleCommand::Install(args) => {
+                warn_module_install_manifest_reference(&args.manifest_reference);
                 module::install_module(&args.manifest_reference, (&args).into()).await?;
             }
             ModuleCommand::Add(args) => {
@@ -666,6 +1168,26 @@ async fn main() -> anyhow::Result<()> {
             ModuleCommand::Doctor(args) => {
                 module::doctor_module((&args).into()).await?;
             }
+            ModuleCommand::Service { command } => match command {
+                ModuleServiceCommand::List(args) => {
+                    module::list_module_services((&args).into()).await?;
+                }
+                ModuleServiceCommand::Export(args) => {
+                    module::export_module_services((&args).into()).await?;
+                }
+                ModuleServiceCommand::Status(args) => {
+                    module::status_module_service((&args).into()).await?;
+                }
+                ModuleServiceCommand::Logs(args) => {
+                    module::logs_module_service((&args).into()).await?;
+                }
+                ModuleServiceCommand::Start(args) => {
+                    module::start_module_service((&args).into()).await?;
+                }
+                ModuleServiceCommand::Stop(args) => {
+                    module::stop_module_service((&args).into()).await?;
+                }
+            },
             ModuleCommand::Catalog { command } => match command {
                 ModuleCatalogCommand::Add(args) => {
                     module::add_module_catalog_entry(&args.manifest_reference, (&args).into())
@@ -678,7 +1200,293 @@ async fn main() -> anyhow::Result<()> {
                 }
             },
         },
+        Command::Service { command } => match command {
+            ServiceCommand::Create(args) => {
+                service::create_service((&args).into())?;
+            }
+            ServiceCommand::Dev(args) => {
+                service::dev_service((&args).into()).await?;
+            }
+            ServiceCommand::Install(args) => {
+                module::install_module(&args.manifest_reference, (&args).into()).await?;
+            }
+            ServiceCommand::Uninstall(args) => {
+                module::uninstall_remote_module(&args.module_name, (&args).into()).await?;
+            }
+            ServiceCommand::Diff(args) => {
+                module::diff_service((&args).into()).await?;
+            }
+            ServiceCommand::Upgrade(args) => {
+                module::upgrade_service((&args).into()).await?;
+            }
+            ServiceCommand::Rollback(args) => {
+                module::rollback_service((&args).into()).await?;
+            }
+            ServiceCommand::Doctor(args) => {
+                module::doctor_module((&args).into()).await?;
+            }
+            ServiceCommand::Check(args) => {
+                if service_check_uses_manifest(&args) {
+                    module::check_service_manifest_reference(
+                        args.manifest_reference
+                            .as_deref()
+                            .unwrap_or("./lenso.service.json"),
+                        module::ServiceManifestCheckOptions {
+                            cwd: args.cwd.clone(),
+                            json: args.json,
+                            manifest_url: args.manifest_url.clone(),
+                            operation: args.operation.clone(),
+                            ready_timeout_ms: args.ready_timeout_ms,
+                            ready_url: args.ready_url.clone(),
+                            sample_input: args.sample_input.clone(),
+                            serve_command: args.serve_command.clone(),
+                        },
+                    )
+                    .await?;
+                } else {
+                    module::doctor_module((&args).into()).await?;
+                }
+            }
+            ServiceCommand::List(args) => {
+                module::list_module_services((&args).into()).await?;
+            }
+            ServiceCommand::Export(args) => {
+                module::export_module_services((&args).into()).await?;
+            }
+            ServiceCommand::Status(args) => {
+                module::status_module_service((&args).into()).await?;
+            }
+            ServiceCommand::Logs(args) => {
+                module::logs_module_service((&args).into()).await?;
+            }
+            ServiceCommand::Start(args) => {
+                module::start_module_service((&args).into()).await?;
+            }
+            ServiceCommand::Stop(args) => {
+                module::stop_module_service((&args).into()).await?;
+            }
+        },
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_service_create_ts() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "service",
+            "create",
+            "support-suite-provider",
+            "--lang",
+            "ts",
+        ]);
+
+        let Command::Service {
+            command: ServiceCommand::Create(args),
+        } = cli.command
+        else {
+            panic!("expected service create");
+        };
+
+        assert_eq!(args.name, "support-suite-provider");
+        assert_eq!(args.lang, ServiceLanguage::Ts);
+    }
+
+    #[test]
+    fn parses_service_create_rust() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "service",
+            "create",
+            "rust-audit-service",
+            "--lang",
+            "rust",
+        ]);
+
+        let Command::Service {
+            command: ServiceCommand::Create(args),
+        } = cli.command
+        else {
+            panic!("expected service create");
+        };
+
+        assert_eq!(args.name, "rust-audit-service");
+        assert_eq!(args.lang, ServiceLanguage::Rust);
+    }
+
+    #[test]
+    fn parses_service_dev() {
+        let cli = Cli::parse_from(["lenso", "service", "dev", "--skip-db"]);
+        let Command::Service {
+            command: ServiceCommand::Dev(args),
+        } = cli.command
+        else {
+            panic!("expected service dev");
+        };
+
+        assert!(args.skip_db);
+    }
+
+    #[test]
+    fn parses_service_check_manifest_reference() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "service",
+            "check",
+            "./lenso.service.json",
+            "--json",
+            "--serve-command",
+            "pnpm start",
+        ]);
+        let Command::Service {
+            command: ServiceCommand::Check(args),
+        } = cli.command
+        else {
+            panic!("expected service check");
+        };
+
+        assert_eq!(
+            args.manifest_reference.as_deref(),
+            Some("./lenso.service.json")
+        );
+        assert!(args.json);
+        assert_eq!(args.serve_command.as_deref(), Some("pnpm start"));
+    }
+
+    #[test]
+    fn parses_service_check_operation_filter_and_sample_input() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "service",
+            "check",
+            "./lenso.service.json",
+            "--operation",
+            "support-ticket/http/GET:/tickets",
+            "--sample-input",
+            "fixtures/probe.json",
+        ]);
+        let Command::Service {
+            command: ServiceCommand::Check(args),
+        } = cli.command
+        else {
+            panic!("expected service check");
+        };
+
+        assert_eq!(
+            args.operation.as_deref(),
+            Some("support-ticket/http/GET:/tickets")
+        );
+        assert_eq!(
+            args.sample_input.as_deref(),
+            Some(std::path::Path::new("fixtures/probe.json"))
+        );
+    }
+
+    #[test]
+    fn service_check_operation_options_use_manifest_check_mode() {
+        let cli = Cli::parse_from(["lenso", "service", "check", "--operation", "missing"]);
+        let Command::Service {
+            command: ServiceCommand::Check(args),
+        } = cli.command
+        else {
+            panic!("expected service check");
+        };
+
+        assert!(service_check_uses_manifest(&args));
+        assert_eq!(args.manifest_reference.as_deref(), None);
+
+        let cli = Cli::parse_from([
+            "lenso",
+            "service",
+            "check",
+            "--sample-input",
+            "fixtures/probe.json",
+        ]);
+        let Command::Service {
+            command: ServiceCommand::Check(args),
+        } = cli.command
+        else {
+            panic!("expected service check");
+        };
+
+        assert!(service_check_uses_manifest(&args));
+        assert_eq!(args.manifest_reference.as_deref(), None);
+    }
+
+    #[test]
+    fn parses_service_delivery_lifecycle_commands() {
+        let diff = Cli::parse_from([
+            "lenso",
+            "service",
+            "diff",
+            "support-suite-provider",
+            "./lenso.service.json",
+        ]);
+        let Command::Service {
+            command: ServiceCommand::Diff(diff_args),
+        } = diff.command
+        else {
+            panic!("expected service diff");
+        };
+        assert_eq!(diff_args.service_name, "support-suite-provider");
+
+        let upgrade = Cli::parse_from([
+            "lenso",
+            "service",
+            "upgrade",
+            "support-suite-provider",
+            "./lenso.service.json",
+            "--dry-run",
+        ]);
+        let Command::Service {
+            command: ServiceCommand::Upgrade(upgrade_args),
+        } = upgrade.command
+        else {
+            panic!("expected service upgrade");
+        };
+        assert!(upgrade_args.dry_run);
+
+        let rollback = Cli::parse_from([
+            "lenso",
+            "service",
+            "rollback",
+            "support-suite-provider",
+            "--dry-run",
+        ]);
+        let Command::Service {
+            command: ServiceCommand::Rollback(rollback_args),
+        } = rollback.command
+        else {
+            panic!("expected service rollback");
+        };
+        assert!(rollback_args.dry_run);
+    }
+
+    #[test]
+    fn parses_service_logs() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "service",
+            "logs",
+            "support-ticket",
+            "api",
+            "--tail",
+            "100",
+        ]);
+        let Command::Service {
+            command: ServiceCommand::Logs(args),
+        } = cli.command
+        else {
+            panic!("expected service logs");
+        };
+
+        assert_eq!(args.module_name, "support-ticket");
+        assert_eq!(args.service_name, "api");
+        assert_eq!(args.tail, 100);
+    }
 }

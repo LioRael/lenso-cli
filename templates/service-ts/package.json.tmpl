@@ -1,0 +1,15 @@
+{
+  "name": "{{package_name}}",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node src/server.ts --check",
+    "dev": "node src/server.ts",
+    "start": "node src/server.ts"
+  },
+  "dependencies": {
+    "@lenso/remote-module-kit": {{remote_module_kit_dependency}},
+    "@lenso/service-kit": {{service_kit_dependency}}
+  }
+}

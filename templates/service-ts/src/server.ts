@@ -1,0 +1,13 @@
+import { serveService } from "@lenso/service-kit";
+
+import { service } from "./service.ts";
+
+if (process.argv.includes("--check")) {
+  console.log(JSON.stringify(service, null, 2));
+  process.exit(0);
+}
+
+const port = Number(process.env.PORT ?? "4100");
+const server = await serveService(service, { port });
+
+console.log(`Lenso service ready: ${server.manifestUrl}`);

@@ -1,14 +1,16 @@
-use std::collections::BTreeMap;
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Duration;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Map, Value, json};
 
 #[derive(Debug, Clone)]
 pub struct RemoteModuleInstallOptions {
+    pub allow_incompatible: bool,
     pub base_url: Option<String>,
     pub console_plan: bool,
     pub dry_run: bool,
@@ -44,6 +46,7 @@ pub struct RemoteModuleUninstallOptions {
 
 #[derive(Debug, Clone)]
 pub struct ModuleUpdateOptions {
+    pub allow_incompatible: bool,
     pub base_url: Option<String>,
     pub console_plan: bool,
     pub dry_run: bool,
@@ -57,9 +60,101 @@ pub struct ModuleUpdateOptions {
 #[derive(Debug, Clone)]
 pub struct ModuleDoctorOptions {
     pub env_file: Option<PathBuf>,
+    pub json: bool,
     pub module_name: Option<String>,
     pub module_services_file: Option<PathBuf>,
     pub repo_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceManifestCheckOptions {
+    pub cwd: Option<PathBuf>,
+    pub json: bool,
+    pub manifest_url: Option<String>,
+    pub operation: Option<String>,
+    pub ready_timeout_ms: u64,
+    pub ready_url: Option<String>,
+    pub sample_input: Option<PathBuf>,
+    pub serve_command: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceDiffOptions {
+    pub json: bool,
+    pub manifest_reference: String,
+    pub repo_root: Option<PathBuf>,
+    pub service_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceUpgradeOptions {
+    pub allow_incompatible: bool,
+    pub base_url: Option<String>,
+    pub dry_run: bool,
+    pub env_file: Option<PathBuf>,
+    pub manifest_reference: String,
+    pub module_services_file: Option<PathBuf>,
+    pub repo_root: Option<PathBuf>,
+    pub service_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceRollbackOptions {
+    pub dry_run: bool,
+    pub env_file: Option<PathBuf>,
+    pub module_services_file: Option<PathBuf>,
+    pub repo_root: Option<PathBuf>,
+    pub service_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModuleServiceListOptions {
+    pub json: bool,
+    pub module_name: Option<String>,
+    pub module_services_file: Option<PathBuf>,
+    pub repo_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModuleServiceExportOptions {
+    pub format: String,
+    pub module_name: String,
+    pub module_services_file: Option<PathBuf>,
+    pub repo_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModuleServiceStatusOptions {
+    pub json: bool,
+    pub module_name: String,
+    pub module_services_file: Option<PathBuf>,
+    pub repo_root: Option<PathBuf>,
+    pub service_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModuleServiceLogsOptions {
+    pub module_name: String,
+    pub module_services_file: Option<PathBuf>,
+    pub repo_root: Option<PathBuf>,
+    pub service_name: String,
+    pub tail: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModuleServiceStartOptions {
+    pub module_name: String,
+    pub module_services_file: Option<PathBuf>,
+    pub repo_root: Option<PathBuf>,
+    pub service_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModuleServiceStopOptions {
+    pub module_name: String,
+    pub module_services_file: Option<PathBuf>,
+    pub repo_root: Option<PathBuf>,
+    pub service_name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -171,6 +266,11 @@ struct RemoteModuleServiceState {
     services: Vec<RemoteModuleServiceInstallSpec>,
 }
 
+struct RemoteUninstallTarget {
+    provider_name: String,
+    module_names: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RemoteModuleServiceDoctorStatus {
     Ready,
@@ -186,19 +286,105 @@ impl RemoteModuleServiceDoctorStatus {
         match self {
             Self::Ready => "ready",
             Self::Disabled => "disabled",
-            Self::ManualNotReady => "manual_not_ready",
-            Self::NotConfigured => "not_configured",
-            Self::NotReady => "not_ready",
-            Self::StaleState => "stale_or_starting",
+            Self::ManualNotReady => "service_not_ready",
+            Self::NotConfigured => "source_not_configured",
+            Self::NotReady => "service_not_ready",
+            Self::StaleState => "stale_lock_or_pid",
         }
     }
 
     fn is_issue(self) -> bool {
         matches!(
             self,
-            Self::NotConfigured | Self::NotReady | Self::StaleState
+            Self::ManualNotReady | Self::NotConfigured | Self::NotReady | Self::StaleState
         )
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModuleDoctorReport {
+    issue_count: usize,
+    sources_checked: usize,
+    services_checked: usize,
+    sources: Vec<ModuleDoctorSourceReport>,
+    services: Vec<ModuleDoctorServiceReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModuleDoctorSourceReport {
+    module_name: String,
+    installed: bool,
+    configured: bool,
+    enabled: bool,
+    base_url: Option<String>,
+    manifest_url: Option<String>,
+    manifest_status: ModuleDoctorManifestStatus,
+    fix: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ModuleDoctorManifestStatus {
+    Reachable,
+    Unreachable,
+    Skipped,
+    NotConfigured,
+}
+
+impl ModuleDoctorManifestStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Reachable => "reachable",
+            Self::Unreachable => "unreachable",
+            Self::Skipped => "skipped",
+            Self::NotConfigured => "not_configured",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModuleDoctorServiceReport {
+    module_name: String,
+    service_name: String,
+    status: String,
+    ready_url: String,
+    process: String,
+    command: Option<String>,
+    lock_file: Option<String>,
+    pid_file: Option<String>,
+    fix: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModuleServiceListReport {
+    services: Vec<ModuleServiceListItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModuleServiceListItem {
+    module_name: String,
+    service_name: String,
+    auto_start: bool,
+    command: String,
+    ready_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModuleServiceStatusReport {
+    module_name: String,
+    service_name: String,
+    status: String,
+    ready: bool,
+    ready_url: String,
+    auto_start: bool,
+    lock_file: Option<String>,
+    pid_file: Option<String>,
 }
 
 #[derive(Debug)]
@@ -210,11 +396,18 @@ struct RepoPaths {
 
 type PendingWrites = BTreeMap<PathBuf, String>;
 
+const MODULE_CATALOG_PATH: &str = ".lenso/module-catalog.json";
 const MODULE_INSTALL_LEDGER_PATH: &str = ".lenso/module-installs.json";
 const CONSOLE_EXTENSION_REGISTRY_PATH: &str = ".lenso/console/extensions/registry.json";
 const RUNTIME_CONFIG_DEFAULTS_PATH: &str = ".lenso/runtime-config-defaults.json";
 const CONSOLE_EXTENSION_ROUTE_PREFIX: &str = "/console/extensions";
 const CONSOLE_BUNDLE_HOST_API: &str = "1";
+const REMOTE_PROTOCOL_VERSION: &str = "1";
+const SUPPORTED_SERVICE_MODULE_FEATURES: &[&str] = &[
+    "console.package-api.1",
+    "service.lifecycle",
+    "service.status",
+];
 
 pub async fn create_module(options: ModuleCreateOptions) -> Result<()> {
     if options.remote {
@@ -391,14 +584,91 @@ pub async fn install_module(
     module_reference: &str,
     options: RemoteModuleInstallOptions,
 ) -> Result<()> {
+    let source = parse_module_source(&options.source)?;
     if let Some(descriptor) = read_install_descriptor(module_reference).await? {
+        if should_resolve_service_catalog_entry(source)
+            && let Some(manifest_reference) = catalog_service_manifest_reference(&descriptor)
+        {
+            return add_remote_module(manifest_reference, options).await;
+        }
         return install_module_descriptor(&descriptor, module_reference, options).await;
     }
 
-    match parse_module_source(&options.source)? {
+    if should_resolve_service_catalog_entry(source)
+        && !looks_like_json_reference(module_reference)
+        && let Some(manifest_reference) = local_catalog_service_manifest_reference(
+            module_reference,
+            options.repo_root.as_deref(),
+        )?
+    {
+        return add_remote_module(&manifest_reference, options).await;
+    }
+
+    match source {
         ModuleSource::Remote => add_remote_module(module_reference, options).await,
         ModuleSource::Linked => install_linked_module(module_reference, options),
     }
+}
+
+fn should_resolve_service_catalog_entry(source: ModuleSource) -> bool {
+    matches!(source, ModuleSource::Remote)
+}
+
+fn catalog_service_manifest_reference(entry: &Value) -> Option<&str> {
+    entry
+        .get("serviceManifest")
+        .or_else(|| entry.get("service_manifest"))
+        .or_else(|| {
+            catalog_entry_is_service(entry)
+                .then(|| entry.get("manifestReference"))
+                .flatten()
+        })
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn catalog_service_manifest_reference_for_module<'a>(
+    entry: &'a Value,
+    module_name: &str,
+) -> Option<&'a str> {
+    let entry_name_matches = entry.get("name").and_then(Value::as_str) == Some(module_name);
+    let provided_module_matches = catalog_entry_is_service(entry)
+        && entry
+            .get("modules")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|module| module.get("name").and_then(Value::as_str) == Some(module_name));
+
+    (entry_name_matches || provided_module_matches)
+        .then(|| catalog_service_manifest_reference(entry))
+        .flatten()
+}
+
+fn catalog_entry_is_service(entry: &Value) -> bool {
+    entry
+        .get("source")
+        .and_then(Value::as_str)
+        .is_some_and(|source| source.eq_ignore_ascii_case("service"))
+}
+
+fn local_catalog_service_manifest_reference(
+    module_name: &str,
+    repo_root: Option<&Path>,
+) -> Result<Option<String>> {
+    let repo_root = resolve_repo_root(repo_root)?;
+    let Some(catalog) = read_json_if_exists(&repo_root.join(MODULE_CATALOG_PATH))? else {
+        return Ok(None);
+    };
+    let modules = catalog
+        .get("modules")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("Module catalog modules must be an array"))?;
+    Ok(modules
+        .iter()
+        .find_map(|entry| catalog_service_manifest_reference_for_module(entry, module_name))
+        .map(ToOwned::to_owned))
 }
 
 async fn install_module_descriptor(
@@ -469,7 +739,41 @@ async fn update_remote_module_from_receipt(
     options: ModuleUpdateOptions,
     repo_root: PathBuf,
 ) -> Result<()> {
-    let manifest = validate_remote_module_manifest(read_json_reference(manifest_reference).await?)?;
+    let manifest = read_json_reference(manifest_reference).await?;
+    if is_service_manifest(&manifest) {
+        let manifest = validate_service_manifest(manifest)?;
+        let manifest_service_name = string_field(&manifest, "name")?.trim();
+        let receipt_service_name = receipt
+            .get("service")
+            .and_then(|service| service.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or(manifest_service_name);
+        if manifest_service_name != receipt_service_name {
+            bail!(
+                "Installed module `{module_name}` update resolved service `{manifest_service_name}`"
+            );
+        }
+        return add_remote_module(
+            manifest_reference,
+            RemoteModuleInstallOptions {
+                allow_incompatible: options.allow_incompatible,
+                base_url: options
+                    .base_url
+                    .clone()
+                    .or_else(|| service_receipt_base_url(receipt)),
+                console_plan: options.console_plan,
+                dry_run: options.dry_run,
+                env_file: options.env_file,
+                install_profiles: options.install_profiles,
+                module_services_file: options.module_services_file,
+                repo_root: Some(repo_root),
+                run_install_commands: options.run_install_commands,
+                source: "remote".to_owned(),
+            },
+        )
+        .await;
+    }
+    let manifest = validate_remote_module_manifest(manifest)?;
     let manifest_name = string_field(&manifest, "name")?.trim();
     if manifest_name != module_name {
         bail!("Installed module `{module_name}` update resolved manifest for `{manifest_name}`");
@@ -487,6 +791,7 @@ async fn update_remote_module_from_receipt(
     add_remote_module(
         manifest_reference,
         RemoteModuleInstallOptions {
+            allow_incompatible: options.allow_incompatible,
             base_url: options.base_url.clone().or_else(|| {
                 receipt
                     .get("baseUrl")
@@ -528,6 +833,7 @@ async fn update_linked_module_from_receipt(
     install_module(
         module_update_reference(manifest_reference),
         RemoteModuleInstallOptions {
+            allow_incompatible: options.allow_incompatible,
             base_url: None,
             console_plan: options.console_plan,
             dry_run: options.dry_run,
@@ -563,7 +869,26 @@ pub async fn add_remote_module(
             .as_deref()
             .unwrap_or_else(|| Path::new(".lenso/module-services.json")),
     );
-    let manifest = validate_remote_module_manifest(read_json_reference(manifest_reference).await?)?;
+    let manifest = read_json_reference(manifest_reference).await?;
+    if is_service_manifest(&manifest) {
+        return add_service_manifest_with_paths(
+            manifest_reference,
+            validate_service_manifest(manifest)?,
+            &options,
+            &repo_root,
+            &env_file_path,
+            &console_extension_registry_path,
+            &install_ledger_path,
+            &module_services_path,
+        )
+        .await;
+    }
+    let manifest = validate_remote_module_manifest(manifest)?;
+    if let Some(issue) = remote_module_manifest_compatibility_issue(&manifest)
+        && !options.allow_incompatible
+    {
+        bail!("{issue}; rerun with --allow-incompatible to record an operator override");
+    }
     let module_name = string_field(&manifest, "name")?.trim().to_owned();
     let base_url = derive_remote_base_url(options.base_url.as_deref(), manifest_reference)?;
     let install_env = remote_module_install_env(&manifest)?;
@@ -590,6 +915,7 @@ pub async fn add_remote_module(
             &module_name,
             manifest_reference,
             &base_url,
+            &manifest,
             remote_module_install_writes(
                 &repo_root,
                 &env_file_path,
@@ -608,7 +934,7 @@ pub async fn add_remote_module(
     )?;
 
     if options.dry_run {
-        println!("Remote module install dry run:");
+        println!("Module install dry run:");
         println!("- {}", display_relative(&repo_root, &env_file_path));
         if console_bundle_install.registry_changed {
             println!(
@@ -637,7 +963,7 @@ pub async fn add_remote_module(
         write_json(&module_services_path, module_services)?;
     }
 
-    println!("Added remote module {module_name}.");
+    println!("Installed module {module_name}.");
     println!("Updated:");
     println!("- {}", display_relative(&repo_root, &env_file_path));
     if console_bundle_install.registry_changed {
@@ -670,6 +996,199 @@ pub async fn add_remote_module(
     if !install_commands.is_empty() && !install_commands_ran {
         println!("- rerun with --run-install-commands to execute manifest install commands");
     }
+    println!("- restart the API and worker");
+
+    Ok(())
+}
+
+async fn add_service_manifest_with_options(
+    manifest_reference: &str,
+    manifest: Value,
+    options: &RemoteModuleInstallOptions,
+) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let env_file_path = resolve_path(
+        &repo_root,
+        options
+            .env_file
+            .as_deref()
+            .unwrap_or_else(|| Path::new(".env")),
+    );
+    let console_extension_registry_path = repo_root.join(CONSOLE_EXTENSION_REGISTRY_PATH);
+    let install_ledger_path = repo_root.join(MODULE_INSTALL_LEDGER_PATH);
+    let module_services_path = resolve_path(
+        &repo_root,
+        options
+            .module_services_file
+            .as_deref()
+            .unwrap_or_else(|| Path::new(".lenso/module-services.json")),
+    );
+    add_service_manifest_with_paths(
+        manifest_reference,
+        manifest,
+        options,
+        &repo_root,
+        &env_file_path,
+        &console_extension_registry_path,
+        &install_ledger_path,
+        &module_services_path,
+    )
+    .await
+}
+
+async fn add_service_manifest_with_paths(
+    manifest_reference: &str,
+    manifest: Value,
+    options: &RemoteModuleInstallOptions,
+    repo_root: &Path,
+    env_file_path: &Path,
+    console_extension_registry_path: &Path,
+    install_ledger_path: &Path,
+    module_services_path: &Path,
+) -> Result<()> {
+    if let Some(issue) = remote_module_manifest_compatibility_issue(&manifest)
+        && !options.allow_incompatible
+    {
+        bail!("{issue}; rerun with --allow-incompatible to record an operator override");
+    }
+
+    let service_name = string_field(&manifest, "name")?.trim().to_owned();
+    let base_url = derive_remote_base_url(options.base_url.as_deref(), manifest_reference)?;
+    let install_env = remote_module_install_env(&manifest)?;
+    let install_commands = remote_module_install_commands(&manifest)?;
+    let install_services = service_manifest_install_services(&manifest, &service_name, &base_url)?;
+    let module_manifests =
+        service_module_install_manifests(&manifest, manifest_reference, &base_url)?;
+    let env_file = apply_manifest_install_env(
+        update_remote_modules_env(env_file_path, &service_name, &base_url)?,
+        &install_env,
+    );
+    let module_services =
+        update_remote_module_services_file(module_services_path, &service_name, &install_services)?;
+
+    let mut console_bundle_files = Vec::new();
+    let mut console_bundle_count = 0;
+    let mut console_registry_changed = false;
+    let mut install_ledger = read_json_if_exists(install_ledger_path)?
+        .unwrap_or_else(|| json!({ "modules": [], "version": 1 }));
+    let mut module_names = Vec::new();
+
+    for module_manifest in &module_manifests {
+        let module_name = string_field(module_manifest, "name")?.trim().to_owned();
+        let module_base_url = service_module_base_url(&base_url, &module_name);
+        let previous_manifest_snapshot =
+            module_install_ledger_entry_value(&install_ledger, &module_name)
+                .and_then(|entry| entry.get("serviceManifestSnapshot").cloned());
+        let console_bundle_install = install_runtime_console_bundles(
+            repo_root,
+            console_extension_registry_path,
+            module_manifest,
+            &module_base_url,
+            options.console_plan,
+            options.dry_run,
+        )
+        .await?;
+        console_registry_changed |= console_bundle_install.registry_changed;
+        console_bundle_count += console_bundle_install.bundle_count;
+        console_bundle_files.extend(console_bundle_install.bundle_files);
+
+        let mut entry = remote_module_install_ledger_entry(
+            &module_name,
+            manifest_reference,
+            &module_base_url,
+            module_manifest,
+            remote_module_install_writes(
+                repo_root,
+                env_file_path,
+                console_registry_changed.then_some(console_extension_registry_path),
+                module_services.as_ref().map(|_| module_services_path),
+            ),
+            &install_env,
+            &install_commands,
+            &install_services,
+            console_bundle_install.bundle_count,
+        );
+        entry["serviceManifestSnapshot"] = manifest.clone();
+        if let Some(previous_manifest_snapshot) = previous_manifest_snapshot {
+            entry["previousServiceManifestSnapshot"] = previous_manifest_snapshot;
+        }
+        if let Some(service) = entry.get_mut("service").and_then(Value::as_object_mut) {
+            service.insert("baseUrl".to_owned(), json!(base_url.clone()));
+            service.insert(
+                "manifestReference".to_owned(),
+                json!(manifest_reference.to_owned()),
+            );
+        }
+        install_ledger = upsert_module_install_ledger_entry(install_ledger, entry)?;
+        module_names.push(module_name);
+    }
+
+    if options.dry_run {
+        println!("Service install dry run:");
+        println!("- {}", display_relative(repo_root, env_file_path));
+        if console_registry_changed {
+            println!(
+                "- {}",
+                display_relative(repo_root, console_extension_registry_path)
+            );
+            for file_path in &console_bundle_files {
+                println!("- {}", display_relative(repo_root, file_path));
+            }
+        }
+        println!("- {}", display_relative(repo_root, install_ledger_path));
+        if module_services.is_some() {
+            println!("- {}", display_relative(repo_root, module_services_path));
+        }
+        println!("- {service_name}={base_url}");
+        println!("- provided modules: {}", module_names.join(", "));
+        println!("- install env vars: {}", install_env.len());
+        println!("- install commands: {}", install_commands.len());
+        println!("- install services: {}", install_services.len());
+        println!("- console bundles: {console_bundle_count}");
+        return Ok(());
+    }
+
+    write_file(env_file_path, env_file.as_bytes())?;
+    write_json(install_ledger_path, &install_ledger)?;
+    if let Some(module_services) = &module_services {
+        write_json(module_services_path, module_services)?;
+    }
+
+    println!("Installed service {service_name}.");
+    println!("Updated:");
+    println!("- {}", display_relative(repo_root, env_file_path));
+    if console_registry_changed {
+        println!(
+            "- {}",
+            display_relative(repo_root, console_extension_registry_path)
+        );
+        for file_path in &console_bundle_files {
+            println!("- {}", display_relative(repo_root, file_path));
+        }
+    }
+    println!("- {}", display_relative(repo_root, install_ledger_path));
+    if module_services.is_some() {
+        println!("- {}", display_relative(repo_root, module_services_path));
+    }
+    println!("REMOTE_MODULES: {service_name}={base_url}");
+    println!("Provided modules: {}", module_names.join(", "));
+    println!("Install env vars: {}", install_env.len());
+    println!("Install commands: {}", install_commands.len());
+    println!("Install services: {}", install_services.len());
+    println!("Console bundles: {console_bundle_count}");
+
+    let install_commands_ran = if !install_commands.is_empty() && options.run_install_commands {
+        run_install_commands(repo_root, &install_commands)?;
+        true
+    } else {
+        false
+    };
+
+    println!("Next steps:");
+    if !install_commands.is_empty() && !install_commands_ran {
+        println!("- rerun with --run-install-commands to execute service install commands");
+    }
+    println!("- start the service process if it is not already running");
     println!("- restart the API and worker");
 
     Ok(())
@@ -981,22 +1500,34 @@ pub async fn uninstall_remote_module(
             .unwrap_or_else(|| Path::new(".lenso/module-services.json")),
     );
     let console_extension_registry_path = repo_root.join(CONSOLE_EXTENSION_REGISTRY_PATH);
-    let console_extension_module_dir = repo_root
-        .join(".lenso/console/extensions")
-        .join(slugify(module_name));
-    let env_file = remove_remote_module_from_env(&env_file_path, module_name)?;
-    let install_plan = remove_console_package_install_plan_module(&install_plan_path, module_name)?;
-    let install_ledger = remove_module_install_ledger_module(&install_ledger_path, module_name)?;
+    let target = remote_uninstall_target(&install_ledger_path, module_name)?;
+    for warning in remote_uninstall_dependency_warnings(&install_ledger_path, &target)? {
+        eprintln!("warning: {warning}");
+    }
+    let console_extension_module_dirs = target
+        .module_names
+        .iter()
+        .map(|module_name| {
+            repo_root
+                .join(".lenso/console/extensions")
+                .join(slugify(module_name))
+        })
+        .filter(|path| path.exists())
+        .collect::<Vec<_>>();
+    let env_file = remove_remote_module_from_env(&env_file_path, &target.provider_name)?;
+    let install_plan =
+        remove_console_package_install_plan_modules(&install_plan_path, &target.module_names)?;
+    let install_ledger =
+        remove_module_install_ledger_modules(&install_ledger_path, &target.module_names)?;
     let module_services =
-        remove_remote_module_services_file_module(&module_services_path, module_name)?;
-    let console_registry = remove_runtime_console_bundle_registry_module(
+        remove_remote_module_services_file_module(&module_services_path, &target.provider_name)?;
+    let console_registry = remove_runtime_console_bundle_registry_modules(
         &console_extension_registry_path,
-        module_name,
+        &target.module_names,
     )?;
-    let console_bundle_dir_exists = console_extension_module_dir.exists();
 
     if options.dry_run {
-        println!("Remote module uninstall dry run:");
+        println!("Service uninstall dry run:");
         if env_file.is_some() {
             println!("- {}", display_relative(&repo_root, &env_file_path));
         }
@@ -1015,18 +1546,15 @@ pub async fn uninstall_remote_module(
                 display_relative(&repo_root, &console_extension_registry_path)
             );
         }
-        if console_bundle_dir_exists {
-            println!(
-                "- {}",
-                display_relative(&repo_root, &console_extension_module_dir)
-            );
+        for path in &console_extension_module_dirs {
+            println!("- {}", display_relative(&repo_root, path));
         }
         if env_file.is_none()
             && install_plan.is_none()
             && install_ledger.is_none()
             && module_services.is_none()
             && console_registry.is_none()
-            && !console_bundle_dir_exists
+            && console_extension_module_dirs.is_empty()
         {
             println!("- no local install state found");
         }
@@ -1038,7 +1566,7 @@ pub async fn uninstall_remote_module(
         || install_ledger.is_some()
         || module_services.is_some()
         || console_registry.is_some()
-        || console_bundle_dir_exists;
+        || !console_extension_module_dirs.is_empty();
     if let Some(env_file) = env_file {
         write_file(&env_file_path, env_file.as_bytes())?;
     }
@@ -1054,21 +1582,25 @@ pub async fn uninstall_remote_module(
     if let Some(console_registry) = console_registry {
         write_json(&console_extension_registry_path, &console_registry)?;
     }
-    if console_bundle_dir_exists {
-        fs::remove_dir_all(&console_extension_module_dir).with_context(|| {
-            format!(
-                "remove console extension directory {}",
-                console_extension_module_dir.display()
-            )
-        })?;
+    for path in console_extension_module_dirs {
+        fs::remove_dir_all(&path)
+            .with_context(|| format!("remove console extension directory {}", path.display()))?;
     }
 
     if !changed {
-        println!("Remote module {module_name} is not installed locally.");
+        println!("Service {module_name} is not installed locally.");
         return Ok(());
     }
 
-    println!("Uninstalled remote module {module_name}.");
+    if target.provider_name == module_name && target.module_names.len() == 1 {
+        println!("Uninstalled service {module_name}.");
+    } else {
+        println!(
+            "Uninstalled service {} and modules: {}.",
+            target.provider_name,
+            target.module_names.join(", ")
+        );
+    }
     println!("Next steps:");
     println!("- restart the API and worker");
 
@@ -1096,6 +1628,33 @@ pub async fn doctor_module(options: ModuleDoctorOptions) -> Result<()> {
         .as_deref()
         .map(str::trim)
         .filter(|module_name| !module_name.is_empty());
+    let report = build_module_doctor_report(
+        &repo_root,
+        &env_file_path,
+        &module_services_path,
+        requested_module,
+    )
+    .await?;
+
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_module_doctor_report(&repo_root, &env_file_path, &module_services_path, &report);
+    }
+
+    if report.issue_count > 0 {
+        bail!("Service doctor found {} issue(s)", report.issue_count);
+    }
+
+    Ok(())
+}
+
+async fn build_module_doctor_report(
+    repo_root: &Path,
+    env_file_path: &Path,
+    module_services_path: &Path,
+    requested_module: Option<&str>,
+) -> Result<ModuleDoctorReport> {
     let env_source = read_text_if_exists(&env_file_path)?;
     let remote_modules = remote_module_entries_from_env_source(&env_source);
     let service_states = read_remote_module_service_states(&module_services_path)?;
@@ -1107,15 +1666,65 @@ pub async fn doctor_module(options: ModuleDoctorOptions) -> Result<()> {
         .build()
         .context("build module doctor HTTP client")?;
     let mut issue_count = 0usize;
-    let mut checked_count = 0usize;
+    let mut sources = Vec::new();
+    let mut services = Vec::new();
 
-    println!("Module doctor:");
-    println!("- env: {}", display_relative(&repo_root, &env_file_path));
-    println!(
-        "- services: {}",
-        display_relative(&repo_root, &module_services_path)
-    );
-    println!("- remote modules: {}", remote_modules.len());
+    for (module_name, base_url) in remote_modules.iter().filter(|(module_name, _)| {
+        requested_module.is_none_or(|requested| module_name == requested)
+    }) {
+        let enabled = module_enabled_from_env_source(&env_source, module_name);
+        let installed =
+            module_install_ledger_entry(&repo_root.join(MODULE_INSTALL_LEDGER_PATH), module_name)?
+                .is_some();
+        let mut fix = None;
+        let mut manifest_url = None;
+        let mut manifest_status = ModuleDoctorManifestStatus::Skipped;
+        if !enabled {
+            fix = Some("enable the service if it should load".to_owned());
+        } else if let Some(url) = remote_module_manifest_url(base_url) {
+            let manifest_ready = remote_service_ready_url(&client, &url).await;
+            manifest_status = if manifest_ready {
+                ModuleDoctorManifestStatus::Reachable
+            } else {
+                issue_count += 1;
+                fix = Some(
+                    "start the service or fix REMOTE_MODULES for this manifest URL".to_owned(),
+                );
+                ModuleDoctorManifestStatus::Unreachable
+            };
+            manifest_url = Some(url);
+        }
+        sources.push(ModuleDoctorSourceReport {
+            module_name: module_name.to_owned(),
+            installed,
+            configured: true,
+            enabled,
+            base_url: Some(base_url.to_owned()),
+            manifest_url,
+            manifest_status,
+            fix,
+        });
+    }
+
+    if let Some(module_name) = requested_module {
+        let has_source = remote_modules.iter().any(|(name, _)| name == module_name);
+        let has_service_state = service_states
+            .iter()
+            .any(|state| state.module_name == module_name);
+        if !has_source && !has_service_state {
+            issue_count += 1;
+            sources.push(ModuleDoctorSourceReport {
+                module_name: module_name.to_owned(),
+                installed: false,
+                configured: false,
+                enabled: false,
+                base_url: None,
+                manifest_url: None,
+                manifest_status: ModuleDoctorManifestStatus::NotConfigured,
+                fix: Some("install the service or add it to REMOTE_MODULES".to_owned()),
+            });
+        }
+    }
 
     for state in service_states
         .iter()
@@ -1127,7 +1736,6 @@ pub async fn doctor_module(options: ModuleDoctorOptions) -> Result<()> {
         let enabled = module_enabled_from_env_source(&env_source, &state.module_name);
 
         for service in &state.services {
-            checked_count += 1;
             let ready = remote_service_ready_url(&client, &service.ready_url).await;
             let lock_file_path = remote_module_service_state_path(
                 services_state_dir,
@@ -1154,44 +1762,527 @@ pub async fn doctor_module(options: ModuleDoctorOptions) -> Result<()> {
             if status.is_issue() {
                 issue_count += 1;
             }
-
-            println!(
-                "- {}/{}: {}",
-                state.module_name,
-                service.name,
-                status.label()
-            );
-            println!("  readyUrl: {}", service.ready_url);
-            if !ready {
-                println!("  command: {}", service.command);
-            }
-            if lock_exists || pid_exists {
-                println!(
-                    "  state: lock={} pid={}",
-                    display_relative(&repo_root, &lock_file_path),
-                    display_relative(&repo_root, &pid_file_path)
-                );
-            }
-            if let Some(fix) = remote_module_service_doctor_fix(status) {
-                println!("  fix: {fix}");
-            }
+            services.push(ModuleDoctorServiceReport {
+                module_name: state.module_name.clone(),
+                service_name: service.name.clone(),
+                status: status.label().to_owned(),
+                ready_url: service.ready_url.clone(),
+                process: if service.auto_start {
+                    "host-started".to_owned()
+                } else {
+                    "manual".to_owned()
+                },
+                command: (!ready).then(|| service.command.clone()),
+                lock_file: lock_exists.then(|| display_relative(repo_root, &lock_file_path)),
+                pid_file: pid_exists.then(|| display_relative(repo_root, &pid_file_path)),
+                fix: remote_module_service_doctor_fix(status).map(ToOwned::to_owned),
+            });
         }
     }
 
-    if checked_count == 0 {
-        if let Some(module_name) = requested_module {
-            println!("- services checked: 0 for {module_name}");
-        } else {
-            println!("- services checked: 0");
+    Ok(ModuleDoctorReport {
+        issue_count,
+        sources_checked: sources.len(),
+        services_checked: services.len(),
+        sources,
+        services,
+    })
+}
+
+fn print_module_doctor_report(
+    repo_root: &Path,
+    env_file_path: &Path,
+    module_services_path: &Path,
+    report: &ModuleDoctorReport,
+) {
+    println!("Module doctor:");
+    println!("- env: {}", display_relative(repo_root, env_file_path));
+    println!(
+        "- services: {}",
+        display_relative(repo_root, module_services_path)
+    );
+    println!("- services: {}", report.sources.len());
+    println!("Sources:");
+    for source in &report.sources {
+        println!(
+            "- {}: {}",
+            source.module_name,
+            if source.configured {
+                "configured"
+            } else {
+                "source_not_configured"
+            }
+        );
+        println!(
+            "  installed: {}",
+            if source.installed { "yes" } else { "no" }
+        );
+        if let Some(base_url) = &source.base_url {
+            println!("  baseUrl: {base_url}");
         }
+        if let Some(manifest_url) = &source.manifest_url {
+            println!("  manifest: {manifest_url}");
+        }
+        println!("  manifestStatus: {}", source.manifest_status.label());
+        if let Some(fix) = &source.fix {
+            println!("  fix: {fix}");
+        }
+    }
+
+    println!("Services:");
+    for service in &report.services {
+        println!(
+            "- {}/{}: {}",
+            service.module_name, service.service_name, service.status
+        );
+        println!("  readyUrl: {}", service.ready_url);
+        println!("  process: {}", service.process);
+        if let Some(command) = &service.command {
+            println!("  command: {command}");
+        }
+        if service.lock_file.is_some() || service.pid_file.is_some() {
+            println!(
+                "  state: lock={} pid={}",
+                service.lock_file.as_deref().unwrap_or("-"),
+                service.pid_file.as_deref().unwrap_or("-")
+            );
+        }
+        if let Some(fix) = &service.fix {
+            println!("  fix: {fix}");
+        }
+    }
+    println!("- services checked: {}", report.services_checked);
+    println!("- sources checked: {}", report.sources_checked);
+}
+
+pub async fn list_module_services(options: ModuleServiceListOptions) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let module_services_path =
+        resolve_module_services_file_path(&repo_root, options.module_services_file.as_deref());
+    let states = read_remote_module_service_states(&module_services_path)?;
+    let services = module_service_list_items(&states, options.module_name.as_deref());
+    let report = ModuleServiceListReport { services };
+
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }
-    println!("- services checked: {checked_count}");
-    if issue_count > 0 {
-        bail!("Module doctor found {issue_count} issue(s)");
+
+    println!("MODULE\tSERVICE\tPROCESS\tREADY URL");
+    for service in &report.services {
+        println!(
+            "{}\t{}\t{}\t{}",
+            service.module_name,
+            service.service_name,
+            service_process_label(service.auto_start),
+            service.ready_url
+        );
+    }
+    Ok(())
+}
+
+pub async fn export_module_services(options: ModuleServiceExportOptions) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let module_services_path =
+        resolve_module_services_file_path(&repo_root, options.module_services_file.as_deref());
+    let states = read_remote_module_service_states(&module_services_path)?;
+    let state = states
+        .iter()
+        .find(|state| state.module_name == options.module_name)
+        .ok_or_else(|| anyhow!("Service module not found: {}", options.module_name))?;
+    let receipt = installed_service_receipt(&repo_root, &options.module_name).ok();
+    match options.format.trim() {
+        "compose" => print!("{}", compose_service_export_source(state)),
+        "systemd" => print!("{}", systemd_service_export_source(state)),
+        "dockerfile" => print!("{}", dockerfile_service_export_source(state)),
+        "env" => print!("{}", env_service_export_source(state, receipt.as_ref())),
+        other => bail!(
+            "Unsupported service export format `{other}`; expected compose, systemd, dockerfile, or env"
+        ),
+    }
+    Ok(())
+}
+
+fn compose_service_export_source(state: &RemoteModuleServiceState) -> String {
+    let mut source = "services:\n".to_owned();
+    for service in &state.services {
+        source.push_str(&compose_service_source(state, service));
+    }
+    source
+}
+
+fn compose_service_source(
+    state: &RemoteModuleServiceState,
+    service: &RemoteModuleServiceInstallSpec,
+) -> String {
+    let service_key = format!("{}-{}", slugify(&state.module_name), slugify(&service.name));
+    format!(
+        "  {service_key}:\n    command: >-\n      {}\n    working_dir: {}\n    restart: unless-stopped\n    labels:\n      lenso.module: {}\n      lenso.service: {}\n      lenso.ready_url: {}\n",
+        service.command,
+        service.cwd.as_deref().unwrap_or("."),
+        state.module_name,
+        service.name,
+        service.ready_url
+    )
+}
+
+fn systemd_service_export_source(state: &RemoteModuleServiceState) -> String {
+    let mut source = String::new();
+    for service in &state.services {
+        let unit_name = format!(
+            "lenso-{}-{}",
+            slugify(&state.module_name),
+            slugify(&service.name)
+        );
+        source.push_str(&format!(
+            "# {unit_name}.service\n[Unit]\nDescription=Lenso service {} / {}\nAfter=network.target\n\n[Service]\nWorkingDirectory={}\nExecStart=/bin/sh -lc '{}'\nRestart=always\nEnvironment=LENSO_READY_URL={}\n\n[Install]\nWantedBy=multi-user.target\n\n",
+            state.module_name,
+            service.name,
+            shell_single_quote(service.cwd.as_deref().unwrap_or(".")),
+            shell_single_quote(&service.command),
+            service.ready_url
+        ));
+    }
+    source
+}
+
+fn dockerfile_service_export_source(state: &RemoteModuleServiceState) -> String {
+    let Some(service) = state.services.first() else {
+        return "# no services declared\n".to_owned();
+    };
+    format!(
+        "# Generated for Lenso service {} / {}\nFROM node:22-slim\nWORKDIR /app\nCOPY . .\nEXPOSE 4100\nCMD [\"sh\", \"-lc\", \"{}\"]\n",
+        state.module_name,
+        service.name,
+        json_escaped_string(&service.command)
+    )
+}
+
+fn env_service_export_source(state: &RemoteModuleServiceState, receipt: Option<&Value>) -> String {
+    let mut source = format!("# Lenso service env for {}\n", state.module_name);
+    let manifest = receipt.and_then(|receipt| receipt.get("serviceManifestSnapshot"));
+    for key in manifest.map(service_env_set).unwrap_or_default() {
+        source.push_str(&format!("{key}=\n"));
+    }
+    for service in &state.services {
+        source.push_str(&format!(
+            "LENSO_{}_READY_URL={}\n",
+            snake_case(&service.name).to_ascii_uppercase(),
+            service.ready_url
+        ));
+    }
+    source
+}
+
+fn shell_single_quote(value: &str) -> String {
+    value.replace('\'', "'\\''")
+}
+
+fn json_escaped_string(value: &str) -> String {
+    serde_json::to_string(value)
+        .unwrap_or_else(|_| "\"\"".to_owned())
+        .trim_matches('"')
+        .to_owned()
+}
+
+pub async fn status_module_service(options: ModuleServiceStatusOptions) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let module_services_path =
+        resolve_module_services_file_path(&repo_root, options.module_services_file.as_deref());
+    let states = read_remote_module_service_states(&module_services_path)?;
+    let (module_name, service) =
+        find_module_service(&states, &options.module_name, &options.service_name)?;
+    let report = module_service_status_report(
+        &repo_root,
+        module_services_path
+            .parent()
+            .unwrap_or_else(|| Path::new(".")),
+        &module_name,
+        &service,
+    )
+    .await?;
+
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
     }
 
+    println!(
+        "{}/{}: {}",
+        report.module_name, report.service_name, report.status
+    );
+    println!("readyUrl: {}", report.ready_url);
+    println!(
+        "state: lock={} pid={}",
+        report.lock_file.as_deref().unwrap_or("-"),
+        report.pid_file.as_deref().unwrap_or("-")
+    );
     Ok(())
+}
+
+pub async fn logs_module_service(options: ModuleServiceLogsOptions) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let module_services_path =
+        resolve_module_services_file_path(&repo_root, options.module_services_file.as_deref());
+    let states = read_remote_module_service_states(&module_services_path)?;
+    let (module_name, service) =
+        find_module_service(&states, &options.module_name, &options.service_name)?;
+    let log_file_path = module_service_log_path(&repo_root, &module_name, &service.name);
+    if !log_file_path.exists() {
+        bail!(
+            "No local log file for {}/{}; start it with `lenso service start {} {}`",
+            module_name,
+            service.name,
+            module_name,
+            service.name
+        );
+    }
+
+    // ponytail: local dev logs are read whole; stream from EOF if these get large.
+    let contents = read_text(&log_file_path)
+        .with_context(|| format!("read service log {}", log_file_path.display()))?;
+    for line in tail_lines(&contents, options.tail) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+pub async fn start_module_service(options: ModuleServiceStartOptions) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let module_services_path =
+        resolve_module_services_file_path(&repo_root, options.module_services_file.as_deref());
+    let states = read_remote_module_service_states(&module_services_path)?;
+    let (module_name, service) =
+        find_module_service(&states, &options.module_name, &options.service_name)?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(800))
+        .build()
+        .context("build module service HTTP client")?;
+    if remote_service_ready_url(&client, &service.ready_url).await {
+        println!("{}/{} already ready", module_name, service.name);
+        return Ok(());
+    }
+
+    let services_state_dir = module_services_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    let lock_file_path =
+        remote_module_service_state_path(services_state_dir, &module_name, &service, "lock");
+    let pid_file_path =
+        remote_module_service_state_path(services_state_dir, &module_name, &service, "pid");
+    if lock_file_path.exists() || pid_file_path.exists() {
+        bail!(
+            "{}/{} already has local state; run `lenso service stop {} {}` first",
+            module_name,
+            service.name,
+            module_name,
+            service.name
+        );
+    }
+
+    let cwd = service
+        .cwd
+        .as_deref()
+        .map(|cwd| resolve_path(&repo_root, Path::new(cwd)))
+        .unwrap_or_else(|| repo_root.clone());
+    let log_file_path = module_service_log_path(&repo_root, &module_name, &service.name);
+    if let Some(parent) = log_file_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create directory {}", parent.display()))?;
+    }
+    let log_file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_file_path)
+        .with_context(|| format!("open service log {}", log_file_path.display()))?;
+    let stderr_log = log_file
+        .try_clone()
+        .with_context(|| format!("clone service log {}", log_file_path.display()))?;
+    // ponytail: local dev process control; a real supervisor belongs in deployment tooling.
+    let mut child = shell_command(&service.command)
+        .current_dir(cwd)
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(stderr_log))
+        .spawn()
+        .with_context(|| format!("start service {}/{}", module_name, service.name))?;
+    write_service_lock(&lock_file_path)?;
+    write_file(&pid_file_path, format!("{}\n", child.id()).as_bytes())?;
+    println!(
+        "Started service {}/{} with pid {}. Logs: {}",
+        module_name,
+        service.name,
+        child.id(),
+        display_relative(&repo_root, &log_file_path)
+    );
+    wait_for_started_module_service_ready(
+        &client,
+        &mut child,
+        &module_name,
+        &service,
+        &lock_file_path,
+        &pid_file_path,
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn start_declared_module_services(
+    repo_root: Option<&Path>,
+    module_services_file: Option<&Path>,
+) -> Result<()> {
+    let repo_root = repo_root.unwrap_or_else(|| Path::new("."));
+    let module_services_path = resolve_module_services_file_path(repo_root, module_services_file);
+    let states = read_remote_module_service_states(&module_services_path)?;
+    for state in states {
+        for service in state.services {
+            if service.auto_start {
+                start_module_service(ModuleServiceStartOptions {
+                    module_name: state.module_name.clone(),
+                    service_name: service.name.clone(),
+                    module_services_file: Some(module_services_path.clone()),
+                    repo_root: Some(repo_root.to_path_buf()),
+                })
+                .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+pub async fn stop_module_service(options: ModuleServiceStopOptions) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let module_services_path =
+        resolve_module_services_file_path(&repo_root, options.module_services_file.as_deref());
+    let states = read_remote_module_service_states(&module_services_path)?;
+    let (module_name, service) =
+        find_module_service(&states, &options.module_name, &options.service_name)?;
+    let services_state_dir = module_services_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    let lock_file_path =
+        remote_module_service_state_path(services_state_dir, &module_name, &service, "lock");
+    let pid_file_path =
+        remote_module_service_state_path(services_state_dir, &module_name, &service, "pid");
+    if !pid_file_path.exists() {
+        println!("{}/{} not running", module_name, service.name);
+        return Ok(());
+    }
+    let pid = read_text(&pid_file_path)?.trim().to_owned();
+    let status = Command::new("kill")
+        .arg(&pid)
+        .status()
+        .with_context(|| format!("stop service {}/{}", module_name, service.name))?;
+    if !status.success() {
+        bail!("kill failed for pid {pid}");
+    }
+    let _ = fs::remove_file(&pid_file_path);
+    let _ = fs::remove_file(&lock_file_path);
+    println!("Stopped service {}/{}.", module_name, service.name);
+    Ok(())
+}
+
+fn resolve_module_services_file_path(
+    repo_root: &Path,
+    module_services_file: Option<&Path>,
+) -> PathBuf {
+    resolve_path(
+        repo_root,
+        module_services_file.unwrap_or_else(|| Path::new(".lenso/module-services.json")),
+    )
+}
+
+fn module_service_list_items(
+    states: &[RemoteModuleServiceState],
+    requested_module: Option<&str>,
+) -> Vec<ModuleServiceListItem> {
+    states
+        .iter()
+        .filter(|state| requested_module.is_none_or(|module_name| state.module_name == module_name))
+        .flat_map(|state| {
+            state.services.iter().map(|service| ModuleServiceListItem {
+                module_name: state.module_name.clone(),
+                service_name: service.name.clone(),
+                auto_start: service.auto_start,
+                command: service.command.clone(),
+                ready_url: service.ready_url.clone(),
+            })
+        })
+        .collect()
+}
+
+fn find_module_service(
+    states: &[RemoteModuleServiceState],
+    module_name: &str,
+    service_name: &str,
+) -> Result<(String, RemoteModuleServiceInstallSpec)> {
+    states
+        .iter()
+        .find(|state| state.module_name == module_name)
+        .and_then(|state| {
+            state
+                .services
+                .iter()
+                .find(|service| service.name == service_name)
+                .cloned()
+                .map(|service| (state.module_name.clone(), service))
+        })
+        .ok_or_else(|| anyhow!("Service not found: {module_name}/{service_name}"))
+}
+
+async fn module_service_status_report(
+    repo_root: &Path,
+    services_state_dir: &Path,
+    module_name: &str,
+    service: &RemoteModuleServiceInstallSpec,
+) -> Result<ModuleServiceStatusReport> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(800))
+        .build()
+        .context("build module service HTTP client")?;
+    let ready = remote_service_ready_url(&client, &service.ready_url).await;
+    let lock_file_path =
+        remote_module_service_state_path(services_state_dir, module_name, service, "lock");
+    let pid_file_path =
+        remote_module_service_state_path(services_state_dir, module_name, service, "pid");
+    let lock_exists = lock_file_path.exists();
+    let pid_exists = pid_file_path.exists();
+    let status = if ready {
+        "ready"
+    } else if lock_exists || pid_exists {
+        "stale_lock_or_pid"
+    } else {
+        "service_not_ready"
+    };
+    Ok(ModuleServiceStatusReport {
+        module_name: module_name.to_owned(),
+        service_name: service.name.clone(),
+        status: status.to_owned(),
+        ready,
+        ready_url: service.ready_url.clone(),
+        auto_start: service.auto_start,
+        lock_file: lock_exists.then(|| display_relative(repo_root, &lock_file_path)),
+        pid_file: pid_exists.then(|| display_relative(repo_root, &pid_file_path)),
+    })
+}
+
+fn service_process_label(auto_start: bool) -> &'static str {
+    if auto_start { "host-started" } else { "manual" }
+}
+
+fn write_service_lock(lock_file_path: &Path) -> Result<()> {
+    if let Some(parent) = lock_file_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create directory {}", parent.display()))?;
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(lock_file_path)
+        .with_context(|| format!("create {}", lock_file_path.display()))?;
+    write_file(
+        lock_file_path,
+        format!("owner_pid={}\n", std::process::id()).as_bytes(),
+    )
 }
 
 pub async fn add_module_catalog_entry(
@@ -1204,9 +2295,15 @@ pub async fn add_module_catalog_entry(
         options
             .catalog_file
             .as_deref()
-            .unwrap_or_else(|| Path::new(".lenso/module-catalog.json")),
+            .unwrap_or_else(|| Path::new(MODULE_CATALOG_PATH)),
     );
-    let manifest = validate_remote_module_manifest(read_json_reference(manifest_reference).await?)?;
+    let manifest = read_json_reference(manifest_reference).await?;
+    let is_service = is_service_manifest(&manifest);
+    let manifest = if is_service {
+        validate_service_manifest(manifest)?
+    } else {
+        validate_remote_module_manifest(manifest)?
+    };
     let module_name = string_field(&manifest, "name")?.trim().to_owned();
     let version = string_field(&manifest, "version")?.trim().to_owned();
     let base_url = derive_remote_base_url(options.base_url.as_deref(), manifest_reference)?;
@@ -1217,12 +2314,21 @@ pub async fn add_module_catalog_entry(
         .and_then(Value::as_array_mut)
         .ok_or_else(|| anyhow!("Module catalog modules must be an array"))?;
     modules.retain(|entry| entry.get("name").and_then(Value::as_str) != Some(module_name.as_str()));
-    modules.push(module_catalog_entry_from_manifest(
-        &manifest,
-        manifest_reference,
-        &base_url,
-        options.summary.as_deref(),
-    )?);
+    modules.push(if is_service {
+        service_catalog_entry_from_manifest(
+            &manifest,
+            manifest_reference,
+            &base_url,
+            options.summary.as_deref(),
+        )?
+    } else {
+        module_catalog_entry_from_manifest(
+            &manifest,
+            manifest_reference,
+            &base_url,
+            options.summary.as_deref(),
+        )?
+    });
 
     if options.dry_run {
         println!("Module catalog dry run:");
@@ -1232,13 +2338,988 @@ pub async fn add_module_catalog_entry(
     }
 
     write_json(&catalog_file_path, &catalog)?;
-    println!("Added {module_name} to module catalog.");
+    if is_service {
+        println!("Added service {module_name} to module catalog.");
+    } else {
+        println!("Added {module_name} to module catalog.");
+    }
     println!("Updated:");
     println!("- {}", display_relative(&repo_root, &catalog_file_path));
     println!("Install:");
-    println!("- lenso module install {manifest_reference}");
+    if is_service {
+        println!("- lenso service install {manifest_reference}");
+    } else {
+        println!("- lenso module install {manifest_reference}");
+    }
 
     Ok(())
+}
+
+pub async fn check_service_manifest_reference(
+    manifest_reference: &str,
+    options: ServiceManifestCheckOptions,
+) -> Result<()> {
+    let initial_manifest = if manifest_reference.starts_with("http://")
+        || manifest_reference.starts_with("https://")
+    {
+        None
+    } else {
+        Some(validate_service_manifest(
+            read_json_reference(manifest_reference).await?,
+        )?)
+    };
+    let manifest_url = service_check_manifest_url(
+        manifest_reference,
+        initial_manifest.as_ref(),
+        options.manifest_url.as_deref(),
+    );
+    let ready_url = service_check_ready_url(
+        initial_manifest.as_ref(),
+        manifest_url.as_deref(),
+        options.ready_url.as_deref(),
+    );
+    let mut process = if let Some(command) = options.serve_command.as_deref() {
+        let ready_url = ready_url.as_deref().ok_or_else(|| {
+            anyhow!(
+                "Service check needs --ready-url or a manifest health/install ready URL when using --serve-command"
+            )
+        })?;
+        let manifest_url = manifest_url.as_deref().ok_or_else(|| {
+            anyhow!(
+                "Service check needs --manifest-url or an inferable manifest URL when using --serve-command"
+            )
+        })?;
+        let mut process = ManagedCheckProcess::spawn(command, options.cwd.as_deref())?;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(800))
+            .build()
+            .context("build service check HTTP client")?;
+        wait_for_service_check_ready(
+            &client,
+            &mut process.child,
+            ready_url,
+            options.ready_timeout_ms,
+        )
+        .await?;
+        let fetched_manifest = client
+            .get(manifest_url)
+            .send()
+            .await
+            .with_context(|| format!("fetch service manifest {manifest_url}"))?
+            .error_for_status()
+            .with_context(|| format!("fetch service manifest {manifest_url}"))?
+            .json::<Value>()
+            .await
+            .context("parse service manifest JSON")?;
+        Some((process, validate_service_manifest(fetched_manifest)?))
+    } else {
+        None
+    };
+    let manifest = if let Some((_, manifest)) = process.as_ref() {
+        manifest.clone()
+    } else if let Some(manifest) = initial_manifest {
+        manifest
+    } else {
+        validate_service_manifest(read_json_reference(manifest_reference).await?)?
+    };
+    let name = string_field(&manifest, "name")?.trim();
+    let version = string_field(&manifest, "version")?.trim();
+    let modules = manifest
+        .get("modules")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("Service manifest modules must be an array"))?;
+    let module_names = modules
+        .iter()
+        .filter_map(|module| module.get("name").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    let operations = service_manifest_operations(&manifest, options.operation.as_deref());
+    if let Some(operation) = options.operation.as_deref()
+        && operations.is_empty()
+    {
+        bail!("Service operation `{operation}` was not found in manifest");
+    }
+    let probes = if let Some(manifest_url) = manifest_url.as_deref() {
+        service_check_operation_probe_summary(
+            &operations,
+            manifest_url,
+            options.sample_input.as_deref(),
+        )
+        .await?
+    } else {
+        Vec::new()
+    };
+    let declarations = service_check_declaration_summary(&manifest);
+    if let Some(failed_probe) = probes
+        .iter()
+        .find(|probe| probe.get("status").and_then(Value::as_str) == Some("failed"))
+    {
+        bail!(
+            "Service probe failed: {} {} {}",
+            failed_probe
+                .get("operationId")
+                .and_then(Value::as_str)
+                .unwrap_or("-"),
+            failed_probe
+                .get("method")
+                .and_then(Value::as_str)
+                .unwrap_or("-"),
+            failed_probe
+                .get("url")
+                .and_then(Value::as_str)
+                .unwrap_or("-")
+        );
+    }
+
+    if options.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "declarations": declarations,
+                "manifestReference": manifest_reference,
+                "manifestUrl": manifest_url,
+                "modules": module_names,
+                "operations": operations,
+                "probes": probes,
+                "readyUrl": ready_url,
+                "service": name,
+                "status": "ok",
+                "version": version,
+            }))
+            .context("serialize service manifest check")?
+        );
+    } else {
+        println!("Service manifest ok: {name} {version}");
+        println!("Provided modules: {}", module_names.join(", "));
+        println!(
+            "Declared operations: routes={} actions={} runtime={} events={}",
+            declarations["routes"],
+            declarations["actions"],
+            declarations["runtimeFunctions"],
+            declarations["eventHandlers"]
+        );
+        println!("Service operations: {}", operations.len());
+        if let Some(ready_url) = ready_url {
+            println!("Ready URL: {ready_url}");
+        }
+        if let Some(manifest_url) = manifest_url {
+            println!("Manifest URL: {manifest_url}");
+        }
+        if !probes.is_empty() {
+            println!("Probes:");
+            for probe in probes {
+                println!(
+                    "- {} {} {} {}",
+                    probe
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("skip"),
+                    probe
+                        .get("operationId")
+                        .and_then(Value::as_str)
+                        .unwrap_or("-"),
+                    probe.get("method").and_then(Value::as_str).unwrap_or("-"),
+                    probe
+                        .get("url")
+                        .or_else(|| probe.get("reason"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("-")
+                );
+            }
+        }
+    }
+    drop(process.take());
+    Ok(())
+}
+
+struct ManagedCheckProcess {
+    child: Child,
+}
+
+impl ManagedCheckProcess {
+    fn spawn(command: &str, cwd: Option<&Path>) -> Result<Self> {
+        let mut process = Command::new("sh");
+        process.arg("-c").arg(command);
+        if let Some(cwd) = cwd {
+            process.current_dir(cwd);
+        }
+        let child = process
+            .spawn()
+            .with_context(|| format!("start service check command `{command}`"))?;
+        Ok(Self { child })
+    }
+}
+
+impl Drop for ManagedCheckProcess {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+async fn wait_for_service_check_ready(
+    client: &reqwest::Client,
+    child: &mut Child,
+    ready_url: &str,
+    ready_timeout_ms: u64,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_millis(ready_timeout_ms);
+    loop {
+        if remote_service_ready_url(client, ready_url).await {
+            return Ok(());
+        }
+        if let Some(status) = child.try_wait().context("check service command status")? {
+            bail!("service command exited before ready: {status}");
+        }
+        if Instant::now() >= deadline {
+            bail!("service did not become ready at {ready_url} within {ready_timeout_ms}ms");
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn service_check_manifest_url(
+    manifest_reference: &str,
+    manifest: Option<&Value>,
+    explicit_manifest_url: Option<&str>,
+) -> Option<String> {
+    explicit_manifest_url
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            manifest
+                .and_then(|manifest| manifest.get("health"))
+                .and_then(|health| {
+                    health
+                        .get("manifestUrl")
+                        .or_else(|| health.get("manifest_url"))
+                })
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            manifest
+                .and_then(service_check_first_ready_url)
+                .and_then(|url| infer_manifest_url_from_ready_url(&url))
+        })
+        .or_else(|| {
+            (manifest_reference.starts_with("http://")
+                || manifest_reference.starts_with("https://"))
+            .then(|| manifest_reference.to_owned())
+        })
+}
+
+fn service_check_ready_url(
+    manifest: Option<&Value>,
+    manifest_url: Option<&str>,
+    explicit_ready_url: Option<&str>,
+) -> Option<String> {
+    explicit_ready_url
+        .map(ToOwned::to_owned)
+        .or_else(|| manifest.and_then(service_check_first_ready_url))
+        .or_else(|| manifest_url.and_then(infer_ready_url_from_manifest_url))
+}
+
+fn service_check_first_ready_url(manifest: &Value) -> Option<String> {
+    manifest
+        .get("health")
+        .and_then(|health| {
+            health
+                .get("readyUrl")
+                .or_else(|| health.get("ready_url"))
+                .or_else(|| health.get("statusUrl"))
+                .or_else(|| health.get("status_url"))
+        })
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            manifest
+                .get("install")
+                .and_then(|install| install.get("services"))
+                .and_then(Value::as_array)
+                .and_then(|services| services.first())
+                .and_then(|service| service.get("readyUrl").or_else(|| service.get("ready_url")))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+}
+
+fn infer_manifest_url_from_ready_url(ready_url: &str) -> Option<String> {
+    ready_url
+        .strip_suffix("/status")
+        .or_else(|| ready_url.strip_suffix("/ready"))
+        .map(|base| format!("{base}/manifest"))
+}
+
+fn infer_ready_url_from_manifest_url(manifest_url: &str) -> Option<String> {
+    manifest_url
+        .strip_suffix("/manifest")
+        .map(|base| format!("{base}/status"))
+}
+
+fn service_manifest_operations(manifest: &Value, filter: Option<&str>) -> Vec<Value> {
+    let mut operations = Vec::new();
+    for module in manifest
+        .get("modules")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(module_name) = module.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        for route in module
+            .get("http_routes")
+            .or_else(|| module.get("httpRoutes"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let method = route
+                .get("method")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_ascii_uppercase();
+            let path = route.get("path").and_then(Value::as_str).unwrap_or("");
+            let operation = route.get("operation");
+            let operation_id = operation_id(operation)
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| format!("{module_name}/http/{method}:{path}"));
+            let safe_probe_spec = operation_safe_probe(operation).cloned();
+            let legacy_safe_probe = operation.is_none()
+                && method == "GET"
+                && !path.contains('{')
+                && !path.contains(':');
+            push_manifest_operation(
+                &mut operations,
+                filter,
+                json!({
+                    "capability": route.get("capability").and_then(Value::as_str),
+                    "kind": "http_route",
+                    "method": method,
+                    "module": module_name,
+                    "operationId": operation_id,
+                    "path": path,
+                    "safeProbe": safe_probe_spec.is_some() || legacy_safe_probe,
+                    "safeProbeSpec": safe_probe_spec,
+                }),
+            );
+        }
+        for function in module
+            .get("runtime")
+            .and_then(|runtime| runtime.get("functions"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let name = function.get("name").and_then(Value::as_str).unwrap_or("");
+            let operation = function.get("operation");
+            let operation_id = operation_id(operation)
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| format!("{module_name}/runtime/{name}"));
+            let safe_probe_spec = operation_safe_probe(operation).cloned();
+            push_manifest_operation(
+                &mut operations,
+                filter,
+                json!({
+                    "kind": "runtime_function",
+                    "module": module_name,
+                    "name": name,
+                    "operationId": operation_id,
+                    "safeProbe": safe_probe_spec.is_some(),
+                    "safeProbeSpec": safe_probe_spec,
+                }),
+            );
+        }
+        for handler in module
+            .get("events")
+            .and_then(|events| events.get("handlers"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let name = handler
+                .get("name")
+                .or_else(|| handler.get("event"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let operation = handler.get("operation");
+            let operation_id = operation_id(operation)
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| format!("{module_name}/event/{name}"));
+            let safe_probe_spec = operation_safe_probe(operation).cloned();
+            push_manifest_operation(
+                &mut operations,
+                filter,
+                json!({
+                    "eventName": handler.get("eventName").or_else(|| handler.get("event_name")).and_then(Value::as_str),
+                    "kind": "event_handler",
+                    "module": module_name,
+                    "name": name,
+                    "operationId": operation_id,
+                    "safeProbe": safe_probe_spec.is_some(),
+                    "safeProbeSpec": safe_probe_spec,
+                }),
+            );
+        }
+        let admin = module.get("admin");
+        let include_admin_actions = admin
+            .and_then(|admin| admin.get("kind"))
+            .and_then(Value::as_str)
+            .is_none_or(|kind| kind == "declarative_custom");
+        if include_admin_actions {
+            for action in admin
+                .and_then(|admin| admin.get("actions"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let name = action.get("name").and_then(Value::as_str).unwrap_or("");
+                let operation = action.get("operation");
+                let operation_id = operation_id(operation)
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| format!("{module_name}/action/{name}"));
+                let safe_probe_spec = operation_safe_probe(operation).cloned();
+                push_manifest_operation(
+                    &mut operations,
+                    filter,
+                    json!({
+                        "capability": action.get("capability").and_then(Value::as_str),
+                        "kind": "admin_action",
+                        "module": module_name,
+                        "name": name,
+                        "operationId": operation_id,
+                        "safeProbe": safe_probe_spec.is_some(),
+                        "safeProbeSpec": safe_probe_spec,
+                    }),
+                );
+            }
+        }
+    }
+    operations.sort_by(|left, right| {
+        left.get("operationId")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .cmp(
+                right
+                    .get("operationId")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+            )
+    });
+    operations
+}
+
+fn operation_id(operation: Option<&Value>) -> Option<&str> {
+    operation
+        .and_then(|operation| {
+            operation
+                .get("operationId")
+                .or_else(|| operation.get("operation_id"))
+        })
+        .and_then(Value::as_str)
+}
+
+fn operation_safe_probe(operation: Option<&Value>) -> Option<&Value> {
+    let probe = operation.and_then(|operation| {
+        operation
+            .get("safeProbe")
+            .or_else(|| operation.get("safe_probe"))
+    })?;
+    match probe {
+        Value::Bool(true) | Value::Object(_) => Some(probe),
+        _ => None,
+    }
+}
+
+fn push_manifest_operation(operations: &mut Vec<Value>, filter: Option<&str>, operation: Value) {
+    let operation_id = operation.get("operationId").and_then(Value::as_str);
+    if filter.is_none_or(|filter| operation_id == Some(filter)) {
+        operations.push(operation);
+    }
+}
+
+async fn service_check_operation_probe_summary(
+    operations: &[Value],
+    manifest_url: &str,
+    _sample_input: Option<&Path>,
+) -> Result<Vec<Value>> {
+    let service_base_url = manifest_url
+        .strip_suffix("/manifest")
+        .unwrap_or(manifest_url)
+        .to_owned();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(800))
+        .build()
+        .context("build service probe HTTP client")?;
+    let mut probes = Vec::new();
+    for operation in operations {
+        let kind = operation.get("kind").and_then(Value::as_str).unwrap_or("");
+        let operation_id = operation
+            .get("operationId")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        if kind != "http_route" {
+            probes.push(json!({
+                "kind": kind,
+                "operationId": operation_id,
+                "reason": "operation kind is not probed",
+                "status": "skipped",
+            }));
+            continue;
+        }
+        if operation.get("safeProbe").and_then(Value::as_bool) != Some(true) {
+            probes.push(json!({
+                "kind": kind,
+                "operationId": operation_id,
+                "reason": "safeProbe not declared",
+                "status": "skipped",
+            }));
+            continue;
+        }
+        let probe = operation.get("safeProbeSpec");
+        let method = probe
+            .and_then(|probe| probe.get("method"))
+            .and_then(Value::as_str)
+            .or_else(|| operation.get("method").and_then(Value::as_str))
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        let path = probe
+            .and_then(|probe| probe.get("path"))
+            .and_then(Value::as_str)
+            .or_else(|| operation.get("path").and_then(Value::as_str))
+            .unwrap_or("");
+        let module_name = operation
+            .get("module")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if method != "GET" || path.contains('{') || path.contains(':') {
+            probes.push(json!({
+                "kind": kind,
+                "method": method,
+                "operationId": operation_id,
+                "path": path,
+                "reason": "only literal HTTP GET safe probes are supported",
+                "status": "skipped",
+            }));
+            continue;
+        }
+        let url = join_url_path(
+            &service_base_url,
+            &format!("modules/{module_name}/{}", path.trim_start_matches('/')),
+        );
+        let status = if remote_service_ready_url(&client, &url).await {
+            "ok"
+        } else {
+            "failed"
+        };
+        probes.push(json!({
+            "kind": kind,
+            "method": method,
+            "module": module_name,
+            "operationId": operation_id,
+            "path": path,
+            "status": status,
+            "url": url,
+        }));
+    }
+    Ok(probes)
+}
+
+fn service_check_declaration_summary(manifest: &Value) -> Value {
+    let mut routes = 0usize;
+    let mut actions = 0usize;
+    let mut runtime_functions = 0usize;
+    let mut event_handlers = 0usize;
+    for module in manifest
+        .get("modules")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        routes += module
+            .get("http_routes")
+            .or_else(|| module.get("httpRoutes"))
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        actions += module
+            .get("admin")
+            .and_then(|admin| admin.get("actions"))
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        runtime_functions += module
+            .get("runtime")
+            .and_then(|runtime| runtime.get("functions"))
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        event_handlers += module
+            .get("events")
+            .and_then(|events| events.get("handlers"))
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+    }
+    json!({
+        "actions": actions,
+        "eventHandlers": event_handlers,
+        "routes": routes,
+        "runtimeFunctions": runtime_functions,
+    })
+}
+
+pub async fn diff_service(options: ServiceDiffOptions) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let receipt = installed_service_receipt(&repo_root, &options.service_name)?;
+    let current = receipt
+        .get("serviceManifestSnapshot")
+        .ok_or_else(|| {
+            anyhow!(
+                "Service `{}` has no manifest snapshot; reinstall or upgrade it once before diff",
+                options.service_name
+            )
+        })?
+        .clone();
+    let candidate =
+        validate_service_manifest(read_json_reference(&options.manifest_reference).await?)?;
+    ensure_service_name_matches(&candidate, &options.service_name)?;
+    let diff = service_manifest_diff(&current, &candidate);
+
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&diff)?);
+    } else {
+        print_service_manifest_diff(&options.service_name, &diff);
+    }
+    Ok(())
+}
+
+pub async fn upgrade_service(options: ServiceUpgradeOptions) -> Result<()> {
+    let candidate =
+        validate_service_manifest(read_json_reference(&options.manifest_reference).await?)?;
+    ensure_service_name_matches(&candidate, &options.service_name)?;
+    let install_options = RemoteModuleInstallOptions {
+        allow_incompatible: options.allow_incompatible,
+        base_url: options.base_url,
+        console_plan: false,
+        dry_run: options.dry_run,
+        env_file: options.env_file,
+        install_profiles: Vec::new(),
+        module_services_file: options.module_services_file,
+        repo_root: options.repo_root,
+        run_install_commands: false,
+        source: "remote".to_owned(),
+    };
+    add_service_manifest_with_options(&options.manifest_reference, candidate, &install_options)
+        .await
+}
+
+pub async fn rollback_service(options: ServiceRollbackOptions) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let receipt = installed_service_receipt(&repo_root, &options.service_name)?;
+    let previous = receipt
+        .get("previousServiceManifestSnapshot")
+        .ok_or_else(|| {
+            anyhow!(
+                "Service `{}` has no previous manifest snapshot to roll back to",
+                options.service_name
+            )
+        })?
+        .clone();
+    let previous = validate_service_manifest(previous)?;
+    let manifest_reference = receipt
+        .get("service")
+        .and_then(|service| service.get("manifestReference"))
+        .or_else(|| receipt.get("manifestReference"))
+        .and_then(Value::as_str)
+        .unwrap_or("rollback:lenso.service.json")
+        .to_owned();
+    let install_options = RemoteModuleInstallOptions {
+        allow_incompatible: true,
+        base_url: service_receipt_base_url(&receipt),
+        console_plan: false,
+        dry_run: options.dry_run,
+        env_file: options.env_file,
+        install_profiles: Vec::new(),
+        module_services_file: options.module_services_file,
+        repo_root: options.repo_root,
+        run_install_commands: false,
+        source: "remote".to_owned(),
+    };
+    add_service_manifest_with_options(&manifest_reference, previous, &install_options).await
+}
+
+fn installed_service_receipt(repo_root: &Path, service_name: &str) -> Result<Value> {
+    let ledger_path = repo_root.join(MODULE_INSTALL_LEDGER_PATH);
+    let ledger = read_json_if_exists(&ledger_path)?
+        .ok_or_else(|| anyhow!("Module install ledger not found: {}", ledger_path.display()))?;
+    let modules = ledger
+        .get("modules")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("Module install ledger modules must be an array"))?;
+    modules
+        .iter()
+        .find(|entry| {
+            entry.get("moduleName").and_then(Value::as_str) == Some(service_name)
+                || service_receipt_name(entry) == Some(service_name)
+        })
+        .cloned()
+        .ok_or_else(|| anyhow!("Installed service not found: {service_name}"))
+}
+
+fn ensure_service_name_matches(manifest: &Value, expected: &str) -> Result<()> {
+    let actual = string_field(manifest, "name")?.trim();
+    if actual != expected {
+        bail!("Service manifest is for `{actual}`, expected `{expected}`");
+    }
+    Ok(())
+}
+
+fn service_manifest_diff(current: &Value, candidate: &Value) -> Value {
+    let current_modules = service_module_name_set(current);
+    let candidate_modules = service_module_name_set(candidate);
+    let all_modules = current_modules
+        .union(&candidate_modules)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let capability_changes = all_modules
+        .iter()
+        .filter_map(|module| {
+            let current = service_module_string_set(current, module, "capabilities");
+            let candidate = service_module_string_set(candidate, module, "capabilities");
+            let added = set_added(&current, &candidate);
+            let removed = set_removed(&current, &candidate);
+            (!added.is_empty() || !removed.is_empty()).then(|| {
+                json!({
+                    "added": added,
+                    "module": module,
+                    "removed": removed,
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    let operation_changes = all_modules
+        .iter()
+        .filter_map(|module| {
+            let current = service_module_operation_set(current, module);
+            let candidate = service_module_operation_set(candidate, module);
+            let added = set_added(&current, &candidate);
+            let removed = set_removed(&current, &candidate);
+            (!added.is_empty() || !removed.is_empty()).then(|| {
+                json!({
+                    "added": added,
+                    "module": module,
+                    "removed": removed,
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    let current_env = service_env_set(current);
+    let candidate_env = service_env_set(candidate);
+    let current_config = service_config_set(current);
+    let candidate_config = service_config_set(candidate);
+
+    json!({
+        "capabilities": capability_changes,
+        "compatibilityChanged": current.get("compatibility") != candidate.get("compatibility"),
+        "config": {
+            "added": set_added(&current_config, &candidate_config),
+            "removed": set_removed(&current_config, &candidate_config),
+        },
+        "env": {
+            "added": set_added(&current_env, &candidate_env),
+            "removed": set_removed(&current_env, &candidate_env),
+        },
+        "modules": {
+            "added": set_added(&current_modules, &candidate_modules),
+            "removed": set_removed(&current_modules, &candidate_modules),
+        },
+        "operations": operation_changes,
+    })
+}
+
+fn print_service_manifest_diff(service_name: &str, diff: &Value) {
+    println!("Service diff: {service_name}");
+    print_diff_group("modules added", &diff["modules"]["added"]);
+    print_diff_group("modules removed", &diff["modules"]["removed"]);
+    print_diff_group("env added", &diff["env"]["added"]);
+    print_diff_group("env removed", &diff["env"]["removed"]);
+    print_diff_group("config added", &diff["config"]["added"]);
+    print_diff_group("config removed", &diff["config"]["removed"]);
+    println!(
+        "compatibility changed: {}",
+        diff.get("compatibilityChanged")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    );
+    for change in diff
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        println!(
+            "capabilities {}: +{} -{}",
+            change.get("module").and_then(Value::as_str).unwrap_or("-"),
+            json_string_list(&change["added"]).join(", "),
+            json_string_list(&change["removed"]).join(", ")
+        );
+    }
+    for change in diff
+        .get("operations")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        println!(
+            "operations {}: +{} -{}",
+            change.get("module").and_then(Value::as_str).unwrap_or("-"),
+            json_string_list(&change["added"]).join(", "),
+            json_string_list(&change["removed"]).join(", ")
+        );
+    }
+}
+
+fn print_diff_group(label: &str, value: &Value) {
+    let items = json_string_list(value);
+    if !items.is_empty() {
+        println!("{label}: {}", items.join(", "));
+    }
+}
+
+fn json_string_list(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn service_module_name_set(manifest: &Value) -> BTreeSet<String> {
+    manifest
+        .get("modules")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|module| module.get("name").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn service_module<'a>(manifest: &'a Value, module_name: &str) -> Option<&'a Value> {
+    manifest
+        .get("modules")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|module| module.get("name").and_then(Value::as_str) == Some(module_name))
+}
+
+fn service_module_string_set(manifest: &Value, module_name: &str, key: &str) -> BTreeSet<String> {
+    service_module(manifest, module_name)
+        .and_then(|module| module.get(key))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn service_module_operation_set(manifest: &Value, module_name: &str) -> BTreeSet<String> {
+    let Some(module) = service_module(manifest, module_name) else {
+        return BTreeSet::new();
+    };
+    let mut operations = BTreeSet::new();
+    for route in module
+        .get("http_routes")
+        .or_else(|| module.get("httpRoutes"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let (Some(method), Some(path)) = (
+            route.get("method").and_then(Value::as_str),
+            route.get("path").and_then(Value::as_str),
+        ) {
+            operations.insert(format!("route:{method} {path}"));
+        }
+    }
+    for function in module
+        .get("runtime")
+        .and_then(|runtime| runtime.get("functions"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(name) = function.get("name").and_then(Value::as_str) {
+            operations.insert(format!("runtime:{name}"));
+        }
+    }
+    for handler in module
+        .get("events")
+        .and_then(|events| events.get("handlers"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(name) = handler
+            .get("event")
+            .or_else(|| handler.get("name"))
+            .and_then(Value::as_str)
+        {
+            operations.insert(format!("event:{name}"));
+        }
+    }
+    for action in module
+        .get("admin")
+        .and_then(|admin| admin.get("actions"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(name) = action.get("name").and_then(Value::as_str) {
+            operations.insert(format!("action:{name}"));
+        }
+    }
+    operations
+}
+
+fn service_env_set(manifest: &Value) -> BTreeSet<String> {
+    let mut values = manifest
+        .get("requiredEnv")
+        .or_else(|| manifest.get("required_env"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>();
+    values.extend(
+        manifest
+            .get("env")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|field| field.get("name").and_then(Value::as_str))
+            .map(ToOwned::to_owned),
+    );
+    values
+}
+
+fn service_config_set(manifest: &Value) -> BTreeSet<String> {
+    manifest
+        .get("config")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|field| field.get("key").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn set_added(left: &BTreeSet<String>, right: &BTreeSet<String>) -> Vec<String> {
+    right.difference(left).cloned().collect()
+}
+
+fn set_removed(left: &BTreeSet<String>, right: &BTreeSet<String>) -> Vec<String> {
+    left.difference(right).cloned().collect()
 }
 
 pub async fn apply_console_package_install_plan(
@@ -1363,10 +3444,7 @@ async fn create_remote_module(options: ModuleCreateOptions) -> Result<()> {
     }
     let package_root = output_root.join(&package_root_name);
     if package_root.exists() {
-        bail!(
-            "Remote module package already exists: {}",
-            package_root.display()
-        );
+        bail!("Service package already exists: {}", package_root.display());
     }
 
     let mut package_context = build_console_package_context(
@@ -1384,7 +3462,7 @@ async fn create_remote_module(options: ModuleCreateOptions) -> Result<()> {
     )?;
 
     if options.dry_run {
-        println!("Remote module dry run:");
+        println!("Service package dry run:");
         for file_path in pending_writes.keys() {
             println!("- {}", display_relative(&output_root, file_path));
         }
@@ -1393,12 +3471,12 @@ async fn create_remote_module(options: ModuleCreateOptions) -> Result<()> {
 
     write_pending_files(&pending_writes)?;
 
-    println!("Created remote module package {package_root_name}.");
+    println!("Created service package {package_root_name}.");
     println!("Next steps:");
     println!("- pnpm --dir {package_root_name}/backend dev");
-    println!("- lenso module install http://127.0.0.1:4100/lenso/module/v1/manifest");
+    println!("- lenso service install http://127.0.0.1:4100/lenso/service/v1/manifest");
     println!(
-        "- lenso module catalog add http://127.0.0.1:4100/lenso/module/v1/manifest # optional discovery"
+        "- lenso module catalog add http://127.0.0.1:4100/lenso/service/v1/manifest # optional discovery"
     );
     println!("- publish or install the console package");
     println!("- pnpm install");
@@ -2327,13 +4405,18 @@ fn queue_remote_module_files(
 ) -> Result<()> {
     queue_write(
         pending_writes,
-        package_root.join("lenso.module.json"),
-        json_string_pretty(&remote_manifest_json(context))?,
+        package_root.join("lenso.service.json"),
+        json_string_pretty(&remote_manifest_json(context, package_root_name))?,
     );
     queue_write(
         pending_writes,
         package_root.join("catalog-entry.json"),
         json_string_pretty(&remote_catalog_entry_json(context))?,
+    );
+    queue_write(
+        pending_writes,
+        package_root.join("module-services.local.json"),
+        json_string_pretty(&remote_module_services_local_json(context))?,
     );
     queue_write(
         pending_writes,
@@ -2344,6 +4427,11 @@ fn queue_remote_module_files(
         pending_writes,
         package_root.join("README.md"),
         remote_package_readme(&context.module_id, package_root_name),
+    );
+    queue_write(
+        pending_writes,
+        package_root.join("RUNBOOK.md"),
+        remote_package_runbook(&context.module_id),
     );
     queue_write(
         pending_writes,
@@ -2369,7 +4457,7 @@ fn queue_remote_module_files(
         pending_writes,
         package_root.join("backend/openapi.yaml"),
         format!(
-            "openapi: 3.1.0\ninfo:\n  title: {} Remote Module\n  version: 0.1.0\npaths: {{}}\n",
+            "openapi: 3.1.0\ninfo:\n  title: {} Service\n  version: 0.1.0\npaths: {{}}\n",
             context.label
         ),
     );
@@ -2392,8 +4480,12 @@ fn queue_remote_module_files(
     Ok(())
 }
 
-fn remote_manifest_json(context: &ConsolePackageContext) -> Value {
-    json!({
+fn service_id_for_module(module_id: &str) -> String {
+    format!("{module_id}-service")
+}
+
+fn remote_manifest_json(context: &ConsolePackageContext, package_root_name: &str) -> Value {
+    let module = json!({
         "admin": {
             "entities": [
                 {
@@ -2490,14 +4582,72 @@ fn remote_manifest_json(context: &ConsolePackageContext) -> Value {
                 },
             ],
         },
-        "source": "remote",
+        "version": "0.1.0",
+    });
+    let service_id = service_id_for_module(&context.module_id);
+    json!({
+        "compatibility": {
+            "consolePackageApi": CONSOLE_BUNDLE_HOST_API,
+            "remoteProtocolVersion": REMOTE_PROTOCOL_VERSION,
+            "requiredHostFeatures": SUPPORTED_SERVICE_MODULE_FEATURES,
+        },
+        "deployment": {
+            "commands": ["pnpm --dir backend dev"],
+            "target": "container-paas",
+        },
+        "install": {
+            "services": [
+                {
+                    "autoStart": true,
+                    "command": "pnpm --dir backend dev",
+                    "cwd": format!("../{package_root_name}"),
+                    "name": service_id.clone(),
+                    "readyTimeoutMs": 12000,
+                    "readyUrl": "http://127.0.0.1:4100/lenso/service/v1/status",
+                },
+            ],
+        },
+        "modules": [module],
+        "name": service_id,
+        "protocol": "lenso.service.v1",
+        "requiredEnv": ["PORT"],
+        "statusPath": "/lenso/service/v1/status",
+        "transports": ["http"],
         "version": "0.1.0",
     })
 }
 
-fn remote_catalog_entry_json(context: &ConsolePackageContext) -> Value {
+fn remote_module_services_local_json(context: &ConsolePackageContext) -> Value {
+    let service_id = service_id_for_module(&context.module_id);
     json!({
-        "baseUrl": "https://example.com/lenso/module/v1",
+        "modules": [
+            {
+                "moduleName": service_id,
+                "services": [
+                    {
+                        "autoStart": true,
+                        "command": "pnpm --dir backend dev",
+                        "cwd": ".",
+                        "name": "api",
+                        "readyTimeoutMs": 12000,
+                        "readyUrl": "http://127.0.0.1:4100/lenso/service/v1/status",
+                    },
+                ],
+            },
+        ],
+        "version": 1,
+    })
+}
+
+fn remote_catalog_entry_json(context: &ConsolePackageContext) -> Value {
+    let service_id = service_id_for_module(&context.module_id);
+    json!({
+        "baseUrl": "https://example.com/lenso/service/v1",
+        "compatibility": {
+            "consolePackageApi": CONSOLE_BUNDLE_HOST_API,
+            "remoteProtocolVersion": REMOTE_PROTOCOL_VERSION,
+            "requiredHostFeatures": SUPPORTED_SERVICE_MODULE_FEATURES,
+        },
         "consolePackages": [
             {
                 "exportName": context.module_name,
@@ -2505,9 +4655,34 @@ fn remote_catalog_entry_json(context: &ConsolePackageContext) -> Value {
                 "route": context.route,
             },
         ],
-        "manifestReference": "https://example.com/lenso/module/v1/manifest",
-        "name": context.module_id,
-        "source": "remote",
+        "deployment": {
+            "commands": ["pnpm --dir backend dev"],
+            "target": "container-paas",
+        },
+        "install": {
+            "services": [
+                {
+                    "command": "pnpm --dir backend dev",
+                    "name": service_id.clone(),
+                },
+            ],
+        },
+        "manifestReference": "https://example.com/lenso/service/v1/manifest",
+        "modules": [
+            {
+                "capabilities": [context.capability],
+                "name": context.module_id,
+                "version": "0.1.0",
+            },
+        ],
+        "name": service_id.clone(),
+        "service": {
+            "requiredEnv": ["PORT"],
+            "statusPath": "/lenso/service/v1/status",
+            "statusUrl": "https://example.com/lenso/service/v1/status",
+            "transports": ["http"],
+        },
+        "source": "service",
         "summary": format!("{} workspace and operations", context.label),
         "version": "0.1.0",
     })
@@ -2520,6 +4695,11 @@ fn remote_root_package_json(module_id: &str) -> Result<String> {
         "scripts": {
             "check": "pnpm --dir backend check && pnpm --dir console check",
             "dev": "pnpm --dir backend dev",
+            "service:export": format!("lenso service export --module {} --module-services-file module-services.local.json", service_id_for_module(module_id)),
+            "service:list": "lenso service list --module-services-file module-services.local.json",
+            "service:start": format!("lenso service start {} api --module-services-file module-services.local.json", service_id_for_module(module_id)),
+            "service:status": format!("lenso service status {} api --module-services-file module-services.local.json", service_id_for_module(module_id)),
+            "service:stop": format!("lenso service stop {} api --module-services-file module-services.local.json", service_id_for_module(module_id)),
             "smoke": "pnpm --dir backend smoke",
         },
         "type": "module",
@@ -2531,13 +4711,15 @@ fn remote_package_readme(module_id: &str, package_root_name: &str) -> String {
     format!(
         r#"# {}
 
-Remote Lenso module package scaffold.
+Lenso service package scaffold.
 
 ## Shape
 
-- `lenso.module.json`: install-time module manifest.
+- `lenso.service.json`: install-time service manifest.
 - `catalog-entry.json`: optional local catalog entry for discovery.
-- `backend/`: remote module backend implementation.
+- `module-services.local.json`: local service lifecycle file for CLI checks.
+- `RUNBOOK.md`: create, run, install, inspect, and troubleshoot steps.
+- `backend/`: service backend implementation.
 - `console/`: optional Runtime Console package.
 - `contracts/`: module-owned event and runtime-function contracts.
 
@@ -2549,80 +4731,161 @@ pnpm smoke
 pnpm check
 ```
 
+The backend prints the manifest and status URLs on startup. The generated
+service lifecycle sample treats the status URL as the readiness check:
+
+```sh
+lenso service list --module-services-file module-services.local.json
+lenso service status {module_id}-service api --module-services-file module-services.local.json
+```
+
 ## Install
 
-Expose the remote module protocol from a stable base URL such as:
+Expose the service protocol from a stable base URL such as:
 
 ```text
-GET https://example.com/lenso/module/v1/manifest
+GET https://example.com/lenso/service/v1/manifest
+GET https://example.com/lenso/service/v1/status
 ```
 
 Use `catalog-entry.json` as the local discovery record, or add the manifest
 URL directly:
 
 ```sh
-lenso module install https://example.com/lenso/module/v1/manifest
+lenso service install https://example.com/lenso/service/v1/manifest
 ```
 
 If you want it to appear in Available Modules before installing it, add a local
 catalog entry:
 
 ```sh
-lenso module catalog add https://example.com/lenso/module/v1/manifest
+lenso module catalog add https://example.com/lenso/service/v1/manifest
 ```
 
 If the manifest is inspected from a local file, provide the runtime base URL:
 
 ```sh
-lenso module install ./lenso.module.json --base-url https://example.com/lenso/module/v1
+lenso service install ./lenso.service.json --base-url https://example.com/lenso/service/v1
 ```
 
-Optional install-time host work can be declared in `lenso.module.json`:
+The generated `lenso.service.json` also declares a local service process:
 
 ```json
 {{
   "install": {{
-    "env": {{
-      "{}_API_BASE_URL": "https://example.com"
-    }},
-    "commands": [
-      {{ "command": "pnpm --dir ../lenso-runtime-console install" }}
-    ],
     "services": [
       {{
-        "name": "{}-api",
-        "command": "pnpm --dir ../{}-backend dev",
-        "readyUrl": "https://example.com/lenso/module/v1/manifest",
-        "autoStart": true
+        "name": "api",
+        "command": "pnpm --dir backend dev",
+        "cwd": "../{package_root_name}",
+        "readyUrl": "http://127.0.0.1:4100/lenso/service/v1/status"
       }}
     ]
   }}
 }}
 ```
 
-Env values are written to the host `.env`. Commands are recorded in the install
-plan and only run when the operator passes `--run-install-commands`. Services
-are stored in `.lenso/module-services.json` and started before the host loads
-remote modules on API/worker startup.
+Adjust `cwd` if the host app and this package are not sibling directories.
+Services are stored in the host `.lenso/module-services.json` and started
+before the host loads service-provided modules on API/worker startup.
+
+## Operator Loop
+
+```sh
+lenso service install http://127.0.0.1:4100/lenso/service/v1/manifest
+lenso service list
+lenso service doctor {module_id} --json
+```
+
+Runtime Console should show the service as installed, configured, and ready,
+and the provided `{module_id}` module as loaded once the host API/worker restart
+with the configured provider source.
 
 This scaffold lives in `{package_root_name}` and should stay separate from a
 host application's linked `modules/` workspace.
 "#,
         title_case(module_id),
-        module_id.replace('-', "_").to_ascii_uppercase(),
-        module_id,
-        module_id
+    )
+}
+
+fn remote_package_runbook(module_id: &str) -> String {
+    format!(
+        r#"# Service Runbook
+
+## 1. Create
+
+This package is an independently running Lenso service. The service provider is
+`{module_id}-service`; it provides the `{module_id}` module. Keep the module
+name, capabilities, route names, runtime function names, and event names stable
+if you later extract it from a linked module.
+
+## 2. Run
+
+```sh
+pnpm install
+pnpm dev
+```
+
+The backend listens on `PORT` or `4100` and exposes:
+
+```text
+GET http://127.0.0.1:4100/lenso/service/v1/manifest
+GET http://127.0.0.1:4100/lenso/service/v1/status
+```
+
+## 3. Inspect Local Service State
+
+From this package root:
+
+```sh
+lenso service list --module-services-file module-services.local.json
+lenso service status {module_id}-service api --module-services-file module-services.local.json
+lenso service start {module_id}-service api --module-services-file module-services.local.json
+lenso service stop {module_id}-service api --module-services-file module-services.local.json
+```
+
+## 4. Install Into A Host
+
+From the host app root:
+
+```sh
+lenso service install http://127.0.0.1:4100/lenso/service/v1/manifest
+lenso service doctor {module_id} --json
+```
+
+Restart the host API and worker after installation so they load the configured
+service provider source and any service process declaration.
+
+## 5. Observe
+
+Runtime Console evidence should stay on the host side:
+
+- Modules shows installed / configured / ready.
+- Remote Calls shows proxied HTTP, action, and runtime calls.
+- Runtime Story links host-owned runtime work back to this service.
+- Technical Operations records retries, queues, and operational failures.
+
+## 6. Troubleshoot
+
+| State | Meaning | Next action |
+| --- | --- | --- |
+| `manifest_unreachable` | Host cannot fetch the service manifest. | Start the backend or fix `REMOTE_MODULES`. |
+| `service_not_ready` | The lifecycle ready URL failed. | Run the service or inspect its logs. |
+| `restart_pending` | `.env` or service state changed after host startup. | Restart API and worker. |
+| `stale_state` | Lock/pid state exists but readiness failed. | Stop the service or remove stale lock/pid files. |
+"#
     )
 }
 
 fn remote_backend_readme(module_id: &str) -> String {
     format!(
-        r#"# Remote module backend
+        r#"# Service Backend
 
-The generated Node server exposes the {module_id} manifest at:
+The generated Node server exposes the `{module_id}-service` manifest at:
 
 ```text
-GET /lenso/module/v1/manifest
+GET /lenso/service/v1/manifest
+GET /lenso/service/v1/status
 ```
 
 Run it locally:
@@ -2636,9 +4899,9 @@ pnpm dev
 Replace `src/server.mjs` with the language or framework you prefer as the
 module grows.
 
-The backend should expose the remote module protocol expected by
-`platform-module-remote`, including a stable manifest endpoint and any declared
-schema-admin, action, HTTP proxy, or runtime-function endpoints.
+The backend should expose the Lenso service protocol, including a stable
+manifest endpoint and module-scoped schema-admin, action, HTTP proxy, or
+runtime-function endpoints.
 
 The host owns auth, capability enforcement, proxy policy, runtime queues,
 retries, Runtime Stories, and Technical Operations records.
@@ -2649,9 +4912,9 @@ retries, Runtime Stories, and Technical Operations records.
 fn remote_backend_package_json(module_id: &str) -> Result<String> {
     json_string_pretty(&json!({
         "dependencies": {
-            "@lenso/remote-module-kit": "^0.1.0",
+            "@lenso/service-kit": "^0.1.0",
         },
-        "name": format!("{module_id}-remote-backend"),
+        "name": format!("{}-backend", service_id_for_module(module_id)),
         "private": true,
         "scripts": {
             "check": "node src/smoke.mjs",
@@ -2665,19 +4928,26 @@ fn remote_backend_package_json(module_id: &str) -> Result<String> {
 }
 
 fn remote_backend_server(context: &ConsolePackageContext) -> String {
+    let service_id = service_id_for_module(&context.module_id);
     format!(
         r#"import {{
-  defineRemoteModule,
+  defineModule,
   defineSchemaEntity,
+  defineService,
   everyStartup,
   getRoute,
   lifecycle,
   runtimeFunction,
   schemaAdmin,
-  serveRemoteModule,
+  serveService,
   textField,
   timestampField,
-}} from "@lenso/remote-module-kit";
+}} from "@lenso/service-kit";
+
+const moduleName = {};
+const serviceName = {};
+const readCapability = {};
+const enrichFunctionName = {};
 
 const contacts = [
   {{
@@ -2698,12 +4968,12 @@ const contactsEntity = defineSchemaEntity({{
   fields: [textField("email"), textField("name"), timestampField("created_at")],
   label: "Contacts",
   name: "contacts",
-  readCapability: {},
+  readCapability,
 }});
 
-const module = defineRemoteModule({{
+const providedModule = defineModule({{
   admin: schemaAdmin([contactsEntity]),
-  capabilities: [{}],
+  capabilities: [readCapability],
   console: [
     {{
       area: {},
@@ -2722,13 +4992,13 @@ const module = defineRemoteModule({{
         export: {},
         name: {},
       }},
-      required_capabilities: [{}],
+      required_capabilities: [readCapability],
       route: {},
     }},
   ],
   httpRoutes: [
     getRoute("/contacts/{{id}}", {{
-      capability: {},
+      capability: readCapability,
       displayName: "Fetch Contact",
       storyTitle: "Fetch Contact",
     }}),
@@ -2737,7 +5007,7 @@ const module = defineRemoteModule({{
     activationJobs: [
       everyStartup(
         "sync contacts on startup",
-        {},
+        enrichFunctionName,
         {{
           input: {{ reason: "worker_startup" }},
         }}
@@ -2745,18 +5015,18 @@ const module = defineRemoteModule({{
     ],
     startupChecks: [
       {{
-        function_name: {},
+        function_name: enrichFunctionName,
         kind: "function_registered",
         name: "contacts enrich function is registered",
         required: true,
       }},
     ],
   }}),
-  name: {},
+  name: moduleName,
   runtimeFunctions: [
-    runtimeFunction({}, {{
-      inputSchema: {},
-      queue: {},
+    runtimeFunction(enrichFunctionName, {{
+      inputSchema: enrichFunctionName,
+      queue: moduleName,
       retryPolicy: {{
         initial_delay_ms: 1000,
         max_attempts: 3,
@@ -2767,39 +5037,73 @@ const module = defineRemoteModule({{
   version: "0.1.0",
 }});
 
-await serveRemoteModule(module, {{
-  data: {{
-    contacts: {{
-      detail: async (id) => contacts.find((contact) => contact.id === id),
-      list: async ({{ limit }}) => ({{
-        next_cursor: null,
-        records: contacts.slice(0, limit),
-      }}),
-    }},
+const service = defineService({{
+  compatibility: {{
+    console_package_api: "1",
+    remote_protocol_version: "1",
+    required_host_features: ["service.status"],
   }},
-  http: {{
-    "GET /contacts/{{id}}": ({{ params }}) =>
-      contacts.find((contact) => contact.id === params.id) ?? null,
+  deployment: {{
+    commands: ["pnpm --dir backend dev"],
+    target: "container-paas",
   }},
-  runtime: {{
-    {}: ({{ input }}) => {{
-      const contactId = input?.contact_id;
-      const contact = contacts.find((item) => item.id === contactId);
-      return {{
-        contact,
-        enriched: Boolean(contact),
-        source: {},
-      }};
+  install: {{
+    services: [
+      {{
+        autoStart: true,
+        command: "pnpm --dir backend dev",
+        name: serviceName,
+      }},
+    ],
+  }},
+  modules: [providedModule],
+  name: serviceName,
+  requiredEnv: ["PORT"],
+  statusPath: "/lenso/service/v1/status",
+  transports: ["http"],
+  version: "0.1.0",
+}});
+
+await serveService(service, {{
+  modules: {{
+    [moduleName]: {{
+      data: {{
+        contacts: {{
+          detail: async (id) => contacts.find((contact) => contact.id === id),
+          list: async ({{ limit }}) => ({{
+            next_cursor: null,
+            records: contacts.slice(0, limit),
+          }}),
+        }},
+      }},
+      http: {{
+        "GET /contacts/{{id}}": ({{ params }}) =>
+          contacts.find((contact) => contact.id === params.id) ?? null,
+      }},
+      runtime: {{
+        [enrichFunctionName]: ({{ input }}) => {{
+          const contactId = input?.contact_id;
+          const contact = contacts.find((item) => item.id === contactId);
+          return {{
+            contact,
+            enriched: Boolean(contact),
+            source: moduleName,
+          }};
+        }},
+      }},
     }},
   }},
   port: Number(process.env.PORT ?? 4100),
-  onReady: ({{ manifestUrl }}) => {{
+  onReady: ({{ manifestUrl, statusUrl }}) => {{
     console.log({} + manifestUrl);
+    console.log("Status: " + statusUrl);
   }},
 }});
 "#,
+        ts_string_literal_lossy(&context.module_id),
+        ts_string_literal_lossy(&service_id),
         ts_string_literal_lossy(&context.capability),
-        ts_string_literal_lossy(&context.capability),
+        ts_string_literal_lossy(&format!("{}.contacts.enrich.v1", context.module_id)),
         ts_string_literal_lossy(&context.area),
         ts_string_literal_lossy(&context.icon),
         ts_string_literal_lossy(&context.label),
@@ -2809,22 +5113,13 @@ await serveRemoteModule(module, {{
         ts_string_literal_lossy(&context.label),
         ts_string_literal_lossy(&context.module_name),
         ts_string_literal_lossy(&context.package_name),
-        ts_string_literal_lossy(&context.capability),
         ts_string_literal_lossy(&context.route),
-        ts_string_literal_lossy(&context.capability),
-        ts_string_literal_lossy(&format!("{}.contacts.enrich.v1", context.module_id)),
-        ts_string_literal_lossy(&format!("{}.contacts.enrich.v1", context.module_id)),
-        ts_string_literal_lossy(&context.module_id),
-        ts_string_literal_lossy(&format!("{}.contacts.enrich.v1", context.module_id)),
-        ts_string_literal_lossy(&format!("{}.contacts.enrich.v1", context.module_id)),
-        ts_string_literal_lossy(&context.module_id),
-        ts_string_literal_lossy(&format!("{}.contacts.enrich.v1", context.module_id)),
-        ts_string_literal_lossy(&context.module_id),
-        ts_string_literal_lossy(&format!("{} manifest: ", context.module_id)),
+        ts_string_literal_lossy(&format!("{} service manifest: ", service_id)),
     )
 }
 
 fn remote_backend_smoke(module_id: &str) -> String {
+    let service_id = service_id_for_module(module_id);
     format!(
         r#"import {{ spawn }} from "node:child_process";
 
@@ -2849,10 +5144,15 @@ try {{
   }}
 
   const manifest = await fetch(manifestUrl).then((response) => response.json());
-  if (manifest.name !== {} || manifest.source !== "remote") {{
-    throw new Error("manifest response did not match {module_id}");
+  if (manifest.name !== {} || manifest.protocol !== "lenso.service.v1") {{
+    throw new Error("service manifest response did not match {service_id}");
   }}
-  const moduleBaseUrl = manifestUrl.slice(0, -"/manifest".length);
+  const moduleManifest = manifest.modules?.find((item) => item.name === {});
+  if (!moduleManifest) {{
+    throw new Error("service manifest did not provide {module_id}");
+  }}
+  const serviceBaseUrl = manifestUrl.slice(0, -"/manifest".length);
+  const moduleBaseUrl = serviceBaseUrl + "/modules/{module_id}";
   const contact = await fetch(moduleBaseUrl + "/contacts/contact_1").then(
     (response) => response.json()
   );
@@ -2886,12 +5186,13 @@ try {{
   childProcess.kill();
 }}
 "#,
+        ts_string_literal_lossy(&service_id),
         ts_string_literal_lossy(module_id)
     )
 }
 
 fn remote_contracts_readme() -> String {
-    "# Module-owned contracts\n\nKeep event and runtime-function JSON Schema contracts here.\n\nThe host may validate these before installing or enabling a remote module.\n".to_owned()
+    "# Module-owned contracts\n\nKeep event and runtime-function JSON Schema contracts here.\n\nThe host may validate these before installing or enabling a service-provided module.\n".to_owned()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3146,6 +5447,488 @@ fn validate_remote_module_manifest(manifest: Value) -> Result<Value> {
     Ok(manifest)
 }
 
+fn is_service_manifest(manifest: &Value) -> bool {
+    manifest.get("protocol").and_then(Value::as_str) == Some("lenso.service.v1")
+        || manifest.get("modules").is_some_and(Value::is_array)
+}
+
+fn validate_service_manifest(manifest: Value) -> Result<Value> {
+    if !manifest.is_object() {
+        bail!("Service manifest must be a JSON object");
+    }
+    let name = string_field(&manifest, "name")?;
+    if name.trim().is_empty() {
+        bail!("Service manifest name is required");
+    }
+    let version = string_field(&manifest, "version")?;
+    if version.trim().is_empty() {
+        bail!("Service manifest version is required");
+    }
+    validate_service_provider(&manifest)?;
+    validate_named_object_array(manifest.get("config"), "$.config", "key")?;
+    validate_named_object_array(manifest.get("env"), "$.env", "name")?;
+    validate_service_string_array(
+        manifest
+            .get("requiredEnv")
+            .or_else(|| manifest.get("required_env")),
+        "$.requiredEnv",
+    )?;
+    validate_service_compatibility(&manifest)?;
+    validate_service_local_process(
+        manifest
+            .get("localProcess")
+            .or_else(|| manifest.get("local_process")),
+    )?;
+    validate_service_install(&manifest)?;
+    let modules = manifest
+        .get("modules")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("Service manifest modules must be an array"))?;
+    if modules.is_empty() {
+        bail!("Service manifest modules must not be empty");
+    }
+    let mut module_names = BTreeSet::new();
+    for (index, module) in modules.iter().enumerate() {
+        if !module.is_object() {
+            bail!("Service manifest modules entries must be objects");
+        }
+        let module_name = string_field(module, "name")?.trim();
+        if module_name.is_empty() {
+            bail!("Service manifest module name is required");
+        }
+        if !module_names.insert(module_name.to_owned()) {
+            bail!("Service manifest module `{module_name}` is declared more than once");
+        }
+        validate_service_string_array(
+            module.get("capabilities"),
+            &format!("$.modules[{index}].capabilities"),
+        )?;
+        validate_service_string_array(
+            module.get("dependencies"),
+            &format!("$.modules[{index}].dependencies"),
+        )?;
+    }
+    Ok(manifest)
+}
+
+fn validate_service_provider(manifest: &Value) -> Result<()> {
+    let Some(provider) = manifest.get("provider") else {
+        return Ok(());
+    };
+    let provider = provider
+        .as_object()
+        .ok_or_else(|| anyhow!("Service manifest $.provider must be an object"))?;
+    require_service_string(provider.get("name"), "$.provider.name")
+}
+
+fn validate_service_compatibility(manifest: &Value) -> Result<()> {
+    let Some(compatibility) = manifest.get("compatibility") else {
+        return Ok(());
+    };
+    let compatibility = compatibility
+        .as_object()
+        .ok_or_else(|| anyhow!("Service manifest $.compatibility must be an object"))?;
+    validate_service_string_array(
+        compatibility
+            .get("requiredHostFeatures")
+            .or_else(|| compatibility.get("required_host_features")),
+        "$.compatibility.requiredHostFeatures",
+    )
+}
+
+fn validate_named_object_array(value: Option<&Value>, path: &str, name_field: &str) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let array = value
+        .as_array()
+        .ok_or_else(|| anyhow!("Service manifest {path} must be an array"))?;
+    for (index, item) in array.iter().enumerate() {
+        let object = item
+            .as_object()
+            .ok_or_else(|| anyhow!("Service manifest {path}[{index}] must be an object"))?;
+        require_service_string(
+            object.get(name_field),
+            &format!("{path}[{index}].{name_field}"),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_service_local_process(value: Option<&Value>) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow!("Service manifest $.localProcess must be an object"))?;
+    require_service_string(object.get("command"), "$.localProcess.command")
+}
+
+fn validate_service_install(manifest: &Value) -> Result<()> {
+    let Some(install) = manifest.get("install") else {
+        return Ok(());
+    };
+    let install = install
+        .as_object()
+        .ok_or_else(|| anyhow!("Service manifest $.install must be an object"))?;
+    let Some(services) = install.get("services") else {
+        return Ok(());
+    };
+    let services = services
+        .as_array()
+        .ok_or_else(|| anyhow!("Service manifest $.install.services must be an array"))?;
+    for (index, service) in services.iter().enumerate() {
+        let service = service.as_object().ok_or_else(|| {
+            anyhow!("Service manifest $.install.services[{index}] must be an object")
+        })?;
+        require_service_string(
+            service.get("name"),
+            &format!("$.install.services[{index}].name"),
+        )?;
+        require_service_string(
+            service.get("command"),
+            &format!("$.install.services[{index}].command"),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_service_string_array(value: Option<&Value>, path: &str) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let array = value
+        .as_array()
+        .ok_or_else(|| anyhow!("Service manifest {path} must be an array"))?;
+    for (index, item) in array.iter().enumerate() {
+        require_service_string(Some(item), &format!("{path}[{index}]"))?;
+    }
+    Ok(())
+}
+
+fn require_service_string(value: Option<&Value>, path: &str) -> Result<()> {
+    if value
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Ok(());
+    }
+    bail!("Service manifest {path} must be a non-empty string")
+}
+
+fn service_module_install_manifests(
+    service_manifest: &Value,
+    manifest_reference: &str,
+    base_url: &str,
+) -> Result<Vec<Value>> {
+    let service_version = string_field(service_manifest, "version")?.trim();
+    let modules = service_manifest
+        .get("modules")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("Service manifest modules must be an array"))?;
+
+    modules
+        .iter()
+        .map(|module| {
+            let mut module_manifest = module.clone();
+            let object = module_manifest
+                .as_object_mut()
+                .ok_or_else(|| anyhow!("Service manifest modules entries must be objects"))?;
+            object.insert("source".to_owned(), json!("remote"));
+            object
+                .entry("version".to_owned())
+                .or_insert_with(|| json!(service_version));
+            object
+                .entry("capabilities".to_owned())
+                .or_insert_with(|| json!([]));
+            object
+                .entry("console".to_owned())
+                .or_insert_with(|| json!([]));
+            copy_optional_manifest_field(service_manifest, &mut module_manifest, "compatibility");
+            copy_optional_manifest_field(service_manifest, &mut module_manifest, "deployment");
+            module_manifest["service"] =
+                service_module_provider_metadata(service_manifest, manifest_reference, base_url)?;
+            validate_remote_module_manifest(module_manifest)
+        })
+        .collect()
+}
+
+fn service_module_provider_metadata(
+    service_manifest: &Value,
+    manifest_reference: &str,
+    base_url: &str,
+) -> Result<Value> {
+    let mut service = json!({
+        "baseUrl": base_url,
+        "manifestReference": manifest_reference,
+        "name": string_field(service_manifest, "name")?,
+        "statusPath": service_status_path(service_manifest),
+        "statusUrl": service_status_url(service_manifest, base_url),
+        "version": string_field(service_manifest, "version")?,
+    });
+    copy_optional_manifest_alias_field(
+        service_manifest,
+        &mut service,
+        "requiredEnv",
+        "required_env",
+    );
+    copy_optional_manifest_alias_field(service_manifest, &mut service, "transports", "transports");
+    copy_optional_manifest_field(service_manifest, &mut service, "deployment");
+    Ok(service)
+}
+
+fn copy_optional_manifest_alias_field(
+    source: &Value,
+    target: &mut Value,
+    target_field: &str,
+    source_field: &str,
+) {
+    if let Some(value) = source
+        .get(source_field)
+        .or_else(|| source.get(target_field))
+    {
+        target[target_field] = value.clone();
+    }
+}
+
+fn service_status_path(service_manifest: &Value) -> String {
+    service_manifest
+        .get("status_path")
+        .or_else(|| service_manifest.get("statusPath"))
+        .and_then(Value::as_str)
+        .unwrap_or("/lenso/service/v1/status")
+        .to_owned()
+}
+
+fn service_status_url(service_manifest: &Value, base_url: &str) -> String {
+    if let Some(status_url) = service_manifest
+        .get("status_url")
+        .or_else(|| service_manifest.get("statusUrl"))
+        .and_then(Value::as_str)
+        .map(trim_trailing_slashes)
+    {
+        return status_url;
+    }
+    let path = service_status_path(service_manifest);
+    reqwest::Url::parse(&format!("{}/", trim_trailing_slashes(base_url)))
+        .ok()
+        .and_then(|base| base.join(&path).ok())
+        .map(|url| trim_trailing_slashes(url.as_str()))
+        .unwrap_or_else(|| join_url_path(base_url, &path))
+}
+
+fn service_module_base_url(base_url: &str, module_name: &str) -> String {
+    join_url_path(base_url, &format!("modules/{module_name}"))
+}
+
+fn join_url_path(base_url: &str, path: &str) -> String {
+    format!(
+        "{}/{}",
+        trim_trailing_slashes(base_url),
+        path.trim_start_matches('/')
+    )
+}
+
+fn service_manifest_install_services(
+    manifest: &Value,
+    service_name: &str,
+    base_url: &str,
+) -> Result<Vec<RemoteModuleServiceInstallSpec>> {
+    let mut services = remote_module_install_services(manifest, service_name, base_url)?;
+    let default_manifest_ready_url = join_url_path(base_url, "manifest");
+    let default_status_ready_url = service_status_url(manifest, base_url);
+    for service in &mut services {
+        if service.ready_url == default_manifest_ready_url {
+            service.ready_url = default_status_ready_url.clone();
+        }
+    }
+    Ok(services)
+}
+
+fn service_receipt_base_url(receipt: &Value) -> Option<String> {
+    receipt
+        .get("service")
+        .and_then(|service| service.get("baseUrl").or_else(|| service.get("base_url")))
+        .and_then(Value::as_str)
+        .map(trim_trailing_slashes)
+}
+
+fn service_receipt_name(receipt: &Value) -> Option<&str> {
+    receipt
+        .get("service")
+        .and_then(|service| service.get("name").or_else(|| service.get("serviceName")))
+        .and_then(Value::as_str)
+}
+
+fn remote_uninstall_target(
+    install_ledger_path: &Path,
+    requested_name: &str,
+) -> Result<RemoteUninstallTarget> {
+    let Some(ledger) = read_json_if_exists(install_ledger_path)? else {
+        return Ok(RemoteUninstallTarget {
+            provider_name: requested_name.to_owned(),
+            module_names: vec![requested_name.to_owned()],
+        });
+    };
+    let modules = ledger
+        .get("modules")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("Module install ledger modules must be an array"))?;
+
+    if let Some(receipt) = modules
+        .iter()
+        .find(|module| module.get("moduleName").and_then(Value::as_str) == Some(requested_name))
+        && let Some(provider_name) = service_receipt_name(receipt)
+    {
+        return Ok(RemoteUninstallTarget {
+            provider_name: provider_name.to_owned(),
+            module_names: service_receipt_module_names(modules, provider_name),
+        });
+    }
+
+    let module_names = service_receipt_module_names(modules, requested_name);
+    if module_names.is_empty() {
+        Ok(RemoteUninstallTarget {
+            provider_name: requested_name.to_owned(),
+            module_names: vec![requested_name.to_owned()],
+        })
+    } else {
+        Ok(RemoteUninstallTarget {
+            provider_name: requested_name.to_owned(),
+            module_names,
+        })
+    }
+}
+
+fn remote_uninstall_dependency_warnings(
+    install_ledger_path: &Path,
+    target: &RemoteUninstallTarget,
+) -> Result<Vec<String>> {
+    let Some(ledger) = read_json_if_exists(install_ledger_path)? else {
+        return Ok(Vec::new());
+    };
+    let removed = target
+        .module_names
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    Ok(ledger
+        .get("modules")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let module_name = entry.get("moduleName").and_then(Value::as_str)?;
+            if removed.contains(module_name) {
+                return None;
+            }
+            let dependency = entry
+                .get("dependencies")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .find(|dependency| removed.contains(dependency))?;
+            Some(format!(
+                "`{module_name}` still declares dependency on removed module `{dependency}`"
+            ))
+        })
+        .collect())
+}
+
+fn service_receipt_module_names(modules: &[Value], provider_name: &str) -> Vec<String> {
+    modules
+        .iter()
+        .filter(|module| service_receipt_name(module) == Some(provider_name))
+        .filter_map(|module| module.get("moduleName").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn remote_module_manifest_compatibility_issue(manifest: &Value) -> Option<String> {
+    let compatibility = manifest.get("compatibility")?;
+    let module_name = manifest
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("module");
+    if let Some(lenso) = compatibility.get("lenso") {
+        if let Some(min_version) = lenso
+            .get("minVersion")
+            .or_else(|| lenso.get("min_version"))
+            .and_then(Value::as_str)
+            && !matches!(
+                compare_versions(env!("CARGO_PKG_VERSION"), min_version),
+                Some(Ordering::Equal | Ordering::Greater)
+            )
+        {
+            return Some(format!(
+                "{module_name} requires Lenso >= {min_version}; CLI is {}",
+                env!("CARGO_PKG_VERSION")
+            ));
+        }
+        if let Some(max_version) = lenso
+            .get("maxVersion")
+            .or_else(|| lenso.get("max_version"))
+            .and_then(Value::as_str)
+            && !matches!(
+                compare_versions(env!("CARGO_PKG_VERSION"), max_version),
+                Some(Ordering::Equal | Ordering::Less)
+            )
+        {
+            return Some(format!(
+                "{module_name} supports Lenso <= {max_version}; CLI is {}",
+                env!("CARGO_PKG_VERSION")
+            ));
+        }
+    }
+    if let Some(console_package_api) = compatibility
+        .get("consolePackageApi")
+        .or_else(|| compatibility.get("console_package_api"))
+        .and_then(Value::as_str)
+        && console_package_api != CONSOLE_BUNDLE_HOST_API
+    {
+        return Some(format!(
+            "{module_name} requires console package API {console_package_api}; host supports {CONSOLE_BUNDLE_HOST_API}"
+        ));
+    }
+    if let Some(protocol_version) = compatibility
+        .get("remoteProtocolVersion")
+        .or_else(|| compatibility.get("remote_protocol_version"))
+        .and_then(Value::as_str)
+        && protocol_version != REMOTE_PROTOCOL_VERSION
+    {
+        return Some(format!(
+            "{module_name} requires remote protocol {protocol_version}; host supports {REMOTE_PROTOCOL_VERSION}"
+        ));
+    }
+    let unsupported_feature = compatibility
+        .get("requiredHostFeatures")
+        .or_else(|| compatibility.get("required_host_features"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .find(|feature| !SUPPORTED_SERVICE_MODULE_FEATURES.contains(feature));
+    unsupported_feature
+        .map(|feature| format!("{module_name} requires unsupported host feature {feature}"))
+}
+
+fn compare_versions(left: &str, right: &str) -> Option<Ordering> {
+    Some(parse_version(left)?.cmp(&parse_version(right)?))
+}
+
+fn parse_version(value: &str) -> Option<[u64; 3]> {
+    let mut parts = value.split('.');
+    let major = parts.next()?.parse::<u64>().ok()?;
+    let minor = parts.next()?.parse::<u64>().ok()?;
+    let patch = parts.next()?.parse::<u64>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some([major, minor, patch])
+}
+
 async fn read_json_reference(reference: &str) -> Result<Value> {
     if reference.starts_with("http://") || reference.starts_with("https://") {
         let response = reqwest::get(reference)
@@ -3296,28 +6079,26 @@ fn console_extension_registry_has_module(registry: &Value, module_name: &str) ->
 }
 
 fn update_module_install_ledger(ledger_path: &Path, entry: Value) -> Result<Value> {
+    let ledger =
+        read_json_if_exists(ledger_path)?.unwrap_or_else(|| json!({ "modules": [], "version": 1 }));
+    upsert_module_install_ledger_entry(ledger, entry)
+}
+
+fn upsert_module_install_ledger_entry(mut ledger: Value, entry: Value) -> Result<Value> {
     let module_name = entry
         .get("moduleName")
         .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("Module install ledger entry moduleName is required"))?;
-    let mut ledger =
-        read_json_if_exists(ledger_path)?.unwrap_or_else(|| json!({ "modules": [], "version": 1 }));
+        .ok_or_else(|| anyhow!("Module install ledger entry moduleName is required"))?
+        .to_owned();
     let modules = ledger
         .get_mut("modules")
         .and_then(Value::as_array_mut)
         .ok_or_else(|| anyhow!("Module install ledger modules must be an array"))?;
-    modules.retain(|module| module.get("moduleName").and_then(Value::as_str) != Some(module_name));
+    modules.retain(|module| {
+        module.get("moduleName").and_then(Value::as_str) != Some(module_name.as_str())
+    });
     modules.push(entry);
     Ok(json!({ "modules": modules.clone(), "version": 1 }))
-}
-
-fn remove_module_install_ledger_module(
-    ledger_path: &Path,
-    module_name: &str,
-) -> Result<Option<Value>> {
-    read_json_if_exists(ledger_path)?.map_or(Ok(None), |ledger| {
-        remove_module_install_ledger_module_value(ledger, module_name)
-    })
 }
 
 fn remove_module_install_ledger_modules(
@@ -3343,6 +6124,7 @@ fn remove_module_install_ledger_modules(
     })
 }
 
+#[cfg(test)]
 fn remove_module_install_ledger_module_value(
     mut ledger: Value,
     module_name: &str,
@@ -3397,7 +6179,14 @@ fn module_install_ledger_entry(ledger_path: &Path, module_name: &str) -> Result<
     let Some(ledger) = read_json_if_exists(ledger_path)? else {
         return Ok(None);
     };
-    Ok(ledger
+    Ok(module_install_ledger_entry_value(&ledger, module_name).cloned())
+}
+
+fn module_install_ledger_entry_value<'a>(
+    ledger: &'a Value,
+    module_name: &str,
+) -> Option<&'a Value> {
+    ledger
         .get("modules")
         .and_then(Value::as_array)
         .and_then(|modules| {
@@ -3405,7 +6194,6 @@ fn module_install_ledger_entry(ledger_path: &Path, module_name: &str) -> Result<
                 module.get("moduleName").and_then(Value::as_str) == Some(module_name)
             })
         })
-        .cloned())
 }
 
 fn module_install_ledger_source(
@@ -3568,13 +6356,14 @@ fn remote_module_install_ledger_entry(
     module_name: &str,
     manifest_reference: &str,
     base_url: &str,
+    manifest: &Value,
     writes: Vec<Value>,
     install_env: &[(String, String)],
     install_commands: &[InstallCommandSpec],
     install_services: &[RemoteModuleServiceInstallSpec],
     console_package_count: usize,
 ) -> Value {
-    json!({
+    let mut entry = json!({
         "baseUrl": base_url,
         "enabled": true,
         "install": {
@@ -3587,7 +6376,12 @@ fn remote_module_install_ledger_entry(
         "moduleName": module_name,
         "source": "remote",
         "writes": writes,
-    })
+    });
+    copy_optional_manifest_field(manifest, &mut entry, "compatibility");
+    copy_optional_manifest_field(manifest, &mut entry, "dependencies");
+    copy_optional_manifest_field(manifest, &mut entry, "deployment");
+    copy_optional_manifest_field(manifest, &mut entry, "service");
+    entry
 }
 
 fn linked_module_install_ledger_entry(
@@ -3615,6 +6409,12 @@ fn linked_module_install_ledger_entry(
         "source": "linked",
         "writes": writes,
     })
+}
+
+fn copy_optional_manifest_field(manifest: &Value, entry: &mut Value, field: &str) {
+    if let Some(value) = manifest.get(field) {
+        entry[field] = value.clone();
+    }
 }
 
 fn simple_linked_module_install_ledger_entry(
@@ -4575,6 +7375,7 @@ fn install_command_spec(command: &str, cwd: Option<String>) -> Result<InstallCom
     })
 }
 
+#[cfg(test)]
 fn install_service_plans(install_services: &[RemoteModuleServiceInstallSpec]) -> Vec<Value> {
     install_services
         .iter()
@@ -4696,6 +7497,45 @@ async fn remote_service_ready_url(client: &reqwest::Client, ready_url: &str) -> 
         .is_ok_and(|response| response.status().is_success())
 }
 
+async fn wait_for_started_module_service_ready(
+    client: &reqwest::Client,
+    child: &mut Child,
+    module_name: &str,
+    service: &RemoteModuleServiceInstallSpec,
+    lock_file_path: &Path,
+    pid_file_path: &Path,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_millis(service.ready_timeout_ms);
+    loop {
+        if remote_service_ready_url(client, &service.ready_url).await {
+            println!("{}/{} ready", module_name, service.name);
+            return Ok(());
+        }
+        if let Some(status) = child
+            .try_wait()
+            .with_context(|| format!("check service {}/{}", module_name, service.name))?
+        {
+            let _ = fs::remove_file(pid_file_path);
+            let _ = fs::remove_file(lock_file_path);
+            bail!(
+                "service {}/{} exited before ready: {status}",
+                module_name,
+                service.name
+            );
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "service {}/{} did not become ready at {} within {}ms",
+                module_name,
+                service.name,
+                service.ready_url,
+                service.ready_timeout_ms
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 fn remote_module_service_doctor_status(
     configured: bool,
     enabled: bool,
@@ -4745,6 +7585,21 @@ fn remote_module_service_doctor_fix(
     }
 }
 
+fn module_service_log_path(repo_root: &Path, module_name: &str, service_name: &str) -> PathBuf {
+    repo_root
+        .join(".lenso/service-logs")
+        .join(remote_module_service_state_segment(module_name))
+        .join(format!(
+            "{}.log",
+            remote_module_service_state_segment(service_name)
+        ))
+}
+
+fn tail_lines(contents: &str, tail: usize) -> Vec<&str> {
+    let lines = contents.lines().collect::<Vec<_>>();
+    lines[lines.len().saturating_sub(tail)..].to_vec()
+}
+
 fn remote_module_service_state_path(
     services_state_dir: &Path,
     module_name: &str,
@@ -4781,6 +7636,7 @@ fn remote_module_service_state_segment(value: &str) -> String {
     }
 }
 
+#[cfg(test)]
 fn install_command_plans(
     install_commands: &[InstallCommandSpec],
     install_commands_executed: bool,
@@ -4806,11 +7662,36 @@ fn remove_console_package_install_plan_module(
     install_plan_path: &Path,
     module_name: &str,
 ) -> Result<Option<Value>> {
-    read_json_if_exists(install_plan_path)?.map_or(Ok(None), |plan| {
-        remove_console_package_install_plan_module_value(plan, module_name)
+    remove_console_package_install_plan_modules(install_plan_path, &[module_name.to_owned()])
+}
+
+fn remove_console_package_install_plan_modules(
+    install_plan_path: &Path,
+    module_names: &[String],
+) -> Result<Option<Value>> {
+    read_json_if_exists(install_plan_path)?.map_or(Ok(None), |mut plan| {
+        let version = plan.get("version").cloned().unwrap_or_else(|| json!(1));
+        let modules = plan
+            .get_mut("modules")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| anyhow!("Console package install plan modules must be an array"))?;
+        let original_len = modules.len();
+        modules.retain(|entry| {
+            let Some(module_name) = entry.get("moduleName").and_then(Value::as_str) else {
+                return true;
+            };
+            !module_names.iter().any(|name| name == module_name)
+        });
+        if modules.len() == original_len {
+            return Ok(None);
+        }
+        Ok(Some(
+            json!({ "modules": modules.clone(), "version": version }),
+        ))
     })
 }
 
+#[cfg(test)]
 fn remove_console_package_install_plan_module_value(
     mut plan: Value,
     module_name: &str,
@@ -4973,6 +7854,49 @@ fn module_catalog_entry_from_manifest(
     }))
 }
 
+fn service_catalog_entry_from_manifest(
+    manifest: &Value,
+    manifest_reference: &str,
+    base_url: &str,
+    summary: Option<&str>,
+) -> Result<Value> {
+    let provided_modules = manifest
+        .get("modules")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("Service manifest modules must be an array"))?
+        .iter()
+        .map(|module| {
+            json!({
+                "capabilities": module.get("capabilities").cloned().unwrap_or_else(|| json!([])),
+                "name": string_field(module, "name").unwrap_or("-").trim(),
+                "version": module
+                    .get("version")
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| string_field(manifest, "version").unwrap_or("0.1.0")),
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut entry = json!({
+        "baseUrl": base_url,
+        "manifestReference": manifest_reference,
+        "modules": provided_modules,
+        "name": string_field(manifest, "name")?.trim(),
+        "service": {
+            "requiredEnv": manifest.get("required_env").or_else(|| manifest.get("requiredEnv")).cloned().unwrap_or_else(|| json!([])),
+            "statusPath": service_status_path(manifest),
+            "statusUrl": service_status_url(manifest, base_url),
+            "transports": manifest.get("transports").cloned().unwrap_or_else(|| json!(["http"])),
+        },
+        "source": "service",
+        "summary": summary.or_else(|| manifest.get("summary").and_then(Value::as_str)).unwrap_or("-"),
+        "version": string_field(manifest, "version")?.trim(),
+    });
+    copy_optional_manifest_field(manifest, &mut entry, "compatibility");
+    copy_optional_manifest_field(manifest, &mut entry, "deployment");
+    copy_optional_manifest_field(manifest, &mut entry, "install");
+    Ok(entry)
+}
+
 fn unique_console_package_plan_items(install_plan: &Value) -> Vec<ConsolePackagePlanItem> {
     let mut items_by_key = BTreeMap::new();
     for module_plan in install_plan
@@ -5047,7 +7971,10 @@ async fn read_install_descriptor(reference: &str) -> Result<Option<Value>> {
     }
 
     let descriptor = read_json_reference(reference).await?;
-    Ok(descriptor.get("source").is_some().then_some(descriptor))
+    Ok(
+        (descriptor.get("source").is_some() && !is_service_manifest(&descriptor))
+            .then_some(descriptor),
+    )
 }
 
 fn builtin_linked_module_descriptor(reference: &str) -> Option<Value> {
@@ -5621,6 +8548,18 @@ fn remote_module_entries_from_env_source(source: &str) -> Vec<(String, String)> 
     parse_remote_module_entries(current_value)
 }
 
+fn remote_module_manifest_url(base_url: &str) -> Option<String> {
+    let base_url = base_url.trim().trim_end_matches('/');
+    if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
+        return None;
+    }
+    Some(if base_url.ends_with("/manifest") {
+        base_url.to_owned()
+    } else {
+        format!("{base_url}/manifest")
+    })
+}
+
 fn format_remote_module_entries(entries: &[(String, String)]) -> String {
     entries
         .iter()
@@ -5829,6 +8768,27 @@ fn write_json(path: &Path, value: &Value) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn remote_context() -> ConsolePackageContext {
+        ConsolePackageContext {
+            area: "Support".to_owned(),
+            capability: "support.ticket.read".to_owned(),
+            component_name: "SupportTicketModule".to_owned(),
+            icon: "life-buoy".to_owned(),
+            label: "Support Ticket".to_owned(),
+            manifest_name: "supportTicketManifest".to_owned(),
+            module_id: "support-ticket".to_owned(),
+            module_name: "supportTicketModule".to_owned(),
+            package_dir: PathBuf::from("console"),
+            package_name: "@acme/lenso-support-ticket-console".to_owned(),
+            package_private: true,
+            package_slug: "support-ticket-console".to_owned(),
+            registry_source: "support-ticket.console.json".to_owned(),
+            route: "/support/tickets".to_owned(),
+            runtime_console_api_version: "1".to_owned(),
+            surface_name: "tickets".to_owned(),
+        }
+    }
+
     #[test]
     fn starter_host_module_scaffold_uses_internal_module_layout() {
         let root =
@@ -5848,6 +8808,59 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn remote_scaffold_manifest_declares_service_lifecycle() {
+        let manifest = remote_manifest_json(&remote_context(), "lenso-support-ticket");
+
+        assert_eq!(manifest["name"], json!("support-ticket-service"));
+        assert_eq!(manifest["modules"][0]["name"], json!("support-ticket"));
+        assert_eq!(manifest["protocol"], json!("lenso.service.v1"));
+        assert_eq!(
+            manifest["install"]["services"][0]["name"],
+            json!("support-ticket-service")
+        );
+        assert_eq!(
+            manifest["install"]["services"][0]["readyUrl"],
+            json!("http://127.0.0.1:4100/lenso/service/v1/status")
+        );
+        assert_eq!(manifest["statusPath"], json!("/lenso/service/v1/status"));
+        assert_eq!(
+            manifest["compatibility"]["remoteProtocolVersion"],
+            json!("1")
+        );
+        assert_eq!(
+            manifest["install"]["services"][0]["cwd"],
+            json!("../lenso-support-ticket")
+        );
+    }
+
+    #[test]
+    fn remote_scaffold_writes_local_service_state_sample() {
+        let value = remote_module_services_local_json(&remote_context());
+        let states = parse_remote_module_service_states(&value).unwrap();
+
+        assert_eq!(states[0].module_name, "support-ticket-service");
+        assert_eq!(states[0].services[0].name, "api");
+        assert_eq!(states[0].services[0].cwd.as_deref(), Some("."));
+        assert!(states[0].services[0].auto_start);
+    }
+
+    #[test]
+    fn remote_scaffold_docs_include_lifecycle_operator_commands() {
+        let readme = remote_package_readme("support-ticket", "lenso-support-ticket");
+        let runbook = remote_package_runbook("support-ticket");
+        let package_json = remote_root_package_json("support-ticket").unwrap();
+
+        assert!(
+            readme.contains("lenso service list --module-services-file module-services.local.json")
+        );
+        assert!(readme.contains("lenso service doctor support-ticket --json"));
+        assert!(runbook.contains("lenso service start support-ticket-service api"));
+        assert!(runbook.contains("Runtime Console evidence should stay on the host side"));
+        assert!(package_json.contains("\"service:export\""));
+        assert!(package_json.contains("\"service:status\""));
     }
 
     #[test]
@@ -5901,6 +8914,42 @@ mod tests {
         assert_eq!(parse_module_source("remote").unwrap(), ModuleSource::Remote);
         assert_eq!(parse_module_source("linked").unwrap(), ModuleSource::Linked);
         assert!(parse_module_source("wasm").is_err());
+    }
+
+    #[test]
+    fn catalog_service_entry_resolves_to_service_manifest() {
+        let entry = serde_json::json!({
+            "name": "support-ticket",
+            "source": "service",
+            "providedBy": "support-suite-provider",
+            "serviceManifest": "http://127.0.0.1:4110/lenso/service/v1/manifest"
+        });
+
+        assert_eq!(
+            catalog_service_manifest_reference(&entry),
+            Some("http://127.0.0.1:4110/lenso/service/v1/manifest")
+        );
+    }
+
+    #[test]
+    fn provider_catalog_entry_resolves_provided_module_to_manifest_reference() {
+        let entry = serde_json::json!({
+            "name": "support-suite-provider",
+            "source": "service",
+            "manifestReference": "http://127.0.0.1:4110/lenso/service/v1/manifest",
+            "modules": [{ "name": "support-ticket" }]
+        });
+
+        assert_eq!(
+            catalog_service_manifest_reference_for_module(&entry, "support-ticket"),
+            Some("http://127.0.0.1:4110/lenso/service/v1/manifest")
+        );
+    }
+
+    #[test]
+    fn linked_source_skips_service_catalog_resolution() {
+        assert!(should_resolve_service_catalog_entry(ModuleSource::Remote));
+        assert!(!should_resolve_service_catalog_entry(ModuleSource::Linked));
     }
 
     #[test]
@@ -5959,6 +9008,52 @@ mod tests {
 
         assert_eq!(updated["modules"].as_array().unwrap().len(), 1);
         assert_eq!(updated["modules"][0]["moduleName"], "auth");
+    }
+
+    #[test]
+    fn service_uninstall_target_expands_provider_modules() {
+        let path = std::env::temp_dir().join(format!(
+            "lenso-service-uninstall-target-{}.json",
+            std::process::id()
+        ));
+        write_json(
+            &path,
+            &json!({
+                "modules": [
+                    {
+                        "moduleName": "support-ticket",
+                        "service": { "name": "support-service" },
+                        "source": "remote"
+                    },
+                    {
+                        "moduleName": "support-sla",
+                        "service": { "name": "support-service" },
+                        "source": "remote"
+                    },
+                    {
+                        "moduleName": "crm",
+                        "source": "remote"
+                    }
+                ],
+                "version": 1
+            }),
+        )
+        .unwrap();
+
+        let by_module = remote_uninstall_target(&path, "support-ticket").unwrap();
+        let by_provider = remote_uninstall_target(&path, "support-service").unwrap();
+        fs::remove_file(&path).ok();
+
+        assert_eq!(by_module.provider_name, "support-service");
+        assert_eq!(
+            by_module.module_names,
+            vec!["support-ticket", "support-sla"]
+        );
+        assert_eq!(by_provider.provider_name, "support-service");
+        assert_eq!(
+            by_provider.module_names,
+            vec!["support-ticket", "support-sla"]
+        );
     }
 
     #[test]
@@ -6515,10 +9610,698 @@ mod tests {
             remote_module_service_doctor_status(true, true, false, false, false, false),
             RemoteModuleServiceDoctorStatus::ManualNotReady
         );
+        assert!(
+            remote_module_service_doctor_status(true, true, false, false, false, false).is_issue()
+        );
         assert_eq!(
             remote_module_service_doctor_status(false, true, true, true, false, false),
             RemoteModuleServiceDoctorStatus::NotConfigured
         );
+    }
+
+    #[test]
+    fn remote_manifest_url_only_checks_http_sources() {
+        assert_eq!(
+            remote_module_manifest_url("https://example.com/lenso/module/v1"),
+            Some("https://example.com/lenso/module/v1/manifest".to_owned())
+        );
+        assert_eq!(
+            remote_module_manifest_url("https://example.com/lenso/module/v1/manifest"),
+            Some("https://example.com/lenso/module/v1/manifest".to_owned())
+        );
+        assert_eq!(remote_module_manifest_url("grpc://example.com:50051"), None);
+    }
+
+    #[test]
+    fn remote_manifest_compatibility_blocks_unsupported_protocol() {
+        let manifest = json!({
+            "compatibility": {
+                "remoteProtocolVersion": "99"
+            },
+            "name": "billing"
+        });
+
+        let issue = remote_module_manifest_compatibility_issue(&manifest).unwrap();
+
+        assert!(issue.contains("requires remote protocol 99"));
+    }
+
+    #[test]
+    fn remote_install_receipt_keeps_service_metadata() {
+        let manifest = json!({
+            "compatibility": { "remoteProtocolVersion": "1" },
+            "deployment": { "target": "container-paas" },
+            "service": { "name": "api", "statusUrl": "http://127.0.0.1:4100/status" }
+        });
+
+        let receipt = remote_module_install_ledger_entry(
+            "billing",
+            "http://127.0.0.1:4100/manifest",
+            "http://127.0.0.1:4100",
+            &manifest,
+            Vec::new(),
+            &[],
+            &[],
+            &[],
+            0,
+        );
+
+        assert_eq!(receipt["service"]["name"], json!("api"));
+        assert_eq!(receipt["deployment"]["target"], json!("container-paas"));
+        assert_eq!(
+            receipt["compatibility"]["remoteProtocolVersion"],
+            json!("1")
+        );
+    }
+
+    #[test]
+    fn service_manifest_modules_become_remote_module_manifests() {
+        let manifest = validate_service_manifest(json!({
+            "compatibility": { "remoteProtocolVersion": "1" },
+            "deployment": { "target": "container-paas" },
+            "install": {
+                "services": [
+                    {
+                        "command": "pnpm start",
+                        "name": "support-service"
+                    }
+                ]
+            },
+            "modules": [
+                {
+                    "capabilities": ["support.tickets.read"],
+                    "console": [],
+                    "name": "support-ticket"
+                }
+            ],
+            "name": "support-service",
+            "protocol": "lenso.service.v1",
+            "required_env": ["SUPPORT_DATABASE_URL"],
+            "status_path": "/lenso/service/v1/readyz",
+            "transports": ["http"],
+            "version": "0.1.0"
+        }))
+        .unwrap();
+
+        let modules = service_module_install_manifests(
+            &manifest,
+            "https://support.example.test/lenso/service/v1/manifest",
+            "https://support.example.test/lenso/service/v1",
+        )
+        .unwrap();
+
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0]["name"], json!("support-ticket"));
+        assert_eq!(modules[0]["source"], json!("remote"));
+        assert_eq!(modules[0]["version"], json!("0.1.0"));
+        assert_eq!(
+            modules[0]["compatibility"]["remoteProtocolVersion"],
+            json!("1")
+        );
+        assert_eq!(modules[0]["deployment"]["target"], json!("container-paas"));
+        assert_eq!(modules[0]["service"]["name"], json!("support-service"));
+        assert_eq!(
+            modules[0]["service"]["baseUrl"],
+            json!("https://support.example.test/lenso/service/v1")
+        );
+        assert_eq!(
+            modules[0]["service"]["statusPath"],
+            json!("/lenso/service/v1/readyz")
+        );
+        assert_eq!(
+            modules[0]["service"]["statusUrl"],
+            json!("https://support.example.test/lenso/service/v1/readyz")
+        );
+        assert_eq!(
+            modules[0]["service"]["requiredEnv"],
+            json!(["SUPPORT_DATABASE_URL"])
+        );
+    }
+
+    #[test]
+    fn service_install_services_default_to_service_status_url() {
+        let manifest = validate_service_manifest(json!({
+            "install": {
+                "services": [
+                    {
+                        "command": "pnpm dev",
+                        "name": "support-api"
+                    }
+                ]
+            },
+            "modules": [
+                { "name": "support-ticket" }
+            ],
+            "name": "support-service",
+            "protocol": "lenso.service.v1",
+            "status_path": "/lenso/service/v1/status",
+            "version": "0.1.0"
+        }))
+        .unwrap();
+
+        let services = service_manifest_install_services(
+            &manifest,
+            "support-service",
+            "http://127.0.0.1:4110/lenso/service/v1",
+        )
+        .unwrap();
+
+        assert_eq!(services.len(), 1);
+        assert_eq!(
+            services[0].ready_url,
+            "http://127.0.0.1:4110/lenso/service/v1/status"
+        );
+    }
+
+    #[test]
+    fn service_check_infers_urls_from_ready_url() {
+        let manifest = json!({
+            "health": {
+                "readyUrl": "http://127.0.0.1:4110/lenso/service/v1/status"
+            },
+            "modules": [{ "name": "support-ticket" }],
+            "name": "support-service",
+            "version": "0.1.0"
+        });
+
+        assert_eq!(
+            service_check_ready_url(Some(&manifest), None, None).as_deref(),
+            Some("http://127.0.0.1:4110/lenso/service/v1/status")
+        );
+        assert_eq!(
+            service_check_manifest_url("./lenso.service.json", Some(&manifest), None).as_deref(),
+            Some("http://127.0.0.1:4110/lenso/service/v1/manifest")
+        );
+    }
+
+    #[test]
+    fn service_manifest_operations_include_kinds_and_safe_probe_state() {
+        let manifest = json!({
+            "modules": [
+                {
+                    "admin": {
+                        "kind": "declarative_custom",
+                        "actions": [
+                            {
+                                "capability": "support_ticket.tickets.write",
+                                "name": "assign_ticket"
+                            }
+                        ]
+                    },
+                    "events": {
+                        "handlers": [
+                            {
+                                "name": "ticket_created",
+                                "operation": {
+                                    "operationId": "support-ticket/event/ticket-created-handler"
+                                }
+                            }
+                        ]
+                    },
+                    "http_routes": [
+                        {
+                            "capability": "support_ticket.tickets.read",
+                            "method": "GET",
+                            "operation": {
+                                "operationId": "support-ticket/http/list",
+                                "safeProbe": {
+                                    "method": "GET",
+                                    "path": "/tickets"
+                                }
+                            },
+                            "path": "/tickets"
+                        }
+                    ],
+                    "name": "support-ticket",
+                    "runtime": {
+                        "functions": [
+                            { "name": "support-ticket.reindex.v1" }
+                        ]
+                    }
+                }
+            ],
+            "name": "support-suite-provider",
+            "version": "0.1.0"
+        });
+
+        let operations = service_manifest_operations(&manifest, None);
+
+        assert_eq!(
+            operations
+                .iter()
+                .map(|operation| operation["operationId"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "support-ticket/action/assign_ticket",
+                "support-ticket/event/ticket-created-handler",
+                "support-ticket/http/list",
+                "support-ticket/runtime/support-ticket.reindex.v1",
+            ]
+        );
+        assert_eq!(operations[0]["kind"], json!("admin_action"));
+        assert_eq!(operations[0]["name"], json!("assign_ticket"));
+        assert_eq!(operations[0]["safeProbe"], json!(false));
+        assert_eq!(operations[1]["kind"], json!("event_handler"));
+        assert_eq!(operations[1]["name"], json!("ticket_created"));
+        assert_eq!(operations[1]["safeProbe"], json!(false));
+        assert_eq!(operations[2]["kind"], json!("http_route"));
+        assert_eq!(operations[2]["method"], json!("GET"));
+        assert_eq!(operations[2]["path"], json!("/tickets"));
+        assert_eq!(operations[2]["safeProbe"], json!(true));
+        assert_eq!(operations[3]["kind"], json!("runtime_function"));
+        assert_eq!(operations[3]["name"], json!("support-ticket.reindex.v1"));
+        assert_eq!(operations[3]["safeProbe"], json!(false));
+    }
+
+    #[test]
+    fn service_manifest_operations_filter_by_operation_id() {
+        let manifest = json!({
+            "modules": [
+                {
+                    "httpRoutes": [
+                        { "method": "GET", "path": "/tickets" },
+                        { "method": "GET", "path": "/tickets/{id}" }
+                    ],
+                    "name": "support-ticket"
+                }
+            ],
+            "name": "support-suite-provider",
+            "version": "0.1.0"
+        });
+
+        let operations =
+            service_manifest_operations(&manifest, Some("support-ticket/http/GET:/tickets/{id}"));
+
+        assert_eq!(operations.len(), 1);
+        assert_eq!(
+            operations[0]["operationId"],
+            "support-ticket/http/GET:/tickets/{id}"
+        );
+        assert_eq!(operations[0]["path"], "/tickets/{id}");
+    }
+
+    #[tokio::test]
+    async fn service_manifest_operations_safe_probe_false_is_skipped() {
+        let manifest = json!({
+            "modules": [
+                {
+                    "httpRoutes": [
+                        {
+                            "method": "GET",
+                            "operation": {
+                                "operationId": "support-ticket/http/camel-false",
+                                "safeProbe": false
+                            },
+                            "path": "/tickets"
+                        },
+                        {
+                            "method": "GET",
+                            "operation": {
+                                "operationId": "support-ticket/http/snake-false",
+                                "safe_probe": false
+                            },
+                            "path": "/tickets/open"
+                        }
+                    ],
+                    "name": "support-ticket"
+                }
+            ],
+            "name": "support-suite-provider",
+            "version": "0.1.0"
+        });
+
+        let operations = service_manifest_operations(&manifest, None);
+
+        assert_eq!(operations.len(), 2);
+        assert_eq!(operations[0]["safeProbe"], json!(false));
+        assert_eq!(operations[1]["safeProbe"], json!(false));
+
+        let probes = service_check_operation_probe_summary(
+            &operations,
+            "http://127.0.0.1:4110/lenso/service/v1/manifest",
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(probes.len(), 2);
+        assert_eq!(probes[0]["status"], "skipped");
+        assert_eq!(probes[1]["status"], "skipped");
+    }
+
+    #[tokio::test]
+    async fn service_check_does_not_read_unused_sample_input() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let manifest_path = std::env::temp_dir().join(format!(
+            "lenso-service-check-unused-sample-input-{nonce}.json"
+        ));
+        let missing_sample_input =
+            std::env::temp_dir().join(format!("lenso-missing-sample-input-{nonce}.json"));
+        write_json(
+            &manifest_path,
+            &json!({
+                "modules": [
+                    { "name": "support-ticket" }
+                ],
+                "name": "support-suite-provider",
+                "version": "0.1.0"
+            }),
+        )
+        .unwrap();
+
+        let result = check_service_manifest_reference(
+            manifest_path.to_str().unwrap(),
+            ServiceManifestCheckOptions {
+                cwd: None,
+                json: true,
+                manifest_url: None,
+                operation: None,
+                ready_timeout_ms: 10_000,
+                ready_url: None,
+                sample_input: Some(missing_sample_input),
+                serve_command: None,
+            },
+        )
+        .await;
+        fs::remove_file(&manifest_path).ok();
+
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn service_check_operation_probe_summary_uses_ok_status_for_success() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0; 1024];
+            let _ = stream.read(&mut buffer);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+        let operations = vec![json!({
+            "kind": "http_route",
+            "method": "GET",
+            "module": "support-ticket",
+            "operationId": "support-ticket/http/GET:/tickets",
+            "path": "/tickets",
+            "safeProbe": true
+        })];
+
+        let probes = service_check_operation_probe_summary(
+            &operations,
+            &format!("http://{addr}/lenso/service/v1/manifest"),
+            None,
+        )
+        .await
+        .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(probes.len(), 1);
+        assert_eq!(probes[0]["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn service_check_operation_probe_summary_skips_unsafe_operations() {
+        let operations = vec![
+            json!({
+                "kind": "runtime_function",
+                "module": "support-ticket",
+                "name": "support-ticket.reindex.v1",
+                "operationId": "support-ticket/runtime/support-ticket.reindex.v1",
+                "safeProbe": false
+            }),
+            json!({
+                "kind": "http_route",
+                "method": "POST",
+                "module": "support-ticket",
+                "operationId": "support-ticket/http/POST:/tickets",
+                "path": "/tickets",
+                "safeProbe": true
+            }),
+        ];
+
+        let probes = service_check_operation_probe_summary(
+            &operations,
+            "http://127.0.0.1:4110/lenso/service/v1/manifest",
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(probes.len(), 2);
+        assert_eq!(probes[0]["operationId"], operations[0]["operationId"]);
+        assert_eq!(probes[0]["status"], "skipped");
+        assert_eq!(probes[1]["operationId"], operations[1]["operationId"]);
+        assert_eq!(probes[1]["status"], "skipped");
+    }
+
+    #[test]
+    fn service_manifest_validation_reports_contract_paths() {
+        let missing_command = validate_service_manifest(json!({
+            "install": {
+                "services": [
+                    { "name": "support-service" }
+                ]
+            },
+            "modules": [
+                { "name": "support-ticket" }
+            ],
+            "name": "support-service",
+            "version": "0.1.0"
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(missing_command.contains("$.install.services[0].command"));
+
+        let bad_capability = validate_service_manifest(json!({
+            "modules": [
+                {
+                    "capabilities": ["support.tickets.read", 42],
+                    "name": "support-ticket"
+                }
+            ],
+            "name": "support-service",
+            "version": "0.1.0"
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(bad_capability.contains("$.modules[0].capabilities[1]"));
+    }
+
+    #[test]
+    fn service_manifest_diff_reports_modules_capabilities_and_operations() {
+        let current = json!({
+            "modules": [
+                {
+                    "capabilities": ["support.read"],
+                    "http_routes": [{ "method": "GET", "path": "/tickets" }],
+                    "name": "support-ticket"
+                }
+            ],
+            "name": "support-service",
+            "requiredEnv": ["PORT"],
+            "version": "0.1.0"
+        });
+        let candidate = json!({
+            "config": [{ "key": "support.mode" }],
+            "modules": [
+                {
+                    "capabilities": ["support.read", "support.write"],
+                    "http_routes": [
+                        { "method": "GET", "path": "/tickets" },
+                        { "method": "POST", "path": "/tickets" }
+                    ],
+                    "name": "support-ticket"
+                },
+                { "name": "support-kb" }
+            ],
+            "name": "support-service",
+            "requiredEnv": ["PORT", "SUPPORT_API_KEY"],
+            "version": "0.2.0"
+        });
+
+        let diff = service_manifest_diff(&current, &candidate);
+
+        assert_eq!(diff["modules"]["added"], json!(["support-kb"]));
+        assert_eq!(diff["env"]["added"], json!(["SUPPORT_API_KEY"]));
+        assert_eq!(diff["config"]["added"], json!(["support.mode"]));
+        assert_eq!(diff["capabilities"][0]["added"], json!(["support.write"]));
+        assert_eq!(
+            diff["operations"][0]["added"],
+            json!(["route:POST /tickets"])
+        );
+    }
+
+    #[test]
+    fn service_catalog_entry_records_provider_and_modules() {
+        let manifest = validate_service_manifest(json!({
+            "compatibility": { "remoteProtocolVersion": "1" },
+            "deployment": { "target": "container-paas" },
+            "install": {
+                "services": [
+                    {
+                        "command": "pnpm start",
+                        "name": "support-service"
+                    }
+                ]
+            },
+            "modules": [
+                {
+                    "capabilities": ["support.tickets.read"],
+                    "name": "support-ticket",
+                    "version": "0.1.0"
+                }
+            ],
+            "name": "support-service",
+            "protocol": "lenso.service.v1",
+            "required_env": ["PORT"],
+            "status_path": "/lenso/service/v1/status",
+            "transports": ["http"],
+            "version": "0.1.0"
+        }))
+        .unwrap();
+
+        let entry = service_catalog_entry_from_manifest(
+            &manifest,
+            "http://127.0.0.1:4110/lenso/service/v1/manifest",
+            "http://127.0.0.1:4110/lenso/service/v1",
+            Some("Support ticket service"),
+        )
+        .unwrap();
+
+        assert_eq!(entry["name"], json!("support-service"));
+        assert_eq!(entry["source"], json!("service"));
+        assert_eq!(entry["modules"][0]["name"], json!("support-ticket"));
+        assert_eq!(
+            entry["service"]["statusUrl"],
+            json!("http://127.0.0.1:4110/lenso/service/v1/status")
+        );
+        assert_eq!(entry["deployment"]["target"], json!("container-paas"));
+        assert_eq!(
+            entry["install"]["services"][0]["name"],
+            json!("support-service")
+        );
+        assert_eq!(entry["compatibility"]["remoteProtocolVersion"], json!("1"));
+    }
+
+    #[test]
+    fn module_install_ledger_upserts_multiple_service_modules() {
+        let ledger = upsert_module_install_ledger_entry(
+            json!({ "modules": [], "version": 1 }),
+            json!({ "moduleName": "support-ticket", "source": "remote" }),
+        )
+        .unwrap();
+        let ledger = upsert_module_install_ledger_entry(
+            ledger,
+            json!({ "moduleName": "support-sla", "source": "remote" }),
+        )
+        .unwrap();
+        let ledger = upsert_module_install_ledger_entry(
+            ledger,
+            json!({ "moduleName": "support-ticket", "source": "remote", "enabled": true }),
+        )
+        .unwrap();
+        let modules = ledger.get("modules").and_then(Value::as_array).unwrap();
+
+        assert_eq!(modules.len(), 2);
+        assert!(modules.iter().any(|module| {
+            module.get("moduleName").and_then(Value::as_str) == Some("support-sla")
+        }));
+        assert!(modules.iter().any(|module| {
+            module.get("moduleName").and_then(Value::as_str) == Some("support-ticket")
+                && module.get("enabled").and_then(Value::as_bool) == Some(true)
+        }));
+    }
+
+    #[test]
+    fn compose_export_uses_declared_service_state() {
+        let state = RemoteModuleServiceState {
+            module_name: "support-ticket".to_owned(),
+            services: vec![RemoteModuleServiceInstallSpec {
+                name: "api".to_owned(),
+                command: "pnpm start".to_owned(),
+                cwd: Some("examples/support-ticket".to_owned()),
+                ready_url: "http://127.0.0.1:4110/lenso/module/v1/status".to_owned(),
+                ready_timeout_ms: 10_000,
+                auto_start: true,
+            }],
+        };
+        let source = compose_service_export_source(&state);
+
+        assert!(source.contains("support-ticket-api:"));
+        assert!(source.contains("pnpm start"));
+        assert!(source.contains("lenso.ready_url"));
+        assert!(systemd_service_export_source(&state).contains("ExecStart=/bin/sh -lc"));
+        assert!(dockerfile_service_export_source(&state).contains("CMD [\"sh\", \"-lc\""));
+        assert!(env_service_export_source(&state, None).contains("LENSO_API_READY_URL="));
+    }
+
+    #[test]
+    fn doctor_manifest_status_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_value(ModuleDoctorManifestStatus::Unreachable).unwrap(),
+            json!("unreachable")
+        );
+    }
+
+    #[test]
+    fn module_service_list_items_filter_by_module() {
+        let states = vec![
+            RemoteModuleServiceState {
+                module_name: "crm".to_owned(),
+                services: vec![RemoteModuleServiceInstallSpec {
+                    name: "api".to_owned(),
+                    command: "pnpm dev".to_owned(),
+                    cwd: None,
+                    ready_url: "http://127.0.0.1:4100/readyz".to_owned(),
+                    ready_timeout_ms: 10_000,
+                    auto_start: true,
+                }],
+            },
+            RemoteModuleServiceState {
+                module_name: "billing".to_owned(),
+                services: vec![RemoteModuleServiceInstallSpec {
+                    name: "api".to_owned(),
+                    command: "node server.mjs".to_owned(),
+                    cwd: None,
+                    ready_url: "http://127.0.0.1:4200/readyz".to_owned(),
+                    ready_timeout_ms: 10_000,
+                    auto_start: false,
+                }],
+            },
+        ];
+
+        let items = module_service_list_items(&states, Some("billing"));
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].module_name, "billing");
+        assert_eq!(items[0].service_name, "api");
+        assert_eq!(items[0].auto_start, false);
+    }
+
+    #[test]
+    fn module_service_list_report_serializes_camel_case() {
+        let report = ModuleServiceListReport {
+            services: vec![ModuleServiceListItem {
+                module_name: "support-ticket".to_owned(),
+                service_name: "api".to_owned(),
+                auto_start: true,
+                command: "pnpm dev".to_owned(),
+                ready_url: "http://127.0.0.1:4110/readyz".to_owned(),
+            }],
+        };
+        let value = serde_json::to_value(report).unwrap();
+
+        assert_eq!(value["services"][0]["moduleName"], json!("support-ticket"));
+        assert_eq!(value["services"][0]["serviceName"], json!("api"));
+        assert_eq!(value["services"][0]["autoStart"], json!(true));
     }
 
     #[test]
@@ -6541,6 +10324,25 @@ mod tests {
     }
 
     #[test]
+    fn module_service_log_path_sanitizes_names() {
+        let path = module_service_log_path(Path::new("/repo"), "CRM Module", "API Worker");
+
+        assert_eq!(
+            path,
+            PathBuf::from("/repo/.lenso/service-logs/crm-module/api-worker.log")
+        );
+    }
+
+    #[test]
+    fn tail_lines_returns_requested_suffix() {
+        let lines = tail_lines("one\ntwo\nthree\n", 2);
+
+        assert_eq!(lines, vec!["two", "three"]);
+        assert_eq!(tail_lines("one\ntwo\n", 10), vec!["one", "two"]);
+        assert!(tail_lines("one\ntwo\n", 0).is_empty());
+    }
+
+    #[test]
     fn install_plan_module_is_removed() {
         let plan = json!({
             "modules": [
@@ -6552,6 +10354,41 @@ mod tests {
         let updated = remove_console_package_install_plan_module_value(plan, "crm")
             .unwrap()
             .unwrap();
+        let modules = updated.get("modules").and_then(Value::as_array).unwrap();
+
+        assert_eq!(modules.len(), 1);
+        assert_eq!(
+            modules[0].get("moduleName").and_then(Value::as_str),
+            Some("billing")
+        );
+    }
+
+    #[test]
+    fn install_plan_service_modules_are_removed_together() {
+        let path = std::env::temp_dir().join(format!(
+            "lenso-console-install-plan-{}.json",
+            std::process::id()
+        ));
+        write_json(
+            &path,
+            &json!({
+                "modules": [
+                    { "moduleName": "support-ticket", "consolePackages": [] },
+                    { "moduleName": "support-sla", "consolePackages": [] },
+                    { "moduleName": "billing", "consolePackages": [] }
+                ],
+                "version": 1
+            }),
+        )
+        .unwrap();
+
+        let updated = remove_console_package_install_plan_modules(
+            &path,
+            &["support-ticket".to_owned(), "support-sla".to_owned()],
+        )
+        .unwrap()
+        .unwrap();
+        fs::remove_file(&path).ok();
         let modules = updated.get("modules").and_then(Value::as_array).unwrap();
 
         assert_eq!(modules.len(), 1);

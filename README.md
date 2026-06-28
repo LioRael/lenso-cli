@@ -70,7 +70,25 @@ workspace package:
 lenso module create billing --with-console
 ```
 
-For a standalone remote package:
+For a standalone service provider:
+
+```sh
+lenso service create support-suite-provider --lang ts --output-dir ../services
+lenso service create support-suite-provider --lang rust --output-dir ../services
+```
+
+The generated provider includes a `lenso.service.json` manifest and a minimal
+service process. A service name ending in `-provider` or `-service` provides a
+module named without that suffix, so `support-suite-provider` provides
+`support-suite`.
+When this command runs from a framework checkout with sibling `lenso` and
+`lenso-runtime-console` repositories, the scaffold uses local path/file
+dependencies so `cargo check` or `pnpm install` can run before the packages are
+published. Outside that checkout it keeps the future-publish version
+dependencies and prints a note to replace them with local paths until
+`lenso-service` and `@lenso/service-kit` are published.
+
+The older standalone module package generator is still available as:
 
 ```sh
 lenso module create billing --remote --output-dir ../module-packages
@@ -85,8 +103,6 @@ lenso console package create billing
 ## Install a module
 
 ```sh
-lenso module install https://example.com/lenso/module/v1/manifest
-lenso module install ./lenso.module.json
 lenso module install auth
 lenso module install auth-password
 lenso module install auth-oidc
@@ -94,12 +110,31 @@ lenso module install auth-device
 ```
 
 `module install` reads `source` from the module descriptor when one is present.
-Remote modules update `REMOTE_MODULES`, copy declared Runtime Console bundles to
+For V5 service-backed modules, `module install <name>` is the business-capability
+entrypoint: the catalog resolves the provider service, installs it when needed,
+then enables the requested module.
+
+Install a service directly when you already have a service manifest URL:
+
+```sh
+lenso service install https://example.com/lenso/service/v1/manifest
+lenso service install ./lenso.service.json --base-url http://127.0.0.1:4100/lenso/service/v1
+```
+
+Local manifest files need `--base-url` so the host records the runtime service
+endpoint rather than the file path.
+
+Service installs update `REMOTE_MODULES`, copy declared Runtime Console bundles to
 `.lenso/console/extensions`, update `.lenso/console/extensions/registry.json`,
 and record `.lenso/module-installs.json` in one step. Linked modules update the
 host `Cargo.toml`, `src/lib.rs`, `.env` toggle, and the same install receipt
 from the descriptor's `linked` section. `module add` remains a compatibility
-alias for remote installs.
+alias for service installs.
+
+Legacy `lenso module install <manifest-url>` still works for one compatibility
+window, but prints a deprecation warning. Use `lenso service install <manifest>`
+for process manifests and `lenso module install <module-name>` for business
+modules.
 
 Install descriptor profiles let a module expose optional setup without baking
 module-specific choices into the CLI. For Redis-backed auth sessions:
@@ -130,36 +165,60 @@ builtin module entry.
 Use `--no-console-extension` when you want to skip Runtime Console extension
 registration.
 
-Remote manifests may also declare `install.env` values and `install.commands`.
-Env values are written to `.env`; commands are run only when you pass:
+Service module manifests may also declare `install.env` values and
+`install.commands`. Env values are written to `.env`; commands are run only when
+you pass:
 
 ```sh
-lenso module install https://example.com/lenso/module/v1/manifest --run-install-commands
+lenso service install https://example.com/lenso/service/v1/manifest --run-install-commands
 ```
 
-For long-running remote module backends, declare `install.services`. These are
-stored in `.lenso/module-services.json` and started before the host loads remote
-modules on API/worker startup. Services started by the host are tracked with
+For long-running service backends, declare `install.services`. These are
+stored in `.lenso/module-services.json` and started before the host loads
+service-provided modules on API/worker startup. Services started by the host are tracked with
 `.lock`/`.pid` files and stopped when the owning API/worker process exits;
 services that are already ready before startup are treated as external and are
 not stopped by the host.
 
-Diagnose installed remote-module service state with:
+During local development, start declared service providers and then the host
+with:
 
 ```sh
-lenso module doctor
-lenso module doctor billing
+lenso service dev
+lenso service dev --skip-db --skip-migrate
 ```
 
-The doctor reads `REMOTE_MODULES` and `.lenso/module-services.json`, checks
-service `readyUrl` endpoints, and points to stale `.lock`/`.pid` files when a
-host-started service did not become ready.
+Diagnose installed service state with:
 
-Remove the local remote-module source, install receipt, service state, Runtime
+```sh
+lenso service doctor
+lenso service doctor billing
+lenso service doctor billing --json
+lenso service check billing --json
+```
+
+The doctor reads `REMOTE_MODULES`, `.lenso/module-installs.json`, and
+`.lenso/module-services.json`. It reports whether the service is
+installed, configured, whether an HTTP manifest is reachable, whether managed
+service `readyUrl` endpoints are ready, and which stale `.lock`/`.pid` files
+may be blocking a host-started service.
+
+Export declared service processes as a Compose fragment when handing the
+service to deployment tooling:
+
+```sh
+lenso service export --module billing --format compose
+```
+
+If a manifest declares incompatible `compatibility` metadata, install stops
+before writing host-local state. Use `--allow-incompatible` only when an
+operator deliberately accepts that override.
+
+Remove the local service source, install receipt, service state, Runtime
 Console extension registry entry, and copied bundle files with:
 
 ```sh
-lenso module uninstall billing
+lenso service uninstall billing-service
 ```
 
 Use `--source linked` only when you need to force the loading source. Prefer
