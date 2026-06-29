@@ -94,11 +94,12 @@ lenso service package --output-dir dist/lenso-service
 
 The package artifact contains the canonical `lenso.service.json`,
 `lenso.service-package.json`, and one
+`modules/<module>/lenso.module.json` plus
 `modules/<module>/lenso.module-release.json` file for each provided module.
 The service package records the provider name, version, and provided module
 names; each module release is the business-module install entrypoint.
-Install either manifest directly. For a local package artifact, still pass the
-runtime service base URL:
+Operators can install a provider directly. For a local package artifact, still
+pass the runtime service base URL:
 
 ```sh
 lenso service install dist/lenso-service/support-suite-provider/lenso.service-package.json \
@@ -116,11 +117,21 @@ lenso module install dist/lenso-service/support-suite-provider/modules/support-t
 lenso module catalog add dist/lenso-service/support-suite-provider/modules/support-ticket/lenso.module-release.json \
   --base-url http://127.0.0.1:4100/lenso/service/v1
 lenso module install support-ticket
+lenso module enable support-ticket
+lenso module disable support-ticket
 ```
 
 `lenso.module-release.v1` is the module release channel. It records the module
-name, version, capabilities, and provider pointer while installation still
-resolves to a host-owned service source and writes the normal service receipt.
+name, version, capabilities, source, and optional provider pointer. V11 keeps
+`lenso module install` as the unified business-capability entrypoint:
+
+- `source: service` resolves to a provider service package or service manifest.
+- `source: linked` enables linked Rust code in the host.
+- `source: bundled` enables a host-bundled module.
+
+`lenso service install` remains the lower-level provider/process command. It
+connects a service, but it does not mean every module inside that service is
+the user-facing install target.
 
 When this command runs from a framework checkout with sibling `lenso` and
 `lenso-runtime-console` repositories, the scaffold uses local path/file
@@ -154,9 +165,9 @@ lenso module install auth-device
 For V5 service-backed modules, `module install <name>` is the business-capability
 entrypoint: the catalog resolves the provider service, installs it when needed,
 then enables the requested module.
-For V10 module releases, `module install <module-release.json>` first resolves
-the release to its provider service package or service manifest, then records
-`moduleRelease` provenance in `.lenso/module-installs.json`.
+For module releases, `module install <module-release.json>` resolves the
+release by source, then records `moduleRelease` provenance in
+`.lenso/module-installs.json` where the source supports a receipt.
 
 Install a service directly when you already have a service manifest URL:
 

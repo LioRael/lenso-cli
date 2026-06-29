@@ -110,11 +110,18 @@ pub(crate) async fn package_service(options: ServicePackageOptions) -> Result<()
             format!("{package_source}\n").as_bytes(),
         )?;
         for release in &plan.module_release_outputs {
+            let contract_source =
+                serde_json::to_string_pretty(&module_contract_manifest(&release.module))
+                    .context("serialize module contract manifest")?;
             let release_source = serde_json::to_string_pretty(&module_release_manifest(
                 &plan.metadata,
                 &release.module,
             ))
             .context("serialize module release manifest")?;
+            write_file(
+                &release.contract_path,
+                format!("{contract_source}\n").as_bytes(),
+            )?;
             write_file(&release.path, format!("{release_source}\n").as_bytes())?;
         }
     }
@@ -138,6 +145,7 @@ struct ServicePackageMetadata {
 
 #[derive(Debug)]
 struct ModuleReleaseOutput {
+    contract_path: PathBuf,
     module: ServicePackageModuleMetadata,
     path: PathBuf,
 }
@@ -171,12 +179,13 @@ async fn service_package_plan(options: &ServicePackageOptions) -> Result<Service
         .modules
         .iter()
         .map(|module| {
+            let module_dir = package_dir
+                .join("modules")
+                .join(module_release_path_segment(&module.name)?);
             Ok(ModuleReleaseOutput {
+                contract_path: module_dir.join("lenso.module.json"),
                 module: module.clone(),
-                path: package_dir
-                    .join("modules")
-                    .join(module_release_path_segment(&module.name)?)
-                    .join("lenso.module-release.json"),
+                path: module_dir.join("lenso.module-release.json"),
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -310,6 +319,18 @@ fn service_package_manifest(metadata: &ServicePackageMetadata) -> Value {
     })
 }
 
+fn module_contract_manifest(module: &ServicePackageModuleMetadata) -> Value {
+    serde_json::json!({
+        "protocol": "lenso.module.v1",
+        "name": module.name,
+        "version": module.version,
+        "source": "service",
+        "summary": format!("{} module", module.name),
+        "capabilities": module.capabilities,
+        "dependencies": module.dependencies,
+    })
+}
+
 fn module_release_manifest(
     metadata: &ServicePackageMetadata,
     module: &ServicePackageModuleMetadata,
@@ -354,8 +375,25 @@ fn print_service_package_report(plan: &ServicePackagePlan, check: bool, json: bo
         files.extend(
             plan.module_release_outputs
                 .iter()
-                .map(|release| path_string(&release.path)),
+                .flat_map(|release| {
+                    [
+                        path_string(&release.contract_path),
+                        path_string(&release.path),
+                    ]
+                })
+                .collect::<Vec<_>>(),
         );
+        let module_releases = plan
+            .module_release_outputs
+            .iter()
+            .map(|release| {
+                serde_json::json!({
+                    "contractPath": path_string(&release.contract_path),
+                    "module": release.module.name,
+                    "path": path_string(&release.path),
+                })
+            })
+            .collect::<Vec<_>>();
         let report = serde_json::json!({
             "status": status,
             "name": plan.metadata.name,
@@ -363,10 +401,7 @@ fn print_service_package_report(plan: &ServicePackagePlan, check: bool, json: bo
             "modules": module_names(&plan.metadata.modules),
             "manifestReference": plan.manifest_reference,
             "packageDir": path_string(&plan.package_dir),
-            "moduleReleases": plan.module_release_outputs.iter().map(|release| serde_json::json!({
-                "module": release.module.name,
-                "path": path_string(&release.path),
-            })).collect::<Vec<_>>(),
+            "moduleReleases": module_releases,
             "files": files,
         });
         println!(
@@ -394,6 +429,7 @@ fn print_service_package_report(plan: &ServicePackagePlan, check: bool, json: bo
         println!("- wrote: {}", plan.service_manifest_output.display());
         println!("- wrote: {}", plan.package_manifest_output.display());
         for release in &plan.module_release_outputs {
+            println!("- wrote: {}", release.contract_path.display());
             println!("- wrote: {}", release.path.display());
         }
     }
@@ -965,6 +1001,16 @@ mod tests {
             module_release["provider"]["servicePackage"],
             "../../lenso.service-package.json"
         );
+        let module_contract: Value = serde_json::from_str(
+            &fs::read_to_string(service_dir.join(
+                "dist/services/support-suite-provider/modules/support-ticket/lenso.module.json",
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(module_contract["protocol"], "lenso.module.v1");
+        assert_eq!(module_contract["source"], "service");
+        assert_eq!(module_contract["name"], "support-ticket");
         assert_eq!(
             module_release["capabilities"],
             json!(["support_ticket.tickets.read"])
