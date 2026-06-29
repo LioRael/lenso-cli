@@ -216,6 +216,27 @@ pub struct ServiceReleaseApplyOptions {
 }
 
 #[derive(Debug, Clone)]
+pub struct ServiceReleasePromoteOptions {
+    pub fail_on: Option<String>,
+    pub from_environment: String,
+    pub json: bool,
+    pub output: Option<PathBuf>,
+    pub repo_root: Option<PathBuf>,
+    pub service_name: String,
+    pub to_environment: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceReleaseRollbackPlanOptions {
+    pub environment_name: String,
+    pub json: bool,
+    pub output: Option<PathBuf>,
+    pub release_id: Option<String>,
+    pub repo_root: Option<PathBuf>,
+    pub service_name: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct ModuleServiceListOptions {
     pub json: bool,
     pub module_name: Option<String>,
@@ -4676,6 +4697,100 @@ fn latest_service_release(repo_root: &Path, service_name: &str) -> Result<Option
         .cloned())
 }
 
+fn latest_service_release_for_env(
+    repo_root: &Path,
+    service_name: &str,
+    environment_name: &str,
+) -> Result<Option<Value>> {
+    Ok(
+        service_releases_for_env(repo_root, service_name, environment_name)?
+            .into_iter()
+            .next(),
+    )
+}
+
+fn rollback_service_release_target(
+    repo_root: &Path,
+    service_name: &str,
+    environment_name: &str,
+    release_id: Option<&str>,
+) -> Result<Value> {
+    let releases = service_releases_for_env(repo_root, service_name, environment_name)?;
+    if let Some(release_id) = release_id {
+        return releases
+            .into_iter()
+            .find(|release| release.get("id").and_then(Value::as_str) == Some(release_id))
+            .ok_or_else(|| {
+                anyhow!("Release `{release_id}` not found for {service_name}/{environment_name}")
+            });
+    }
+    releases
+        .into_iter()
+        .nth(1)
+        .ok_or_else(|| anyhow!("No previous release found for {service_name}/{environment_name}"))
+}
+
+fn service_releases_for_env(
+    repo_root: &Path,
+    service_name: &str,
+    environment_name: &str,
+) -> Result<Vec<Value>> {
+    let Some(ledger) = read_json_if_exists(&repo_root.join(SERVICE_RELEASE_LEDGER_PATH))? else {
+        return Ok(Vec::new());
+    };
+    let mut releases = ledger
+        .get("releases")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|release| release.get("serviceName").and_then(Value::as_str) == Some(service_name))
+        .filter(|release| {
+            release.pointer("/environment/name").and_then(Value::as_str) == Some(environment_name)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    releases.sort_by_key(|release| {
+        std::cmp::Reverse(
+            release
+                .get("appliedAtUnixMs")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        )
+    });
+    Ok(releases)
+}
+
+fn service_release_candidate_reference(release: &Value) -> Result<String> {
+    release
+        .pointer("/candidate/inputReference")
+        .or_else(|| release.pointer("/candidate/packageReference"))
+        .or_else(|| release.pointer("/candidate/manifestReference"))
+        .and_then(Value::as_str)
+        .filter(|reference| !reference.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("Release has no candidate manifest or package reference"))
+}
+
+fn write_or_print_release_plan(
+    plan: &Value,
+    output: Option<&Path>,
+    json: bool,
+    message: &str,
+) -> Result<()> {
+    if let Some(output) = output {
+        write_json(output, plan)?;
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(plan)?);
+    } else {
+        print_service_release_plan(plan);
+        if let Some(output) = output {
+            println!("{message}: {}", output.display());
+        }
+    }
+    Ok(())
+}
+
 fn service_manifest_env_names(manifest: &Value) -> Vec<String> {
     manifest
         .get("env")
@@ -4853,6 +4968,78 @@ pub async fn apply_service_release_plan(options: ServiceReleaseApplyOptions) -> 
     }
 
     Ok(())
+}
+
+pub async fn promote_service_release(options: ServiceReleasePromoteOptions) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let release = latest_service_release_for_env(
+        &repo_root,
+        &options.service_name,
+        &options.from_environment,
+    )?
+    .ok_or_else(|| {
+        anyhow!(
+            "No applied release found for {}/{}",
+            options.service_name,
+            options.from_environment
+        )
+    })?;
+    let candidate_reference = service_release_candidate_reference(&release)?;
+    let mut plan =
+        build_service_release_plan(&repo_root, &options.service_name, &candidate_reference).await?;
+    attach_service_release_environment(
+        &repo_root,
+        &mut plan,
+        &options.service_name,
+        &options.to_environment,
+    )?;
+    plan["promotion"] = json!({
+        "from": options.from_environment,
+        "to": options.to_environment,
+        "sourceReleaseId": release.get("id").cloned().unwrap_or(Value::Null),
+    });
+    let policy = service_release_policy_from_plan(&plan)?;
+    enforce_service_release_fail_on(&policy, options.fail_on.as_deref())?;
+    plan["policy"] = policy;
+    write_or_print_release_plan(
+        &plan,
+        options.output.as_deref(),
+        options.json,
+        "Wrote promotion release plan",
+    )
+}
+
+pub async fn plan_service_release_rollback(
+    options: ServiceReleaseRollbackPlanOptions,
+) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let release = rollback_service_release_target(
+        &repo_root,
+        &options.service_name,
+        &options.environment_name,
+        options.release_id.as_deref(),
+    )?;
+    let candidate_reference = service_release_candidate_reference(&release)?;
+    let mut plan =
+        build_service_release_plan(&repo_root, &options.service_name, &candidate_reference).await?;
+    attach_service_release_environment(
+        &repo_root,
+        &mut plan,
+        &options.service_name,
+        &options.environment_name,
+    )?;
+    plan["rollback"] = json!({
+        "environment": options.environment_name,
+        "targetReleaseId": release.get("id").cloned().unwrap_or(Value::Null),
+    });
+    let policy = service_release_policy_from_plan(&plan)?;
+    plan["policy"] = policy;
+    write_or_print_release_plan(
+        &plan,
+        options.output.as_deref(),
+        options.json,
+        "Wrote rollback release plan",
+    )
 }
 
 fn installed_service_receipt(repo_root: &Path, service_name: &str) -> Result<Value> {
@@ -11561,6 +11748,32 @@ mod tests {
 
         validate_service_release_plan_environment(&plan, Some("staging")).unwrap();
         assert!(validate_service_release_plan_environment(&plan, Some("prod")).is_err());
+    }
+
+    #[test]
+    fn service_release_candidate_reference_prefers_input_then_package() {
+        let release = json!({
+            "candidate": {
+                "inputReference": "./dist/lenso.service-package.json",
+                "packageReference": "./fallback/lenso.service-package.json",
+                "manifestReference": "./fallback/lenso.service.json"
+            }
+        });
+        assert_eq!(
+            service_release_candidate_reference(&release).unwrap(),
+            "./dist/lenso.service-package.json"
+        );
+
+        let release = json!({
+            "candidate": {
+                "packageReference": "./fallback/lenso.service-package.json",
+                "manifestReference": "./fallback/lenso.service.json"
+            }
+        });
+        assert_eq!(
+            service_release_candidate_reference(&release).unwrap(),
+            "./fallback/lenso.service-package.json"
+        );
     }
 
     #[test]

@@ -782,6 +782,10 @@ enum ServiceReleaseCommand {
     Check(ServiceReleaseCheckArgs),
     /// Apply a checked service release plan and record it in the service release ledger.
     Apply(ServiceReleaseApplyArgs),
+    /// Create a target-environment release plan from the latest source-environment release.
+    Promote(ServiceReleasePromoteArgs),
+    /// Create a rollback release plan for one environment.
+    Rollback(ServiceReleaseRollbackArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -869,6 +873,62 @@ struct ServiceReleaseApplyArgs {
     /// Allow apply when compatibility metadata does not match this host.
     #[arg(long)]
     allow_incompatible: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceReleasePromoteArgs {
+    /// Installed service provider name.
+    service_name: String,
+
+    /// Source environment name.
+    #[arg(long = "from")]
+    from_environment: String,
+
+    /// Target environment name.
+    #[arg(long = "to")]
+    to_environment: String,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Write the release plan JSON to this path.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+
+    /// Fail when policy risk is at or above this level: needs_attention, breaking, blocked.
+    #[arg(long)]
+    fail_on: Option<String>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceReleaseRollbackArgs {
+    /// Installed service provider name.
+    service_name: String,
+
+    /// Environment name.
+    #[arg(long = "env")]
+    environment_name: String,
+
+    /// Roll back to this release id instead of the previous same-environment release.
+    #[arg(long = "to")]
+    release_id: Option<String>,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Write the rollback plan JSON to this path.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -1612,6 +1672,33 @@ impl From<&ServiceReleaseApplyArgs> for module::ServiceReleaseApplyOptions {
     }
 }
 
+impl From<&ServiceReleasePromoteArgs> for module::ServiceReleasePromoteOptions {
+    fn from(args: &ServiceReleasePromoteArgs) -> Self {
+        Self {
+            fail_on: args.fail_on.clone(),
+            from_environment: args.from_environment.clone(),
+            json: args.json,
+            output: args.output.clone(),
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
+            to_environment: args.to_environment.clone(),
+        }
+    }
+}
+
+impl From<&ServiceReleaseRollbackArgs> for module::ServiceReleaseRollbackPlanOptions {
+    fn from(args: &ServiceReleaseRollbackArgs) -> Self {
+        Self {
+            environment_name: args.environment_name.clone(),
+            json: args.json,
+            output: args.output.clone(),
+            release_id: args.release_id.clone(),
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
+        }
+    }
+}
+
 impl From<&ServicePolicyCheckArgs> for module::ServiceReleaseCheckOptions {
     fn from(args: &ServicePolicyCheckArgs) -> Self {
         Self {
@@ -2060,6 +2147,12 @@ async fn main() -> anyhow::Result<()> {
                 }
                 ServiceReleaseCommand::Apply(args) => {
                     module::apply_service_release_plan((&args).into()).await?;
+                }
+                ServiceReleaseCommand::Promote(args) => {
+                    module::promote_service_release((&args).into()).await?;
+                }
+                ServiceReleaseCommand::Rollback(args) => {
+                    module::plan_service_release_rollback((&args).into()).await?;
                 }
             },
             ServiceCommand::Policy { command } => match command {
@@ -2728,6 +2821,54 @@ mod tests {
         };
         assert!(apply_args.dry_run);
         assert_eq!(apply_args.environment_name.as_deref(), Some("staging"));
+
+        let promote = Cli::parse_from([
+            "lenso",
+            "service",
+            "release",
+            "promote",
+            "support-suite-provider",
+            "--from",
+            "staging",
+            "--to",
+            "prod",
+            "--output",
+            ".lenso/releases/support.prod.plan.json",
+        ]);
+        let Command::Service {
+            command:
+                ServiceCommand::Release {
+                    command: ServiceReleaseCommand::Promote(promote_args),
+                },
+        } = promote.command
+        else {
+            panic!("expected service release promote");
+        };
+        assert_eq!(promote_args.from_environment, "staging");
+        assert_eq!(promote_args.to_environment, "prod");
+
+        let rollback = Cli::parse_from([
+            "lenso",
+            "service",
+            "release",
+            "rollback",
+            "support-suite-provider",
+            "--env",
+            "prod",
+            "--to",
+            "rel_1",
+        ]);
+        let Command::Service {
+            command:
+                ServiceCommand::Release {
+                    command: ServiceReleaseCommand::Rollback(rollback_args),
+                },
+        } = rollback.command
+        else {
+            panic!("expected service release rollback");
+        };
+        assert_eq!(rollback_args.environment_name, "prod");
+        assert_eq!(rollback_args.release_id.as_deref(), Some("rel_1"));
 
         let policy = Cli::parse_from([
             "lenso",
