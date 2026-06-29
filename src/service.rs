@@ -77,6 +77,12 @@ pub(crate) struct ServiceWorkspaceCheckOptions {
     pub(crate) workspace_file: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ServiceWorkspaceExportOptions {
+    pub(crate) output: Option<PathBuf>,
+    pub(crate) workspace_file: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ServiceWorkspaceInstallReference {
     pub(crate) base_url: Option<String>,
@@ -370,6 +376,22 @@ pub(crate) async fn check_service_workspace(options: ServiceWorkspaceCheckOption
     if report.status != "ready" {
         bail!("Service workspace check found services that need attention");
     }
+    Ok(())
+}
+
+pub(crate) fn export_service_workspace(options: ServiceWorkspaceExportOptions) -> Result<()> {
+    let path = service_workspace_read_path(options.workspace_file.as_deref())?;
+    let workspace = read_service_workspace(&path)?;
+    let state = service_workspace_module_services_json(&workspace);
+    let source = format!("{}\n", json_string_pretty(&state)?);
+    if let Some(output) = options.output {
+        let current_dir = std::env::current_dir().context("resolve current directory")?;
+        let output = absolutize_from(&current_dir, &output);
+        write_file(&output, source.as_bytes())?;
+        println!("Exported service workspace state to {}.", output.display());
+        return Ok(());
+    }
+    print!("{source}");
     Ok(())
 }
 
@@ -1606,6 +1628,47 @@ mod tests {
         assert_eq!(
             resolved.base_url.as_deref(),
             Some("http://127.0.0.1:4110/lenso/service/v1")
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn export_service_workspace_writes_module_service_state() {
+        let root = test_dir("workspace-export");
+        let workspace_path = root.join("lenso.workspace.json");
+        let output = root.join(".lenso/module-services.json");
+        write_service_workspace(
+            &workspace_path,
+            &ServiceWorkspace {
+                protocol: SERVICE_WORKSPACE_PROTOCOL.to_owned(),
+                services: vec![ServiceWorkspaceService {
+                    auto_start: true,
+                    command: "pnpm start".to_owned(),
+                    cwd: "services/support-suite-provider".to_owned(),
+                    lang: "ts".to_owned(),
+                    manifest: "lenso.service.json".to_owned(),
+                    modules: vec!["support-suite".to_owned()],
+                    name: "support-suite-provider".to_owned(),
+                    ready_timeout_ms: 10_000,
+                    ready_url: "http://127.0.0.1:4110/lenso/service/v1/status".to_owned(),
+                }],
+            },
+        )
+        .unwrap();
+
+        export_service_workspace(ServiceWorkspaceExportOptions {
+            output: Some(output.clone()),
+            workspace_file: Some(workspace_path),
+        })
+        .unwrap();
+
+        let value: Value = serde_json::from_str(&fs::read_to_string(&output).unwrap()).unwrap();
+        assert_eq!(value["version"], 1);
+        assert_eq!(value["modules"][0]["moduleName"], "support-suite-provider");
+        assert_eq!(
+            value["modules"][0]["services"][0]["readyUrl"],
+            "http://127.0.0.1:4110/lenso/service/v1/status"
         );
 
         fs::remove_dir_all(root).unwrap();

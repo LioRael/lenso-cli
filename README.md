@@ -276,6 +276,13 @@ Use `lenso service dev --no-workspace` when only installed
 exists, its manifest is reachable, and its `readyUrl` is responding before the
 host tries to load the provider.
 
+Export workspace services into the host service-start state format when a script
+or deployment handoff should consume the same service declarations:
+
+```sh
+lenso service workspace export --output .lenso/module-services.json
+```
+
 Diagnose installed service state with:
 
 ```sh

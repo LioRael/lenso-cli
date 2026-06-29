@@ -279,6 +279,8 @@ enum ServiceWorkspaceCommand {
     List(ServiceWorkspaceListArgs),
     /// Check service workspace readiness and manifest reachability.
     Check(ServiceWorkspaceCheckArgs),
+    /// Export workspace services as host service-start state.
+    Export(ServiceWorkspaceExportArgs),
 }
 
 #[derive(Debug, Args, Clone)]
@@ -349,6 +351,17 @@ struct ServiceWorkspaceCheckArgs {
     /// Print machine-readable JSON.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceWorkspaceExportArgs {
+    /// Service workspace file.
+    #[arg(long)]
+    workspace_file: Option<std::path::PathBuf>,
+
+    /// Output file. Prints JSON when omitted.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -1441,6 +1454,12 @@ async fn main() -> anyhow::Result<()> {
                     })
                     .await?;
                 }
+                ServiceWorkspaceCommand::Export(args) => {
+                    service::export_service_workspace(service::ServiceWorkspaceExportOptions {
+                        output: args.output,
+                        workspace_file: args.workspace_file,
+                    })?;
+                }
             },
             ServiceCommand::Dev(args) => {
                 service::dev_service((&args).into()).await?;
@@ -1676,6 +1695,39 @@ mod tests {
             Some(std::path::Path::new(".lenso/services.json"))
         );
         assert!(args.json);
+    }
+
+    #[test]
+    fn parses_service_workspace_export() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "service",
+            "workspace",
+            "export",
+            "--workspace-file",
+            "lenso.workspace.json",
+            "--output",
+            ".lenso/module-services.json",
+        ]);
+
+        let Command::Service {
+            command:
+                ServiceCommand::Workspace {
+                    command: ServiceWorkspaceCommand::Export(args),
+                },
+        } = cli.command
+        else {
+            panic!("expected service workspace export");
+        };
+
+        assert_eq!(
+            args.workspace_file.as_deref(),
+            Some(std::path::Path::new("lenso.workspace.json"))
+        );
+        assert_eq!(
+            args.output.as_deref(),
+            Some(std::path::Path::new(".lenso/module-services.json"))
+        );
     }
 
     #[test]
