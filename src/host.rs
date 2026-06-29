@@ -867,7 +867,7 @@ fn print_next_steps(target: &Path, package_name: &str) {
     eprintln!("  lenso serve");
     eprintln!("  open http://127.0.0.1:3000/console");
     eprintln!();
-    eprintln!("Install a service with `lenso service install <service-manifest-url>`.");
+    eprintln!("Install a service with `lenso service install <service-name-or-manifest>`.");
 }
 
 #[cfg(test)]
