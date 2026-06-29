@@ -196,6 +196,11 @@ enum ModuleMarketplaceCommand {
 enum ServiceCommand {
     /// Create a service provider scaffold.
     Create(ServiceCreateArgs),
+    /// Manage the local service workspace file.
+    Workspace {
+        #[command(subcommand)]
+        command: ServiceWorkspaceCommand,
+    },
     /// Start service providers, then run the generated host.
     Dev(ServiceDevArgs),
     /// Package a service provider project for distribution.
@@ -247,9 +252,87 @@ struct ServiceCreateArgs {
     #[arg(long)]
     output_dir: Option<std::path::PathBuf>,
 
+    /// Local service port used in generated manifests.
+    #[arg(long, default_value_t = 4100)]
+    port: u16,
+
+    /// Service workspace file to update.
+    #[arg(long)]
+    workspace_file: Option<std::path::PathBuf>,
+
+    /// Do not register the service in lenso.workspace.json.
+    #[arg(long)]
+    no_workspace: bool,
+
     /// Print files without writing them.
     #[arg(long)]
     dry_run: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum ServiceWorkspaceCommand {
+    /// Create an empty service workspace file.
+    Init(ServiceWorkspaceInitArgs),
+    /// Add or update a service in the workspace file.
+    Add(ServiceWorkspaceAddArgs),
+    /// List services in the workspace file.
+    List(ServiceWorkspaceListArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceWorkspaceInitArgs {
+    /// Service workspace file.
+    #[arg(long)]
+    workspace_file: Option<std::path::PathBuf>,
+
+    /// Replace an existing workspace file.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceWorkspaceAddArgs {
+    /// Service provider name.
+    name: String,
+
+    /// Service directory.
+    #[arg(long)]
+    cwd: std::path::PathBuf,
+
+    /// Service language label.
+    #[arg(long, value_enum)]
+    lang: ServiceLanguage,
+
+    /// Service start command.
+    #[arg(long)]
+    command: String,
+
+    /// Service readiness URL.
+    #[arg(long)]
+    ready_url: String,
+
+    /// Module provided by this service. Can be repeated.
+    #[arg(long = "module")]
+    modules: Vec<String>,
+
+    /// Service manifest path, relative to --cwd.
+    #[arg(long, default_value = "lenso.service.json")]
+    manifest: String,
+
+    /// Service workspace file.
+    #[arg(long)]
+    workspace_file: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceWorkspaceListArgs {
+    /// Service workspace file.
+    #[arg(long)]
+    workspace_file: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -261,6 +344,14 @@ struct ServiceDevArgs {
     /// Remote module services file.
     #[arg(long)]
     module_services_file: Option<std::path::PathBuf>,
+
+    /// Service workspace file.
+    #[arg(long)]
+    workspace_file: Option<std::path::PathBuf>,
+
+    /// Do not start service workspace entries.
+    #[arg(long)]
+    no_workspace: bool,
 
     /// Do not start the template Postgres service.
     #[arg(long)]
@@ -1291,6 +1382,32 @@ async fn main() -> anyhow::Result<()> {
             ServiceCommand::Create(args) => {
                 service::create_service((&args).into())?;
             }
+            ServiceCommand::Workspace { command } => match command {
+                ServiceWorkspaceCommand::Init(args) => {
+                    service::init_service_workspace(service::ServiceWorkspaceInitOptions {
+                        force: args.force,
+                        workspace_file: args.workspace_file,
+                    })?;
+                }
+                ServiceWorkspaceCommand::Add(args) => {
+                    service::add_service_workspace_entry(service::ServiceWorkspaceAddOptions {
+                        command: args.command,
+                        cwd: args.cwd,
+                        lang: args.lang,
+                        manifest: args.manifest,
+                        modules: args.modules,
+                        name: args.name,
+                        ready_url: args.ready_url,
+                        workspace_file: args.workspace_file,
+                    })?;
+                }
+                ServiceWorkspaceCommand::List(args) => {
+                    service::list_service_workspace(service::ServiceWorkspaceListOptions {
+                        json: args.json,
+                        workspace_file: args.workspace_file,
+                    })?;
+                }
+            },
             ServiceCommand::Dev(args) => {
                 service::dev_service((&args).into()).await?;
             }
@@ -1374,6 +1491,10 @@ mod tests {
             "support-suite-provider",
             "--lang",
             "ts",
+            "--port",
+            "4110",
+            "--workspace-file",
+            "lenso.workspace.json",
         ]);
 
         let Command::Service {
@@ -1385,6 +1506,11 @@ mod tests {
 
         assert_eq!(args.name, "support-suite-provider");
         assert_eq!(args.lang, ServiceLanguage::Ts);
+        assert_eq!(args.port, 4110);
+        assert_eq!(
+            args.workspace_file.as_deref(),
+            Some(std::path::Path::new("lenso.workspace.json"))
+        );
     }
 
     #[test]
@@ -1411,7 +1537,14 @@ mod tests {
 
     #[test]
     fn parses_service_dev() {
-        let cli = Cli::parse_from(["lenso", "service", "dev", "--skip-db"]);
+        let cli = Cli::parse_from([
+            "lenso",
+            "service",
+            "dev",
+            "--skip-db",
+            "--workspace-file",
+            "services.json",
+        ]);
         let Command::Service {
             command: ServiceCommand::Dev(args),
         } = cli.command
@@ -1420,6 +1553,45 @@ mod tests {
         };
 
         assert!(args.skip_db);
+        assert_eq!(
+            args.workspace_file.as_deref(),
+            Some(std::path::Path::new("services.json"))
+        );
+    }
+
+    #[test]
+    fn parses_service_workspace_add() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "service",
+            "workspace",
+            "add",
+            "support-suite-provider",
+            "--cwd",
+            "services/support-suite-provider",
+            "--lang",
+            "ts",
+            "--command",
+            "pnpm start",
+            "--ready-url",
+            "http://127.0.0.1:4110/lenso/service/v1/status",
+            "--module",
+            "support-ticket",
+        ]);
+
+        let Command::Service {
+            command:
+                ServiceCommand::Workspace {
+                    command: ServiceWorkspaceCommand::Add(args),
+                },
+        } = cli.command
+        else {
+            panic!("expected service workspace add");
+        };
+
+        assert_eq!(args.name, "support-suite-provider");
+        assert_eq!(args.lang, ServiceLanguage::Ts);
+        assert_eq!(args.modules, ["support-ticket"]);
     }
 
     #[test]

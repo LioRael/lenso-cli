@@ -74,13 +74,23 @@ For a standalone service provider:
 
 ```sh
 lenso service create support-suite-provider --lang ts --output-dir ../services
-lenso service create support-suite-provider --lang rust --output-dir ../services
+lenso service create support-suite-provider --lang rust --output-dir ../services --port 4110
 ```
 
 The generated provider includes a `lenso.service.json` manifest and a minimal
 service process. A service name ending in `-provider` or `-service` provides a
 module named without that suffix, so `support-suite-provider` provides
 `support-suite`.
+`service create` also updates `lenso.workspace.json` unless `--no-workspace` is
+set. That workspace file is the local service plane for development:
+
+```sh
+lenso service workspace list
+lenso service dev
+```
+
+`lenso service dev` starts workspace services first, then starts declared
+installed services from `.lenso/module-services.json`, then runs the host.
 Generated TS and Rust services also support `--check-release` to print the
 development module release descriptor before packaging.
 Before handing a service to another app or deployment pipeline, package-check
@@ -241,7 +251,11 @@ with:
 ```sh
 lenso service dev
 lenso service dev --skip-db --skip-migrate
+lenso service dev --workspace-file lenso.workspace.json
 ```
+
+Use `lenso service dev --no-workspace` when only installed
+`.lenso/module-services.json` providers should start.
 
 Diagnose installed service state with:
 

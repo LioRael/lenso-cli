@@ -12,7 +12,7 @@ if (process.argv.includes("--check-release")) {
   process.exit(0);
 }
 
-const port = Number(process.env.PORT ?? "4100");
+const port = Number(process.env.PORT ?? "{{service_port}}");
 const server = await serveService(service, { port });
 
 console.log(`Lenso service ready: ${server.manifestUrl}`);
