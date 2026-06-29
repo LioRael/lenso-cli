@@ -217,6 +217,16 @@ enum ServiceCommand {
     Upgrade(ServiceUpgradeArgs),
     /// Roll back a service to the previous installed manifest snapshot.
     Rollback(ServiceRollbackArgs),
+    /// Plan, check, and apply service releases.
+    Release {
+        #[command(subcommand)]
+        command: ServiceReleaseCommand,
+    },
+    /// Run service delivery policy gates.
+    Policy {
+        #[command(subcommand)]
+        command: ServicePolicyCommand,
+    },
     /// Diagnose installed services and their provided modules.
     Doctor(ModuleDoctorArgs),
     /// Check a service manifest or configured service state.
@@ -542,6 +552,105 @@ struct ServiceRollbackArgs {
     /// Print changes without writing them.
     #[arg(long)]
     dry_run: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum ServiceReleaseCommand {
+    /// Build a reusable service release plan from an installed service and candidate manifest.
+    Plan(ServiceReleasePlanArgs),
+    /// Check a service release plan without applying it.
+    Check(ServiceReleaseCheckArgs),
+    /// Apply a checked service release plan and record it in the service release ledger.
+    Apply(ServiceReleaseApplyArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum ServicePolicyCommand {
+    /// Check a service release plan against built-in delivery policy.
+    Check(ServicePolicyCheckArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceReleasePlanArgs {
+    /// Installed service provider name.
+    service_name: String,
+
+    /// Candidate service manifest or service package URL/path.
+    manifest_reference: String,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Write the release plan JSON to this path.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+
+    /// Fail when policy risk is at or above this level: needs_attention, breaking, blocked.
+    #[arg(long)]
+    fail_on: Option<String>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceReleaseCheckArgs {
+    /// Service release plan JSON path.
+    plan_file: std::path::PathBuf,
+
+    /// Fail when policy risk is at or above this level: needs_attention, breaking, blocked.
+    #[arg(long)]
+    fail_on: Option<String>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceReleaseApplyArgs {
+    /// Service release plan JSON path.
+    plan_file: std::path::PathBuf,
+
+    /// Remote service base URL for local manifest files.
+    #[arg(long)]
+    base_url: Option<String>,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Environment file to update.
+    #[arg(long)]
+    env_file: Option<std::path::PathBuf>,
+
+    /// Remote module services file.
+    #[arg(long)]
+    module_services_file: Option<std::path::PathBuf>,
+
+    /// Print changes without writing them.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Allow apply when compatibility metadata does not match this host.
+    #[arg(long)]
+    allow_incompatible: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServicePolicyCheckArgs {
+    /// Service release plan JSON path.
+    plan_file: std::path::PathBuf,
+
+    /// Fail when policy risk is at or above this level: needs_attention, breaking, blocked.
+    #[arg(long)]
+    fail_on: Option<String>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1140,6 +1249,53 @@ impl From<&ServiceRollbackArgs> for module::ServiceRollbackOptions {
     }
 }
 
+impl From<&ServiceReleasePlanArgs> for module::ServiceReleasePlanOptions {
+    fn from(args: &ServiceReleasePlanArgs) -> Self {
+        Self {
+            fail_on: args.fail_on.clone(),
+            json: args.json,
+            manifest_reference: args.manifest_reference.clone(),
+            output: args.output.clone(),
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
+        }
+    }
+}
+
+impl From<&ServiceReleaseCheckArgs> for module::ServiceReleaseCheckOptions {
+    fn from(args: &ServiceReleaseCheckArgs) -> Self {
+        Self {
+            fail_on: args.fail_on.clone(),
+            json: args.json,
+            plan_file: args.plan_file.clone(),
+        }
+    }
+}
+
+impl From<&ServiceReleaseApplyArgs> for module::ServiceReleaseApplyOptions {
+    fn from(args: &ServiceReleaseApplyArgs) -> Self {
+        Self {
+            allow_incompatible: args.allow_incompatible,
+            base_url: args.base_url.clone(),
+            dry_run: args.dry_run,
+            env_file: args.env_file.clone(),
+            module_services_file: args.module_services_file.clone(),
+            plan_file: args.plan_file.clone(),
+            repo_root: args.repo_root.clone(),
+        }
+    }
+}
+
+impl From<&ServicePolicyCheckArgs> for module::ServiceReleaseCheckOptions {
+    fn from(args: &ServicePolicyCheckArgs) -> Self {
+        Self {
+            fail_on: args.fail_on.clone(),
+            json: args.json,
+            plan_file: args.plan_file.clone(),
+        }
+    }
+}
+
 impl From<&ModuleServiceListArgs> for module::ModuleServiceListOptions {
     fn from(args: &ModuleServiceListArgs) -> Self {
         Self {
@@ -1546,6 +1702,22 @@ async fn main() -> anyhow::Result<()> {
             ServiceCommand::Rollback(args) => {
                 module::rollback_service((&args).into()).await?;
             }
+            ServiceCommand::Release { command } => match command {
+                ServiceReleaseCommand::Plan(args) => {
+                    module::plan_service_release((&args).into()).await?;
+                }
+                ServiceReleaseCommand::Check(args) => {
+                    module::check_service_release_plan((&args).into())?;
+                }
+                ServiceReleaseCommand::Apply(args) => {
+                    module::apply_service_release_plan((&args).into()).await?;
+                }
+            },
+            ServiceCommand::Policy { command } => match command {
+                ServicePolicyCommand::Check(args) => {
+                    module::policy_check_service_release_plan((&args).into())?;
+                }
+            },
             ServiceCommand::Doctor(args) => {
                 module::doctor_module((&args).into()).await?;
             }
@@ -2036,6 +2208,93 @@ mod tests {
             panic!("expected service rollback");
         };
         assert!(rollback_args.dry_run);
+    }
+
+    #[test]
+    fn parses_service_release_and_policy_commands() {
+        let plan = Cli::parse_from([
+            "lenso",
+            "service",
+            "release",
+            "plan",
+            "support-suite-provider",
+            "./lenso.service-package.json",
+            "--output",
+            ".lenso/releases/support.plan.json",
+            "--fail-on",
+            "breaking",
+            "--json",
+        ]);
+        let Command::Service {
+            command:
+                ServiceCommand::Release {
+                    command: ServiceReleaseCommand::Plan(plan_args),
+                },
+        } = plan.command
+        else {
+            panic!("expected service release plan");
+        };
+        assert_eq!(plan_args.service_name, "support-suite-provider");
+        assert_eq!(plan_args.fail_on.as_deref(), Some("breaking"));
+        assert!(plan_args.json);
+
+        let check = Cli::parse_from([
+            "lenso",
+            "service",
+            "release",
+            "check",
+            ".lenso/releases/support.plan.json",
+            "--fail-on",
+            "needs_attention",
+        ]);
+        let Command::Service {
+            command:
+                ServiceCommand::Release {
+                    command: ServiceReleaseCommand::Check(check_args),
+                },
+        } = check.command
+        else {
+            panic!("expected service release check");
+        };
+        assert_eq!(check_args.fail_on.as_deref(), Some("needs_attention"));
+
+        let apply = Cli::parse_from([
+            "lenso",
+            "service",
+            "release",
+            "apply",
+            ".lenso/releases/support.plan.json",
+            "--dry-run",
+        ]);
+        let Command::Service {
+            command:
+                ServiceCommand::Release {
+                    command: ServiceReleaseCommand::Apply(apply_args),
+                },
+        } = apply.command
+        else {
+            panic!("expected service release apply");
+        };
+        assert!(apply_args.dry_run);
+
+        let policy = Cli::parse_from([
+            "lenso",
+            "service",
+            "policy",
+            "check",
+            ".lenso/releases/support.plan.json",
+            "--json",
+        ]);
+        let Command::Service {
+            command:
+                ServiceCommand::Policy {
+                    command: ServicePolicyCommand::Check(policy_args),
+                },
+        } = policy.command
+        else {
+            panic!("expected service policy check");
+        };
+        assert!(policy_args.json);
     }
 
     #[test]

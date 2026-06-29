@@ -1222,6 +1222,21 @@ fn finish_service_create(
         "- {}",
         local_service_install_command(&scaffold.service_name, &scaffold.repo_root_display)
     );
+    println!(
+        "- lenso service release plan {} ./dist/lenso-service/{}/lenso.service-package.json --repo-root {} --output .lenso/{}.release-plan.json",
+        scaffold.service_name,
+        scaffold.service_name,
+        scaffold.repo_root_display,
+        scaffold.service_name
+    );
+    println!(
+        "- lenso service policy check .lenso/{}.release-plan.json --fail-on breaking",
+        scaffold.service_name
+    );
+    println!(
+        "- lenso service release apply .lenso/{}.release-plan.json --repo-root {}",
+        scaffold.service_name, scaffold.repo_root_display
+    );
     if let Some(note) = &scaffold.publish_note {
         println!("- {note}");
     }
@@ -1314,6 +1329,7 @@ fn render_template(template: &str, scaffold: &ServiceScaffold) -> String {
         .replace("{{module_name}}", &scaffold.module_name)
         .replace("{{package_name}}", &scaffold.package_name)
         .replace("{{crate_name}}", &scaffold.crate_name)
+        .replace("{{repo_root_display}}", &scaffold.repo_root_display)
         .replace(
             "{{service_kit_dependency}}",
             &scaffold.service_kit_dependency,
@@ -1928,6 +1944,8 @@ mod tests {
             include_str!("../templates/service-ts/package.json.tmpl"),
             &scaffold,
         );
+        assert!(ts_package_json.contains("\"service:package\""));
+        assert!(ts_package_json.contains("\"service:release-plan\""));
         assert!(ts_package_json.contains("\"service:verify\""));
         for template in [
             include_str!("../templates/service-ts/package.json.tmpl"),

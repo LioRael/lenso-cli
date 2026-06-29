@@ -118,6 +118,34 @@ pub struct ServiceRollbackOptions {
 }
 
 #[derive(Debug, Clone)]
+pub struct ServiceReleasePlanOptions {
+    pub fail_on: Option<String>,
+    pub json: bool,
+    pub manifest_reference: String,
+    pub output: Option<PathBuf>,
+    pub repo_root: Option<PathBuf>,
+    pub service_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceReleaseCheckOptions {
+    pub fail_on: Option<String>,
+    pub json: bool,
+    pub plan_file: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceReleaseApplyOptions {
+    pub allow_incompatible: bool,
+    pub base_url: Option<String>,
+    pub dry_run: bool,
+    pub env_file: Option<PathBuf>,
+    pub module_services_file: Option<PathBuf>,
+    pub plan_file: PathBuf,
+    pub repo_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ModuleServiceListOptions {
     pub json: bool,
     pub module_name: Option<String>,
@@ -408,6 +436,7 @@ type PendingWrites = BTreeMap<PathBuf, String>;
 
 const MODULE_CATALOG_PATH: &str = ".lenso/module-catalog.json";
 const MODULE_INSTALL_LEDGER_PATH: &str = ".lenso/module-installs.json";
+const SERVICE_RELEASE_LEDGER_PATH: &str = ".lenso/service-releases.json";
 const CONSOLE_EXTENSION_REGISTRY_PATH: &str = ".lenso/console/extensions/registry.json";
 const RUNTIME_CONFIG_DEFAULTS_PATH: &str = ".lenso/runtime-config-defaults.json";
 const CONSOLE_EXTENSION_ROUTE_PREFIX: &str = "/console/extensions";
@@ -3544,6 +3573,108 @@ pub async fn rollback_service(options: ServiceRollbackOptions) -> Result<()> {
         .await
 }
 
+pub async fn plan_service_release(options: ServiceReleasePlanOptions) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let mut plan = build_service_release_plan(
+        &repo_root,
+        &options.service_name,
+        &options.manifest_reference,
+    )
+    .await?;
+    let policy = service_release_policy_from_plan(&plan)?;
+    enforce_service_release_fail_on(&policy, options.fail_on.as_deref())?;
+    plan["policy"] = policy;
+
+    if let Some(output) = &options.output {
+        write_json(output, &plan)?;
+    }
+
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&plan)?);
+    } else {
+        print_service_release_plan(&plan);
+        if let Some(output) = &options.output {
+            println!("Wrote release plan: {}", output.display());
+        }
+    }
+
+    Ok(())
+}
+
+pub fn check_service_release_plan(options: ServiceReleaseCheckOptions) -> Result<()> {
+    let mut plan = read_json(&options.plan_file)?;
+    validate_service_release_plan(&plan)?;
+    let policy = service_release_policy_from_plan(&plan)?;
+    enforce_service_release_fail_on(&policy, options.fail_on.as_deref())?;
+    plan["policy"] = policy;
+
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&plan)?);
+    } else {
+        print_service_release_plan(&plan);
+    }
+
+    Ok(())
+}
+
+pub fn policy_check_service_release_plan(options: ServiceReleaseCheckOptions) -> Result<()> {
+    let plan = read_json(&options.plan_file)?;
+    validate_service_release_plan(&plan)?;
+    let policy = service_release_policy_from_plan(&plan)?;
+    enforce_service_release_fail_on(&policy, options.fail_on.as_deref())?;
+
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&policy)?);
+    } else {
+        print_service_release_policy(&plan, &policy);
+    }
+
+    Ok(())
+}
+
+pub async fn apply_service_release_plan(options: ServiceReleaseApplyOptions) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let plan = read_json(&options.plan_file)?;
+    validate_service_release_plan(&plan)?;
+    let policy = service_release_policy_from_plan(&plan)?;
+    if service_release_risk_rank(policy_risk(&policy)?) >= service_release_risk_rank("blocked") {
+        bail!(
+            "Service release policy risk is blocked; run `lenso service policy check` for details"
+        );
+    }
+    let service_name = plan
+        .pointer("/service/name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("Service release plan service.name is required"))?
+        .to_owned();
+    let manifest_reference = plan
+        .pointer("/candidate/inputReference")
+        .or_else(|| plan.pointer("/candidate/manifestReference"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("Service release plan candidate manifest reference is required"))?
+        .to_owned();
+
+    upgrade_service(ServiceUpgradeOptions {
+        allow_incompatible: options.allow_incompatible,
+        base_url: options.base_url,
+        dry_run: options.dry_run,
+        env_file: options.env_file,
+        manifest_reference,
+        module_services_file: options.module_services_file,
+        repo_root: Some(repo_root.clone()),
+        service_name,
+    })
+    .await?;
+
+    if options.dry_run {
+        println!("Service release apply dry run; release ledger not updated.");
+    } else {
+        append_service_release_ledger(&repo_root, &plan, &policy)?;
+    }
+
+    Ok(())
+}
+
 fn installed_service_receipt(repo_root: &Path, service_name: &str) -> Result<Value> {
     let ledger_path = repo_root.join(MODULE_INSTALL_LEDGER_PATH);
     let ledger = read_json_if_exists(&ledger_path)?
@@ -3568,6 +3699,417 @@ fn ensure_service_name_matches(manifest: &Value, expected: &str) -> Result<()> {
         bail!("Service manifest is for `{actual}`, expected `{expected}`");
     }
     Ok(())
+}
+
+async fn build_service_release_plan(
+    repo_root: &Path,
+    service_name: &str,
+    candidate_reference: &str,
+) -> Result<Value> {
+    let receipt = installed_service_receipt(repo_root, service_name)?;
+    let current = receipt
+        .get("serviceManifestSnapshot")
+        .ok_or_else(|| {
+            anyhow!(
+                "Service `{service_name}` has no manifest snapshot; reinstall or upgrade it once before planning a release"
+            )
+        })?
+        .clone();
+    let (manifest_reference, candidate, package_context) =
+        read_service_or_package_manifest(candidate_reference).await?;
+    ensure_service_name_matches(&candidate, service_name)?;
+    let diff = service_manifest_diff(&current, &candidate);
+    let compatibility_issue = remote_module_manifest_compatibility_issue(&candidate);
+    let package_reference = package_context
+        .as_ref()
+        .map(|package| package.reference.clone());
+    let package_snapshot = package_context
+        .as_ref()
+        .map(|package| package.manifest.clone())
+        .unwrap_or(Value::Null);
+    let mut plan = json!({
+        "protocol": "lenso.service-release-plan.v1",
+        "createdAtUnixMs": current_time_millis()?,
+        "service": {
+            "name": service_name,
+        },
+        "current": service_release_manifest_summary(
+            &current,
+            receipt_manifest_reference(&receipt).as_deref(),
+            receipt.get("servicePackage").and_then(|package| package.get("manifestReference")).and_then(Value::as_str),
+        ),
+        "candidate": service_release_manifest_summary(
+            &candidate,
+            Some(&manifest_reference),
+            package_reference.as_deref(),
+        ),
+        "diff": diff,
+        "restartRequired": service_release_restart_required(&diff),
+    });
+    plan["candidate"]["inputReference"] = json!(candidate_reference);
+    plan["candidate"]["compatibilityIssue"] = compatibility_issue
+        .map(Value::String)
+        .unwrap_or(Value::Null);
+    if package_snapshot != Value::Null {
+        plan["candidate"]["packageSnapshot"] = package_snapshot;
+    }
+    let policy = service_release_policy_from_plan(&plan)?;
+    plan["policy"] = policy.clone();
+    plan["nextAction"] = json!(service_release_next_action(policy_risk(&policy)?));
+    Ok(plan)
+}
+
+fn validate_service_release_plan(plan: &Value) -> Result<()> {
+    let protocol = plan
+        .get("protocol")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("Service release plan protocol is required"))?;
+    if protocol != "lenso.service-release-plan.v1" {
+        bail!("Unsupported service release plan protocol: {protocol}");
+    }
+    plan.pointer("/service/name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("Service release plan service.name is required"))?;
+    plan.pointer("/candidate/manifestReference")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("Service release plan candidate.manifestReference is required"))?;
+    plan.get("diff")
+        .ok_or_else(|| anyhow!("Service release plan diff is required"))?;
+    Ok(())
+}
+
+fn service_release_manifest_summary(
+    manifest: &Value,
+    manifest_reference: Option<&str>,
+    package_reference: Option<&str>,
+) -> Value {
+    let mut summary = json!({
+        "manifestReference": manifest_reference.unwrap_or(""),
+        "name": manifest.get("name").and_then(Value::as_str).unwrap_or(""),
+        "version": manifest.get("version").and_then(Value::as_str).unwrap_or(""),
+        "modules": service_module_name_set(manifest).into_iter().collect::<Vec<_>>(),
+    });
+    if let Some(package_reference) = package_reference {
+        summary["packageReference"] = json!(package_reference);
+    }
+    if let Some(compatibility) = manifest.get("compatibility") {
+        summary["compatibility"] = compatibility.clone();
+    }
+    summary
+}
+
+fn receipt_manifest_reference(receipt: &Value) -> Option<String> {
+    receipt
+        .get("service")
+        .and_then(|service| service.get("manifestReference"))
+        .or_else(|| receipt.get("manifestReference"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn service_release_policy_from_plan(plan: &Value) -> Result<Value> {
+    validate_service_release_plan(plan)?;
+    let diff = plan
+        .get("diff")
+        .ok_or_else(|| anyhow!("Service release plan diff is required"))?;
+    let compatibility_issue = plan
+        .pointer("/candidate/compatibilityIssue")
+        .and_then(Value::as_str);
+    Ok(service_release_policy_from_diff(diff, compatibility_issue))
+}
+
+fn service_release_policy_from_diff(diff: &Value, compatibility_issue: Option<&str>) -> Value {
+    let mut issues = Vec::new();
+
+    if let Some(issue) = compatibility_issue {
+        push_release_issue(
+            &mut issues,
+            "blocked",
+            "host_incompatible",
+            issue.to_owned(),
+        );
+    } else if diff
+        .get("compatibilityChanged")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        push_release_issue(
+            &mut issues,
+            "needs_attention",
+            "compatibility_changed",
+            "Service compatibility metadata changed; review host support before applying."
+                .to_owned(),
+        );
+    }
+
+    for module in json_string_list(&diff["modules"]["removed"]) {
+        push_release_issue(
+            &mut issues,
+            "breaking",
+            "module_removed",
+            format!("Module `{module}` is removed by this release."),
+        );
+    }
+
+    for env in json_string_list(&diff["env"]["added"]) {
+        push_release_issue(
+            &mut issues,
+            "needs_attention",
+            "env_added",
+            format!("Environment value `{env}` is newly required by this release."),
+        );
+    }
+
+    for config in json_string_list(&diff["config"]["added"]) {
+        push_release_issue(
+            &mut issues,
+            "needs_attention",
+            "config_added",
+            format!("Runtime config `{config}` is newly declared by this release."),
+        );
+    }
+
+    for change in diff
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let module = change.get("module").and_then(Value::as_str).unwrap_or("-");
+        for capability in json_string_list(&change["removed"]) {
+            push_release_issue(
+                &mut issues,
+                "breaking",
+                "capability_removed",
+                format!("Capability `{capability}` is removed from module `{module}`."),
+            );
+        }
+    }
+
+    for change in diff
+        .get("operations")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let module = change.get("module").and_then(Value::as_str).unwrap_or("-");
+        for operation in json_string_list(&change["removed"]) {
+            push_release_issue(
+                &mut issues,
+                "breaking",
+                "operation_removed",
+                format!("Operation `{operation}` is removed from module `{module}`."),
+            );
+        }
+    }
+
+    let risk = issues
+        .iter()
+        .filter_map(|issue| issue.get("level").and_then(Value::as_str))
+        .max_by_key(|level| service_release_risk_rank(level))
+        .unwrap_or("safe");
+
+    json!({
+        "risk": risk,
+        "issues": issues,
+    })
+}
+
+fn push_release_issue(issues: &mut Vec<Value>, level: &str, code: &str, message: String) {
+    issues.push(json!({
+        "code": code,
+        "level": level,
+        "message": message,
+    }));
+}
+
+fn policy_risk(policy: &Value) -> Result<&str> {
+    policy
+        .get("risk")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("Service release policy risk is required"))
+}
+
+fn enforce_service_release_fail_on(policy: &Value, fail_on: Option<&str>) -> Result<()> {
+    let Some(fail_on) = fail_on else {
+        return Ok(());
+    };
+    let fail_on = fail_on.trim();
+    let risk = policy_risk(policy)?;
+    if service_release_risk_rank(fail_on) == 0 && fail_on != "safe" {
+        bail!(
+            "Unknown service release risk threshold `{fail_on}`; expected safe, needs_attention, breaking, or blocked"
+        );
+    }
+    if service_release_risk_rank(risk) >= service_release_risk_rank(fail_on) {
+        bail!("Service release policy risk `{risk}` meets --fail-on {fail_on}");
+    }
+    Ok(())
+}
+
+fn service_release_risk_rank(risk: &str) -> u8 {
+    match risk {
+        "safe" => 0,
+        "needs_attention" => 1,
+        "breaking" => 2,
+        "blocked" => 3,
+        _ => 0,
+    }
+}
+
+fn service_release_restart_required(diff: &Value) -> bool {
+    !json_string_list(&diff["modules"]["added"]).is_empty()
+        || !json_string_list(&diff["modules"]["removed"]).is_empty()
+        || !json_string_list(&diff["env"]["added"]).is_empty()
+        || !json_string_list(&diff["env"]["removed"]).is_empty()
+        || !json_string_list(&diff["config"]["added"]).is_empty()
+        || !json_string_list(&diff["config"]["removed"]).is_empty()
+        || diff
+            .get("compatibilityChanged")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        || diff_array_has_changes(&diff["capabilities"])
+        || diff_array_has_changes(&diff["operations"])
+}
+
+fn diff_array_has_changes(value: &Value) -> bool {
+    value.as_array().into_iter().flatten().any(|change| {
+        !json_string_list(&change["added"]).is_empty()
+            || !json_string_list(&change["removed"]).is_empty()
+    })
+}
+
+fn service_release_next_action(risk: &str) -> &'static str {
+    match risk {
+        "safe" => "Run `lenso service release apply <plan.json>` when ready.",
+        "needs_attention" => {
+            "Review required env/config, then run `lenso service release apply <plan.json>`."
+        }
+        "breaking" => "Review removed modules, capabilities, or operations before applying.",
+        "blocked" => "Fix blocked policy issues before applying this release.",
+        _ => "Run `lenso service policy check <plan.json>` before applying.",
+    }
+}
+
+fn print_service_release_plan(plan: &Value) {
+    let service_name = plan
+        .pointer("/service/name")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let current_version = plan
+        .pointer("/current/version")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let candidate_version = plan
+        .pointer("/candidate/version")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let policy = plan.get("policy").unwrap_or(&Value::Null);
+    let risk = policy.get("risk").and_then(Value::as_str).unwrap_or("safe");
+    println!("Service release plan: {service_name}");
+    if !current_version.is_empty() || !candidate_version.is_empty() {
+        println!(
+            "version: {} -> {}",
+            if current_version.is_empty() {
+                "-"
+            } else {
+                current_version
+            },
+            if candidate_version.is_empty() {
+                "-"
+            } else {
+                candidate_version
+            }
+        );
+    }
+    println!("risk: {risk}");
+    println!(
+        "restart required: {}",
+        plan.get("restartRequired")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    );
+    print_service_manifest_diff(service_name, &plan["diff"]);
+    let issues = policy
+        .get("issues")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if !issues.is_empty() {
+        println!("policy issues:");
+        for issue in issues {
+            println!(
+                "- [{}] {}",
+                issue.get("level").and_then(Value::as_str).unwrap_or("-"),
+                issue.get("message").and_then(Value::as_str).unwrap_or("-")
+            );
+        }
+    }
+    if let Some(next_action) = plan.get("nextAction").and_then(Value::as_str) {
+        println!("next action: {next_action}");
+    }
+}
+
+fn print_service_release_policy(plan: &Value, policy: &Value) {
+    let service_name = plan
+        .pointer("/service/name")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let risk = policy.get("risk").and_then(Value::as_str).unwrap_or("safe");
+    println!("Service policy check: {service_name}");
+    println!("risk: {risk}");
+    if let Some(issues) = policy.get("issues").and_then(Value::as_array)
+        && !issues.is_empty()
+    {
+        println!("issues:");
+        for issue in issues {
+            println!(
+                "- [{}] {}",
+                issue.get("level").and_then(Value::as_str).unwrap_or("-"),
+                issue.get("message").and_then(Value::as_str).unwrap_or("-")
+            );
+        }
+    }
+}
+
+fn append_service_release_ledger(repo_root: &Path, plan: &Value, policy: &Value) -> Result<()> {
+    let ledger_path = repo_root.join(SERVICE_RELEASE_LEDGER_PATH);
+    let mut ledger = read_json_if_exists(&ledger_path)?
+        .unwrap_or_else(|| json!({ "releases": [], "version": 1 }));
+    let releases = ledger
+        .get_mut("releases")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow!("Service release ledger releases must be an array"))?;
+    let service_name = plan
+        .pointer("/service/name")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    releases.push(json!({
+        "appliedAtUnixMs": current_time_millis()?,
+        "id": uuid::Uuid::now_v7().to_string(),
+        "planCreatedAtUnixMs": plan.get("createdAtUnixMs").cloned().unwrap_or(Value::Null),
+        "protocol": "lenso.service-release-ledger.v1",
+        "risk": policy_risk(policy)?,
+        "rollbackTarget": plan.pointer("/current/manifestReference").cloned().unwrap_or(Value::Null),
+        "serviceName": service_name,
+        "current": plan.get("current").cloned().unwrap_or(Value::Null),
+        "candidate": plan.get("candidate").cloned().unwrap_or(Value::Null),
+        "diff": plan.get("diff").cloned().unwrap_or(Value::Null),
+        "policy": policy,
+    }));
+    write_json(&ledger_path, &ledger)?;
+    println!(
+        "Recorded service release: {}",
+        display_relative(repo_root, &ledger_path)
+    );
+    Ok(())
+}
+
+fn current_time_millis() -> Result<u64> {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis();
+    u64::try_from(millis).context("system clock timestamp exceeds u64")
 }
 
 fn service_manifest_diff(current: &Value, candidate: &Value) -> Value {
@@ -11502,6 +12044,46 @@ mod tests {
             diff["operations"][0]["added"],
             json!(["route:POST /tickets"])
         );
+    }
+
+    #[test]
+    fn service_release_policy_prioritizes_blocking_and_breaking_changes() {
+        let diff = json!({
+            "capabilities": [
+                {
+                    "added": [],
+                    "module": "support-ticket",
+                    "removed": ["support.write"]
+                }
+            ],
+            "compatibilityChanged": false,
+            "config": {
+                "added": ["support.mode"],
+                "removed": []
+            },
+            "env": {
+                "added": ["SUPPORT_API_KEY"],
+                "removed": []
+            },
+            "modules": {
+                "added": [],
+                "removed": []
+            },
+            "operations": [
+                {
+                    "added": [],
+                    "module": "support-ticket",
+                    "removed": ["route:DELETE /tickets/{id}"]
+                }
+            ],
+        });
+
+        let breaking = service_release_policy_from_diff(&diff, None);
+        assert_eq!(breaking["risk"], json!("breaking"));
+
+        let blocked = service_release_policy_from_diff(&diff, Some("Remote protocol is newer"));
+        assert_eq!(blocked["risk"], json!("blocked"));
+        assert_eq!(blocked["issues"][0]["code"], json!("host_incompatible"));
     }
 
     #[test]
