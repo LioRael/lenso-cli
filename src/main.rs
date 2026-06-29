@@ -563,6 +563,18 @@ struct ServiceDeployExportArgs {
     #[arg(long)]
     replicas: Option<u32>,
 
+    /// Generate an example HorizontalPodAutoscaler.
+    #[arg(long)]
+    hpa: bool,
+
+    /// Generate a PodDisruptionBudget.
+    #[arg(long)]
+    pdb: bool,
+
+    /// Generate a default-deny NetworkPolicy with ingress to the service port.
+    #[arg(long)]
+    network_policy: bool,
+
     /// Lenso host repository root.
     #[arg(long)]
     repo_root: Option<std::path::PathBuf>,
@@ -1604,7 +1616,10 @@ impl From<&ServiceDeployExportArgs> for module::ServiceDeployExportOptions {
             json: args.json,
             namespace: args.namespace.clone(),
             output_dir: args.output_dir.clone(),
+            hpa: args.hpa,
             port: args.port,
+            pdb: args.pdb,
+            network_policy: args.network_policy,
             replicas: args.replicas,
             repo_root: args.repo_root.clone(),
             service_name: args.service_name.clone(),

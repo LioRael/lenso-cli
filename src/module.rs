@@ -165,8 +165,11 @@ pub struct ServiceDeployExportOptions {
     pub image: Option<String>,
     pub ingress_host: Option<String>,
     pub json: bool,
+    pub hpa: bool,
     pub namespace: Option<String>,
+    pub network_policy: bool,
     pub output_dir: PathBuf,
+    pub pdb: bool,
     pub port: Option<u16>,
     pub replicas: Option<u32>,
     pub repo_root: Option<PathBuf>,
@@ -4129,6 +4132,11 @@ pub fn export_service_deployment(options: ServiceDeployExportOptions) -> Result<
         .ingress_host
         .clone()
         .or_else(|| string_at(&environment, "/config/ingressHost"));
+    let include_hpa = options.hpa || bool_at(&environment, "/config/autoscaling").unwrap_or(false);
+    let include_pdb =
+        options.pdb || bool_at(&environment, "/config/disruptionBudget").unwrap_or(replicas > 1);
+    let include_network_policy =
+        options.network_policy || bool_at(&environment, "/config/networkPolicy").unwrap_or(false);
     let manifest_reference = service_environment_manifest_reference(&environment);
     let release = latest_service_release(&repo_root, &options.service_name)?;
     let release_id = release
@@ -4189,9 +4197,33 @@ pub fn export_service_deployment(options: ServiceDeployExportOptions) -> Result<
             kubernetes_ingress_yaml(&context).as_bytes(),
         )?;
     }
+    if include_hpa {
+        write_file(
+            &output_dir.join("hpa.yaml"),
+            kubernetes_hpa_yaml(&context).as_bytes(),
+        )?;
+    }
+    if include_pdb {
+        write_file(
+            &output_dir.join("pdb.yaml"),
+            kubernetes_pdb_yaml(&context).as_bytes(),
+        )?;
+    }
+    if include_network_policy {
+        write_file(
+            &output_dir.join("networkpolicy.yaml"),
+            kubernetes_network_policy_yaml(&context).as_bytes(),
+        )?;
+    }
     write_file(
         &output_dir.join("kustomization.yaml"),
-        kubernetes_kustomization_yaml(ingress_host.is_some()).as_bytes(),
+        kubernetes_kustomization_yaml(
+            ingress_host.is_some(),
+            include_hpa,
+            include_pdb,
+            include_network_policy,
+        )
+        .as_bytes(),
     )?;
     write_file(
         &output_dir.join("README.md"),
@@ -4206,7 +4238,12 @@ pub fn export_service_deployment(options: ServiceDeployExportOptions) -> Result<
                 "environment": options.environment_name,
                 "target": "kubernetes",
                 "outputDir": output_dir,
-                "files": kubernetes_export_files(ingress_host.is_some()),
+                "files": kubernetes_export_files(
+                    ingress_host.is_some(),
+                    include_hpa,
+                    include_pdb,
+                    include_network_policy,
+                ),
             }))?
         );
     } else {
@@ -4235,11 +4272,22 @@ pub fn status_service_deployment(options: ServiceDeployStatusOptions) -> Result<
                     options.environment_name
                 )
             })?;
-    let deployment = if let Some(from_file) = options.from_file.as_deref() {
+    let (deployment, service, ingress) = if let Some(from_file) = options.from_file.as_deref() {
         let value = read_json(from_file)?;
-        value.get("deployment").cloned().unwrap_or(value)
+        (
+            value
+                .get("deployment")
+                .cloned()
+                .unwrap_or_else(|| value.clone()),
+            value.get("service").cloned(),
+            value.get("ingress").cloned(),
+        )
     } else {
-        kubectl_get_deployment(&environment, &options.service_name)?
+        let deployment = kubectl_get_deployment(&environment, &options.service_name)?;
+        let service = kubectl_get_named(&environment, "service", &options.service_name).ok();
+        let ingress = string_at(&environment, "/config/ingressHost")
+            .and_then(|_| kubectl_get_named(&environment, "ingress", &options.service_name).ok());
+        (deployment, service, ingress)
     };
     let observation = service_deployment_observation(
         &repo_root,
@@ -4247,6 +4295,8 @@ pub fn status_service_deployment(options: ServiceDeployStatusOptions) -> Result<
         &options.environment_name,
         &environment,
         &deployment,
+        service.as_ref(),
+        ingress.as_ref(),
     )?;
 
     if options.write_state {
@@ -4389,7 +4439,39 @@ fn kubernetes_ingress_yaml(context: &KubernetesExportContext<'_>) -> String {
     )
 }
 
-fn kubernetes_kustomization_yaml(include_ingress: bool) -> String {
+fn kubernetes_hpa_yaml(context: &KubernetesExportContext<'_>) -> String {
+    format!(
+        "apiVersion: autoscaling/v2\nkind: HorizontalPodAutoscaler\nmetadata:\n  name: {name}\n  namespace: {namespace}\nspec:\n  scaleTargetRef:\n    apiVersion: apps/v1\n    kind: Deployment\n    name: {name}\n  minReplicas: {replicas}\n  maxReplicas: {max_replicas}\n  metrics:\n    - type: Resource\n      resource:\n        name: cpu\n        target:\n          type: Utilization\n          averageUtilization: 70\n",
+        name = context.deployment_name,
+        namespace = context.namespace,
+        replicas = context.replicas.max(1),
+        max_replicas = (context.replicas.max(1) * 3).max(3)
+    )
+}
+
+fn kubernetes_pdb_yaml(context: &KubernetesExportContext<'_>) -> String {
+    format!(
+        "apiVersion: policy/v1\nkind: PodDisruptionBudget\nmetadata:\n  name: {name}\n  namespace: {namespace}\nspec:\n  minAvailable: 1\n  selector:\n    matchLabels:\n      app.kubernetes.io/name: {name}\n",
+        name = context.deployment_name,
+        namespace = context.namespace
+    )
+}
+
+fn kubernetes_network_policy_yaml(context: &KubernetesExportContext<'_>) -> String {
+    format!(
+        "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: {name}\n  namespace: {namespace}\nspec:\n  podSelector:\n    matchLabels:\n      app.kubernetes.io/name: {name}\n  policyTypes:\n    - Ingress\n  ingress:\n    - ports:\n        - protocol: TCP\n          port: {port}\n",
+        name = context.deployment_name,
+        namespace = context.namespace,
+        port = context.port
+    )
+}
+
+fn kubernetes_kustomization_yaml(
+    include_ingress: bool,
+    include_hpa: bool,
+    include_pdb: bool,
+    include_network_policy: bool,
+) -> String {
     let mut resources = vec![
         "deployment.yaml",
         "service.yaml",
@@ -4398,6 +4480,15 @@ fn kubernetes_kustomization_yaml(include_ingress: bool) -> String {
     ];
     if include_ingress {
         resources.push("ingress.yaml");
+    }
+    if include_hpa {
+        resources.push("hpa.yaml");
+    }
+    if include_pdb {
+        resources.push("pdb.yaml");
+    }
+    if include_network_policy {
+        resources.push("networkpolicy.yaml");
     }
     format!(
         "resources:\n{}\n",
@@ -4417,7 +4508,12 @@ fn kubernetes_export_readme(context: &KubernetesExportContext<'_>) -> String {
     )
 }
 
-fn kubernetes_export_files(include_ingress: bool) -> Vec<&'static str> {
+fn kubernetes_export_files(
+    include_ingress: bool,
+    include_hpa: bool,
+    include_pdb: bool,
+    include_network_policy: bool,
+) -> Vec<&'static str> {
     let mut files = vec![
         "deployment.yaml",
         "service.yaml",
@@ -4428,6 +4524,15 @@ fn kubernetes_export_files(include_ingress: bool) -> Vec<&'static str> {
     ];
     if include_ingress {
         files.push("ingress.yaml");
+    }
+    if include_hpa {
+        files.push("hpa.yaml");
+    }
+    if include_pdb {
+        files.push("pdb.yaml");
+    }
+    if include_network_policy {
+        files.push("networkpolicy.yaml");
     }
     files
 }
@@ -4443,30 +4548,28 @@ fn kubernetes_labels_yaml(context: &KubernetesExportContext<'_>, indent: usize) 
 }
 
 fn kubectl_get_deployment(environment: &Value, service_name: &str) -> Result<Value> {
+    kubectl_get_named(environment, "deployment", service_name)
+}
+
+fn kubectl_get_named(environment: &Value, kind: &str, service_name: &str) -> Result<Value> {
     let namespace = string_at(environment, "/namespace")
         .ok_or_else(|| anyhow!("Kubernetes namespace is required for deploy status"))?;
-    let deployment_name = kubernetes_name(service_name);
+    let name = kubernetes_name(service_name);
     let mut command = Command::new("kubectl");
     if let Some(context) = string_at(environment, "/kubeContext") {
         command.args(["--context", &context]);
     }
-    command.args([
-        "get",
-        "deployment",
-        &deployment_name,
-        "-n",
-        &namespace,
-        "-o",
-        "json",
-    ]);
-    let output = command.output().context("run kubectl get deployment")?;
+    command.args(["get", kind, &name, "-n", &namespace, "-o", "json"]);
+    let output = command
+        .output()
+        .with_context(|| format!("run kubectl get {kind}"))?;
     if !output.status.success() {
         bail!(
-            "kubectl get deployment failed: {}",
+            "kubectl get {kind} failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    serde_json::from_slice(&output.stdout).context("parse kubectl deployment JSON")
+    serde_json::from_slice(&output.stdout).with_context(|| format!("parse kubectl {kind} JSON"))
 }
 
 fn service_deployment_observation(
@@ -4475,6 +4578,8 @@ fn service_deployment_observation(
     environment_name: &str,
     environment: &Value,
     deployment: &Value,
+    service: Option<&Value>,
+    ingress: Option<&Value>,
 ) -> Result<Value> {
     let latest_release = latest_service_release(repo_root, service_name)?;
     let host_release_id = latest_release
@@ -4518,7 +4623,14 @@ fn service_deployment_observation(
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
         .or_else(|| service_environment_manifest_reference(environment));
-    let ingress_host = string_at(environment, "/config/ingressHost");
+    let service_endpoint = service
+        .and_then(|service| service.pointer("/spec/clusterIP").and_then(Value::as_str))
+        .filter(|cluster_ip| *cluster_ip != "None")
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("{deployment_name}.{namespace}.svc.cluster.local"));
+    let ingress_host = ingress
+        .and_then(first_ingress_host)
+        .or_else(|| string_at(environment, "/config/ingressHost"));
     let next_action = service_deployment_next_action(&state, &drift);
 
     Ok(json!({
@@ -4537,7 +4649,7 @@ fn service_deployment_observation(
             "image": observed_image,
             "releaseId": cluster_release_id,
             "manifestReference": manifest_reference,
-            "serviceEndpoint": format!("{deployment_name}.{namespace}.svc.cluster.local"),
+            "serviceEndpoint": service_endpoint,
             "ingressHost": ingress_host,
         },
         "host": {
@@ -4625,6 +4737,16 @@ fn deployment_container_image(deployment: &Value) -> Option<String> {
         .and_then(Value::as_array)
         .and_then(|containers| containers.first())
         .and_then(|container| container.get("image"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn first_ingress_host(ingress: &Value) -> Option<String> {
+    ingress
+        .pointer("/spec/rules")
+        .and_then(Value::as_array)
+        .and_then(|rules| rules.first())
+        .and_then(|rule| rule.get("host"))
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
 }
@@ -4821,6 +4943,10 @@ fn u16_at(value: &Value, pointer: &str) -> Option<u16> {
         .pointer(pointer)
         .and_then(Value::as_u64)
         .and_then(|value| u16::try_from(value).ok())
+}
+
+fn bool_at(value: &Value, pointer: &str) -> Option<bool> {
+    value.pointer(pointer).and_then(Value::as_bool)
 }
 
 fn kubernetes_name(value: &str) -> String {
@@ -11733,6 +11859,21 @@ mod tests {
                 deployment_container_image(&deployment).as_deref(),
             ),
             "image_drift"
+        );
+        assert_eq!(
+            kubernetes_export_files(true, true, true, true),
+            vec![
+                "deployment.yaml",
+                "service.yaml",
+                "configmap.yaml",
+                "secret.example.yaml",
+                "kustomization.yaml",
+                "README.md",
+                "ingress.yaml",
+                "hpa.yaml",
+                "pdb.yaml",
+                "networkpolicy.yaml"
+            ]
         );
     }
 
