@@ -368,6 +368,8 @@ enum ServiceDeployCommand {
     Export(ServiceDeployExportArgs),
     /// Read deployment status for a service provider.
     Status(ServiceDeployStatusArgs),
+    /// Wait until a service deployment is ready.
+    Wait(ServiceDeployWaitArgs),
 }
 
 #[derive(Debug, Args, Clone)]
@@ -640,6 +642,44 @@ struct ServiceDeployStatusArgs {
     source: ServiceDeploymentSourceArg,
 
     /// Persist the observation to .lenso/service-deployments.json.
+    #[arg(long)]
+    write_state: bool,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceDeployWaitArgs {
+    /// Service provider name.
+    service_name: String,
+
+    /// Environment name.
+    #[arg(long = "env")]
+    environment_name: String,
+
+    /// Read deployment JSON from a file instead of a provider adapter.
+    #[arg(long)]
+    from_file: Option<std::path::PathBuf>,
+
+    /// Deployment status source.
+    #[arg(long, value_enum, default_value_t = ServiceDeploymentSourceArg::Kubernetes)]
+    source: ServiceDeploymentSourceArg,
+
+    /// Timeout in seconds.
+    #[arg(long, default_value_t = 120)]
+    timeout_seconds: u64,
+
+    /// Poll interval in seconds.
+    #[arg(long, default_value_t = 5)]
+    interval_seconds: u64,
+
+    /// Persist every observation to .lenso/service-deployments.json.
     #[arg(long)]
     write_state: bool,
 
@@ -1684,6 +1724,22 @@ impl From<&ServiceDeployStatusArgs> for module::ServiceDeployStatusOptions {
     }
 }
 
+impl From<&ServiceDeployWaitArgs> for module::ServiceDeployWaitOptions {
+    fn from(args: &ServiceDeployWaitArgs) -> Self {
+        Self {
+            environment_name: args.environment_name.clone(),
+            from_file: args.from_file.clone(),
+            interval_seconds: args.interval_seconds,
+            json: args.json,
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
+            source: service_deployment_source_arg(args.source).to_owned(),
+            timeout_seconds: args.timeout_seconds,
+            write_state: args.write_state,
+        }
+    }
+}
+
 impl From<&ServiceReleasePlanArgs> for module::ServiceReleasePlanOptions {
     fn from(args: &ServiceReleasePlanArgs) -> Self {
         Self {
@@ -2165,6 +2221,9 @@ async fn main() -> anyhow::Result<()> {
                 ServiceDeployCommand::Status(args) => {
                     module::status_service_deployment((&args).into())?;
                 }
+                ServiceDeployCommand::Wait(args) => {
+                    module::wait_service_deployment((&args).into())?;
+                }
             },
             ServiceCommand::Dev(args) => {
                 service::dev_service((&args).into()).await?;
@@ -2539,6 +2598,36 @@ mod tests {
         };
         assert_eq!(status_args.environment_name, "staging");
         assert!(status_args.write_state);
+
+        let wait = Cli::parse_from([
+            "lenso",
+            "service",
+            "deploy",
+            "wait",
+            "support-suite-provider",
+            "--env",
+            "staging",
+            "--source",
+            "kubernetes",
+            "--timeout-seconds",
+            "30",
+            "--interval-seconds",
+            "2",
+            "--write-state",
+        ]);
+        let Command::Service {
+            command:
+                ServiceCommand::Deploy {
+                    command: ServiceDeployCommand::Wait(wait_args),
+                },
+        } = wait.command
+        else {
+            panic!("expected service deploy wait");
+        };
+        assert_eq!(wait_args.environment_name, "staging");
+        assert_eq!(wait_args.timeout_seconds, 30);
+        assert_eq!(wait_args.interval_seconds, 2);
+        assert!(wait_args.write_state);
     }
 
     #[test]

@@ -189,6 +189,19 @@ pub struct ServiceDeployStatusOptions {
 }
 
 #[derive(Debug, Clone)]
+pub struct ServiceDeployWaitOptions {
+    pub environment_name: String,
+    pub from_file: Option<PathBuf>,
+    pub interval_seconds: u64,
+    pub json: bool,
+    pub repo_root: Option<PathBuf>,
+    pub service_name: String,
+    pub source: String,
+    pub timeout_seconds: u64,
+    pub write_state: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct ServiceReleasePlanOptions {
     pub environment_name: Option<String>,
     pub fail_on: Option<String>,
@@ -4390,50 +4403,7 @@ fn export_operator_service_provider(options: ServiceDeployExportOptions) -> Resu
 }
 
 pub fn status_service_deployment(options: ServiceDeployStatusOptions) -> Result<()> {
-    match options.source.as_str() {
-        "kubernetes" => status_kubernetes_service_deployment(options),
-        "operator" => status_operator_service_deployment(options),
-        other => bail!("Unsupported deployment source `{other}`; expected kubernetes or operator"),
-    }
-}
-
-fn status_kubernetes_service_deployment(options: ServiceDeployStatusOptions) -> Result<()> {
-    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
-    let environment =
-        find_service_environment(&repo_root, &options.service_name, &options.environment_name)?
-            .ok_or_else(|| {
-                anyhow!(
-                    "Service environment not found: {}/{}",
-                    options.service_name,
-                    options.environment_name
-                )
-            })?;
-    let (deployment, service, ingress) = if let Some(from_file) = options.from_file.as_deref() {
-        let value = read_json(from_file)?;
-        (
-            value
-                .get("deployment")
-                .cloned()
-                .unwrap_or_else(|| value.clone()),
-            value.get("service").cloned(),
-            value.get("ingress").cloned(),
-        )
-    } else {
-        let deployment = kubectl_get_deployment(&environment, &options.service_name)?;
-        let service = kubectl_get_named(&environment, "service", &options.service_name).ok();
-        let ingress = string_at(&environment, "/config/ingressHost")
-            .and_then(|_| kubectl_get_named(&environment, "ingress", &options.service_name).ok());
-        (deployment, service, ingress)
-    };
-    let observation = service_deployment_observation(
-        &repo_root,
-        &options.service_name,
-        &options.environment_name,
-        &environment,
-        &deployment,
-        service.as_ref(),
-        ingress.as_ref(),
-    )?;
+    let (repo_root, observation) = service_deployment_observation_for_options(&options)?;
 
     if options.write_state {
         upsert_service_deployment_observation(
@@ -4442,34 +4412,97 @@ fn status_kubernetes_service_deployment(options: ServiceDeployStatusOptions) -> 
         )?;
     }
 
-    if options.json {
-        println!("{}", serde_json::to_string_pretty(&observation)?);
-    } else {
-        let state = observation
-            .get("state")
-            .and_then(Value::as_str)
-            .unwrap_or("-");
-        let drift = observation
-            .get("drift")
-            .and_then(Value::as_str)
-            .unwrap_or("-");
-        let next_action = observation
-            .get("nextAction")
-            .and_then(Value::as_str)
-            .unwrap_or("-");
-        println!(
-            "Service deployment: {}/{}",
-            options.service_name, options.environment_name
-        );
-        println!("state: {state}");
-        println!("drift: {drift}");
-        println!("next action: {next_action}");
-    }
+    print_service_deployment_observation(&options, &observation)?;
 
     Ok(())
 }
 
-fn status_operator_service_deployment(options: ServiceDeployStatusOptions) -> Result<()> {
+pub fn wait_service_deployment(options: ServiceDeployWaitOptions) -> Result<()> {
+    let timeout = Duration::from_secs(options.timeout_seconds);
+    let interval = Duration::from_secs(options.interval_seconds.max(1));
+    let started = Instant::now();
+
+    loop {
+        let status_options = ServiceDeployStatusOptions {
+            environment_name: options.environment_name.clone(),
+            from_file: options.from_file.clone(),
+            json: false,
+            repo_root: options.repo_root.clone(),
+            service_name: options.service_name.clone(),
+            source: options.source.clone(),
+            write_state: false,
+        };
+        let (repo_root, observation) = service_deployment_observation_for_options(&status_options)?;
+
+        if options.write_state {
+            upsert_service_deployment_observation(
+                &repo_root.join(SERVICE_DEPLOYMENTS_PATH),
+                observation.clone(),
+            )?;
+        }
+
+        if service_deployment_wait_ready(&observation) {
+            if options.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "status": "ready",
+                        "observation": observation,
+                    }))?
+                );
+            } else {
+                println!(
+                    "Service deployment ready: {}/{}",
+                    options.service_name, options.environment_name
+                );
+                println!(
+                    "state: {}",
+                    observation
+                        .get("state")
+                        .and_then(Value::as_str)
+                        .unwrap_or("-")
+                );
+                println!(
+                    "drift: {}",
+                    observation
+                        .get("drift")
+                        .and_then(Value::as_str)
+                        .unwrap_or("-")
+                );
+            }
+            return Ok(());
+        }
+
+        if service_deployment_wait_failed(&observation)
+            || options.from_file.is_some()
+            || started.elapsed() >= timeout
+        {
+            let state = observation
+                .get("state")
+                .and_then(Value::as_str)
+                .unwrap_or("-");
+            let drift = observation
+                .get("drift")
+                .and_then(Value::as_str)
+                .unwrap_or("-");
+            let next_action = observation
+                .get("nextAction")
+                .and_then(Value::as_str)
+                .unwrap_or("refresh deployment status");
+            bail!(
+                "Service deployment is not ready: {}/{} state={state} drift={drift}; next: {next_action}",
+                options.service_name,
+                options.environment_name
+            );
+        }
+
+        std::thread::sleep(interval);
+    }
+}
+
+fn service_deployment_observation_for_options(
+    options: &ServiceDeployStatusOptions,
+) -> Result<(PathBuf, Value)> {
     let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
     let environment =
         find_service_environment(&repo_root, &options.service_name, &options.environment_name)?
@@ -4480,50 +4513,84 @@ fn status_operator_service_deployment(options: ServiceDeployStatusOptions) -> Re
                     options.environment_name
                 )
             })?;
-    let provider = if let Some(from_file) = options.from_file.as_deref() {
-        read_json(from_file)?
-    } else {
-        kubectl_get_lenso_service_provider(&environment, &options.service_name)?
+    let observation = match options.source.as_str() {
+        "kubernetes" => {
+            let (deployment, service, ingress) =
+                if let Some(from_file) = options.from_file.as_deref() {
+                    let value = read_json(from_file)?;
+                    (
+                        value
+                            .get("deployment")
+                            .cloned()
+                            .unwrap_or_else(|| value.clone()),
+                        value.get("service").cloned(),
+                        value.get("ingress").cloned(),
+                    )
+                } else {
+                    let deployment = kubectl_get_deployment(&environment, &options.service_name)?;
+                    let service =
+                        kubectl_get_named(&environment, "service", &options.service_name).ok();
+                    let ingress = string_at(&environment, "/config/ingressHost").and_then(|_| {
+                        kubectl_get_named(&environment, "ingress", &options.service_name).ok()
+                    });
+                    (deployment, service, ingress)
+                };
+            service_deployment_observation(
+                &repo_root,
+                &options.service_name,
+                &options.environment_name,
+                &environment,
+                &deployment,
+                service.as_ref(),
+                ingress.as_ref(),
+            )?
+        }
+        "operator" => {
+            let provider = if let Some(from_file) = options.from_file.as_deref() {
+                read_json(from_file)?
+            } else {
+                kubectl_get_lenso_service_provider(&environment, &options.service_name)?
+            };
+            operator_service_deployment_observation(
+                &repo_root,
+                &options.service_name,
+                &options.environment_name,
+                &environment,
+                &provider,
+            )?
+        }
+        other => bail!("Unsupported deployment source `{other}`; expected kubernetes or operator"),
     };
-    let observation = operator_service_deployment_observation(
-        &repo_root,
-        &options.service_name,
-        &options.environment_name,
-        &environment,
-        &provider,
-    )?;
+    Ok((repo_root, observation))
+}
 
-    if options.write_state {
-        upsert_service_deployment_observation(
-            &repo_root.join(SERVICE_DEPLOYMENTS_PATH),
-            observation.clone(),
-        )?;
-    }
-
+fn print_service_deployment_observation(
+    options: &ServiceDeployStatusOptions,
+    observation: &Value,
+) -> Result<()> {
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&observation)?);
-    } else {
-        let state = observation
-            .get("state")
-            .and_then(Value::as_str)
-            .unwrap_or("-");
-        let drift = observation
-            .get("drift")
-            .and_then(Value::as_str)
-            .unwrap_or("-");
-        let next_action = observation
-            .get("nextAction")
-            .and_then(Value::as_str)
-            .unwrap_or("-");
-        println!(
-            "Service deployment: {}/{}",
-            options.service_name, options.environment_name
-        );
-        println!("state: {state}");
-        println!("drift: {drift}");
-        println!("next action: {next_action}");
+        println!("{}", serde_json::to_string_pretty(observation)?);
+        return Ok(());
     }
-
+    let state = observation
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let drift = observation
+        .get("drift")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let next_action = observation
+        .get("nextAction")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    println!(
+        "Service deployment: {}/{}",
+        options.service_name, options.environment_name
+    );
+    println!("state: {state}");
+    println!("drift: {drift}");
+    println!("next action: {next_action}");
     Ok(())
 }
 
@@ -5123,6 +5190,21 @@ fn operator_deployment_next_action(state: &str, drift: &str) -> &'static str {
     }
 }
 
+fn service_deployment_wait_ready(observation: &Value) -> bool {
+    observation.get("state").and_then(Value::as_str) == Some("ready")
+        && matches!(
+            observation.get("drift").and_then(Value::as_str),
+            Some("in_sync") | Some("unknown") | None
+        )
+}
+
+fn service_deployment_wait_failed(observation: &Value) -> bool {
+    matches!(
+        observation.get("state").and_then(Value::as_str),
+        Some("failed") | Some("unhealthy")
+    )
+}
+
 fn deployment_container_image(deployment: &Value) -> Option<String> {
     deployment
         .pointer("/spec/template/spec/containers")
@@ -5144,10 +5226,14 @@ fn first_ingress_host(ingress: &Value) -> Option<String> {
 }
 
 fn upsert_service_deployment_observation(path: &Path, observation: Value) -> Result<()> {
-    let mut file =
-        read_json_if_exists(path)?.unwrap_or_else(|| json!({ "version": 1, "observations": [] }));
+    let mut file = read_json_if_exists(path)?
+        .unwrap_or_else(|| json!({ "version": 2, "observations": [], "history": [] }));
+    file["version"] = json!(2);
     if !file.get("observations").is_some_and(Value::is_array) {
         file["observations"] = json!([]);
+    }
+    if !file.get("history").is_some_and(Value::is_array) {
+        file["history"] = json!([]);
     }
     let service_name = observation
         .get("serviceName")
@@ -5168,7 +5254,7 @@ fn upsert_service_deployment_observation(path: &Path, observation: Value) -> Res
             || candidate.get("environment").and_then(Value::as_str)
                 != Some(environment_name.as_str())
     });
-    observations.push(observation);
+    observations.push(observation.clone());
     observations.sort_by(|left, right| {
         (
             left.get("serviceName")
@@ -5188,6 +5274,29 @@ fn upsert_service_deployment_observation(path: &Path, observation: Value) -> Res
                     .and_then(Value::as_str)
                     .unwrap_or(""),
             ))
+    });
+    let history = file
+        .get_mut("history")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow!("service deployment history must be an array"))?;
+    history.push(observation);
+    history.sort_by_key(|entry| {
+        (
+            entry
+                .get("observedAtUnixMs")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            entry
+                .get("serviceName")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+            entry
+                .get("environment")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+        )
     });
     write_json(path, &file)
 }
@@ -12251,6 +12360,71 @@ mod tests {
     }
 
     #[test]
+    fn service_deployment_wait_readiness_uses_provider_neutral_observation() {
+        assert!(service_deployment_wait_ready(&json!({
+            "state": "ready",
+            "drift": "in_sync"
+        })));
+        assert!(service_deployment_wait_ready(&json!({
+            "state": "ready",
+            "drift": "unknown"
+        })));
+        assert!(!service_deployment_wait_ready(&json!({
+            "state": "ready",
+            "drift": "host_ahead"
+        })));
+        assert!(service_deployment_wait_failed(&json!({
+            "state": "failed",
+            "drift": "in_sync"
+        })));
+    }
+
+    #[test]
+    fn service_deployment_ledger_keeps_current_and_history() {
+        let root = std::env::temp_dir().join(format!(
+            "lenso-cli-deployment-ledger-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let path = root.join(".lenso/service-deployments.json");
+
+        upsert_service_deployment_observation(
+            &path,
+            json!({
+                "serviceName": "support-suite-provider",
+                "environment": "staging",
+                "target": "operator",
+                "observedAtUnixMs": 1,
+                "state": "progressing",
+                "drift": "host_ahead"
+            }),
+        )
+        .unwrap();
+        upsert_service_deployment_observation(
+            &path,
+            json!({
+                "serviceName": "support-suite-provider",
+                "environment": "staging",
+                "target": "operator",
+                "observedAtUnixMs": 2,
+                "state": "ready",
+                "drift": "in_sync"
+            }),
+        )
+        .unwrap();
+
+        let ledger: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(ledger["version"], 2);
+        assert_eq!(ledger["observations"].as_array().unwrap().len(), 1);
+        assert_eq!(ledger["observations"][0]["state"], "ready");
+        assert_eq!(ledger["history"].as_array().unwrap().len(), 2);
+        assert_eq!(ledger["history"][0]["state"], "progressing");
+        assert_eq!(ledger["history"][1]["state"], "ready");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn latest_service_release_for_env_ignores_newer_other_env_release() {
         let root =
             std::env::temp_dir().join(format!("lenso-cli-release-env-{}", std::process::id()));
@@ -12480,6 +12654,8 @@ mod tests {
         );
         assert_eq!(observation["host"]["releaseId"], "rel_staging");
         assert_eq!(observation["drift"], "in_sync");
+        assert_eq!(observations["version"], 2);
+        assert_eq!(observations["history"].as_array().unwrap().len(), 1);
 
         fs::remove_dir_all(root).unwrap();
     }
