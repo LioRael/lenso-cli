@@ -201,6 +201,16 @@ enum ServiceCommand {
         #[command(subcommand)]
         command: ServiceWorkspaceCommand,
     },
+    /// Manage deployment environments for service providers.
+    Env {
+        #[command(subcommand)]
+        command: ServiceEnvCommand,
+    },
+    /// Export and inspect service deployments.
+    Deploy {
+        #[command(subcommand)]
+        command: ServiceDeployCommand,
+    },
     /// Start service providers, then run the generated host.
     Dev(ServiceDevArgs),
     /// Package a service provider project for distribution.
@@ -253,6 +263,11 @@ pub(crate) enum ServiceLanguage {
     Ts,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum ServiceDeploymentTargetArg {
+    Kubernetes,
+}
+
 #[derive(Debug, Args, Clone)]
 struct ServiceCreateArgs {
     /// Service provider name, such as support-suite-provider.
@@ -295,6 +310,26 @@ enum ServiceWorkspaceCommand {
     Check(ServiceWorkspaceCheckArgs),
     /// Export workspace services as host service-start state.
     Export(ServiceWorkspaceExportArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum ServiceEnvCommand {
+    /// List configured service deployment environments.
+    List(ServiceEnvListArgs),
+    /// Add or update a service deployment environment.
+    Add(ServiceEnvAddArgs),
+    /// Remove a service deployment environment.
+    Remove(ServiceEnvRemoveArgs),
+    /// Verify a service deployment environment.
+    Verify(ServiceEnvVerifyArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum ServiceDeployCommand {
+    /// Export deployment files for a service provider.
+    Export(ServiceDeployExportArgs),
+    /// Read deployment status for a service provider.
+    Status(ServiceDeployStatusArgs),
 }
 
 #[derive(Debug, Args, Clone)]
@@ -376,6 +411,191 @@ struct ServiceWorkspaceExportArgs {
     /// Output file. Prints JSON when omitted.
     #[arg(long)]
     output: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceEnvListArgs {
+    /// Filter by service provider name.
+    #[arg(long = "service")]
+    service_name: Option<String>,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceEnvAddArgs {
+    /// Environment name, such as staging or prod.
+    name: String,
+
+    /// Service provider name.
+    #[arg(long = "service")]
+    service_name: String,
+
+    /// Deployment target.
+    #[arg(long, value_enum)]
+    target: ServiceDeploymentTargetArg,
+
+    /// Kubernetes namespace.
+    #[arg(long)]
+    namespace: Option<String>,
+
+    /// Kubernetes context.
+    #[arg(long)]
+    kube_context: Option<String>,
+
+    /// Desired service image.
+    #[arg(long)]
+    image: Option<String>,
+
+    /// Public service base URL.
+    #[arg(long)]
+    public_base_url: Option<String>,
+
+    /// Service manifest URL/path.
+    #[arg(long)]
+    manifest_reference: Option<String>,
+
+    /// Release track label.
+    #[arg(long)]
+    release_track: Option<String>,
+
+    /// Desired Kubernetes replicas.
+    #[arg(long)]
+    replicas: Option<u32>,
+
+    /// Service container port.
+    #[arg(long)]
+    port: Option<u16>,
+
+    /// Kubernetes ingress host.
+    #[arg(long)]
+    ingress_host: Option<String>,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceEnvRemoveArgs {
+    /// Environment name.
+    name: String,
+
+    /// Service provider name.
+    #[arg(long = "service")]
+    service_name: String,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print changes without writing them.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceEnvVerifyArgs {
+    /// Environment name.
+    name: String,
+
+    /// Service provider name.
+    #[arg(long = "service")]
+    service_name: String,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceDeployExportArgs {
+    /// Service provider name.
+    service_name: String,
+
+    /// Environment name.
+    #[arg(long = "env")]
+    environment_name: String,
+
+    /// Deployment target.
+    #[arg(long, value_enum, default_value_t = ServiceDeploymentTargetArg::Kubernetes)]
+    target: ServiceDeploymentTargetArg,
+
+    /// Output directory for generated deployment files.
+    #[arg(long)]
+    output_dir: std::path::PathBuf,
+
+    /// Override desired service image.
+    #[arg(long)]
+    image: Option<String>,
+
+    /// Override Kubernetes namespace.
+    #[arg(long)]
+    namespace: Option<String>,
+
+    /// Override Kubernetes ingress host.
+    #[arg(long)]
+    ingress_host: Option<String>,
+
+    /// Override service container port.
+    #[arg(long)]
+    port: Option<u16>,
+
+    /// Override desired replicas.
+    #[arg(long)]
+    replicas: Option<u32>,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceDeployStatusArgs {
+    /// Service provider name.
+    service_name: String,
+
+    /// Environment name.
+    #[arg(long = "env")]
+    environment_name: String,
+
+    /// Read Kubernetes deployment JSON from a file instead of kubectl.
+    #[arg(long)]
+    from_file: Option<std::path::PathBuf>,
+
+    /// Persist the observation to .lenso/service-deployments.json.
+    #[arg(long)]
+    write_state: bool,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -582,6 +802,10 @@ struct ServiceReleasePlanArgs {
     #[arg(long)]
     repo_root: Option<std::path::PathBuf>,
 
+    /// Service deployment environment.
+    #[arg(long = "env")]
+    environment_name: Option<String>,
+
     /// Write the release plan JSON to this path.
     #[arg(long)]
     output: Option<std::path::PathBuf>,
@@ -600,6 +824,10 @@ struct ServiceReleaseCheckArgs {
     /// Service release plan JSON path.
     plan_file: std::path::PathBuf,
 
+    /// Require the plan to match this service deployment environment.
+    #[arg(long = "env")]
+    environment_name: Option<String>,
+
     /// Fail when policy risk is at or above this level: needs_attention, breaking, blocked.
     #[arg(long)]
     fail_on: Option<String>,
@@ -613,6 +841,10 @@ struct ServiceReleaseCheckArgs {
 struct ServiceReleaseApplyArgs {
     /// Service release plan JSON path.
     plan_file: std::path::PathBuf,
+
+    /// Require the plan to match this service deployment environment.
+    #[arg(long = "env")]
+    environment_name: Option<String>,
 
     /// Remote service base URL for local manifest files.
     #[arg(long)]
@@ -1249,9 +1481,95 @@ impl From<&ServiceRollbackArgs> for module::ServiceRollbackOptions {
     }
 }
 
+impl From<&ServiceEnvListArgs> for module::ServiceEnvListOptions {
+    fn from(args: &ServiceEnvListArgs) -> Self {
+        Self {
+            json: args.json,
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
+        }
+    }
+}
+
+impl From<&ServiceEnvAddArgs> for module::ServiceEnvAddOptions {
+    fn from(args: &ServiceEnvAddArgs) -> Self {
+        Self {
+            environment_name: args.name.clone(),
+            image: args.image.clone(),
+            ingress_host: args.ingress_host.clone(),
+            json: args.json,
+            kube_context: args.kube_context.clone(),
+            manifest_reference: args.manifest_reference.clone(),
+            namespace: args.namespace.clone(),
+            port: args.port,
+            public_base_url: args.public_base_url.clone(),
+            release_track: args.release_track.clone(),
+            replicas: args.replicas,
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
+            target: service_deployment_target_arg(args.target).to_owned(),
+        }
+    }
+}
+
+impl From<&ServiceEnvRemoveArgs> for module::ServiceEnvRemoveOptions {
+    fn from(args: &ServiceEnvRemoveArgs) -> Self {
+        Self {
+            dry_run: args.dry_run,
+            environment_name: args.name.clone(),
+            json: args.json,
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
+        }
+    }
+}
+
+impl From<&ServiceEnvVerifyArgs> for module::ServiceEnvVerifyOptions {
+    fn from(args: &ServiceEnvVerifyArgs) -> Self {
+        Self {
+            environment_name: args.name.clone(),
+            json: args.json,
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
+        }
+    }
+}
+
+impl From<&ServiceDeployExportArgs> for module::ServiceDeployExportOptions {
+    fn from(args: &ServiceDeployExportArgs) -> Self {
+        Self {
+            environment_name: args.environment_name.clone(),
+            image: args.image.clone(),
+            ingress_host: args.ingress_host.clone(),
+            json: args.json,
+            namespace: args.namespace.clone(),
+            output_dir: args.output_dir.clone(),
+            port: args.port,
+            replicas: args.replicas,
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
+            target: service_deployment_target_arg(args.target).to_owned(),
+        }
+    }
+}
+
+impl From<&ServiceDeployStatusArgs> for module::ServiceDeployStatusOptions {
+    fn from(args: &ServiceDeployStatusArgs) -> Self {
+        Self {
+            environment_name: args.environment_name.clone(),
+            from_file: args.from_file.clone(),
+            json: args.json,
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
+            write_state: args.write_state,
+        }
+    }
+}
+
 impl From<&ServiceReleasePlanArgs> for module::ServiceReleasePlanOptions {
     fn from(args: &ServiceReleasePlanArgs) -> Self {
         Self {
+            environment_name: args.environment_name.clone(),
             fail_on: args.fail_on.clone(),
             json: args.json,
             manifest_reference: args.manifest_reference.clone(),
@@ -1262,9 +1580,16 @@ impl From<&ServiceReleasePlanArgs> for module::ServiceReleasePlanOptions {
     }
 }
 
+const fn service_deployment_target_arg(target: ServiceDeploymentTargetArg) -> &'static str {
+    match target {
+        ServiceDeploymentTargetArg::Kubernetes => "kubernetes",
+    }
+}
+
 impl From<&ServiceReleaseCheckArgs> for module::ServiceReleaseCheckOptions {
     fn from(args: &ServiceReleaseCheckArgs) -> Self {
         Self {
+            environment_name: args.environment_name.clone(),
             fail_on: args.fail_on.clone(),
             json: args.json,
             plan_file: args.plan_file.clone(),
@@ -1278,6 +1603,7 @@ impl From<&ServiceReleaseApplyArgs> for module::ServiceReleaseApplyOptions {
             allow_incompatible: args.allow_incompatible,
             base_url: args.base_url.clone(),
             dry_run: args.dry_run,
+            environment_name: args.environment_name.clone(),
             env_file: args.env_file.clone(),
             module_services_file: args.module_services_file.clone(),
             plan_file: args.plan_file.clone(),
@@ -1289,6 +1615,7 @@ impl From<&ServiceReleaseApplyArgs> for module::ServiceReleaseApplyOptions {
 impl From<&ServicePolicyCheckArgs> for module::ServiceReleaseCheckOptions {
     fn from(args: &ServicePolicyCheckArgs) -> Self {
         Self {
+            environment_name: None,
             fail_on: args.fail_on.clone(),
             json: args.json,
             plan_file: args.plan_file.clone(),
@@ -1659,6 +1986,28 @@ async fn main() -> anyhow::Result<()> {
                     })?;
                 }
             },
+            ServiceCommand::Env { command } => match command {
+                ServiceEnvCommand::List(args) => {
+                    module::list_service_environments((&args).into())?;
+                }
+                ServiceEnvCommand::Add(args) => {
+                    module::add_service_environment((&args).into())?;
+                }
+                ServiceEnvCommand::Remove(args) => {
+                    module::remove_service_environment((&args).into())?;
+                }
+                ServiceEnvCommand::Verify(args) => {
+                    module::verify_service_environment((&args).into())?;
+                }
+            },
+            ServiceCommand::Deploy { command } => match command {
+                ServiceDeployCommand::Export(args) => {
+                    module::export_service_deployment((&args).into())?;
+                }
+                ServiceDeployCommand::Status(args) => {
+                    module::status_service_deployment((&args).into())?;
+                }
+            },
             ServiceCommand::Dev(args) => {
                 service::dev_service((&args).into()).await?;
             }
@@ -1929,6 +2278,103 @@ mod tests {
             args.output.as_deref(),
             Some(std::path::Path::new(".lenso/module-services.json"))
         );
+    }
+
+    #[test]
+    fn parses_service_env_add() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "service",
+            "env",
+            "add",
+            "staging",
+            "--service",
+            "support-suite-provider",
+            "--target",
+            "kubernetes",
+            "--namespace",
+            "lenso-staging",
+            "--image",
+            "ghcr.io/acme/support-suite-provider:0.4.0",
+            "--public-base-url",
+            "https://support-staging.example.com",
+            "--replicas",
+            "2",
+            "--port",
+            "4110",
+        ]);
+
+        let Command::Service {
+            command:
+                ServiceCommand::Env {
+                    command: ServiceEnvCommand::Add(args),
+                },
+        } = cli.command
+        else {
+            panic!("expected service env add");
+        };
+
+        assert_eq!(args.name, "staging");
+        assert_eq!(args.service_name, "support-suite-provider");
+        assert_eq!(args.target, ServiceDeploymentTargetArg::Kubernetes);
+        assert_eq!(args.namespace.as_deref(), Some("lenso-staging"));
+        assert_eq!(args.replicas, Some(2));
+        assert_eq!(args.port, Some(4110));
+    }
+
+    #[test]
+    fn parses_service_deploy_commands() {
+        let export = Cli::parse_from([
+            "lenso",
+            "service",
+            "deploy",
+            "export",
+            "support-suite-provider",
+            "--env",
+            "staging",
+            "--target",
+            "kubernetes",
+            "--output-dir",
+            "dist/kubernetes/staging",
+            "--image",
+            "ghcr.io/acme/support-suite-provider:0.4.0",
+        ]);
+        let Command::Service {
+            command:
+                ServiceCommand::Deploy {
+                    command: ServiceDeployCommand::Export(export_args),
+                },
+        } = export.command
+        else {
+            panic!("expected service deploy export");
+        };
+        assert_eq!(export_args.service_name, "support-suite-provider");
+        assert_eq!(export_args.environment_name, "staging");
+        assert_eq!(export_args.target, ServiceDeploymentTargetArg::Kubernetes);
+
+        let status = Cli::parse_from([
+            "lenso",
+            "service",
+            "deploy",
+            "status",
+            "support-suite-provider",
+            "--env",
+            "staging",
+            "--from-file",
+            "deployment.json",
+            "--write-state",
+        ]);
+        let Command::Service {
+            command:
+                ServiceCommand::Deploy {
+                    command: ServiceDeployCommand::Status(status_args),
+                },
+        } = status.command
+        else {
+            panic!("expected service deploy status");
+        };
+        assert_eq!(status_args.environment_name, "staging");
+        assert!(status_args.write_state);
     }
 
     #[test]
@@ -2221,6 +2667,8 @@ mod tests {
             "./lenso.service-package.json",
             "--output",
             ".lenso/releases/support.plan.json",
+            "--env",
+            "staging",
             "--fail-on",
             "breaking",
             "--json",
@@ -2235,6 +2683,7 @@ mod tests {
             panic!("expected service release plan");
         };
         assert_eq!(plan_args.service_name, "support-suite-provider");
+        assert_eq!(plan_args.environment_name.as_deref(), Some("staging"));
         assert_eq!(plan_args.fail_on.as_deref(), Some("breaking"));
         assert!(plan_args.json);
 
@@ -2264,6 +2713,8 @@ mod tests {
             "release",
             "apply",
             ".lenso/releases/support.plan.json",
+            "--env",
+            "staging",
             "--dry-run",
         ]);
         let Command::Service {
@@ -2276,6 +2727,7 @@ mod tests {
             panic!("expected service release apply");
         };
         assert!(apply_args.dry_run);
+        assert_eq!(apply_args.environment_name.as_deref(), Some("staging"));
 
         let policy = Cli::parse_from([
             "lenso",
