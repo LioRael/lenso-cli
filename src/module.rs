@@ -77,11 +77,13 @@ pub struct ModuleDoctorOptions {
 #[derive(Debug, Clone)]
 pub struct ServiceManifestCheckOptions {
     pub cwd: Option<PathBuf>,
+    pub env_file: Option<PathBuf>,
     pub json: bool,
     pub manifest_url: Option<String>,
     pub operation: Option<String>,
     pub ready_timeout_ms: u64,
     pub ready_url: Option<String>,
+    pub repo_root: Option<PathBuf>,
     pub sample_input: Option<PathBuf>,
     pub serve_command: Option<String>,
 }
@@ -2915,6 +2917,11 @@ pub async fn check_service_manifest_reference(
         Vec::new()
     };
     let declarations = service_check_declaration_summary(&manifest);
+    let config = service_check_config_summary(
+        &manifest,
+        options.repo_root.as_deref(),
+        options.env_file.as_deref(),
+    )?;
     if let Some(failed_probe) = probes
         .iter()
         .find(|probe| probe.get("status").and_then(Value::as_str) == Some("failed"))
@@ -2944,6 +2951,7 @@ pub async fn check_service_manifest_reference(
                 "manifestReference": manifest_reference,
                 "manifestUrl": manifest_url,
                 "modules": module_names,
+                "config": config,
                 "operations": operations,
                 "probes": probes,
                 "readyUrl": ready_url,
@@ -2964,6 +2972,26 @@ pub async fn check_service_manifest_reference(
             declarations["eventHandlers"]
         );
         println!("Service operations: {}", operations.len());
+        let required_env = config["requiredEnv"]
+            .as_array()
+            .map(Vec::len)
+            .unwrap_or_default();
+        if required_env > 0 {
+            println!("Required env: {required_env}");
+        }
+        if let Some(env_file) = config["envFile"].as_str() {
+            println!("Env file: {env_file}");
+        }
+        if let Some(missing_env) = config["missingEnv"].as_array()
+            && !missing_env.is_empty()
+        {
+            let names = missing_env
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("Missing env: {names}");
+        }
         if let Some(ready_url) = ready_url {
             println!("Ready URL: {ready_url}");
         }
@@ -3773,6 +3801,52 @@ fn service_env_set(manifest: &Value) -> BTreeSet<String> {
             .map(ToOwned::to_owned),
     );
     values
+}
+
+fn service_check_config_summary(
+    manifest: &Value,
+    repo_root: Option<&Path>,
+    env_file: Option<&Path>,
+) -> Result<Value> {
+    let required_env = service_env_set(manifest).into_iter().collect::<Vec<_>>();
+    let Some(env_file) = env_file else {
+        return Ok(json!({
+            "checked": false,
+            "configuredEnv": [],
+            "envFile": Value::Null,
+            "missingEnv": [],
+            "requiredEnv": required_env,
+        }));
+    };
+    let repo_root = resolve_repo_root(repo_root)?;
+    let env_file_path = resolve_path(&repo_root, env_file);
+    let configured = env_keys_from_source(&read_text_if_exists(&env_file_path)?);
+    let missing_env = required_env
+        .iter()
+        .filter(|key| !configured.contains(*key))
+        .cloned()
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "checked": true,
+        "configuredEnv": configured.into_iter().collect::<Vec<_>>(),
+        "envFile": display_relative(&repo_root, &env_file_path),
+        "missingEnv": missing_env,
+        "requiredEnv": required_env,
+    }))
+}
+
+fn env_keys_from_source(source: &str) -> BTreeSet<String> {
+    source
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_start();
+            let line = line.strip_prefix("export ").unwrap_or(line);
+            (!line.starts_with('#'))
+                .then(|| line.split_once('=').map(|(key, _)| key.trim().to_owned()))
+                .flatten()
+        })
+        .filter(|key| !key.is_empty())
+        .collect()
 }
 
 fn service_config_set(manifest: &Value) -> BTreeSet<String> {
@@ -5082,7 +5156,7 @@ fn remote_manifest_json(context: &ConsolePackageContext, package_root_name: &str
         "modules": [module],
         "name": service_id,
         "protocol": "lenso.service.v1",
-        "requiredEnv": ["PORT"],
+        "requiredEnv": [],
         "statusPath": "/lenso/service/v1/status",
         "transports": ["http"],
         "version": "0.1.0",
@@ -5149,7 +5223,7 @@ fn remote_catalog_entry_json(context: &ConsolePackageContext) -> Value {
         ],
         "name": service_id.clone(),
         "service": {
-            "requiredEnv": ["PORT"],
+            "requiredEnv": [],
             "statusPath": "/lenso/service/v1/status",
             "statusUrl": "https://example.com/lenso/service/v1/status",
             "transports": ["http"],
@@ -5531,7 +5605,7 @@ const service = defineService({{
   }},
   modules: [providedModule],
   name: serviceName,
-  requiredEnv: ["PORT"],
+  requiredEnv: [],
   statusPath: "/lenso/service/v1/status",
   transports: ["http"],
   version: "0.1.0",
@@ -11265,11 +11339,13 @@ mod tests {
             manifest_path.to_str().unwrap(),
             ServiceManifestCheckOptions {
                 cwd: None,
+                env_file: None,
                 json: true,
                 manifest_url: None,
                 operation: None,
                 ready_timeout_ms: 10_000,
                 ready_url: None,
+                repo_root: None,
                 sample_input: Some(missing_sample_input),
                 serve_command: None,
             },
@@ -11426,6 +11502,32 @@ mod tests {
             diff["operations"][0]["added"],
             json!(["route:POST /tickets"])
         );
+    }
+
+    #[test]
+    fn service_check_config_summary_reports_missing_env_from_explicit_file() {
+        let root = std::env::temp_dir().join(format!(
+            "lenso-service-config-summary-{}",
+            uuid::Uuid::now_v7()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(".env"), "PORT=4110\n").unwrap();
+        let manifest = json!({
+            "env": [{ "name": "SUPPORT_API_KEY" }],
+            "modules": [{ "name": "support-ticket" }],
+            "name": "support-suite-provider",
+            "requiredEnv": ["PORT"],
+            "version": "0.1.0"
+        });
+
+        let config =
+            service_check_config_summary(&manifest, Some(&root), Some(Path::new(".env"))).unwrap();
+
+        assert_eq!(config["checked"], json!(true));
+        assert_eq!(config["requiredEnv"], json!(["PORT", "SUPPORT_API_KEY"]));
+        assert_eq!(config["configuredEnv"], json!(["PORT"]));
+        assert_eq!(config["missingEnv"], json!(["SUPPORT_API_KEY"]));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

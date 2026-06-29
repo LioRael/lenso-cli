@@ -269,6 +269,7 @@ lenso service workspace check
 lenso service workspace check support-suite-provider --json
 lenso service verify
 lenso service verify support-suite-provider --json
+lenso service verify ./lenso.service.json --env-file .env --json
 ```
 
 Use `lenso service dev --no-workspace` when only installed
@@ -280,7 +281,8 @@ host tries to load the provider.
 
 `lenso service verify` is the release-readiness entrypoint. With no argument it
 checks `./lenso.service.json`; with a provider name it reuses the installed
-service doctor checks.
+service doctor checks. Pass `--env-file` to include required/missing service env
+in the verification report.
 
 Preview service upgrade impact before writing host-local state:
 

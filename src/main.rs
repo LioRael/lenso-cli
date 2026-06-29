@@ -1327,11 +1327,13 @@ async fn run_service_check_or_doctor(
                 .unwrap_or("./lenso.service.json"),
             module::ServiceManifestCheckOptions {
                 cwd: args.cwd.clone(),
+                env_file: args.env_file.clone(),
                 json: args.json,
                 manifest_url: args.manifest_url.clone(),
                 operation: args.operation.clone(),
                 ready_timeout_ms: args.ready_timeout_ms,
                 ready_url: args.ready_url.clone(),
+                repo_root: args.repo_root.clone(),
                 sample_input: args.sample_input.clone(),
                 serve_command: args.serve_command.clone(),
             },
