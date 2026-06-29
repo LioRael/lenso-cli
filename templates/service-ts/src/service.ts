@@ -15,7 +15,7 @@ export const moduleRelease = defineModuleRelease({
   version: "0.1.0",
   provider: {
     name: "{{service_name}}",
-    serviceManifest: "http://127.0.0.1:4100/lenso/service/v1/manifest",
+    serviceManifest: "{{local_service_base_url}}/manifest",
   },
   capabilities: ["{{module_name}}.read"],
 });
@@ -33,7 +33,7 @@ export const service = defineService({
         name: "{{service_name}}",
         command: "pnpm start",
         cwd: {{service_cwd}},
-        readyUrl: "http://127.0.0.1:4100/lenso/service/v1/status",
+        readyUrl: "{{service_status_url}}",
         autoStart: true,
         readyTimeoutMs: 10000,
       },

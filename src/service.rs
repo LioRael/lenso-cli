@@ -1,30 +1,40 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{ServiceCreateArgs, ServiceDevArgs, ServiceLanguage, ServicePackageArgs, host, module};
 
 type PendingWrites = BTreeMap<PathBuf, String>;
-const LOCAL_SERVICE_BASE_URL: &str = "http://127.0.0.1:4100/lenso/service/v1";
+const SERVICE_WORKSPACE_PROTOCOL: &str = "lenso.service-workspace.v1";
+const DEFAULT_SERVICE_WORKSPACE_FILE: &str = "lenso.workspace.json";
+const LEGACY_SERVICE_WORKSPACE_FILE: &str = ".lenso/services.json";
+const SERVICE_WORKSPACE_CHECK_TIMEOUT_MS: u64 = 2_000;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ServiceCreateOptions {
     pub(crate) dry_run: bool,
     pub(crate) lang: ServiceLanguage,
     pub(crate) name: String,
+    pub(crate) no_workspace: bool,
     pub(crate) output_dir: Option<PathBuf>,
+    pub(crate) port: u16,
+    pub(crate) workspace_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct ServiceDevOptions {
     pub(crate) module_services_file: Option<PathBuf>,
+    pub(crate) no_workspace: bool,
     pub(crate) repo_root: Option<PathBuf>,
     pub(crate) separate_worker: bool,
     pub(crate) skip_db: bool,
     pub(crate) skip_migrate: bool,
+    pub(crate) workspace_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -36,13 +46,59 @@ pub(crate) struct ServicePackageOptions {
     pub(crate) service_dir: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ServiceWorkspaceInitOptions {
+    pub(crate) force: bool,
+    pub(crate) workspace_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ServiceWorkspaceAddOptions {
+    pub(crate) command: String,
+    pub(crate) cwd: PathBuf,
+    pub(crate) lang: ServiceLanguage,
+    pub(crate) manifest: String,
+    pub(crate) modules: Vec<String>,
+    pub(crate) name: String,
+    pub(crate) ready_url: String,
+    pub(crate) workspace_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ServiceWorkspaceListOptions {
+    pub(crate) json: bool,
+    pub(crate) workspace_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ServiceWorkspaceCheckOptions {
+    pub(crate) json: bool,
+    pub(crate) service_name: Option<String>,
+    pub(crate) workspace_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ServiceWorkspaceExportOptions {
+    pub(crate) output: Option<PathBuf>,
+    pub(crate) workspace_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ServiceWorkspaceInstallReference {
+    pub(crate) base_url: Option<String>,
+    pub(crate) manifest_reference: String,
+}
+
 impl From<&ServiceCreateArgs> for ServiceCreateOptions {
     fn from(args: &ServiceCreateArgs) -> Self {
         Self {
             dry_run: args.dry_run,
             lang: args.lang,
             name: args.name.clone(),
+            no_workspace: args.no_workspace,
             output_dir: args.output_dir.clone(),
+            port: args.port,
+            workspace_file: args.workspace_file.clone(),
         }
     }
 }
@@ -51,10 +107,12 @@ impl From<&ServiceDevArgs> for ServiceDevOptions {
     fn from(args: &ServiceDevArgs) -> Self {
         Self {
             module_services_file: args.module_services_file.clone(),
+            no_workspace: args.no_workspace,
             repo_root: args.repo_root.clone(),
             separate_worker: args.separate_worker,
             skip_db: args.skip_db,
             skip_migrate: args.skip_migrate,
+            workspace_file: args.workspace_file.clone(),
         }
     }
 }
@@ -79,6 +137,13 @@ pub(crate) fn create_service(options: ServiceCreateOptions) -> Result<()> {
 }
 
 pub(crate) async fn dev_service(options: ServiceDevOptions) -> Result<()> {
+    let repo_root = options
+        .repo_root
+        .as_deref()
+        .unwrap_or_else(|| Path::new("."));
+    if !options.no_workspace {
+        start_service_workspace_services(repo_root, options.workspace_file.as_deref()).await?;
+    }
     module::start_declared_module_services(
         options.repo_root.as_deref(),
         options.module_services_file.as_deref(),
@@ -159,6 +224,630 @@ struct ServicePackagePlan {
     package_dir: PathBuf,
     package_manifest_output: PathBuf,
     service_manifest_output: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ServiceWorkspace {
+    protocol: String,
+    #[serde(default)]
+    services: Vec<ServiceWorkspaceService>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ServiceWorkspaceService {
+    name: String,
+    lang: String,
+    cwd: String,
+    manifest: String,
+    command: String,
+    ready_url: String,
+    #[serde(default = "default_auto_start")]
+    auto_start: bool,
+    #[serde(default = "default_ready_timeout_ms")]
+    ready_timeout_ms: u64,
+    #[serde(default)]
+    modules: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ServiceWorkspaceCheckReport {
+    workspace_file: String,
+    status: String,
+    services: Vec<ServiceWorkspaceCheckService>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ServiceWorkspaceCheckService {
+    name: String,
+    lang: String,
+    cwd: String,
+    manifest: String,
+    ready_url: String,
+    auto_start: bool,
+    modules: Vec<String>,
+    cwd_exists: bool,
+    manifest_reachable: bool,
+    ready: bool,
+    status: String,
+    issues: Vec<String>,
+}
+
+pub(crate) fn init_service_workspace(options: ServiceWorkspaceInitOptions) -> Result<()> {
+    let path = service_workspace_path(options.workspace_file.as_deref())?;
+    if path.exists() && !options.force {
+        bail!(
+            "Service workspace already exists: {}. Use --force to replace it.",
+            path.display()
+        );
+    }
+    write_service_workspace(&path, &empty_service_workspace())?;
+    println!("Created service workspace {}.", path.display());
+    Ok(())
+}
+
+pub(crate) fn add_service_workspace_entry(options: ServiceWorkspaceAddOptions) -> Result<()> {
+    let path = service_workspace_path(options.workspace_file.as_deref())?;
+    let workspace_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let modules = if options.modules.is_empty() {
+        vec![provided_module_name(&slugify(&options.name))]
+    } else {
+        options.modules
+    };
+    let service = ServiceWorkspaceService {
+        name: slugify(&options.name),
+        lang: service_language_label(options.lang).to_owned(),
+        cwd: display_relative(workspace_dir, &absolutize_from(workspace_dir, &options.cwd)),
+        manifest: options.manifest,
+        command: options.command,
+        ready_url: options.ready_url,
+        auto_start: true,
+        ready_timeout_ms: default_ready_timeout_ms(),
+        modules,
+    };
+    upsert_service_workspace_service(&path, service)?;
+    println!("Updated service workspace {}.", path.display());
+    Ok(())
+}
+
+pub(crate) fn list_service_workspace(options: ServiceWorkspaceListOptions) -> Result<()> {
+    let path = service_workspace_read_path(options.workspace_file.as_deref())?;
+    let workspace = read_service_workspace(&path)?;
+    if options.json {
+        println!("{}", json_string_pretty(&serde_json::to_value(workspace)?)?);
+        return Ok(());
+    }
+    if workspace.services.is_empty() {
+        println!("No services in {}.", path.display());
+        return Ok(());
+    }
+    for service in workspace.services {
+        println!(
+            "{}\t{}\t{}\t{}",
+            service.name, service.lang, service.cwd, service.ready_url
+        );
+    }
+    Ok(())
+}
+
+pub(crate) async fn check_service_workspace(options: ServiceWorkspaceCheckOptions) -> Result<()> {
+    let path = service_workspace_read_path(options.workspace_file.as_deref())?;
+    let workspace = read_service_workspace(&path)?;
+    let selected_services = workspace
+        .services
+        .iter()
+        .filter(|service| match options.service_name.as_deref() {
+            Some(name) => service.name == name,
+            None => true,
+        })
+        .collect::<Vec<_>>();
+    if selected_services.is_empty() {
+        if let Some(name) = options.service_name {
+            bail!("Service `{name}` was not found in {}", path.display());
+        }
+    }
+
+    let workspace_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut services = Vec::new();
+    for service in selected_services {
+        services.push(check_service_workspace_service(workspace_dir, service).await?);
+    }
+    let status = if services.iter().all(|service| service.status == "ready") {
+        "ready"
+    } else {
+        "needs_attention"
+    }
+    .to_owned();
+    let report = ServiceWorkspaceCheckReport {
+        workspace_file: path_string(&path),
+        status,
+        services,
+    };
+
+    if options.json {
+        println!("{}", json_string_pretty(&report)?);
+    } else {
+        print_service_workspace_check_report(&report);
+    }
+
+    if report.status != "ready" {
+        bail!("Service workspace check found services that need attention");
+    }
+    Ok(())
+}
+
+pub(crate) fn export_service_workspace(options: ServiceWorkspaceExportOptions) -> Result<()> {
+    let path = service_workspace_read_path(options.workspace_file.as_deref())?;
+    let workspace = read_service_workspace(&path)?;
+    let state = service_workspace_module_services_json(&workspace);
+    let source = format!("{}\n", json_string_pretty(&state)?);
+    if let Some(output) = options.output {
+        let current_dir = std::env::current_dir().context("resolve current directory")?;
+        let output = absolutize_from(&current_dir, &output);
+        write_file(&output, source.as_bytes())?;
+        println!("Exported service workspace state to {}.", output.display());
+        return Ok(());
+    }
+    print!("{source}");
+    Ok(())
+}
+
+async fn start_service_workspace_services(
+    repo_root: &Path,
+    workspace_file: Option<&Path>,
+) -> Result<()> {
+    let path = service_workspace_read_path_from(repo_root, workspace_file);
+    if !path.exists() {
+        return Ok(());
+    }
+    let workspace = read_service_workspace(&path)?;
+    if workspace.services.is_empty() {
+        return Ok(());
+    }
+    let state_path = absolutize_from(
+        repo_root,
+        Path::new(".lenso/service-workspace-services.json"),
+    );
+    let state = service_workspace_module_services_json(&workspace);
+    write_file(&state_path, json_string_pretty(&state)?.as_bytes())?;
+    module::start_declared_module_services(Some(repo_root), Some(&state_path)).await
+}
+
+async fn check_service_workspace_service(
+    workspace_dir: &Path,
+    service: &ServiceWorkspaceService,
+) -> Result<ServiceWorkspaceCheckService> {
+    let service_dir = absolutize_from(workspace_dir, Path::new(&service.cwd));
+    let cwd_exists = service_dir.is_dir();
+    let mut issues = Vec::new();
+    if !cwd_exists {
+        issues.push(format!(
+            "service cwd does not exist: {}",
+            service_dir.display()
+        ));
+    }
+
+    let (manifest_reachable, manifest_issue) =
+        check_service_manifest_reachable(&service_dir, &service.manifest).await?;
+    if let Some(issue) = manifest_issue {
+        issues.push(issue);
+    }
+
+    let (ready, ready_issue) = check_http_ok(&service.ready_url, workspace_check_timeout()).await?;
+    if let Some(issue) = ready_issue {
+        issues.push(issue);
+    }
+
+    let status = if !cwd_exists {
+        "missing_cwd"
+    } else if !manifest_reachable {
+        "manifest_unreachable"
+    } else if !ready {
+        "service_not_ready"
+    } else {
+        "ready"
+    }
+    .to_owned();
+
+    Ok(ServiceWorkspaceCheckService {
+        name: service.name.clone(),
+        lang: service.lang.clone(),
+        cwd: path_string(&service_dir),
+        manifest: service.manifest.clone(),
+        ready_url: service.ready_url.clone(),
+        auto_start: service.auto_start,
+        modules: service.modules.clone(),
+        cwd_exists,
+        manifest_reachable,
+        ready,
+        status,
+        issues,
+    })
+}
+
+async fn check_service_manifest_reachable(
+    service_dir: &Path,
+    manifest: &str,
+) -> Result<(bool, Option<String>)> {
+    if is_http_reference(manifest) {
+        let (ok, issue) = check_http_json(manifest, workspace_check_timeout()).await?;
+        return Ok((
+            ok,
+            issue.map(|issue| format!("manifest unreachable: {issue}")),
+        ));
+    }
+
+    let manifest_path = absolutize_from(service_dir, Path::new(manifest));
+    let source = match fs::read_to_string(&manifest_path) {
+        Ok(source) => source,
+        Err(error) => {
+            return Ok((
+                false,
+                Some(format!(
+                    "manifest unreadable: {} ({error})",
+                    manifest_path.display()
+                )),
+            ));
+        }
+    };
+    if let Err(error) = serde_json::from_str::<Value>(&source) {
+        return Ok((
+            false,
+            Some(format!(
+                "manifest is not valid JSON: {} ({error})",
+                manifest_path.display()
+            )),
+        ));
+    }
+    Ok((true, None))
+}
+
+async fn check_http_json(url: &str, timeout: Duration) -> Result<(bool, Option<String>)> {
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .context("build service workspace check client")?;
+    let response = match client.get(url).send().await {
+        Ok(response) => response,
+        Err(error) => return Ok((false, Some(error.to_string()))),
+    };
+    let status = response.status();
+    if !status.is_success() {
+        return Ok((false, Some(format!("HTTP {status}"))));
+    }
+    match response.json::<Value>().await {
+        Ok(_) => Ok((true, None)),
+        Err(error) => Ok((false, Some(format!("invalid JSON response ({error})")))),
+    }
+}
+
+async fn check_http_ok(url: &str, timeout: Duration) -> Result<(bool, Option<String>)> {
+    if !is_http_reference(url) {
+        return Ok((false, Some(format!("ready URL is not HTTP: {url}"))));
+    }
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .context("build service workspace check client")?;
+    let response = match client.get(url).send().await {
+        Ok(response) => response,
+        Err(error) => return Ok((false, Some(format!("ready URL failed: {error}")))),
+    };
+    let status = response.status();
+    if status.is_success() {
+        Ok((true, None))
+    } else {
+        Ok((false, Some(format!("ready URL returned HTTP {status}"))))
+    }
+}
+
+fn workspace_check_timeout() -> Duration {
+    Duration::from_millis(SERVICE_WORKSPACE_CHECK_TIMEOUT_MS)
+}
+
+fn print_service_workspace_check_report(report: &ServiceWorkspaceCheckReport) {
+    println!("Service workspace: {}", report.workspace_file);
+    if report.services.is_empty() {
+        println!("No services declared.");
+        return;
+    }
+    for service in &report.services {
+        println!("{}: {}", service.name, service.status);
+        println!("  lang: {}", service.lang);
+        println!("  cwd: {}", service.cwd);
+        println!("  manifest: {}", service.manifest);
+        println!("  readyUrl: {}", service.ready_url);
+        if !service.modules.is_empty() {
+            println!("  modules: {}", service.modules.join(", "));
+        }
+        for issue in &service.issues {
+            println!("  issue: {issue}");
+        }
+    }
+}
+
+fn service_workspace_module_services_json(workspace: &ServiceWorkspace) -> Value {
+    serde_json::json!({
+        "version": 1,
+        "modules": workspace.services.iter().map(|service| {
+            serde_json::json!({
+                "moduleName": service.name,
+                "services": [
+                    {
+                        "name": service.name,
+                        "command": service.command,
+                        "cwd": service.cwd,
+                        "readyUrl": service.ready_url,
+                        "autoStart": service.auto_start,
+                        "readyTimeoutMs": service.ready_timeout_ms,
+                    }
+                ],
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+fn queue_service_workspace_update(
+    pending_writes: &mut PendingWrites,
+    scaffold: &ServiceScaffold,
+    options: &ServiceCreateOptions,
+    lang: &str,
+    command: &str,
+) -> Result<()> {
+    if options.no_workspace {
+        return Ok(());
+    }
+    let path = service_workspace_path(options.workspace_file.as_deref())?;
+    let workspace_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut workspace = read_service_workspace(&path)?;
+    upsert_service_workspace(
+        &mut workspace,
+        ServiceWorkspaceService {
+            name: scaffold.service_name.clone(),
+            lang: lang.to_owned(),
+            cwd: display_relative(workspace_dir, &scaffold.target_dir),
+            manifest: "lenso.service.json".to_owned(),
+            command: command.to_owned(),
+            ready_url: scaffold.service_status_url.clone(),
+            auto_start: true,
+            ready_timeout_ms: default_ready_timeout_ms(),
+            modules: vec![scaffold.module_name.clone()],
+        },
+    );
+    pending_writes.insert(path, format!("{}\n", json_string_pretty(&workspace)?));
+    Ok(())
+}
+
+fn upsert_service_workspace_service(path: &Path, service: ServiceWorkspaceService) -> Result<()> {
+    let mut workspace = read_service_workspace(path)?;
+    upsert_service_workspace(&mut workspace, service);
+    write_service_workspace(path, &workspace)
+}
+
+fn upsert_service_workspace(workspace: &mut ServiceWorkspace, service: ServiceWorkspaceService) {
+    if let Some(existing) = workspace
+        .services
+        .iter_mut()
+        .find(|existing| existing.name == service.name)
+    {
+        *existing = service;
+        return;
+    }
+    workspace.services.push(service);
+    workspace
+        .services
+        .sort_by(|left, right| left.name.cmp(&right.name));
+}
+
+fn read_service_workspace(path: &Path) -> Result<ServiceWorkspace> {
+    if !path.exists() {
+        return Ok(empty_service_workspace());
+    }
+    let source = fs::read_to_string(path)
+        .with_context(|| format!("read service workspace {}", path.display()))?;
+    let workspace: ServiceWorkspace = serde_json::from_str(&source)
+        .with_context(|| format!("parse service workspace {}", path.display()))?;
+    if workspace.protocol != SERVICE_WORKSPACE_PROTOCOL {
+        bail!(
+            "Service workspace {} uses unsupported protocol `{}`",
+            path.display(),
+            workspace.protocol
+        );
+    }
+    Ok(workspace)
+}
+
+fn write_service_workspace(path: &Path, workspace: &ServiceWorkspace) -> Result<()> {
+    write_file(
+        path,
+        format!("{}\n", json_string_pretty(workspace)?).as_bytes(),
+    )
+}
+
+fn empty_service_workspace() -> ServiceWorkspace {
+    ServiceWorkspace {
+        protocol: SERVICE_WORKSPACE_PROTOCOL.to_owned(),
+        services: Vec::new(),
+    }
+}
+
+fn service_workspace_path(workspace_file: Option<&Path>) -> Result<PathBuf> {
+    let current_dir = std::env::current_dir().context("resolve current directory")?;
+    Ok(service_workspace_path_from(&current_dir, workspace_file))
+}
+
+fn service_workspace_read_path(workspace_file: Option<&Path>) -> Result<PathBuf> {
+    let current_dir = std::env::current_dir().context("resolve current directory")?;
+    Ok(service_workspace_read_path_from(
+        &current_dir,
+        workspace_file,
+    ))
+}
+
+fn service_workspace_path_from(base: &Path, workspace_file: Option<&Path>) -> PathBuf {
+    absolutize_from(
+        base,
+        workspace_file.unwrap_or_else(|| Path::new(DEFAULT_SERVICE_WORKSPACE_FILE)),
+    )
+}
+
+fn service_workspace_read_path_from(base: &Path, workspace_file: Option<&Path>) -> PathBuf {
+    if workspace_file.is_some() {
+        return service_workspace_path_from(base, workspace_file);
+    }
+    let default_path = service_workspace_path_from(base, None);
+    if default_path.exists() {
+        return default_path;
+    }
+    let legacy_path = absolutize_from(base, Path::new(LEGACY_SERVICE_WORKSPACE_FILE));
+    if legacy_path.exists() {
+        return legacy_path;
+    }
+    default_path
+}
+
+pub(crate) fn infer_workspace_base_url_for_manifest(
+    manifest_reference: &str,
+    repo_root: Option<&Path>,
+    workspace_file: Option<&Path>,
+) -> Result<Option<String>> {
+    if is_http_reference(manifest_reference) {
+        return Ok(None);
+    }
+    let current_dir = std::env::current_dir().context("resolve current directory")?;
+    let repo_root = repo_root
+        .map(|path| absolutize_from(&current_dir, path))
+        .unwrap_or_else(|| current_dir.clone());
+    let workspace_path = service_workspace_read_path_from(&repo_root, workspace_file);
+    if !workspace_path.exists() {
+        return Ok(None);
+    }
+
+    let workspace = read_service_workspace(&workspace_path)?;
+    let workspace_dir = workspace_path.parent().unwrap_or_else(|| Path::new("."));
+    let requested_manifest = comparable_path(&absolutize_from(
+        &current_dir,
+        Path::new(manifest_reference),
+    ));
+    for service in &workspace.services {
+        if is_http_reference(&service.manifest) {
+            continue;
+        }
+        let service_manifest = comparable_path(&service_workspace_manifest_path(
+            workspace_dir,
+            &service.cwd,
+            &service.manifest,
+        ));
+        if service_manifest == requested_manifest {
+            return Ok(service_workspace_base_url(service));
+        }
+    }
+
+    Ok(None)
+}
+
+pub(crate) fn resolve_workspace_install_reference(
+    reference: &str,
+    repo_root: Option<&Path>,
+    workspace_file: Option<&Path>,
+) -> Result<Option<ServiceWorkspaceInstallReference>> {
+    if is_http_reference(reference) {
+        return Ok(None);
+    }
+    let current_dir = std::env::current_dir().context("resolve current directory")?;
+    let repo_root = repo_root
+        .map(|path| absolutize_from(&current_dir, path))
+        .unwrap_or_else(|| current_dir.clone());
+    let workspace_path = service_workspace_read_path_from(&repo_root, workspace_file);
+    if !workspace_path.exists() {
+        return Ok(None);
+    }
+
+    let workspace = read_service_workspace(&workspace_path)?;
+    let Some(service) = workspace
+        .services
+        .iter()
+        .find(|service| service.name == reference)
+    else {
+        return Ok(None);
+    };
+
+    let workspace_dir = workspace_path.parent().unwrap_or_else(|| Path::new("."));
+    let manifest_reference = if is_http_reference(&service.manifest) {
+        service.manifest.clone()
+    } else {
+        path_string(&service_workspace_manifest_path(
+            workspace_dir,
+            &service.cwd,
+            &service.manifest,
+        ))
+    };
+    Ok(Some(ServiceWorkspaceInstallReference {
+        base_url: service_workspace_base_url(service),
+        manifest_reference,
+    }))
+}
+
+fn service_workspace_manifest_path(
+    workspace_dir: &Path,
+    service_cwd: &str,
+    manifest: &str,
+) -> PathBuf {
+    let service_dir = absolutize_from(workspace_dir, Path::new(service_cwd));
+    absolutize_from(&service_dir, Path::new(manifest))
+}
+
+fn service_workspace_base_url(service: &ServiceWorkspaceService) -> Option<String> {
+    service_base_url_from_ready_url(&service.ready_url)
+        .or_else(|| service_manifest_base_url(&service.manifest))
+}
+
+fn service_manifest_base_url(manifest: &str) -> Option<String> {
+    if !is_http_reference(manifest) {
+        return None;
+    }
+    let mut url = reqwest::Url::parse(manifest).ok()?;
+    let path = url.path().trim_end_matches('/').to_owned();
+    let base_path = path.strip_suffix("/manifest")?.to_owned();
+    url.set_path(&base_path);
+    url.set_query(None);
+    url.set_fragment(None);
+    Some(url.as_str().trim_end_matches('/').to_owned())
+}
+
+fn service_base_url_from_ready_url(ready_url: &str) -> Option<String> {
+    let mut url = reqwest::Url::parse(ready_url).ok()?;
+    let path = url.path().trim_end_matches('/').to_owned();
+    let base_path = ["/status", "/ready", "/health", "/healthz"]
+        .iter()
+        .find_map(|suffix| path.strip_suffix(suffix))
+        .map(ToOwned::to_owned)?;
+    url.set_path(&base_path);
+    url.set_query(None);
+    url.set_fragment(None);
+    Some(url.as_str().trim_end_matches('/').to_owned())
+}
+
+fn comparable_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn service_language_label(lang: ServiceLanguage) -> &'static str {
+    match lang {
+        ServiceLanguage::Rust => "rust",
+        ServiceLanguage::Ts => "ts",
+    }
+}
+
+const fn default_auto_start() -> bool {
+    true
+}
+
+const fn default_ready_timeout_ms() -> u64 {
+    10_000
 }
 
 async fn service_package_plan(options: &ServicePackageOptions) -> Result<ServicePackagePlan> {
@@ -473,6 +1162,7 @@ fn create_ts_service(options: ServiceCreateOptions) -> Result<()> {
         include_str!("../templates/service-ts/lenso.service.json.tmpl"),
         &scaffold,
     );
+    queue_service_workspace_update(&mut pending_writes, &scaffold, &options, "ts", "pnpm start")?;
     finish_service_create(&scaffold, pending_writes, options.dry_run, "pnpm install")
 }
 
@@ -497,6 +1187,13 @@ fn create_rust_service(options: ServiceCreateOptions) -> Result<()> {
         include_str!("../templates/service-rust/lenso.service.json.tmpl"),
         &scaffold,
     );
+    queue_service_workspace_update(
+        &mut pending_writes,
+        &scaffold,
+        &options,
+        "rust",
+        "cargo run",
+    )?;
     finish_service_create(&scaffold, pending_writes, options.dry_run, "cargo check")
 }
 
@@ -522,7 +1219,7 @@ fn finish_service_create(
     println!("- lenso service package --check");
     println!(
         "- {}",
-        local_service_install_command(&scaffold.repo_root_display)
+        local_service_install_command(&scaffold.service_name, &scaffold.repo_root_display)
     );
     if let Some(note) = &scaffold.publish_note {
         println!("- {note}");
@@ -534,6 +1231,7 @@ fn finish_service_create(
 struct ServiceScaffold {
     crate_name: String,
     lenso_service_dependency: String,
+    local_service_base_url: String,
     module_name: String,
     output_root: PathBuf,
     package_name: String,
@@ -545,6 +1243,8 @@ struct ServiceScaffold {
     service_kit_dependency: String,
     service_label: String,
     service_name: String,
+    service_port: u16,
+    service_status_url: String,
     target_dir: PathBuf,
     target_dir_display: String,
 }
@@ -567,9 +1267,11 @@ fn service_scaffold(options: &ServiceCreateOptions) -> Result<ServiceScaffold> {
     }
     let module_name = provided_module_name(&service_name);
     let dependencies = service_dependencies();
+    let local_service_base_url = format!("http://127.0.0.1:{}/lenso/service/v1", options.port);
     Ok(ServiceScaffold {
         crate_name: snake_case(&service_name),
         lenso_service_dependency: dependencies.lenso_service_dependency,
+        local_service_base_url: local_service_base_url.clone(),
         module_name: module_name.clone(),
         output_root,
         package_name: service_name.clone(),
@@ -581,6 +1283,8 @@ fn service_scaffold(options: &ServiceCreateOptions) -> Result<ServiceScaffold> {
         service_kit_dependency: dependencies.service_kit_dependency,
         service_label: label_from_slug(&module_name),
         service_name,
+        service_port: options.port,
+        service_status_url: format!("{local_service_base_url}/status"),
         target_dir_display: display_relative(&current_dir, &target_dir),
         target_dir,
     })
@@ -600,6 +1304,12 @@ fn render_template(template: &str, scaffold: &ServiceScaffold) -> String {
     template
         .replace("{{service_name}}", &scaffold.service_name)
         .replace("{{service_label}}", &scaffold.service_label)
+        .replace("{{service_port}}", &scaffold.service_port.to_string())
+        .replace(
+            "{{local_service_base_url}}",
+            &scaffold.local_service_base_url,
+        )
+        .replace("{{service_status_url}}", &scaffold.service_status_url)
         .replace("{{module_name}}", &scaffold.module_name)
         .replace("{{package_name}}", &scaffold.package_name)
         .replace("{{crate_name}}", &scaffold.crate_name)
@@ -682,15 +1392,20 @@ fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("string serialization is infallible")
 }
 
+fn json_string_pretty<T: Serialize>(value: &T) -> Result<String> {
+    serde_json::to_string_pretty(value).context("serialize JSON")
+}
+
 fn toml_string(path: &Path) -> String {
     path.to_string_lossy()
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
 }
 
-fn local_service_install_command(repo_root: &str) -> String {
+fn local_service_install_command(service_name: &str, repo_root: &str) -> String {
     format!(
-        "lenso service install ./lenso.service.json --base-url {LOCAL_SERVICE_BASE_URL} --repo-root {}",
+        "lenso service install {} --repo-root {}",
+        shell_arg(service_name),
         shell_arg(repo_root)
     )
 }
@@ -784,10 +1499,19 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
 
+    fn test_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("lenso-cli-service-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     fn scaffold() -> ServiceScaffold {
         ServiceScaffold {
             crate_name: "support_suite_provider".to_owned(),
             lenso_service_dependency: "lenso-service = \"0.1.0\"".to_owned(),
+            local_service_base_url: "http://127.0.0.1:4110/lenso/service/v1".to_owned(),
             module_name: "support-suite".to_owned(),
             output_root: PathBuf::from("/tmp/services"),
             package_name: "support-suite-provider".to_owned(),
@@ -799,20 +1523,197 @@ mod tests {
             service_kit_dependency: json_string("0.1.0"),
             service_label: "Support Suite".to_owned(),
             service_name: "support-suite-provider".to_owned(),
+            service_port: 4110,
+            service_status_url: "http://127.0.0.1:4110/lenso/service/v1/status".to_owned(),
             target_dir: PathBuf::from("/tmp/services/support-suite-provider"),
             target_dir_display: "/tmp/services/support-suite-provider".to_owned(),
         }
     }
 
     #[test]
-    fn install_command_uses_local_manifest_and_base_url() {
-        let command = local_service_install_command(&scaffold().repo_root_display);
+    fn install_command_uses_service_name_and_repo_root() {
+        let scaffold = scaffold();
+        let command =
+            local_service_install_command(&scaffold.service_name, &scaffold.repo_root_display);
 
         assert_eq!(
             command,
-            "lenso service install ./lenso.service.json --base-url http://127.0.0.1:4100/lenso/service/v1 --repo-root /tmp/host"
+            "lenso service install support-suite-provider --repo-root /tmp/host"
         );
-        assert!(!command.contains("support-suite-provider"));
+        assert!(!command.contains("--base-url"));
+    }
+
+    #[test]
+    fn service_workspace_read_path_falls_back_to_lenso_services_json() {
+        let root = test_dir("workspace-fallback");
+        let legacy = root.join(".lenso/services.json");
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(&legacy, "{}").unwrap();
+
+        assert_eq!(service_workspace_read_path_from(&root, None), legacy);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn service_workspace_base_url_infers_from_local_manifest_path() {
+        let root = test_dir("workspace-base-url");
+        let service_dir = root.join("services/support-suite-provider");
+        fs::create_dir_all(&service_dir).unwrap();
+        let manifest = service_dir.join("lenso.service.json");
+        fs::write(&manifest, "{}").unwrap();
+        write_service_workspace(
+            &root.join("lenso.workspace.json"),
+            &ServiceWorkspace {
+                protocol: SERVICE_WORKSPACE_PROTOCOL.to_owned(),
+                services: vec![ServiceWorkspaceService {
+                    auto_start: true,
+                    command: "pnpm start".to_owned(),
+                    cwd: "services/support-suite-provider".to_owned(),
+                    lang: "ts".to_owned(),
+                    manifest: "lenso.service.json".to_owned(),
+                    modules: vec!["support-suite".to_owned()],
+                    name: "support-suite-provider".to_owned(),
+                    ready_timeout_ms: 10_000,
+                    ready_url: "http://127.0.0.1:4110/lenso/service/v1/status".to_owned(),
+                }],
+            },
+        )
+        .unwrap();
+
+        let inferred =
+            infer_workspace_base_url_for_manifest(&manifest.to_string_lossy(), Some(&root), None)
+                .unwrap();
+
+        assert_eq!(
+            inferred,
+            Some("http://127.0.0.1:4110/lenso/service/v1".to_owned())
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn service_workspace_install_reference_resolves_service_name() {
+        let root = test_dir("workspace-install-reference");
+        let service_dir = root.join("services/support-suite-provider");
+        fs::create_dir_all(&service_dir).unwrap();
+        let manifest = service_dir.join("lenso.service.json");
+        fs::write(&manifest, "{}").unwrap();
+        write_service_workspace(
+            &root.join("lenso.workspace.json"),
+            &ServiceWorkspace {
+                protocol: SERVICE_WORKSPACE_PROTOCOL.to_owned(),
+                services: vec![ServiceWorkspaceService {
+                    auto_start: true,
+                    command: "pnpm start".to_owned(),
+                    cwd: "services/support-suite-provider".to_owned(),
+                    lang: "ts".to_owned(),
+                    manifest: "lenso.service.json".to_owned(),
+                    modules: vec!["support-suite".to_owned()],
+                    name: "support-suite-provider".to_owned(),
+                    ready_timeout_ms: 10_000,
+                    ready_url: "http://127.0.0.1:4110/lenso/service/v1/status".to_owned(),
+                }],
+            },
+        )
+        .unwrap();
+
+        let resolved =
+            resolve_workspace_install_reference("support-suite-provider", Some(&root), None)
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(resolved.manifest_reference, path_string(&manifest));
+        assert_eq!(
+            resolved.base_url.as_deref(),
+            Some("http://127.0.0.1:4110/lenso/service/v1")
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn export_service_workspace_writes_module_service_state() {
+        let root = test_dir("workspace-export");
+        let workspace_path = root.join("lenso.workspace.json");
+        let output = root.join(".lenso/module-services.json");
+        write_service_workspace(
+            &workspace_path,
+            &ServiceWorkspace {
+                protocol: SERVICE_WORKSPACE_PROTOCOL.to_owned(),
+                services: vec![ServiceWorkspaceService {
+                    auto_start: true,
+                    command: "pnpm start".to_owned(),
+                    cwd: "services/support-suite-provider".to_owned(),
+                    lang: "ts".to_owned(),
+                    manifest: "lenso.service.json".to_owned(),
+                    modules: vec!["support-suite".to_owned()],
+                    name: "support-suite-provider".to_owned(),
+                    ready_timeout_ms: 10_000,
+                    ready_url: "http://127.0.0.1:4110/lenso/service/v1/status".to_owned(),
+                }],
+            },
+        )
+        .unwrap();
+
+        export_service_workspace(ServiceWorkspaceExportOptions {
+            output: Some(output.clone()),
+            workspace_file: Some(workspace_path),
+        })
+        .unwrap();
+
+        let value: Value = serde_json::from_str(&fs::read_to_string(&output).unwrap()).unwrap();
+        assert_eq!(value["version"], 1);
+        assert_eq!(value["modules"][0]["moduleName"], "support-suite-provider");
+        assert_eq!(
+            value["modules"][0]["services"][0]["readyUrl"],
+            "http://127.0.0.1:4110/lenso/service/v1/status"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn service_workspace_upserts_services_and_exports_start_state() {
+        let mut workspace = empty_service_workspace();
+        upsert_service_workspace(
+            &mut workspace,
+            ServiceWorkspaceService {
+                auto_start: true,
+                command: "pnpm start".to_owned(),
+                cwd: "services/support-suite-provider".to_owned(),
+                lang: "ts".to_owned(),
+                manifest: "lenso.service.json".to_owned(),
+                modules: vec!["support-suite".to_owned()],
+                name: "support-suite-provider".to_owned(),
+                ready_timeout_ms: 10_000,
+                ready_url: "http://127.0.0.1:4110/lenso/service/v1/status".to_owned(),
+            },
+        );
+        upsert_service_workspace(
+            &mut workspace,
+            ServiceWorkspaceService {
+                auto_start: true,
+                command: "cargo run".to_owned(),
+                cwd: "services/audit-provider".to_owned(),
+                lang: "rust".to_owned(),
+                manifest: "lenso.service.json".to_owned(),
+                modules: vec!["audit".to_owned()],
+                name: "audit-provider".to_owned(),
+                ready_timeout_ms: 10_000,
+                ready_url: "http://127.0.0.1:4130/lenso/service/v1/status".to_owned(),
+            },
+        );
+
+        assert_eq!(workspace.services[0].name, "audit-provider");
+        let state = service_workspace_module_services_json(&workspace);
+
+        assert_eq!(state["modules"][0]["moduleName"], "audit-provider");
+        assert_eq!(
+            state["modules"][1]["services"][0]["readyUrl"],
+            "http://127.0.0.1:4110/lenso/service/v1/status"
+        );
     }
 
     #[test]
@@ -831,7 +1732,7 @@ mod tests {
         assert_eq!(manifest["install"]["services"][0]["command"], "pnpm start");
         assert_eq!(
             manifest["install"]["services"][0]["readyUrl"],
-            "http://127.0.0.1:4100/lenso/service/v1/status"
+            "http://127.0.0.1:4110/lenso/service/v1/status"
         );
         assert_eq!(manifest["install"]["services"][0]["autoStart"], json!(true));
         assert_eq!(
@@ -856,7 +1757,7 @@ mod tests {
         assert_eq!(manifest["install"]["services"][0]["command"], "cargo run");
         assert_eq!(
             manifest["install"]["services"][0]["readyUrl"],
-            "http://127.0.0.1:4100/lenso/service/v1/status"
+            "http://127.0.0.1:4110/lenso/service/v1/status"
         );
         assert_eq!(manifest["install"]["services"][0]["autoStart"], json!(true));
         assert_eq!(

@@ -74,13 +74,25 @@ For a standalone service provider:
 
 ```sh
 lenso service create support-suite-provider --lang ts --output-dir ../services
-lenso service create support-suite-provider --lang rust --output-dir ../services
+lenso service create support-suite-provider --lang rust --output-dir ../services --port 4110
 ```
 
 The generated provider includes a `lenso.service.json` manifest and a minimal
 service process. A service name ending in `-provider` or `-service` provides a
 module named without that suffix, so `support-suite-provider` provides
 `support-suite`.
+`service create` also updates `lenso.workspace.json` unless `--no-workspace` is
+set. That workspace file is the local service plane for development:
+
+```sh
+lenso service workspace list
+lenso service dev
+```
+
+`lenso service dev` starts workspace services first, then starts declared
+installed services from `.lenso/module-services.json`, then runs the host.
+Workspace reads prefer `lenso.workspace.json` and also accept the older
+`.lenso/services.json` path for compatibility.
 Generated TS and Rust services also support `--check-release` to print the
 development module release descriptor before packaging.
 Before handing a service to another app or deployment pipeline, package-check
@@ -169,15 +181,21 @@ For module releases, `module install <module-release.json>` resolves the
 release by source, then records `moduleRelease` provenance in
 `.lenso/module-installs.json` where the source supports a receipt.
 
-Install a service directly when you already have a service manifest URL:
+Install a service directly when you have a workspace service name or manifest
+reference:
 
 ```sh
+lenso service install support-suite-provider
 lenso service install https://example.com/lenso/service/v1/manifest
-lenso service install ./lenso.service.json --base-url http://127.0.0.1:4100/lenso/service/v1
+lenso service install ./lenso.service.json --repo-root ../my-lenso-host
 ```
 
-Local manifest files need `--base-url` so the host records the runtime service
-endpoint rather than the file path.
+When the first argument matches a service in `lenso.workspace.json` or
+`.lenso/services.json`, the CLI resolves its manifest and infers `--base-url`
+from the service `readyUrl`. Local source manifests registered in the workspace
+also infer `--base-url`; package artifacts outside that workspace still need
+`--base-url` so the host records the runtime service endpoint rather than the
+file path.
 
 Service installs update `REMOTE_MODULES`, copy declared Runtime Console bundles to
 `.lenso/console/extensions`, update `.lenso/console/extensions/registry.json`,
@@ -241,6 +259,28 @@ with:
 ```sh
 lenso service dev
 lenso service dev --skip-db --skip-migrate
+lenso service dev --workspace-file lenso.workspace.json
+```
+
+After the service processes are running, check the workspace from another shell:
+
+```sh
+lenso service workspace check
+lenso service workspace check support-suite-provider --json
+```
+
+Use `lenso service dev --no-workspace` when only installed
+`.lenso/module-services.json` providers should start.
+
+`lenso service workspace check` verifies that each declared service directory
+exists, its manifest is reachable, and its `readyUrl` is responding before the
+host tries to load the provider.
+
+Export workspace services into the host service-start state format when a script
+or deployment handoff should consume the same service declarations:
+
+```sh
+lenso service workspace export --output .lenso/module-services.json
 ```
 
 Diagnose installed service state with:

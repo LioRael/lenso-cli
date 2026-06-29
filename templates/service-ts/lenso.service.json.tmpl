@@ -16,7 +16,7 @@
         "name": "{{service_name}}",
         "command": "pnpm start",
         "cwd": {{service_cwd}},
-        "readyUrl": "http://127.0.0.1:4100/lenso/service/v1/status",
+        "readyUrl": "{{service_status_url}}",
         "autoStart": true,
         "readyTimeoutMs": 10000
       }

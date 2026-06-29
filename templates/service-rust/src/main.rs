@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let port = std::env::var("PORT")
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
-        .unwrap_or(4100);
+        .unwrap_or({{service_port}});
     let app = Router::new()
         .route("/lenso/service/v1/manifest", get(manifest))
         .merge(lenso_service::health_router());
@@ -48,7 +48,7 @@ fn service_manifest() -> Value {
                     "name": "{{service_name}}",
                     "command": "cargo run",
                     "cwd": {{service_cwd}},
-                    "readyUrl": "http://127.0.0.1:4100/lenso/service/v1/status",
+                    "readyUrl": "{{service_status_url}}",
                     "autoStart": true,
                     "readyTimeoutMs": 10000,
                 },
@@ -72,7 +72,7 @@ fn module_release() -> Value {
         "source": "service",
         "provider": {
             "name": "{{service_name}}",
-            "serviceManifest": "http://127.0.0.1:4100/lenso/service/v1/manifest",
+            "serviceManifest": "{{local_service_base_url}}/manifest",
         },
         "capabilities": ["{{module_name}}.read"],
     })
