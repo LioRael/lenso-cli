@@ -1,5 +1,6 @@
 mod host;
 mod module;
+mod operator;
 mod service;
 
 use clap::{Args, Parser, Subcommand};
@@ -36,11 +37,41 @@ enum Command {
         #[command(subcommand)]
         command: ServiceCommand,
     },
+    /// Manage the Lenso Kubernetes Operator.
+    Operator {
+        #[command(subcommand)]
+        command: OperatorCommand,
+    },
     /// Manage Runtime Console assets, access, and packages.
     Console {
         #[command(subcommand)]
         command: ConsoleCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum OperatorCommand {
+    /// Export the Lenso Kubernetes Operator install bundle.
+    ExportCrd(OperatorExportCrdArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+pub(crate) struct OperatorExportCrdArgs {
+    /// Output directory for CRD, RBAC, deployment, kustomization, and README.
+    #[arg(long)]
+    output: std::path::PathBuf,
+
+    /// Operator image to put in deployment.yaml.
+    #[arg(long, default_value = "ghcr.io/lenso-dev/lenso-operator:latest")]
+    image: String,
+
+    /// Namespace for operator install resources.
+    #[arg(long, default_value = "lenso-system")]
+    namespace: String,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -266,6 +297,13 @@ pub(crate) enum ServiceLanguage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum ServiceDeploymentTargetArg {
     Kubernetes,
+    Operator,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum ServiceDeploymentSourceArg {
+    Kubernetes,
+    Operator,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -596,6 +634,10 @@ struct ServiceDeployStatusArgs {
     /// Read Kubernetes deployment JSON from a file instead of kubectl.
     #[arg(long)]
     from_file: Option<std::path::PathBuf>,
+
+    /// Deployment status source.
+    #[arg(long, value_enum, default_value_t = ServiceDeploymentSourceArg::Kubernetes)]
+    source: ServiceDeploymentSourceArg,
 
     /// Persist the observation to .lenso/service-deployments.json.
     #[arg(long)]
@@ -1636,6 +1678,7 @@ impl From<&ServiceDeployStatusArgs> for module::ServiceDeployStatusOptions {
             json: args.json,
             repo_root: args.repo_root.clone(),
             service_name: args.service_name.clone(),
+            source: service_deployment_source_arg(args.source).to_owned(),
             write_state: args.write_state,
         }
     }
@@ -1658,6 +1701,14 @@ impl From<&ServiceReleasePlanArgs> for module::ServiceReleasePlanOptions {
 const fn service_deployment_target_arg(target: ServiceDeploymentTargetArg) -> &'static str {
     match target {
         ServiceDeploymentTargetArg::Kubernetes => "kubernetes",
+        ServiceDeploymentTargetArg::Operator => "operator",
+    }
+}
+
+const fn service_deployment_source_arg(source: ServiceDeploymentSourceArg) -> &'static str {
+    match source {
+        ServiceDeploymentSourceArg::Kubernetes => "kubernetes",
+        ServiceDeploymentSourceArg::Operator => "operator",
     }
 }
 
@@ -1975,6 +2026,11 @@ async fn main() -> anyhow::Result<()> {
                     module::apply_console_package_install_plan((&args).into()).await?;
                 }
             },
+        },
+        Command::Operator { command } => match command {
+            OperatorCommand::ExportCrd(args) => {
+                operator::export_crd_bundle((&args).into())?;
+            }
         },
         Command::Module { command } => match command {
             ModuleCommand::Create(args) => {
@@ -2483,6 +2539,81 @@ mod tests {
         };
         assert_eq!(status_args.environment_name, "staging");
         assert!(status_args.write_state);
+    }
+
+    #[test]
+    fn parses_operator_export_crd() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "operator",
+            "export-crd",
+            "--output",
+            "dist/lenso-operator/crds",
+            "--namespace",
+            "lenso-system",
+        ]);
+
+        let Command::Operator {
+            command: OperatorCommand::ExportCrd(args),
+        } = cli.command
+        else {
+            panic!("expected operator export-crd");
+        };
+
+        assert_eq!(
+            args.output,
+            std::path::PathBuf::from("dist/lenso-operator/crds")
+        );
+        assert_eq!(args.namespace, "lenso-system");
+    }
+
+    #[test]
+    fn parses_service_deploy_operator_target_and_source() {
+        let export = Cli::parse_from([
+            "lenso",
+            "service",
+            "deploy",
+            "export",
+            "support-suite-provider",
+            "--env",
+            "staging",
+            "--target",
+            "operator",
+            "--output-dir",
+            "dist/operator/staging",
+        ]);
+        let Command::Service {
+            command:
+                ServiceCommand::Deploy {
+                    command: ServiceDeployCommand::Export(export_args),
+                },
+        } = export.command
+        else {
+            panic!("expected service deploy export");
+        };
+        assert_eq!(export_args.target, ServiceDeploymentTargetArg::Operator);
+
+        let status = Cli::parse_from([
+            "lenso",
+            "service",
+            "deploy",
+            "status",
+            "support-suite-provider",
+            "--env",
+            "staging",
+            "--source",
+            "operator",
+        ]);
+        let Command::Service {
+            command:
+                ServiceCommand::Deploy {
+                    command: ServiceDeployCommand::Status(status_args),
+                },
+        } = status.command
+        else {
+            panic!("expected service deploy status");
+        };
+        assert_eq!(status_args.source, ServiceDeploymentSourceArg::Operator);
     }
 
     #[test]

@@ -184,6 +184,7 @@ pub struct ServiceDeployStatusOptions {
     pub json: bool,
     pub repo_root: Option<PathBuf>,
     pub service_name: String,
+    pub source: String,
     pub write_state: bool,
 }
 
@@ -4090,12 +4091,14 @@ fn service_env_check(name: &str, status: &str, detail: &str) -> Value {
 }
 
 pub fn export_service_deployment(options: ServiceDeployExportOptions) -> Result<()> {
-    if options.target != "kubernetes" {
-        bail!(
-            "Unsupported deployment target `{}`; expected kubernetes",
-            options.target
-        );
+    match options.target.as_str() {
+        "kubernetes" => export_kubernetes_service_deployment(options),
+        "operator" => export_operator_service_provider(options),
+        other => bail!("Unsupported deployment target `{other}`; expected kubernetes or operator"),
     }
+}
+
+fn export_kubernetes_service_deployment(options: ServiceDeployExportOptions) -> Result<()> {
     let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
     let environment =
         find_service_environment(&repo_root, &options.service_name, &options.environment_name)?
@@ -4261,7 +4264,132 @@ pub fn export_service_deployment(options: ServiceDeployExportOptions) -> Result<
     Ok(())
 }
 
+fn export_operator_service_provider(options: ServiceDeployExportOptions) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let environment =
+        find_service_environment(&repo_root, &options.service_name, &options.environment_name)?
+            .unwrap_or_else(|| {
+                json!({
+                    "name": options.environment_name,
+                    "serviceName": options.service_name,
+                    "target": "operator",
+                })
+            });
+    let namespace = options
+        .namespace
+        .clone()
+        .or_else(|| string_at(&environment, "/namespace"))
+        .ok_or_else(|| {
+            anyhow!("Kubernetes namespace is required; pass --namespace or configure service env")
+        })?;
+    let image = options
+        .image
+        .clone()
+        .or_else(|| string_at(&environment, "/image"))
+        .ok_or_else(|| {
+            anyhow!("Kubernetes image is required; pass --image or configure service env")
+        })?;
+    let port = options
+        .port
+        .or_else(|| u16_at(&environment, "/config/port"))
+        .unwrap_or(4100);
+    let replicas = options
+        .replicas
+        .or_else(|| u32_at(&environment, "/config/replicas"))
+        .unwrap_or(1);
+    let ingress_host = options
+        .ingress_host
+        .clone()
+        .or_else(|| string_at(&environment, "/config/ingressHost"));
+    let include_hpa = options.hpa || bool_at(&environment, "/config/autoscaling").unwrap_or(false);
+    let include_pdb =
+        options.pdb || bool_at(&environment, "/config/disruptionBudget").unwrap_or(replicas > 1);
+    let include_network_policy =
+        options.network_policy || bool_at(&environment, "/config/networkPolicy").unwrap_or(false);
+    let manifest_reference = service_environment_manifest_reference(&environment);
+    let release = latest_service_release(&repo_root, &options.service_name)?;
+    let release_id = release
+        .as_ref()
+        .and_then(|release| release.get("id").and_then(Value::as_str))
+        .unwrap_or("pending");
+    let service_manifest = installed_service_receipt(&repo_root, &options.service_name)
+        .ok()
+        .and_then(|receipt| receipt.get("serviceManifestSnapshot").cloned())
+        .unwrap_or(Value::Null);
+    let modules = if service_manifest.is_null() {
+        Vec::new()
+    } else {
+        service_module_name_set(&service_manifest)
+            .into_iter()
+            .collect()
+    };
+    let env_names = service_manifest_env_names(&service_manifest);
+    let output_dir = resolve_path(&repo_root, &options.output_dir);
+    fs::create_dir_all(&output_dir)
+        .with_context(|| format!("create directory {}", output_dir.display()))?;
+
+    let deployment_name = kubernetes_name(&options.service_name);
+    let context = KubernetesExportContext {
+        deployment_name: &deployment_name,
+        env_names: &env_names,
+        image: &image,
+        ingress_host: ingress_host.as_deref(),
+        manifest_reference: manifest_reference.as_deref().unwrap_or(""),
+        modules: &modules,
+        namespace: &namespace,
+        port,
+        release_id,
+        replicas,
+        service_name: &options.service_name,
+        environment_name: &options.environment_name,
+    };
+
+    write_file(
+        &output_dir.join("lensoserviceprovider.yaml"),
+        operator_provider_cr_yaml(&context, include_hpa, include_pdb, include_network_policy)
+            .as_bytes(),
+    )?;
+    write_file(
+        &output_dir.join("kustomization.yaml"),
+        b"resources:\n  - lensoserviceprovider.yaml\n",
+    )?;
+    write_file(
+        &output_dir.join("README.md"),
+        operator_provider_export_readme(&context).as_bytes(),
+    )?;
+
+    if options.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "serviceName": options.service_name,
+                "environment": options.environment_name,
+                "target": "operator",
+                "outputDir": output_dir,
+                "files": ["lensoserviceprovider.yaml", "kustomization.yaml", "README.md"],
+            }))?
+        );
+    } else {
+        println!("Wrote LensoServiceProvider files: {}", output_dir.display());
+        println!("next: kubectl apply -k {}", output_dir.display());
+        println!(
+            "next: lenso service deploy status {} --env {} --source operator --write-state",
+            context.service_name, context.environment_name
+        );
+    }
+
+    Ok(())
+}
+
 pub fn status_service_deployment(options: ServiceDeployStatusOptions) -> Result<()> {
+    match options.source.as_str() {
+        "kubernetes" => status_kubernetes_service_deployment(options),
+        "operator" => status_operator_service_deployment(options),
+        other => bail!("Unsupported deployment source `{other}`; expected kubernetes or operator"),
+    }
+}
+
+fn status_kubernetes_service_deployment(options: ServiceDeployStatusOptions) -> Result<()> {
     let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
     let environment =
         find_service_environment(&repo_root, &options.service_name, &options.environment_name)?
@@ -4297,6 +4425,64 @@ pub fn status_service_deployment(options: ServiceDeployStatusOptions) -> Result<
         &deployment,
         service.as_ref(),
         ingress.as_ref(),
+    )?;
+
+    if options.write_state {
+        upsert_service_deployment_observation(
+            &repo_root.join(SERVICE_DEPLOYMENTS_PATH),
+            observation.clone(),
+        )?;
+    }
+
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&observation)?);
+    } else {
+        let state = observation
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        let drift = observation
+            .get("drift")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        let next_action = observation
+            .get("nextAction")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        println!(
+            "Service deployment: {}/{}",
+            options.service_name, options.environment_name
+        );
+        println!("state: {state}");
+        println!("drift: {drift}");
+        println!("next action: {next_action}");
+    }
+
+    Ok(())
+}
+
+fn status_operator_service_deployment(options: ServiceDeployStatusOptions) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let environment =
+        find_service_environment(&repo_root, &options.service_name, &options.environment_name)?
+            .ok_or_else(|| {
+                anyhow!(
+                    "Service environment not found: {}/{}",
+                    options.service_name,
+                    options.environment_name
+                )
+            })?;
+    let provider = if let Some(from_file) = options.from_file.as_deref() {
+        read_json(from_file)?
+    } else {
+        kubectl_get_lenso_service_provider(&environment, &options.service_name)?
+    };
+    let observation = operator_service_deployment_observation(
+        &repo_root,
+        &options.service_name,
+        &options.environment_name,
+        &environment,
+        &provider,
     )?;
 
     if options.write_state {
@@ -4537,6 +4723,84 @@ fn kubernetes_export_files(
     files
 }
 
+fn operator_provider_cr_yaml(
+    context: &KubernetesExportContext<'_>,
+    include_hpa: bool,
+    include_pdb: bool,
+    include_network_policy: bool,
+) -> String {
+    let modules = if context.modules.is_empty() {
+        "  modules: []\n".to_owned()
+    } else {
+        format!(
+            "  modules:\n{}\n",
+            context
+                .modules
+                .iter()
+                .map(|module| format!("    - {module}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
+    let env_from = if context.env_names.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "  envFrom:\n    configMap: {}-config\n    secret: {}-secrets\n",
+            context.deployment_name, context.deployment_name
+        )
+    };
+    let ingress = context.ingress_host.map_or_else(String::new, |host| {
+        format!("  ingress:\n    host: {host}\n")
+    });
+    let autoscaling = if include_hpa {
+        format!(
+            "  autoscaling:\n    enabled: true\n    minReplicas: {min}\n    maxReplicas: {max}\n    targetCpuUtilization: 70\n",
+            min = context.replicas.max(1),
+            max = (context.replicas.max(1) * 3).max(3)
+        )
+    } else {
+        String::new()
+    };
+    let disruption_budget = if include_pdb {
+        "  disruptionBudget:\n    enabled: true\n    minAvailable: 1\n".to_owned()
+    } else {
+        String::new()
+    };
+    let network_policy = if include_network_policy {
+        "  networkPolicy:\n    enabled: true\n".to_owned()
+    } else {
+        String::new()
+    };
+
+    format!(
+        "apiVersion: lenso.dev/v1alpha1\nkind: LensoServiceProvider\nmetadata:\n  name: {name}\n  namespace: {namespace}\n  labels:\n    app.kubernetes.io/part-of: lenso\n    app.kubernetes.io/component: service-provider\n    lenso.dev/service-provider: {service}\n    lenso.dev/environment: {environment}\nspec:\n  serviceName: {service}\n  environment: {environment}\n  image: {image}\n  releaseId: {release_id}\n  manifestReference: {manifest_reference}\n{modules}  replicas: {replicas}\n  port: {port}\n{env_from}{ingress}{autoscaling}{disruption_budget}{network_policy}",
+        name = context.deployment_name,
+        namespace = context.namespace,
+        service = context.service_name,
+        environment = context.environment_name,
+        image = context.image,
+        release_id = context.release_id,
+        manifest_reference = context.manifest_reference,
+        modules = modules,
+        replicas = context.replicas,
+        port = context.port,
+        env_from = env_from,
+        ingress = ingress,
+        autoscaling = autoscaling,
+        disruption_budget = disruption_budget,
+        network_policy = network_policy
+    )
+}
+
+fn operator_provider_export_readme(context: &KubernetesExportContext<'_>) -> String {
+    format!(
+        "# {service} {environment} LensoServiceProvider\n\n```sh\nkubectl apply -k .\nlenso service deploy status {service} --env {environment} --source operator --write-state\n```\n",
+        service = context.service_name,
+        environment = context.environment_name
+    )
+}
+
 fn kubernetes_labels_yaml(context: &KubernetesExportContext<'_>, indent: usize) -> String {
     let prefix = " ".repeat(indent);
     format!(
@@ -4549,6 +4813,10 @@ fn kubernetes_labels_yaml(context: &KubernetesExportContext<'_>, indent: usize) 
 
 fn kubectl_get_deployment(environment: &Value, service_name: &str) -> Result<Value> {
     kubectl_get_named(environment, "deployment", service_name)
+}
+
+fn kubectl_get_lenso_service_provider(environment: &Value, service_name: &str) -> Result<Value> {
+    kubectl_get_named(environment, "lensoserviceprovider", service_name)
 }
 
 fn kubectl_get_named(environment: &Value, kind: &str, service_name: &str) -> Result<Value> {
@@ -4671,6 +4939,110 @@ fn service_deployment_observation(
     }))
 }
 
+fn operator_service_deployment_observation(
+    repo_root: &Path,
+    service_name: &str,
+    environment_name: &str,
+    environment: &Value,
+    provider: &Value,
+) -> Result<Value> {
+    let latest_release = latest_service_release(repo_root, service_name)?;
+    let host_release_id = latest_release
+        .as_ref()
+        .and_then(|release| release.get("id").and_then(Value::as_str))
+        .map(ToOwned::to_owned);
+    let host_candidate_version = latest_release.as_ref().and_then(|release| {
+        release
+            .pointer("/candidate/version")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+    });
+    let status = provider.get("status").unwrap_or(&Value::Null);
+    let state = status
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_owned();
+    let observed_release_id = status
+        .get("observedReleaseId")
+        .and_then(Value::as_str)
+        .filter(|value| *value != "pending")
+        .map(ToOwned::to_owned);
+    let observed_image = status
+        .get("observedImage")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let expected_image = string_at(environment, "/image");
+    let drift = service_deployment_drift(
+        host_release_id.as_deref(),
+        observed_release_id.as_deref(),
+        expected_image.as_deref(),
+        observed_image.as_deref(),
+    );
+    let namespace = provider
+        .pointer("/metadata/namespace")
+        .and_then(Value::as_str)
+        .or_else(|| environment.get("namespace").and_then(Value::as_str))
+        .unwrap_or("default");
+    let resource = provider
+        .pointer("/metadata/name")
+        .and_then(Value::as_str)
+        .unwrap_or(service_name);
+    let ready_replicas = u32_at(status, "/readyReplicas");
+    let desired_replicas = u32_at(status, "/desiredReplicas");
+    let available_replicas = u32_at(status, "/availableReplicas");
+    let manifest_reference = status
+        .get("manifestReference")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| service_environment_manifest_reference(environment));
+    let conditions = status
+        .get("conditions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let next_action = operator_deployment_next_action(&state, &drift);
+
+    Ok(json!({
+        "serviceName": service_name,
+        "environment": environment_name,
+        "target": "operator",
+        "observedAtUnixMs": current_time_millis()?,
+        "state": state,
+        "drift": drift,
+        "operator": {
+            "resource": resource,
+            "namespace": namespace,
+            "observedGeneration": status.get("observedGeneration").and_then(Value::as_u64),
+            "conditions": conditions,
+        },
+        "cluster": {
+            "namespace": namespace,
+            "deployment": resource,
+            "readyReplicas": ready_replicas,
+            "desiredReplicas": desired_replicas,
+            "availableReplicas": available_replicas,
+            "image": observed_image,
+            "releaseId": observed_release_id,
+            "manifestReference": manifest_reference,
+        },
+        "host": {
+            "releaseId": host_release_id,
+            "candidateVersion": host_candidate_version,
+        },
+        "checks": [
+            {
+                "name": "operator_reconcile",
+                "status": if state == "ready" { "ok" } else { "attention" },
+                "detail": format!(
+                    "LensoServiceProvider/{resource} is {state}"
+                ),
+            }
+        ],
+        "nextAction": next_action,
+    }))
+}
+
 fn kubernetes_deployment_state(deployment: &Value) -> String {
     if deployment_failed(deployment) {
         return "failed".to_owned();
@@ -4728,6 +5100,18 @@ fn service_deployment_next_action(state: &str, drift: &str) -> &'static str {
         ("failed", _) => "inspect Kubernetes rollout and pod events",
         ("progressing", _) => "wait for rollout or inspect Kubernetes deployment",
         _ => "refresh deployment status",
+    }
+}
+
+fn operator_deployment_next_action(state: &str, drift: &str) -> &'static str {
+    match (state, drift) {
+        ("ready", "in_sync") => "monitor operator conditions, Remote Calls, and Runtime Story",
+        (_, "image_drift") => "update the LensoServiceProvider image or release environment",
+        (_, "host_ahead") => "wait for the operator to observe the latest release",
+        (_, "cluster_ahead") => "check release ledger before promoting",
+        ("failed", _) => "inspect LensoServiceProvider conditions and provider pods",
+        ("progressing", _) => "wait for operator reconciliation or inspect provider pods",
+        _ => "refresh operator status",
     }
 }
 
@@ -11875,6 +12259,176 @@ mod tests {
                 "networkpolicy.yaml"
             ]
         );
+    }
+
+    #[test]
+    fn service_deploy_export_operator_writes_provider_cr() {
+        let root =
+            std::env::temp_dir().join(format!("lenso-cli-operator-export-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(".lenso")).unwrap();
+        fs::write(
+            root.join(".lenso/service-environments.json"),
+            json!({
+                "version": 1,
+                "environments": [{
+                    "name": "staging",
+                    "serviceName": "support-suite-provider",
+                    "target": "operator",
+                    "namespace": "lenso-staging",
+                    "image": "ghcr.io/acme/support-suite-provider:0.4.0",
+                    "manifestReference": "https://support-staging.example.com/lenso/service/v1/manifest",
+                    "config": {
+                        "port": 4110,
+                        "replicas": 2,
+                        "ingressHost": "support-staging.example.com",
+                        "autoscaling": true,
+                        "disruptionBudget": true,
+                        "networkPolicy": true
+                    }
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            root.join(".lenso/service-releases.json"),
+            json!({
+                "version": 1,
+                "releases": [{
+                    "id": "rel_staging",
+                    "serviceName": "support-suite-provider",
+                    "appliedAtUnixMs": 1,
+                    "environment": {"name": "staging", "target": "operator"},
+                    "candidate": {"version": "0.4.0"}
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let output_dir = root.join("dist/operator/staging");
+
+        export_service_deployment(ServiceDeployExportOptions {
+            environment_name: "staging".to_owned(),
+            image: None,
+            ingress_host: None,
+            json: false,
+            hpa: false,
+            namespace: None,
+            network_policy: false,
+            output_dir: output_dir.clone(),
+            pdb: false,
+            port: None,
+            replicas: None,
+            repo_root: Some(root.clone()),
+            service_name: "support-suite-provider".to_owned(),
+            target: "operator".to_owned(),
+        })
+        .unwrap();
+
+        let cr = fs::read_to_string(output_dir.join("lensoserviceprovider.yaml")).unwrap();
+        assert!(cr.contains("kind: LensoServiceProvider"));
+        assert!(cr.contains("serviceName: support-suite-provider"));
+        assert!(cr.contains("releaseId: rel_staging"));
+        assert!(cr.contains("targetCpuUtilization: 70"));
+        assert!(output_dir.join("kustomization.yaml").exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn service_deploy_status_operator_maps_crd_status_to_observation() {
+        let root =
+            std::env::temp_dir().join(format!("lenso-cli-operator-status-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(".lenso")).unwrap();
+        fs::write(
+            root.join(".lenso/service-environments.json"),
+            json!({
+                "version": 1,
+                "environments": [{
+                    "name": "staging",
+                    "serviceName": "support-suite-provider",
+                    "target": "operator",
+                    "namespace": "lenso-staging",
+                    "image": "ghcr.io/acme/support-suite-provider:0.4.0"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            root.join(".lenso/service-releases.json"),
+            json!({
+                "version": 1,
+                "releases": [{
+                    "id": "rel_staging",
+                    "serviceName": "support-suite-provider",
+                    "appliedAtUnixMs": 1,
+                    "environment": {"name": "staging", "target": "operator"},
+                    "candidate": {"version": "0.4.0"}
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let fixture = root.join("operator-status.json");
+        fs::write(
+            &fixture,
+            json!({
+                "apiVersion": "lenso.dev/v1alpha1",
+                "kind": "LensoServiceProvider",
+                "metadata": {
+                    "name": "support-suite-provider",
+                    "namespace": "lenso-staging",
+                    "generation": 3
+                },
+                "status": {
+                    "state": "ready",
+                    "observedGeneration": 3,
+                    "observedReleaseId": "rel_staging",
+                    "observedImage": "ghcr.io/acme/support-suite-provider:0.4.0",
+                    "readyReplicas": 2,
+                    "desiredReplicas": 2,
+                    "availableReplicas": 2,
+                    "manifestReference": "https://support-staging.example.com/lenso/service/v1/manifest",
+                    "conditions": [{
+                        "type": "Ready",
+                        "status": "True",
+                        "reason": "DeploymentAvailable",
+                        "message": "2/2 replicas are ready.",
+                        "lastTransitionTime": "2026-06-29T00:00:00Z"
+                    }]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        status_service_deployment(ServiceDeployStatusOptions {
+            environment_name: "staging".to_owned(),
+            from_file: Some(fixture),
+            json: false,
+            repo_root: Some(root.clone()),
+            service_name: "support-suite-provider".to_owned(),
+            source: "operator".to_owned(),
+            write_state: true,
+        })
+        .unwrap();
+
+        let observations: Value = serde_json::from_str(
+            &fs::read_to_string(root.join(".lenso/service-deployments.json")).unwrap(),
+        )
+        .unwrap();
+        let observation = &observations["observations"][0];
+        assert_eq!(observation["target"], "operator");
+        assert_eq!(
+            observation["operator"]["resource"],
+            "support-suite-provider"
+        );
+        assert_eq!(observation["drift"], "in_sync");
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
