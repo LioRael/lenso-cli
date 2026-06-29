@@ -77,6 +77,12 @@ pub(crate) struct ServiceWorkspaceCheckOptions {
     pub(crate) workspace_file: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ServiceWorkspaceInstallReference {
+    pub(crate) base_url: Option<String>,
+    pub(crate) manifest_reference: String,
+}
+
 impl From<&ServiceCreateArgs> for ServiceCreateOptions {
     fn from(args: &ServiceCreateArgs) -> Self {
         Self {
@@ -721,6 +727,48 @@ pub(crate) fn infer_workspace_base_url_for_manifest(
     Ok(None)
 }
 
+pub(crate) fn resolve_workspace_install_reference(
+    reference: &str,
+    repo_root: Option<&Path>,
+    workspace_file: Option<&Path>,
+) -> Result<Option<ServiceWorkspaceInstallReference>> {
+    if is_http_reference(reference) {
+        return Ok(None);
+    }
+    let current_dir = std::env::current_dir().context("resolve current directory")?;
+    let repo_root = repo_root
+        .map(|path| absolutize_from(&current_dir, path))
+        .unwrap_or_else(|| current_dir.clone());
+    let workspace_path = service_workspace_read_path_from(&repo_root, workspace_file);
+    if !workspace_path.exists() {
+        return Ok(None);
+    }
+
+    let workspace = read_service_workspace(&workspace_path)?;
+    let Some(service) = workspace
+        .services
+        .iter()
+        .find(|service| service.name == reference)
+    else {
+        return Ok(None);
+    };
+
+    let workspace_dir = workspace_path.parent().unwrap_or_else(|| Path::new("."));
+    let manifest_reference = if is_http_reference(&service.manifest) {
+        service.manifest.clone()
+    } else {
+        path_string(&service_workspace_manifest_path(
+            workspace_dir,
+            &service.cwd,
+            &service.manifest,
+        ))
+    };
+    Ok(Some(ServiceWorkspaceInstallReference {
+        base_url: service_workspace_base_url(service),
+        manifest_reference,
+    }))
+}
+
 fn service_workspace_manifest_path(
     workspace_dir: &Path,
     service_cwd: &str,
@@ -1149,7 +1197,7 @@ fn finish_service_create(
     println!("- lenso service package --check");
     println!(
         "- {}",
-        local_service_install_command(&scaffold.repo_root_display)
+        local_service_install_command(&scaffold.service_name, &scaffold.repo_root_display)
     );
     if let Some(note) = &scaffold.publish_note {
         println!("- {note}");
@@ -1332,9 +1380,10 @@ fn toml_string(path: &Path) -> String {
         .replace('"', "\\\"")
 }
 
-fn local_service_install_command(repo_root: &str) -> String {
+fn local_service_install_command(service_name: &str, repo_root: &str) -> String {
     format!(
-        "lenso service install ./lenso.service.json --repo-root {}",
+        "lenso service install {} --repo-root {}",
+        shell_arg(service_name),
         shell_arg(repo_root)
     )
 }
@@ -1460,16 +1509,16 @@ mod tests {
     }
 
     #[test]
-    fn install_command_uses_local_manifest_and_repo_root() {
+    fn install_command_uses_service_name_and_repo_root() {
         let scaffold = scaffold();
-        let command = local_service_install_command(&scaffold.repo_root_display);
+        let command =
+            local_service_install_command(&scaffold.service_name, &scaffold.repo_root_display);
 
         assert_eq!(
             command,
-            "lenso service install ./lenso.service.json --repo-root /tmp/host"
+            "lenso service install support-suite-provider --repo-root /tmp/host"
         );
         assert!(!command.contains("--base-url"));
-        assert!(!command.contains("support-suite-provider"));
     }
 
     #[test]
@@ -1517,6 +1566,46 @@ mod tests {
         assert_eq!(
             inferred,
             Some("http://127.0.0.1:4110/lenso/service/v1".to_owned())
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn service_workspace_install_reference_resolves_service_name() {
+        let root = test_dir("workspace-install-reference");
+        let service_dir = root.join("services/support-suite-provider");
+        fs::create_dir_all(&service_dir).unwrap();
+        let manifest = service_dir.join("lenso.service.json");
+        fs::write(&manifest, "{}").unwrap();
+        write_service_workspace(
+            &root.join("lenso.workspace.json"),
+            &ServiceWorkspace {
+                protocol: SERVICE_WORKSPACE_PROTOCOL.to_owned(),
+                services: vec![ServiceWorkspaceService {
+                    auto_start: true,
+                    command: "pnpm start".to_owned(),
+                    cwd: "services/support-suite-provider".to_owned(),
+                    lang: "ts".to_owned(),
+                    manifest: "lenso.service.json".to_owned(),
+                    modules: vec!["support-suite".to_owned()],
+                    name: "support-suite-provider".to_owned(),
+                    ready_timeout_ms: 10_000,
+                    ready_url: "http://127.0.0.1:4110/lenso/service/v1/status".to_owned(),
+                }],
+            },
+        )
+        .unwrap();
+
+        let resolved =
+            resolve_workspace_install_reference("support-suite-provider", Some(&root), None)
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(resolved.manifest_reference, path_string(&manifest));
+        assert_eq!(
+            resolved.base_url.as_deref(),
+            Some("http://127.0.0.1:4110/lenso/service/v1")
         );
 
         fs::remove_dir_all(root).unwrap();

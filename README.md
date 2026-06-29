@@ -181,17 +181,21 @@ For module releases, `module install <module-release.json>` resolves the
 release by source, then records `moduleRelease` provenance in
 `.lenso/module-installs.json` where the source supports a receipt.
 
-Install a service directly when you already have a service manifest URL:
+Install a service directly when you have a workspace service name or manifest
+reference:
 
 ```sh
+lenso service install support-suite-provider
 lenso service install https://example.com/lenso/service/v1/manifest
 lenso service install ./lenso.service.json --repo-root ../my-lenso-host
 ```
 
-Local source manifests registered in `lenso.workspace.json` or
-`.lenso/services.json` infer `--base-url` from the service `readyUrl`. Local
-package artifacts outside that workspace still need `--base-url` so the host
-records the runtime service endpoint rather than the file path.
+When the first argument matches a service in `lenso.workspace.json` or
+`.lenso/services.json`, the CLI resolves its manifest and infers `--base-url`
+from the service `readyUrl`. Local source manifests registered in the workspace
+also infer `--base-url`; package artifacts outside that workspace still need
+`--base-url` so the host records the runtime service endpoint rather than the
+file path.
 
 Service installs update `REMOTE_MODULES`, copy declared Runtime Console bundles to
 `.lenso/console/extensions`, update `.lenso/console/extensions/registry.json`,

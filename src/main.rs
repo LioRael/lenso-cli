@@ -1450,14 +1450,25 @@ async fn main() -> anyhow::Result<()> {
             }
             ServiceCommand::Install(args) => {
                 let mut options: module::RemoteModuleInstallOptions = (&args.install).into();
+                let mut manifest_reference = args.install.manifest_reference.clone();
+                if let Some(resolved) = service::resolve_workspace_install_reference(
+                    &manifest_reference,
+                    args.install.repo_root.as_deref(),
+                    args.workspace_file.as_deref(),
+                )? {
+                    manifest_reference = resolved.manifest_reference;
+                    if options.base_url.is_none() {
+                        options.base_url = resolved.base_url;
+                    }
+                }
                 if options.base_url.is_none() {
                     options.base_url = service::infer_workspace_base_url_for_manifest(
-                        &args.install.manifest_reference,
+                        &manifest_reference,
                         args.install.repo_root.as_deref(),
                         args.workspace_file.as_deref(),
                     )?;
                 }
-                module::install_module(&args.install.manifest_reference, options).await?;
+                module::install_module(&manifest_reference, options).await?;
             }
             ServiceCommand::Uninstall(args) => {
                 module::uninstall_remote_module(&args.module_name, (&args).into()).await?;
