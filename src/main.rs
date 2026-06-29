@@ -136,14 +136,18 @@ struct ConsoleUpdateArgs {
 enum ModuleCommand {
     /// Create a linked module or service scaffold.
     Create(ModuleCreateArgs),
-    /// Install a remote source or enable a linked module.
+    /// Install a module capability from a release, catalog entry, service, or linked source.
     Install(RemoteModuleInstallArgs),
+    /// Enable a module capability.
+    Enable(RemoteModuleInstallArgs),
     /// Add a configured service source.
     Add(RemoteModuleInstallArgs),
     /// Reapply an installed module from its install receipt.
     Update(ModuleUpdateArgs),
     /// Remove a remote source or disable a linked module.
     Uninstall(RemoteModuleUninstallArgs),
+    /// Disable a module capability.
+    Disable(RemoteModuleUninstallArgs),
     /// Diagnose installed services.
     Doctor(ModuleDoctorArgs),
     /// Inspect and validate module release artifacts.
@@ -1223,6 +1227,9 @@ async fn main() -> anyhow::Result<()> {
                 warn_module_install_manifest_reference(&args.manifest_reference);
                 module::install_module(&args.manifest_reference, (&args).into()).await?;
             }
+            ModuleCommand::Enable(args) => {
+                module::install_module(&args.manifest_reference, (&args).into()).await?;
+            }
             ModuleCommand::Add(args) => {
                 module::install_module(&args.manifest_reference, (&args).into()).await?;
             }
@@ -1230,6 +1237,9 @@ async fn main() -> anyhow::Result<()> {
                 module::update_module(&args.module_name, (&args).into()).await?;
             }
             ModuleCommand::Uninstall(args) => {
+                module::uninstall_module(&args.module_name, (&args).into()).await?;
+            }
+            ModuleCommand::Disable(args) => {
                 module::uninstall_module(&args.module_name, (&args).into()).await?;
             }
             ModuleCommand::Doctor(args) => {
@@ -1410,6 +1420,27 @@ mod tests {
         };
 
         assert!(args.skip_db);
+    }
+
+    #[test]
+    fn parses_module_enable_disable_aliases() {
+        let cli = Cli::parse_from(["lenso", "module", "enable", "support-ticket"]);
+        let Command::Module {
+            command: ModuleCommand::Enable(enable_args),
+        } = cli.command
+        else {
+            panic!("expected module enable");
+        };
+        assert_eq!(enable_args.manifest_reference, "support-ticket");
+
+        let cli = Cli::parse_from(["lenso", "module", "disable", "support-ticket"]);
+        let Command::Module {
+            command: ModuleCommand::Disable(disable_args),
+        } = cli.command
+        else {
+            panic!("expected module disable");
+        };
+        assert_eq!(disable_args.module_name, "support-ticket");
     }
 
     #[test]
