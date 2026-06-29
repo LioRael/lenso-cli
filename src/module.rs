@@ -4141,7 +4141,11 @@ fn export_kubernetes_service_deployment(options: ServiceDeployExportOptions) -> 
     let include_network_policy =
         options.network_policy || bool_at(&environment, "/config/networkPolicy").unwrap_or(false);
     let manifest_reference = service_environment_manifest_reference(&environment);
-    let release = latest_service_release(&repo_root, &options.service_name)?;
+    let release = latest_service_release_for_env(
+        &repo_root,
+        &options.service_name,
+        &options.environment_name,
+    )?;
     let release_id = release
         .as_ref()
         .and_then(|release| release.get("id").and_then(Value::as_str))
@@ -4307,7 +4311,11 @@ fn export_operator_service_provider(options: ServiceDeployExportOptions) -> Resu
     let include_network_policy =
         options.network_policy || bool_at(&environment, "/config/networkPolicy").unwrap_or(false);
     let manifest_reference = service_environment_manifest_reference(&environment);
-    let release = latest_service_release(&repo_root, &options.service_name)?;
+    let release = latest_service_release_for_env(
+        &repo_root,
+        &options.service_name,
+        &options.environment_name,
+    )?;
     let release_id = release
         .as_ref()
         .and_then(|release| release.get("id").and_then(Value::as_str))
@@ -4849,7 +4857,7 @@ fn service_deployment_observation(
     service: Option<&Value>,
     ingress: Option<&Value>,
 ) -> Result<Value> {
-    let latest_release = latest_service_release(repo_root, service_name)?;
+    let latest_release = latest_service_release_for_env(repo_root, service_name, environment_name)?;
     let host_release_id = latest_release
         .as_ref()
         .and_then(|release| release.get("id").and_then(Value::as_str))
@@ -4946,7 +4954,7 @@ fn operator_service_deployment_observation(
     environment: &Value,
     provider: &Value,
 ) -> Result<Value> {
-    let latest_release = latest_service_release(repo_root, service_name)?;
+    let latest_release = latest_service_release_for_env(repo_root, service_name, environment_name)?;
     let host_release_id = latest_release
         .as_ref()
         .and_then(|release| release.get("id").and_then(Value::as_str))
@@ -5182,25 +5190,6 @@ fn upsert_service_deployment_observation(path: &Path, observation: Value) -> Res
             ))
     });
     write_json(path, &file)
-}
-
-fn latest_service_release(repo_root: &Path, service_name: &str) -> Result<Option<Value>> {
-    let Some(ledger) = read_json_if_exists(&repo_root.join(SERVICE_RELEASE_LEDGER_PATH))? else {
-        return Ok(None);
-    };
-    Ok(ledger
-        .get("releases")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|release| release.get("serviceName").and_then(Value::as_str) == Some(service_name))
-        .max_by_key(|release| {
-            release
-                .get("appliedAtUnixMs")
-                .and_then(Value::as_u64)
-                .unwrap_or(0)
-        })
-        .cloned())
 }
 
 fn latest_service_release_for_env(
@@ -12262,6 +12251,51 @@ mod tests {
     }
 
     #[test]
+    fn latest_service_release_for_env_ignores_newer_other_env_release() {
+        let root =
+            std::env::temp_dir().join(format!("lenso-cli-release-env-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(".lenso")).unwrap();
+        fs::write(
+            root.join(".lenso/service-releases.json"),
+            json!({
+                "version": 1,
+                "releases": [
+                    {
+                        "id": "rel_staging",
+                        "serviceName": "support-suite-provider",
+                        "appliedAtUnixMs": 1,
+                        "environment": {"name": "staging", "target": "operator"},
+                        "candidate": {"version": "0.4.0"}
+                    },
+                    {
+                        "id": "rel_prod",
+                        "serviceName": "support-suite-provider",
+                        "appliedAtUnixMs": 2,
+                        "environment": {"name": "prod", "target": "operator"},
+                        "candidate": {"version": "0.5.0"}
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let release =
+            latest_service_release_for_env(&root, "support-suite-provider", "staging").unwrap();
+
+        assert_eq!(
+            release
+                .as_ref()
+                .and_then(|release| release.get("id"))
+                .and_then(Value::as_str),
+            Some("rel_staging")
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn service_deploy_export_operator_writes_provider_cr() {
         let root =
             std::env::temp_dir().join(format!("lenso-cli-operator-export-{}", std::process::id()));
@@ -12295,13 +12329,22 @@ mod tests {
             root.join(".lenso/service-releases.json"),
             json!({
                 "version": 1,
-                "releases": [{
-                    "id": "rel_staging",
-                    "serviceName": "support-suite-provider",
-                    "appliedAtUnixMs": 1,
-                    "environment": {"name": "staging", "target": "operator"},
-                    "candidate": {"version": "0.4.0"}
-                }]
+                "releases": [
+                    {
+                        "id": "rel_staging",
+                        "serviceName": "support-suite-provider",
+                        "appliedAtUnixMs": 1,
+                        "environment": {"name": "staging", "target": "operator"},
+                        "candidate": {"version": "0.4.0"}
+                    },
+                    {
+                        "id": "rel_prod",
+                        "serviceName": "support-suite-provider",
+                        "appliedAtUnixMs": 2,
+                        "environment": {"name": "prod", "target": "operator"},
+                        "candidate": {"version": "0.5.0"}
+                    }
+                ]
             })
             .to_string(),
         )
@@ -12361,13 +12404,22 @@ mod tests {
             root.join(".lenso/service-releases.json"),
             json!({
                 "version": 1,
-                "releases": [{
-                    "id": "rel_staging",
-                    "serviceName": "support-suite-provider",
-                    "appliedAtUnixMs": 1,
-                    "environment": {"name": "staging", "target": "operator"},
-                    "candidate": {"version": "0.4.0"}
-                }]
+                "releases": [
+                    {
+                        "id": "rel_staging",
+                        "serviceName": "support-suite-provider",
+                        "appliedAtUnixMs": 1,
+                        "environment": {"name": "staging", "target": "operator"},
+                        "candidate": {"version": "0.4.0"}
+                    },
+                    {
+                        "id": "rel_prod",
+                        "serviceName": "support-suite-provider",
+                        "appliedAtUnixMs": 2,
+                        "environment": {"name": "prod", "target": "operator"},
+                        "candidate": {"version": "0.5.0"}
+                    }
+                ]
             })
             .to_string(),
         )
@@ -12426,6 +12478,7 @@ mod tests {
             observation["operator"]["resource"],
             "support-suite-provider"
         );
+        assert_eq!(observation["host"]["releaseId"], "rel_staging");
         assert_eq!(observation["drift"], "in_sync");
 
         fs::remove_dir_all(root).unwrap();
