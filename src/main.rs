@@ -633,7 +633,7 @@ struct ServiceDeployStatusArgs {
     #[arg(long = "env")]
     environment_name: String,
 
-    /// Read Kubernetes deployment JSON from a file instead of kubectl.
+    /// Read deployment/provider status JSON from a file instead of a source adapter.
     #[arg(long)]
     from_file: Option<std::path::PathBuf>,
 

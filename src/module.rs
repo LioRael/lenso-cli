@@ -4043,8 +4043,8 @@ fn service_environment_checks(repo_root: &Path, environment: &Value) -> Vec<Valu
         .get("target")
         .and_then(Value::as_str)
         .unwrap_or("");
-    if target == "kubernetes" {
-        checks.push(service_env_check("target", "ok", "kubernetes"));
+    if matches!(target, "kubernetes" | "operator") {
+        checks.push(service_env_check("target", "ok", target));
         push_required_service_env_check(&mut checks, environment, "namespace");
         push_required_service_env_check(&mut checks, environment, "image");
         if service_environment_manifest_reference(environment).is_some() {
@@ -4064,7 +4064,7 @@ fn service_environment_checks(repo_root: &Path, environment: &Value) -> Vec<Valu
         checks.push(service_env_check(
             "target",
             "error",
-            "unsupported target; expected kubernetes",
+            "unsupported target; expected kubernetes or operator",
         ));
     }
 
@@ -4276,6 +4276,10 @@ fn export_kubernetes_service_deployment(options: ServiceDeployExportOptions) -> 
             "next: lenso service deploy status {} --env {} --write-state",
             options.service_name, options.environment_name
         );
+        println!(
+            "next: lenso service deploy wait {} --env {} --write-state",
+            options.service_name, options.environment_name
+        );
     }
 
     Ok(())
@@ -4395,6 +4399,10 @@ fn export_operator_service_provider(options: ServiceDeployExportOptions) -> Resu
         println!("next: kubectl apply -k {}", output_dir.display());
         println!(
             "next: lenso service deploy status {} --env {} --source operator --write-state",
+            context.service_name, context.environment_name
+        );
+        println!(
+            "next: lenso service deploy wait {} --env {} --source operator --write-state",
             context.service_name, context.environment_name
         );
     }
@@ -4763,7 +4771,7 @@ fn kubernetes_kustomization_yaml(
 
 fn kubernetes_export_readme(context: &KubernetesExportContext<'_>) -> String {
     format!(
-        "# {service} {environment} Kubernetes Deployment\n\n```sh\nkubectl apply -k .\nlenso service deploy status {service} --env {environment} --write-state\n```\n",
+        "# {service} {environment} Kubernetes Deployment\n\n```sh\nkubectl apply -k .\nlenso service deploy status {service} --env {environment} --write-state\nlenso service deploy wait {service} --env {environment} --write-state\n```\n",
         service = context.service_name,
         environment = context.environment_name
     )
@@ -4870,7 +4878,7 @@ fn operator_provider_cr_yaml(
 
 fn operator_provider_export_readme(context: &KubernetesExportContext<'_>) -> String {
     format!(
-        "# {service} {environment} LensoServiceProvider\n\n```sh\nkubectl apply -k .\nlenso service deploy status {service} --env {environment} --source operator --write-state\n```\n",
+        "# {service} {environment} LensoServiceProvider\n\n```sh\nkubectl apply -k .\nlenso service deploy status {service} --env {environment} --source operator --write-state\nlenso service deploy wait {service} --env {environment} --source operator --write-state\n```\n",
         service = context.service_name,
         environment = context.environment_name
     )
@@ -12295,6 +12303,58 @@ mod tests {
         assert_eq!(file["environments"][0]["releaseTrack"], "prod");
         assert_eq!(file["environments"][0]["config"]["replicas"], 2);
         assert_eq!(file["environments"][1]["name"], "staging");
+    }
+
+    #[test]
+    fn service_environment_verify_accepts_operator_targets() {
+        let root = std::env::temp_dir().join(format!(
+            "lenso-cli-service-env-operator-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(".lenso")).unwrap();
+        write_json(
+            &root.join(MODULE_INSTALL_LEDGER_PATH),
+            &json!({
+                "version": 1,
+                "modules": [
+                    {
+                        "moduleName": "support-suite-provider",
+                        "source": "service",
+                        "serviceManifestSnapshot": {
+                            "protocol": "lenso.service.v1",
+                            "name": "support-suite-provider",
+                            "version": "0.4.0",
+                            "modules": []
+                        }
+                    }
+                ]
+            }),
+        )
+        .unwrap();
+        let checks = service_environment_checks(
+            &root,
+            &json!({
+                "name": "prod",
+                "serviceName": "support-suite-provider",
+                "target": "operator",
+                "namespace": "lenso-prod",
+                "image": "ghcr.io/acme/support-suite-provider:0.4.0",
+                "manifestReference": "https://support.example.com/lenso/service/v1/manifest"
+            }),
+        );
+
+        assert!(
+            checks
+                .iter()
+                .all(|check| { check.get("status").and_then(Value::as_str) == Some("ok") })
+        );
+        assert!(checks.iter().any(|check| {
+            check.get("name").and_then(Value::as_str) == Some("target")
+                && check.get("detail").and_then(Value::as_str) == Some("operator")
+        }));
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
