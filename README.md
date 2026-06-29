@@ -91,6 +91,8 @@ lenso service dev
 
 `lenso service dev` starts workspace services first, then starts declared
 installed services from `.lenso/module-services.json`, then runs the host.
+Workspace reads prefer `lenso.workspace.json` and also accept the older
+`.lenso/services.json` path for compatibility.
 Generated TS and Rust services also support `--check-release` to print the
 development module release descriptor before packaging.
 Before handing a service to another app or deployment pipeline, package-check
@@ -183,11 +185,13 @@ Install a service directly when you already have a service manifest URL:
 
 ```sh
 lenso service install https://example.com/lenso/service/v1/manifest
-lenso service install ./lenso.service.json --base-url http://127.0.0.1:4100/lenso/service/v1
+lenso service install ./lenso.service.json --repo-root ../my-lenso-host
 ```
 
-Local manifest files need `--base-url` so the host records the runtime service
-endpoint rather than the file path.
+Local source manifests registered in `lenso.workspace.json` or
+`.lenso/services.json` infer `--base-url` from the service `readyUrl`. Local
+package artifacts outside that workspace still need `--base-url` so the host
+records the runtime service endpoint rather than the file path.
 
 Service installs update `REMOTE_MODULES`, copy declared Runtime Console bundles to
 `.lenso/console/extensions`, update `.lenso/console/extensions/registry.json`,
@@ -254,8 +258,19 @@ lenso service dev --skip-db --skip-migrate
 lenso service dev --workspace-file lenso.workspace.json
 ```
 
+After the service processes are running, check the workspace from another shell:
+
+```sh
+lenso service workspace check
+lenso service workspace check support-suite-provider --json
+```
+
 Use `lenso service dev --no-workspace` when only installed
 `.lenso/module-services.json` providers should start.
+
+`lenso service workspace check` verifies that each declared service directory
+exists, its manifest is reachable, and its `readyUrl` is responding before the
+host tries to load the provider.
 
 Diagnose installed service state with:
 

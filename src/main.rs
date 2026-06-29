@@ -206,7 +206,7 @@ enum ServiceCommand {
     /// Package a service provider project for distribution.
     Package(ServicePackageArgs),
     /// Install a service manifest.
-    Install(RemoteModuleInstallArgs),
+    Install(ServiceInstallArgs),
     /// Remove a service provider and its provided modules.
     Uninstall(RemoteModuleUninstallArgs),
     /// Show changes between installed and candidate service manifests.
@@ -277,6 +277,8 @@ enum ServiceWorkspaceCommand {
     Add(ServiceWorkspaceAddArgs),
     /// List services in the workspace file.
     List(ServiceWorkspaceListArgs),
+    /// Check service workspace readiness and manifest reachability.
+    Check(ServiceWorkspaceCheckArgs),
 }
 
 #[derive(Debug, Args, Clone)]
@@ -326,6 +328,20 @@ struct ServiceWorkspaceAddArgs {
 
 #[derive(Debug, Args, Clone)]
 struct ServiceWorkspaceListArgs {
+    /// Service workspace file.
+    #[arg(long)]
+    workspace_file: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceWorkspaceCheckArgs {
+    /// Optional service name to check.
+    service_name: Option<String>,
+
     /// Service workspace file.
     #[arg(long)]
     workspace_file: Option<std::path::PathBuf>,
@@ -684,6 +700,16 @@ struct RemoteModuleInstallArgs {
     /// Allow install when manifest compatibility metadata does not match this host.
     #[arg(long)]
     allow_incompatible: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceInstallArgs {
+    #[command(flatten)]
+    install: RemoteModuleInstallArgs,
+
+    /// Service workspace file used to infer --base-url for local service manifests.
+    #[arg(long)]
+    workspace_file: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -1407,6 +1433,14 @@ async fn main() -> anyhow::Result<()> {
                         workspace_file: args.workspace_file,
                     })?;
                 }
+                ServiceWorkspaceCommand::Check(args) => {
+                    service::check_service_workspace(service::ServiceWorkspaceCheckOptions {
+                        json: args.json,
+                        service_name: args.service_name,
+                        workspace_file: args.workspace_file,
+                    })
+                    .await?;
+                }
             },
             ServiceCommand::Dev(args) => {
                 service::dev_service((&args).into()).await?;
@@ -1415,7 +1449,15 @@ async fn main() -> anyhow::Result<()> {
                 service::package_service((&args).into()).await?;
             }
             ServiceCommand::Install(args) => {
-                module::install_module(&args.manifest_reference, (&args).into()).await?;
+                let mut options: module::RemoteModuleInstallOptions = (&args.install).into();
+                if options.base_url.is_none() {
+                    options.base_url = service::infer_workspace_base_url_for_manifest(
+                        &args.install.manifest_reference,
+                        args.install.repo_root.as_deref(),
+                        args.workspace_file.as_deref(),
+                    )?;
+                }
+                module::install_module(&args.install.manifest_reference, options).await?;
             }
             ServiceCommand::Uninstall(args) => {
                 module::uninstall_remote_module(&args.module_name, (&args).into()).await?;
@@ -1592,6 +1634,61 @@ mod tests {
         assert_eq!(args.name, "support-suite-provider");
         assert_eq!(args.lang, ServiceLanguage::Ts);
         assert_eq!(args.modules, ["support-ticket"]);
+    }
+
+    #[test]
+    fn parses_service_workspace_check() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "service",
+            "workspace",
+            "check",
+            "support-suite-provider",
+            "--workspace-file",
+            ".lenso/services.json",
+            "--json",
+        ]);
+
+        let Command::Service {
+            command:
+                ServiceCommand::Workspace {
+                    command: ServiceWorkspaceCommand::Check(args),
+                },
+        } = cli.command
+        else {
+            panic!("expected service workspace check");
+        };
+
+        assert_eq!(args.service_name.as_deref(), Some("support-suite-provider"));
+        assert_eq!(
+            args.workspace_file.as_deref(),
+            Some(std::path::Path::new(".lenso/services.json"))
+        );
+        assert!(args.json);
+    }
+
+    #[test]
+    fn parses_service_install_workspace_file() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "service",
+            "install",
+            "./services/support-suite-provider/lenso.service.json",
+            "--workspace-file",
+            ".lenso/services.json",
+        ]);
+
+        let Command::Service {
+            command: ServiceCommand::Install(args),
+        } = cli.command
+        else {
+            panic!("expected service install");
+        };
+
+        assert_eq!(
+            args.workspace_file.as_deref(),
+            Some(std::path::Path::new(".lenso/services.json"))
+        );
     }
 
     #[test]
