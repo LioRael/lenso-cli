@@ -1216,6 +1216,7 @@ fn finish_service_create(
     println!("Next steps:");
     println!("- cd {}", scaffold.target_dir_display);
     println!("- {check_command}");
+    println!("- lenso service verify");
     println!("- lenso service package --check");
     println!(
         "- {}",
@@ -1923,6 +1924,11 @@ mod tests {
     #[test]
     fn package_templates_render_without_tokens() {
         let scaffold = scaffold();
+        let ts_package_json = render_template(
+            include_str!("../templates/service-ts/package.json.tmpl"),
+            &scaffold,
+        );
+        assert!(ts_package_json.contains("\"service:verify\""));
         for template in [
             include_str!("../templates/service-ts/package.json.tmpl"),
             include_str!("../templates/service-ts/pnpm-workspace.yaml.tmpl"),

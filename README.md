@@ -267,6 +267,8 @@ After the service processes are running, check the workspace from another shell:
 ```sh
 lenso service workspace check
 lenso service workspace check support-suite-provider --json
+lenso service verify
+lenso service verify support-suite-provider --json
 ```
 
 Use `lenso service dev --no-workspace` when only installed
@@ -275,6 +277,17 @@ Use `lenso service dev --no-workspace` when only installed
 `lenso service workspace check` verifies that each declared service directory
 exists, its manifest is reachable, and its `readyUrl` is responding before the
 host tries to load the provider.
+
+`lenso service verify` is the release-readiness entrypoint. With no argument it
+checks `./lenso.service.json`; with a provider name it reuses the installed
+service doctor checks.
+
+Preview service upgrade impact before writing host-local state:
+
+```sh
+lenso service upgrade-plan billing ./lenso.service.json --json
+lenso service upgrade billing ./lenso.service.json --dry-run
+```
 
 Export workspace services into the host service-start state format when a script
 or deployment handoff should consume the same service declarations:

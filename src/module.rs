@@ -5172,6 +5172,7 @@ fn remote_root_package_json(module_id: &str) -> Result<String> {
             "service:start": format!("lenso service start {} api --module-services-file module-services.local.json", service_id_for_module(module_id)),
             "service:status": format!("lenso service status {} api --module-services-file module-services.local.json", service_id_for_module(module_id)),
             "service:stop": format!("lenso service stop {} api --module-services-file module-services.local.json", service_id_for_module(module_id)),
+            "service:verify": "lenso service verify ./lenso.service.json",
             "smoke": "pnpm --dir backend smoke",
         },
         "type": "module",
@@ -9598,6 +9599,7 @@ mod tests {
         assert!(runbook.contains("Runtime Console evidence should stay on the host side"));
         assert!(package_json.contains("\"service:export\""));
         assert!(package_json.contains("\"service:status\""));
+        assert!(package_json.contains("\"service:verify\""));
     }
 
     #[test]

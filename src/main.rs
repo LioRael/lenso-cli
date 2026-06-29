@@ -211,6 +211,8 @@ enum ServiceCommand {
     Uninstall(RemoteModuleUninstallArgs),
     /// Show changes between installed and candidate service manifests.
     Diff(ServiceDiffArgs),
+    /// Preview the upgrade impact for an installed service.
+    UpgradePlan(ServiceDiffArgs),
     /// Upgrade an installed service from a candidate manifest.
     Upgrade(ServiceUpgradeArgs),
     /// Roll back a service to the previous installed manifest snapshot.
@@ -219,6 +221,8 @@ enum ServiceCommand {
     Doctor(ModuleDoctorArgs),
     /// Check a service manifest or configured service state.
     Check(ServiceCheckArgs),
+    /// Verify a service manifest, package, or installed provider before release.
+    Verify(ServiceCheckArgs),
     /// List declared services.
     List(ModuleServiceListArgs),
     /// Export a deployment fragment for declared services.
@@ -1303,6 +1307,42 @@ fn service_check_uses_manifest(args: &ServiceCheckArgs) -> bool {
             .is_some_and(looks_like_manifest_reference)
 }
 
+fn service_verify_uses_manifest(args: &ServiceCheckArgs) -> bool {
+    args.manifest_reference.is_none() || service_check_uses_manifest(args)
+}
+
+async fn run_service_check_or_doctor(
+    args: &ServiceCheckArgs,
+    default_to_manifest: bool,
+) -> anyhow::Result<()> {
+    let uses_manifest = if default_to_manifest {
+        service_verify_uses_manifest(args)
+    } else {
+        service_check_uses_manifest(args)
+    };
+    if uses_manifest {
+        module::check_service_manifest_reference(
+            args.manifest_reference
+                .as_deref()
+                .unwrap_or("./lenso.service.json"),
+            module::ServiceManifestCheckOptions {
+                cwd: args.cwd.clone(),
+                json: args.json,
+                manifest_url: args.manifest_url.clone(),
+                operation: args.operation.clone(),
+                ready_timeout_ms: args.ready_timeout_ms,
+                ready_url: args.ready_url.clone(),
+                sample_input: args.sample_input.clone(),
+                serve_command: args.serve_command.clone(),
+            },
+        )
+        .await?;
+    } else {
+        module::doctor_module(args.into()).await?;
+    }
+    Ok(())
+}
+
 fn warn_module_install_manifest_reference(reference: &str) {
     if looks_like_manifest_reference(reference) {
         eprintln!(
@@ -1495,6 +1535,9 @@ async fn main() -> anyhow::Result<()> {
             ServiceCommand::Diff(args) => {
                 module::diff_service((&args).into()).await?;
             }
+            ServiceCommand::UpgradePlan(args) => {
+                module::diff_service((&args).into()).await?;
+            }
             ServiceCommand::Upgrade(args) => {
                 module::upgrade_service((&args).into()).await?;
             }
@@ -1505,26 +1548,10 @@ async fn main() -> anyhow::Result<()> {
                 module::doctor_module((&args).into()).await?;
             }
             ServiceCommand::Check(args) => {
-                if service_check_uses_manifest(&args) {
-                    module::check_service_manifest_reference(
-                        args.manifest_reference
-                            .as_deref()
-                            .unwrap_or("./lenso.service.json"),
-                        module::ServiceManifestCheckOptions {
-                            cwd: args.cwd.clone(),
-                            json: args.json,
-                            manifest_url: args.manifest_url.clone(),
-                            operation: args.operation.clone(),
-                            ready_timeout_ms: args.ready_timeout_ms,
-                            ready_url: args.ready_url.clone(),
-                            sample_input: args.sample_input.clone(),
-                            serve_command: args.serve_command.clone(),
-                        },
-                    )
-                    .await?;
-                } else {
-                    module::doctor_module((&args).into()).await?;
-                }
+                run_service_check_or_doctor(&args, false).await?;
+            }
+            ServiceCommand::Verify(args) => {
+                run_service_check_or_doctor(&args, true).await?;
             }
             ServiceCommand::List(args) => {
                 module::list_module_services((&args).into()).await?;
@@ -1836,6 +1863,33 @@ mod tests {
     }
 
     #[test]
+    fn parses_service_verify_manifest_reference() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "service",
+            "verify",
+            "./lenso.service.json",
+            "--json",
+            "--serve-command",
+            "pnpm start",
+        ]);
+        let Command::Service {
+            command: ServiceCommand::Verify(args),
+        } = cli.command
+        else {
+            panic!("expected service verify");
+        };
+
+        assert_eq!(
+            args.manifest_reference.as_deref(),
+            Some("./lenso.service.json")
+        );
+        assert!(args.json);
+        assert_eq!(args.serve_command.as_deref(), Some("pnpm start"));
+        assert!(service_verify_uses_manifest(&args));
+    }
+
+    #[test]
     fn parses_service_check_operation_filter_and_sample_input() {
         let cli = Cli::parse_from([
             "lenso",
@@ -1896,6 +1950,27 @@ mod tests {
     }
 
     #[test]
+    fn service_verify_defaults_to_manifest_but_accepts_provider_name() {
+        let cli = Cli::parse_from(["lenso", "service", "verify"]);
+        let Command::Service {
+            command: ServiceCommand::Verify(args),
+        } = cli.command
+        else {
+            panic!("expected service verify");
+        };
+        assert!(service_verify_uses_manifest(&args));
+
+        let cli = Cli::parse_from(["lenso", "service", "verify", "support-ticket"]);
+        let Command::Service {
+            command: ServiceCommand::Verify(args),
+        } = cli.command
+        else {
+            panic!("expected service verify");
+        };
+        assert!(!service_verify_uses_manifest(&args));
+    }
+
+    #[test]
     fn parses_service_delivery_lifecycle_commands() {
         let diff = Cli::parse_from([
             "lenso",
@@ -1911,6 +1986,23 @@ mod tests {
             panic!("expected service diff");
         };
         assert_eq!(diff_args.service_name, "support-suite-provider");
+
+        let upgrade_plan = Cli::parse_from([
+            "lenso",
+            "service",
+            "upgrade-plan",
+            "support-suite-provider",
+            "./lenso.service.json",
+            "--json",
+        ]);
+        let Command::Service {
+            command: ServiceCommand::UpgradePlan(upgrade_plan_args),
+        } = upgrade_plan.command
+        else {
+            panic!("expected service upgrade-plan");
+        };
+        assert_eq!(upgrade_plan_args.service_name, "support-suite-provider");
+        assert!(upgrade_plan_args.json);
 
         let upgrade = Cli::parse_from([
             "lenso",
