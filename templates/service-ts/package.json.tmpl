@@ -6,6 +6,9 @@
   "scripts": {
     "check": "node src/server.ts --check",
     "dev": "node src/server.ts",
+    "service:package": "lenso service package .",
+    "service:release-plan": "lenso service release plan {{service_name}} ./dist/lenso-service/{{service_name}}/lenso.service-package.json --repo-root \"{{repo_root_display}}\" --output ./dist/lenso-service/{{service_name}}/lenso.service-release-plan.json",
+    "service:verify": "lenso service verify ./lenso.service.json --serve-command \"pnpm start\"",
     "start": "node src/server.ts"
   },
   "dependencies": {

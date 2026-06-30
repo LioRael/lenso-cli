@@ -1,5 +1,6 @@
 mod host;
 mod module;
+mod operator;
 mod service;
 
 use clap::{Args, Parser, Subcommand};
@@ -36,11 +37,41 @@ enum Command {
         #[command(subcommand)]
         command: ServiceCommand,
     },
+    /// Manage the Lenso Kubernetes Operator.
+    Operator {
+        #[command(subcommand)]
+        command: OperatorCommand,
+    },
     /// Manage Runtime Console assets, access, and packages.
     Console {
         #[command(subcommand)]
         command: ConsoleCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum OperatorCommand {
+    /// Export the Lenso Kubernetes Operator install bundle.
+    ExportCrd(OperatorExportCrdArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+pub(crate) struct OperatorExportCrdArgs {
+    /// Output directory for CRD, RBAC, deployment, kustomization, and README.
+    #[arg(long)]
+    output: std::path::PathBuf,
+
+    /// Operator image to put in deployment.yaml.
+    #[arg(long, default_value = "ghcr.io/lenso-dev/lenso-operator:latest")]
+    image: String,
+
+    /// Namespace for operator install resources.
+    #[arg(long, default_value = "lenso-system")]
+    namespace: String,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -201,6 +232,16 @@ enum ServiceCommand {
         #[command(subcommand)]
         command: ServiceWorkspaceCommand,
     },
+    /// Manage deployment environments for service providers.
+    Env {
+        #[command(subcommand)]
+        command: ServiceEnvCommand,
+    },
+    /// Export and inspect service deployments.
+    Deploy {
+        #[command(subcommand)]
+        command: ServiceDeployCommand,
+    },
     /// Start service providers, then run the generated host.
     Dev(ServiceDevArgs),
     /// Package a service provider project for distribution.
@@ -211,14 +252,28 @@ enum ServiceCommand {
     Uninstall(RemoteModuleUninstallArgs),
     /// Show changes between installed and candidate service manifests.
     Diff(ServiceDiffArgs),
+    /// Preview the upgrade impact for an installed service.
+    UpgradePlan(ServiceDiffArgs),
     /// Upgrade an installed service from a candidate manifest.
     Upgrade(ServiceUpgradeArgs),
     /// Roll back a service to the previous installed manifest snapshot.
     Rollback(ServiceRollbackArgs),
+    /// Plan, check, and apply service releases.
+    Release {
+        #[command(subcommand)]
+        command: ServiceReleaseCommand,
+    },
+    /// Run service delivery policy gates.
+    Policy {
+        #[command(subcommand)]
+        command: ServicePolicyCommand,
+    },
     /// Diagnose installed services and their provided modules.
     Doctor(ModuleDoctorArgs),
     /// Check a service manifest or configured service state.
     Check(ServiceCheckArgs),
+    /// Verify a service manifest, package, or installed provider before release.
+    Verify(ServiceCheckArgs),
     /// List declared services.
     List(ModuleServiceListArgs),
     /// Export a deployment fragment for declared services.
@@ -237,6 +292,18 @@ enum ServiceCommand {
 pub(crate) enum ServiceLanguage {
     Rust,
     Ts,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum ServiceDeploymentTargetArg {
+    Kubernetes,
+    Operator,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum ServiceDeploymentSourceArg {
+    Kubernetes,
+    Operator,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -281,6 +348,28 @@ enum ServiceWorkspaceCommand {
     Check(ServiceWorkspaceCheckArgs),
     /// Export workspace services as host service-start state.
     Export(ServiceWorkspaceExportArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum ServiceEnvCommand {
+    /// List configured service deployment environments.
+    List(ServiceEnvListArgs),
+    /// Add or update a service deployment environment.
+    Add(ServiceEnvAddArgs),
+    /// Remove a service deployment environment.
+    Remove(ServiceEnvRemoveArgs),
+    /// Verify a service deployment environment.
+    Verify(ServiceEnvVerifyArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum ServiceDeployCommand {
+    /// Export deployment files for a service provider.
+    Export(ServiceDeployExportArgs),
+    /// Read deployment status for a service provider.
+    Status(ServiceDeployStatusArgs),
+    /// Wait until a service deployment is ready.
+    Wait(ServiceDeployWaitArgs),
 }
 
 #[derive(Debug, Args, Clone)]
@@ -362,6 +451,245 @@ struct ServiceWorkspaceExportArgs {
     /// Output file. Prints JSON when omitted.
     #[arg(long)]
     output: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceEnvListArgs {
+    /// Filter by service provider name.
+    #[arg(long = "service")]
+    service_name: Option<String>,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceEnvAddArgs {
+    /// Environment name, such as staging or prod.
+    name: String,
+
+    /// Service provider name.
+    #[arg(long = "service")]
+    service_name: String,
+
+    /// Deployment target.
+    #[arg(long, value_enum)]
+    target: ServiceDeploymentTargetArg,
+
+    /// Kubernetes namespace.
+    #[arg(long)]
+    namespace: Option<String>,
+
+    /// Kubernetes context.
+    #[arg(long)]
+    kube_context: Option<String>,
+
+    /// Desired service image.
+    #[arg(long)]
+    image: Option<String>,
+
+    /// Public service base URL.
+    #[arg(long)]
+    public_base_url: Option<String>,
+
+    /// Service manifest URL/path.
+    #[arg(long)]
+    manifest_reference: Option<String>,
+
+    /// Release track label.
+    #[arg(long)]
+    release_track: Option<String>,
+
+    /// Desired Kubernetes replicas.
+    #[arg(long)]
+    replicas: Option<u32>,
+
+    /// Service container port.
+    #[arg(long)]
+    port: Option<u16>,
+
+    /// Kubernetes ingress host.
+    #[arg(long)]
+    ingress_host: Option<String>,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceEnvRemoveArgs {
+    /// Environment name.
+    name: String,
+
+    /// Service provider name.
+    #[arg(long = "service")]
+    service_name: String,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print changes without writing them.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceEnvVerifyArgs {
+    /// Environment name.
+    name: String,
+
+    /// Service provider name.
+    #[arg(long = "service")]
+    service_name: String,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceDeployExportArgs {
+    /// Service provider name.
+    service_name: String,
+
+    /// Environment name.
+    #[arg(long = "env")]
+    environment_name: String,
+
+    /// Deployment target.
+    #[arg(long, value_enum, default_value_t = ServiceDeploymentTargetArg::Kubernetes)]
+    target: ServiceDeploymentTargetArg,
+
+    /// Output directory for generated deployment files.
+    #[arg(long)]
+    output_dir: std::path::PathBuf,
+
+    /// Override desired service image.
+    #[arg(long)]
+    image: Option<String>,
+
+    /// Override Kubernetes namespace.
+    #[arg(long)]
+    namespace: Option<String>,
+
+    /// Override Kubernetes ingress host.
+    #[arg(long)]
+    ingress_host: Option<String>,
+
+    /// Override service container port.
+    #[arg(long)]
+    port: Option<u16>,
+
+    /// Override desired replicas.
+    #[arg(long)]
+    replicas: Option<u32>,
+
+    /// Generate an example HorizontalPodAutoscaler.
+    #[arg(long)]
+    hpa: bool,
+
+    /// Generate a PodDisruptionBudget.
+    #[arg(long)]
+    pdb: bool,
+
+    /// Generate a default-deny NetworkPolicy with ingress to the service port.
+    #[arg(long)]
+    network_policy: bool,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceDeployStatusArgs {
+    /// Service provider name.
+    service_name: String,
+
+    /// Environment name.
+    #[arg(long = "env")]
+    environment_name: String,
+
+    /// Read deployment/provider status JSON from a file instead of a source adapter.
+    #[arg(long)]
+    from_file: Option<std::path::PathBuf>,
+
+    /// Deployment status source.
+    #[arg(long, value_enum, default_value_t = ServiceDeploymentSourceArg::Kubernetes)]
+    source: ServiceDeploymentSourceArg,
+
+    /// Persist the observation to .lenso/service-deployments.json.
+    #[arg(long)]
+    write_state: bool,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceDeployWaitArgs {
+    /// Service provider name.
+    service_name: String,
+
+    /// Environment name.
+    #[arg(long = "env")]
+    environment_name: String,
+
+    /// Read deployment JSON from a file instead of a provider adapter.
+    #[arg(long)]
+    from_file: Option<std::path::PathBuf>,
+
+    /// Deployment status source.
+    #[arg(long, value_enum, default_value_t = ServiceDeploymentSourceArg::Kubernetes)]
+    source: ServiceDeploymentSourceArg,
+
+    /// Timeout in seconds.
+    #[arg(long, default_value_t = 120)]
+    timeout_seconds: u64,
+
+    /// Poll interval in seconds.
+    #[arg(long, default_value_t = 5)]
+    interval_seconds: u64,
+
+    /// Persist every observation to .lenso/service-deployments.json.
+    #[arg(long)]
+    write_state: bool,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -538,6 +866,177 @@ struct ServiceRollbackArgs {
     /// Print changes without writing them.
     #[arg(long)]
     dry_run: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum ServiceReleaseCommand {
+    /// Build a reusable service release plan from an installed service and candidate manifest.
+    Plan(ServiceReleasePlanArgs),
+    /// Check a service release plan without applying it.
+    Check(ServiceReleaseCheckArgs),
+    /// Apply a checked service release plan and record it in the service release ledger.
+    Apply(ServiceReleaseApplyArgs),
+    /// Create a target-environment release plan from the latest source-environment release.
+    Promote(ServiceReleasePromoteArgs),
+    /// Create a rollback release plan for one environment.
+    Rollback(ServiceReleaseRollbackArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum ServicePolicyCommand {
+    /// Check a service release plan against built-in delivery policy.
+    Check(ServicePolicyCheckArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceReleasePlanArgs {
+    /// Installed service provider name.
+    service_name: String,
+
+    /// Candidate service manifest or service package URL/path.
+    manifest_reference: String,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Service deployment environment.
+    #[arg(long = "env")]
+    environment_name: Option<String>,
+
+    /// Write the release plan JSON to this path.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+
+    /// Fail when policy risk is at or above this level: needs_attention, breaking, blocked.
+    #[arg(long)]
+    fail_on: Option<String>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceReleaseCheckArgs {
+    /// Service release plan JSON path.
+    plan_file: std::path::PathBuf,
+
+    /// Require the plan to match this service deployment environment.
+    #[arg(long = "env")]
+    environment_name: Option<String>,
+
+    /// Fail when policy risk is at or above this level: needs_attention, breaking, blocked.
+    #[arg(long)]
+    fail_on: Option<String>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceReleaseApplyArgs {
+    /// Service release plan JSON path.
+    plan_file: std::path::PathBuf,
+
+    /// Require the plan to match this service deployment environment.
+    #[arg(long = "env")]
+    environment_name: Option<String>,
+
+    /// Remote service base URL for local manifest files.
+    #[arg(long)]
+    base_url: Option<String>,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Environment file to update.
+    #[arg(long)]
+    env_file: Option<std::path::PathBuf>,
+
+    /// Remote module services file.
+    #[arg(long)]
+    module_services_file: Option<std::path::PathBuf>,
+
+    /// Print changes without writing them.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Allow apply when compatibility metadata does not match this host.
+    #[arg(long)]
+    allow_incompatible: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceReleasePromoteArgs {
+    /// Installed service provider name.
+    service_name: String,
+
+    /// Source environment name.
+    #[arg(long = "from")]
+    from_environment: String,
+
+    /// Target environment name.
+    #[arg(long = "to")]
+    to_environment: String,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Write the release plan JSON to this path.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+
+    /// Fail when policy risk is at or above this level: needs_attention, breaking, blocked.
+    #[arg(long)]
+    fail_on: Option<String>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceReleaseRollbackArgs {
+    /// Installed service provider name.
+    service_name: String,
+
+    /// Environment name.
+    #[arg(long = "env")]
+    environment_name: String,
+
+    /// Roll back to this release id instead of the previous same-environment release.
+    #[arg(long = "to")]
+    release_id: Option<String>,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Write the rollback plan JSON to this path.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServicePolicyCheckArgs {
+    /// Service release plan JSON path.
+    plan_file: std::path::PathBuf,
+
+    /// Fail when policy risk is at or above this level: needs_attention, breaking, blocked.
+    #[arg(long)]
+    fail_on: Option<String>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1136,6 +1635,203 @@ impl From<&ServiceRollbackArgs> for module::ServiceRollbackOptions {
     }
 }
 
+impl From<&ServiceEnvListArgs> for module::ServiceEnvListOptions {
+    fn from(args: &ServiceEnvListArgs) -> Self {
+        Self {
+            json: args.json,
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
+        }
+    }
+}
+
+impl From<&ServiceEnvAddArgs> for module::ServiceEnvAddOptions {
+    fn from(args: &ServiceEnvAddArgs) -> Self {
+        Self {
+            environment_name: args.name.clone(),
+            image: args.image.clone(),
+            ingress_host: args.ingress_host.clone(),
+            json: args.json,
+            kube_context: args.kube_context.clone(),
+            manifest_reference: args.manifest_reference.clone(),
+            namespace: args.namespace.clone(),
+            port: args.port,
+            public_base_url: args.public_base_url.clone(),
+            release_track: args.release_track.clone(),
+            replicas: args.replicas,
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
+            target: service_deployment_target_arg(args.target).to_owned(),
+        }
+    }
+}
+
+impl From<&ServiceEnvRemoveArgs> for module::ServiceEnvRemoveOptions {
+    fn from(args: &ServiceEnvRemoveArgs) -> Self {
+        Self {
+            dry_run: args.dry_run,
+            environment_name: args.name.clone(),
+            json: args.json,
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
+        }
+    }
+}
+
+impl From<&ServiceEnvVerifyArgs> for module::ServiceEnvVerifyOptions {
+    fn from(args: &ServiceEnvVerifyArgs) -> Self {
+        Self {
+            environment_name: args.name.clone(),
+            json: args.json,
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
+        }
+    }
+}
+
+impl From<&ServiceDeployExportArgs> for module::ServiceDeployExportOptions {
+    fn from(args: &ServiceDeployExportArgs) -> Self {
+        Self {
+            environment_name: args.environment_name.clone(),
+            image: args.image.clone(),
+            ingress_host: args.ingress_host.clone(),
+            json: args.json,
+            namespace: args.namespace.clone(),
+            output_dir: args.output_dir.clone(),
+            hpa: args.hpa,
+            port: args.port,
+            pdb: args.pdb,
+            network_policy: args.network_policy,
+            replicas: args.replicas,
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
+            target: service_deployment_target_arg(args.target).to_owned(),
+        }
+    }
+}
+
+impl From<&ServiceDeployStatusArgs> for module::ServiceDeployStatusOptions {
+    fn from(args: &ServiceDeployStatusArgs) -> Self {
+        Self {
+            environment_name: args.environment_name.clone(),
+            from_file: args.from_file.clone(),
+            json: args.json,
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
+            source: service_deployment_source_arg(args.source).to_owned(),
+            write_state: args.write_state,
+        }
+    }
+}
+
+impl From<&ServiceDeployWaitArgs> for module::ServiceDeployWaitOptions {
+    fn from(args: &ServiceDeployWaitArgs) -> Self {
+        Self {
+            environment_name: args.environment_name.clone(),
+            from_file: args.from_file.clone(),
+            interval_seconds: args.interval_seconds,
+            json: args.json,
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
+            source: service_deployment_source_arg(args.source).to_owned(),
+            timeout_seconds: args.timeout_seconds,
+            write_state: args.write_state,
+        }
+    }
+}
+
+impl From<&ServiceReleasePlanArgs> for module::ServiceReleasePlanOptions {
+    fn from(args: &ServiceReleasePlanArgs) -> Self {
+        Self {
+            environment_name: args.environment_name.clone(),
+            fail_on: args.fail_on.clone(),
+            json: args.json,
+            manifest_reference: args.manifest_reference.clone(),
+            output: args.output.clone(),
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
+        }
+    }
+}
+
+const fn service_deployment_target_arg(target: ServiceDeploymentTargetArg) -> &'static str {
+    match target {
+        ServiceDeploymentTargetArg::Kubernetes => "kubernetes",
+        ServiceDeploymentTargetArg::Operator => "operator",
+    }
+}
+
+const fn service_deployment_source_arg(source: ServiceDeploymentSourceArg) -> &'static str {
+    match source {
+        ServiceDeploymentSourceArg::Kubernetes => "kubernetes",
+        ServiceDeploymentSourceArg::Operator => "operator",
+    }
+}
+
+impl From<&ServiceReleaseCheckArgs> for module::ServiceReleaseCheckOptions {
+    fn from(args: &ServiceReleaseCheckArgs) -> Self {
+        Self {
+            environment_name: args.environment_name.clone(),
+            fail_on: args.fail_on.clone(),
+            json: args.json,
+            plan_file: args.plan_file.clone(),
+        }
+    }
+}
+
+impl From<&ServiceReleaseApplyArgs> for module::ServiceReleaseApplyOptions {
+    fn from(args: &ServiceReleaseApplyArgs) -> Self {
+        Self {
+            allow_incompatible: args.allow_incompatible,
+            base_url: args.base_url.clone(),
+            dry_run: args.dry_run,
+            environment_name: args.environment_name.clone(),
+            env_file: args.env_file.clone(),
+            module_services_file: args.module_services_file.clone(),
+            plan_file: args.plan_file.clone(),
+            repo_root: args.repo_root.clone(),
+        }
+    }
+}
+
+impl From<&ServiceReleasePromoteArgs> for module::ServiceReleasePromoteOptions {
+    fn from(args: &ServiceReleasePromoteArgs) -> Self {
+        Self {
+            fail_on: args.fail_on.clone(),
+            from_environment: args.from_environment.clone(),
+            json: args.json,
+            output: args.output.clone(),
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
+            to_environment: args.to_environment.clone(),
+        }
+    }
+}
+
+impl From<&ServiceReleaseRollbackArgs> for module::ServiceReleaseRollbackPlanOptions {
+    fn from(args: &ServiceReleaseRollbackArgs) -> Self {
+        Self {
+            environment_name: args.environment_name.clone(),
+            json: args.json,
+            output: args.output.clone(),
+            release_id: args.release_id.clone(),
+            repo_root: args.repo_root.clone(),
+            service_name: args.service_name.clone(),
+        }
+    }
+}
+
+impl From<&ServicePolicyCheckArgs> for module::ServiceReleaseCheckOptions {
+    fn from(args: &ServicePolicyCheckArgs) -> Self {
+        Self {
+            environment_name: None,
+            fail_on: args.fail_on.clone(),
+            json: args.json,
+            plan_file: args.plan_file.clone(),
+        }
+    }
+}
+
 impl From<&ModuleServiceListArgs> for module::ModuleServiceListOptions {
     fn from(args: &ModuleServiceListArgs) -> Self {
         Self {
@@ -1303,6 +1999,44 @@ fn service_check_uses_manifest(args: &ServiceCheckArgs) -> bool {
             .is_some_and(looks_like_manifest_reference)
 }
 
+fn service_verify_uses_manifest(args: &ServiceCheckArgs) -> bool {
+    args.manifest_reference.is_none() || service_check_uses_manifest(args)
+}
+
+async fn run_service_check_or_doctor(
+    args: &ServiceCheckArgs,
+    default_to_manifest: bool,
+) -> anyhow::Result<()> {
+    let uses_manifest = if default_to_manifest {
+        service_verify_uses_manifest(args)
+    } else {
+        service_check_uses_manifest(args)
+    };
+    if uses_manifest {
+        module::check_service_manifest_reference(
+            args.manifest_reference
+                .as_deref()
+                .unwrap_or("./lenso.service.json"),
+            module::ServiceManifestCheckOptions {
+                cwd: args.cwd.clone(),
+                env_file: args.env_file.clone(),
+                json: args.json,
+                manifest_url: args.manifest_url.clone(),
+                operation: args.operation.clone(),
+                ready_timeout_ms: args.ready_timeout_ms,
+                ready_url: args.ready_url.clone(),
+                repo_root: args.repo_root.clone(),
+                sample_input: args.sample_input.clone(),
+                serve_command: args.serve_command.clone(),
+            },
+        )
+        .await?;
+    } else {
+        module::doctor_module(args.into()).await?;
+    }
+    Ok(())
+}
+
 fn warn_module_install_manifest_reference(reference: &str) {
     if looks_like_manifest_reference(reference) {
         eprintln!(
@@ -1348,6 +2082,11 @@ async fn main() -> anyhow::Result<()> {
                     module::apply_console_package_install_plan((&args).into()).await?;
                 }
             },
+        },
+        Command::Operator { command } => match command {
+            OperatorCommand::ExportCrd(args) => {
+                operator::export_crd_bundle((&args).into())?;
+            }
         },
         Command::Module { command } => match command {
             ModuleCommand::Create(args) => {
@@ -1461,6 +2200,31 @@ async fn main() -> anyhow::Result<()> {
                     })?;
                 }
             },
+            ServiceCommand::Env { command } => match command {
+                ServiceEnvCommand::List(args) => {
+                    module::list_service_environments((&args).into())?;
+                }
+                ServiceEnvCommand::Add(args) => {
+                    module::add_service_environment((&args).into())?;
+                }
+                ServiceEnvCommand::Remove(args) => {
+                    module::remove_service_environment((&args).into())?;
+                }
+                ServiceEnvCommand::Verify(args) => {
+                    module::verify_service_environment((&args).into())?;
+                }
+            },
+            ServiceCommand::Deploy { command } => match command {
+                ServiceDeployCommand::Export(args) => {
+                    module::export_service_deployment((&args).into())?;
+                }
+                ServiceDeployCommand::Status(args) => {
+                    module::status_service_deployment((&args).into())?;
+                }
+                ServiceDeployCommand::Wait(args) => {
+                    module::wait_service_deployment((&args).into())?;
+                }
+            },
             ServiceCommand::Dev(args) => {
                 service::dev_service((&args).into()).await?;
             }
@@ -1495,36 +2259,45 @@ async fn main() -> anyhow::Result<()> {
             ServiceCommand::Diff(args) => {
                 module::diff_service((&args).into()).await?;
             }
+            ServiceCommand::UpgradePlan(args) => {
+                module::diff_service((&args).into()).await?;
+            }
             ServiceCommand::Upgrade(args) => {
                 module::upgrade_service((&args).into()).await?;
             }
             ServiceCommand::Rollback(args) => {
                 module::rollback_service((&args).into()).await?;
             }
+            ServiceCommand::Release { command } => match command {
+                ServiceReleaseCommand::Plan(args) => {
+                    module::plan_service_release((&args).into()).await?;
+                }
+                ServiceReleaseCommand::Check(args) => {
+                    module::check_service_release_plan((&args).into())?;
+                }
+                ServiceReleaseCommand::Apply(args) => {
+                    module::apply_service_release_plan((&args).into()).await?;
+                }
+                ServiceReleaseCommand::Promote(args) => {
+                    module::promote_service_release((&args).into()).await?;
+                }
+                ServiceReleaseCommand::Rollback(args) => {
+                    module::plan_service_release_rollback((&args).into()).await?;
+                }
+            },
+            ServiceCommand::Policy { command } => match command {
+                ServicePolicyCommand::Check(args) => {
+                    module::policy_check_service_release_plan((&args).into())?;
+                }
+            },
             ServiceCommand::Doctor(args) => {
                 module::doctor_module((&args).into()).await?;
             }
             ServiceCommand::Check(args) => {
-                if service_check_uses_manifest(&args) {
-                    module::check_service_manifest_reference(
-                        args.manifest_reference
-                            .as_deref()
-                            .unwrap_or("./lenso.service.json"),
-                        module::ServiceManifestCheckOptions {
-                            cwd: args.cwd.clone(),
-                            json: args.json,
-                            manifest_url: args.manifest_url.clone(),
-                            operation: args.operation.clone(),
-                            ready_timeout_ms: args.ready_timeout_ms,
-                            ready_url: args.ready_url.clone(),
-                            sample_input: args.sample_input.clone(),
-                            serve_command: args.serve_command.clone(),
-                        },
-                    )
-                    .await?;
-                } else {
-                    module::doctor_module((&args).into()).await?;
-                }
+                run_service_check_or_doctor(&args, false).await?;
+            }
+            ServiceCommand::Verify(args) => {
+                run_service_check_or_doctor(&args, true).await?;
             }
             ServiceCommand::List(args) => {
                 module::list_module_services((&args).into()).await?;
@@ -1731,6 +2504,208 @@ mod tests {
     }
 
     #[test]
+    fn parses_service_env_add() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "service",
+            "env",
+            "add",
+            "staging",
+            "--service",
+            "support-suite-provider",
+            "--target",
+            "kubernetes",
+            "--namespace",
+            "lenso-staging",
+            "--image",
+            "ghcr.io/acme/support-suite-provider:0.4.0",
+            "--public-base-url",
+            "https://support-staging.example.com",
+            "--replicas",
+            "2",
+            "--port",
+            "4110",
+        ]);
+
+        let Command::Service {
+            command:
+                ServiceCommand::Env {
+                    command: ServiceEnvCommand::Add(args),
+                },
+        } = cli.command
+        else {
+            panic!("expected service env add");
+        };
+
+        assert_eq!(args.name, "staging");
+        assert_eq!(args.service_name, "support-suite-provider");
+        assert_eq!(args.target, ServiceDeploymentTargetArg::Kubernetes);
+        assert_eq!(args.namespace.as_deref(), Some("lenso-staging"));
+        assert_eq!(args.replicas, Some(2));
+        assert_eq!(args.port, Some(4110));
+    }
+
+    #[test]
+    fn parses_service_deploy_commands() {
+        let export = Cli::parse_from([
+            "lenso",
+            "service",
+            "deploy",
+            "export",
+            "support-suite-provider",
+            "--env",
+            "staging",
+            "--target",
+            "kubernetes",
+            "--output-dir",
+            "dist/kubernetes/staging",
+            "--image",
+            "ghcr.io/acme/support-suite-provider:0.4.0",
+        ]);
+        let Command::Service {
+            command:
+                ServiceCommand::Deploy {
+                    command: ServiceDeployCommand::Export(export_args),
+                },
+        } = export.command
+        else {
+            panic!("expected service deploy export");
+        };
+        assert_eq!(export_args.service_name, "support-suite-provider");
+        assert_eq!(export_args.environment_name, "staging");
+        assert_eq!(export_args.target, ServiceDeploymentTargetArg::Kubernetes);
+
+        let status = Cli::parse_from([
+            "lenso",
+            "service",
+            "deploy",
+            "status",
+            "support-suite-provider",
+            "--env",
+            "staging",
+            "--from-file",
+            "deployment.json",
+            "--write-state",
+        ]);
+        let Command::Service {
+            command:
+                ServiceCommand::Deploy {
+                    command: ServiceDeployCommand::Status(status_args),
+                },
+        } = status.command
+        else {
+            panic!("expected service deploy status");
+        };
+        assert_eq!(status_args.environment_name, "staging");
+        assert!(status_args.write_state);
+
+        let wait = Cli::parse_from([
+            "lenso",
+            "service",
+            "deploy",
+            "wait",
+            "support-suite-provider",
+            "--env",
+            "staging",
+            "--source",
+            "kubernetes",
+            "--timeout-seconds",
+            "30",
+            "--interval-seconds",
+            "2",
+            "--write-state",
+        ]);
+        let Command::Service {
+            command:
+                ServiceCommand::Deploy {
+                    command: ServiceDeployCommand::Wait(wait_args),
+                },
+        } = wait.command
+        else {
+            panic!("expected service deploy wait");
+        };
+        assert_eq!(wait_args.environment_name, "staging");
+        assert_eq!(wait_args.timeout_seconds, 30);
+        assert_eq!(wait_args.interval_seconds, 2);
+        assert!(wait_args.write_state);
+    }
+
+    #[test]
+    fn parses_operator_export_crd() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "operator",
+            "export-crd",
+            "--output",
+            "dist/lenso-operator/crds",
+            "--namespace",
+            "lenso-system",
+        ]);
+
+        let Command::Operator {
+            command: OperatorCommand::ExportCrd(args),
+        } = cli.command
+        else {
+            panic!("expected operator export-crd");
+        };
+
+        assert_eq!(
+            args.output,
+            std::path::PathBuf::from("dist/lenso-operator/crds")
+        );
+        assert_eq!(args.namespace, "lenso-system");
+    }
+
+    #[test]
+    fn parses_service_deploy_operator_target_and_source() {
+        let export = Cli::parse_from([
+            "lenso",
+            "service",
+            "deploy",
+            "export",
+            "support-suite-provider",
+            "--env",
+            "staging",
+            "--target",
+            "operator",
+            "--output-dir",
+            "dist/operator/staging",
+        ]);
+        let Command::Service {
+            command:
+                ServiceCommand::Deploy {
+                    command: ServiceDeployCommand::Export(export_args),
+                },
+        } = export.command
+        else {
+            panic!("expected service deploy export");
+        };
+        assert_eq!(export_args.target, ServiceDeploymentTargetArg::Operator);
+
+        let status = Cli::parse_from([
+            "lenso",
+            "service",
+            "deploy",
+            "status",
+            "support-suite-provider",
+            "--env",
+            "staging",
+            "--source",
+            "operator",
+        ]);
+        let Command::Service {
+            command:
+                ServiceCommand::Deploy {
+                    command: ServiceDeployCommand::Status(status_args),
+                },
+        } = status.command
+        else {
+            panic!("expected service deploy status");
+        };
+        assert_eq!(status_args.source, ServiceDeploymentSourceArg::Operator);
+    }
+
+    #[test]
     fn parses_service_install_workspace_file() {
         let cli = Cli::parse_from([
             "lenso",
@@ -1836,6 +2811,33 @@ mod tests {
     }
 
     #[test]
+    fn parses_service_verify_manifest_reference() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "service",
+            "verify",
+            "./lenso.service.json",
+            "--json",
+            "--serve-command",
+            "pnpm start",
+        ]);
+        let Command::Service {
+            command: ServiceCommand::Verify(args),
+        } = cli.command
+        else {
+            panic!("expected service verify");
+        };
+
+        assert_eq!(
+            args.manifest_reference.as_deref(),
+            Some("./lenso.service.json")
+        );
+        assert!(args.json);
+        assert_eq!(args.serve_command.as_deref(), Some("pnpm start"));
+        assert!(service_verify_uses_manifest(&args));
+    }
+
+    #[test]
     fn parses_service_check_operation_filter_and_sample_input() {
         let cli = Cli::parse_from([
             "lenso",
@@ -1896,6 +2898,27 @@ mod tests {
     }
 
     #[test]
+    fn service_verify_defaults_to_manifest_but_accepts_provider_name() {
+        let cli = Cli::parse_from(["lenso", "service", "verify"]);
+        let Command::Service {
+            command: ServiceCommand::Verify(args),
+        } = cli.command
+        else {
+            panic!("expected service verify");
+        };
+        assert!(service_verify_uses_manifest(&args));
+
+        let cli = Cli::parse_from(["lenso", "service", "verify", "support-ticket"]);
+        let Command::Service {
+            command: ServiceCommand::Verify(args),
+        } = cli.command
+        else {
+            panic!("expected service verify");
+        };
+        assert!(!service_verify_uses_manifest(&args));
+    }
+
+    #[test]
     fn parses_service_delivery_lifecycle_commands() {
         let diff = Cli::parse_from([
             "lenso",
@@ -1911,6 +2934,23 @@ mod tests {
             panic!("expected service diff");
         };
         assert_eq!(diff_args.service_name, "support-suite-provider");
+
+        let upgrade_plan = Cli::parse_from([
+            "lenso",
+            "service",
+            "upgrade-plan",
+            "support-suite-provider",
+            "./lenso.service.json",
+            "--json",
+        ]);
+        let Command::Service {
+            command: ServiceCommand::UpgradePlan(upgrade_plan_args),
+        } = upgrade_plan.command
+        else {
+            panic!("expected service upgrade-plan");
+        };
+        assert_eq!(upgrade_plan_args.service_name, "support-suite-provider");
+        assert!(upgrade_plan_args.json);
 
         let upgrade = Cli::parse_from([
             "lenso",
@@ -1942,6 +2982,147 @@ mod tests {
             panic!("expected service rollback");
         };
         assert!(rollback_args.dry_run);
+    }
+
+    #[test]
+    fn parses_service_release_and_policy_commands() {
+        let plan = Cli::parse_from([
+            "lenso",
+            "service",
+            "release",
+            "plan",
+            "support-suite-provider",
+            "./lenso.service-package.json",
+            "--output",
+            ".lenso/releases/support.plan.json",
+            "--env",
+            "staging",
+            "--fail-on",
+            "breaking",
+            "--json",
+        ]);
+        let Command::Service {
+            command:
+                ServiceCommand::Release {
+                    command: ServiceReleaseCommand::Plan(plan_args),
+                },
+        } = plan.command
+        else {
+            panic!("expected service release plan");
+        };
+        assert_eq!(plan_args.service_name, "support-suite-provider");
+        assert_eq!(plan_args.environment_name.as_deref(), Some("staging"));
+        assert_eq!(plan_args.fail_on.as_deref(), Some("breaking"));
+        assert!(plan_args.json);
+
+        let check = Cli::parse_from([
+            "lenso",
+            "service",
+            "release",
+            "check",
+            ".lenso/releases/support.plan.json",
+            "--fail-on",
+            "needs_attention",
+        ]);
+        let Command::Service {
+            command:
+                ServiceCommand::Release {
+                    command: ServiceReleaseCommand::Check(check_args),
+                },
+        } = check.command
+        else {
+            panic!("expected service release check");
+        };
+        assert_eq!(check_args.fail_on.as_deref(), Some("needs_attention"));
+
+        let apply = Cli::parse_from([
+            "lenso",
+            "service",
+            "release",
+            "apply",
+            ".lenso/releases/support.plan.json",
+            "--env",
+            "staging",
+            "--dry-run",
+        ]);
+        let Command::Service {
+            command:
+                ServiceCommand::Release {
+                    command: ServiceReleaseCommand::Apply(apply_args),
+                },
+        } = apply.command
+        else {
+            panic!("expected service release apply");
+        };
+        assert!(apply_args.dry_run);
+        assert_eq!(apply_args.environment_name.as_deref(), Some("staging"));
+
+        let promote = Cli::parse_from([
+            "lenso",
+            "service",
+            "release",
+            "promote",
+            "support-suite-provider",
+            "--from",
+            "staging",
+            "--to",
+            "prod",
+            "--output",
+            ".lenso/releases/support.prod.plan.json",
+        ]);
+        let Command::Service {
+            command:
+                ServiceCommand::Release {
+                    command: ServiceReleaseCommand::Promote(promote_args),
+                },
+        } = promote.command
+        else {
+            panic!("expected service release promote");
+        };
+        assert_eq!(promote_args.from_environment, "staging");
+        assert_eq!(promote_args.to_environment, "prod");
+
+        let rollback = Cli::parse_from([
+            "lenso",
+            "service",
+            "release",
+            "rollback",
+            "support-suite-provider",
+            "--env",
+            "prod",
+            "--to",
+            "rel_1",
+        ]);
+        let Command::Service {
+            command:
+                ServiceCommand::Release {
+                    command: ServiceReleaseCommand::Rollback(rollback_args),
+                },
+        } = rollback.command
+        else {
+            panic!("expected service release rollback");
+        };
+        assert_eq!(rollback_args.environment_name, "prod");
+        assert_eq!(rollback_args.release_id.as_deref(), Some("rel_1"));
+
+        let policy = Cli::parse_from([
+            "lenso",
+            "service",
+            "policy",
+            "check",
+            ".lenso/releases/support.plan.json",
+            "--json",
+        ]);
+        let Command::Service {
+            command:
+                ServiceCommand::Policy {
+                    command: ServicePolicyCommand::Check(policy_args),
+                },
+        } = policy.command
+        else {
+            panic!("expected service policy check");
+        };
+        assert!(policy_args.json);
     }
 
     #[test]

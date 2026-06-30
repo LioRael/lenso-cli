@@ -77,11 +77,13 @@ pub struct ModuleDoctorOptions {
 #[derive(Debug, Clone)]
 pub struct ServiceManifestCheckOptions {
     pub cwd: Option<PathBuf>,
+    pub env_file: Option<PathBuf>,
     pub json: bool,
     pub manifest_url: Option<String>,
     pub operation: Option<String>,
     pub ready_timeout_ms: u64,
     pub ready_url: Option<String>,
+    pub repo_root: Option<PathBuf>,
     pub sample_input: Option<PathBuf>,
     pub serve_command: Option<String>,
 }
@@ -111,6 +113,142 @@ pub struct ServiceRollbackOptions {
     pub dry_run: bool,
     pub env_file: Option<PathBuf>,
     pub module_services_file: Option<PathBuf>,
+    pub repo_root: Option<PathBuf>,
+    pub service_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceEnvListOptions {
+    pub json: bool,
+    pub repo_root: Option<PathBuf>,
+    pub service_name: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceEnvAddOptions {
+    pub environment_name: String,
+    pub image: Option<String>,
+    pub ingress_host: Option<String>,
+    pub json: bool,
+    pub kube_context: Option<String>,
+    pub manifest_reference: Option<String>,
+    pub namespace: Option<String>,
+    pub port: Option<u16>,
+    pub public_base_url: Option<String>,
+    pub release_track: Option<String>,
+    pub replicas: Option<u32>,
+    pub repo_root: Option<PathBuf>,
+    pub service_name: String,
+    pub target: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceEnvRemoveOptions {
+    pub dry_run: bool,
+    pub environment_name: String,
+    pub json: bool,
+    pub repo_root: Option<PathBuf>,
+    pub service_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceEnvVerifyOptions {
+    pub environment_name: String,
+    pub json: bool,
+    pub repo_root: Option<PathBuf>,
+    pub service_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceDeployExportOptions {
+    pub environment_name: String,
+    pub image: Option<String>,
+    pub ingress_host: Option<String>,
+    pub json: bool,
+    pub hpa: bool,
+    pub namespace: Option<String>,
+    pub network_policy: bool,
+    pub output_dir: PathBuf,
+    pub pdb: bool,
+    pub port: Option<u16>,
+    pub replicas: Option<u32>,
+    pub repo_root: Option<PathBuf>,
+    pub service_name: String,
+    pub target: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceDeployStatusOptions {
+    pub environment_name: String,
+    pub from_file: Option<PathBuf>,
+    pub json: bool,
+    pub repo_root: Option<PathBuf>,
+    pub service_name: String,
+    pub source: String,
+    pub write_state: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceDeployWaitOptions {
+    pub environment_name: String,
+    pub from_file: Option<PathBuf>,
+    pub interval_seconds: u64,
+    pub json: bool,
+    pub repo_root: Option<PathBuf>,
+    pub service_name: String,
+    pub source: String,
+    pub timeout_seconds: u64,
+    pub write_state: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceReleasePlanOptions {
+    pub environment_name: Option<String>,
+    pub fail_on: Option<String>,
+    pub json: bool,
+    pub manifest_reference: String,
+    pub output: Option<PathBuf>,
+    pub repo_root: Option<PathBuf>,
+    pub service_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceReleaseCheckOptions {
+    pub environment_name: Option<String>,
+    pub fail_on: Option<String>,
+    pub json: bool,
+    pub plan_file: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceReleaseApplyOptions {
+    pub allow_incompatible: bool,
+    pub base_url: Option<String>,
+    pub dry_run: bool,
+    pub environment_name: Option<String>,
+    pub env_file: Option<PathBuf>,
+    pub module_services_file: Option<PathBuf>,
+    pub plan_file: PathBuf,
+    pub repo_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceReleasePromoteOptions {
+    pub fail_on: Option<String>,
+    pub from_environment: String,
+    pub json: bool,
+    pub output: Option<PathBuf>,
+    pub repo_root: Option<PathBuf>,
+    pub service_name: String,
+    pub to_environment: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceReleaseRollbackPlanOptions {
+    pub environment_name: String,
+    pub json: bool,
+    pub output: Option<PathBuf>,
+    pub release_id: Option<String>,
     pub repo_root: Option<PathBuf>,
     pub service_name: String,
 }
@@ -406,6 +544,9 @@ type PendingWrites = BTreeMap<PathBuf, String>;
 
 const MODULE_CATALOG_PATH: &str = ".lenso/module-catalog.json";
 const MODULE_INSTALL_LEDGER_PATH: &str = ".lenso/module-installs.json";
+const SERVICE_RELEASE_LEDGER_PATH: &str = ".lenso/service-releases.json";
+const SERVICE_ENVIRONMENTS_PATH: &str = ".lenso/service-environments.json";
+const SERVICE_DEPLOYMENTS_PATH: &str = ".lenso/service-deployments.json";
 const CONSOLE_EXTENSION_REGISTRY_PATH: &str = ".lenso/console/extensions/registry.json";
 const RUNTIME_CONFIG_DEFAULTS_PATH: &str = ".lenso/runtime-config-defaults.json";
 const CONSOLE_EXTENSION_ROUTE_PREFIX: &str = "/console/extensions";
@@ -2915,6 +3056,11 @@ pub async fn check_service_manifest_reference(
         Vec::new()
     };
     let declarations = service_check_declaration_summary(&manifest);
+    let config = service_check_config_summary(
+        &manifest,
+        options.repo_root.as_deref(),
+        options.env_file.as_deref(),
+    )?;
     if let Some(failed_probe) = probes
         .iter()
         .find(|probe| probe.get("status").and_then(Value::as_str) == Some("failed"))
@@ -2944,6 +3090,7 @@ pub async fn check_service_manifest_reference(
                 "manifestReference": manifest_reference,
                 "manifestUrl": manifest_url,
                 "modules": module_names,
+                "config": config,
                 "operations": operations,
                 "probes": probes,
                 "readyUrl": ready_url,
@@ -2964,6 +3111,26 @@ pub async fn check_service_manifest_reference(
             declarations["eventHandlers"]
         );
         println!("Service operations: {}", operations.len());
+        let required_env = config["requiredEnv"]
+            .as_array()
+            .map(Vec::len)
+            .unwrap_or_default();
+        if required_env > 0 {
+            println!("Required env: {required_env}");
+        }
+        if let Some(env_file) = config["envFile"].as_str() {
+            println!("Env file: {env_file}");
+        }
+        if let Some(missing_env) = config["missingEnv"].as_array()
+            && !missing_env.is_empty()
+        {
+            let names = missing_env
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("Missing env: {names}");
+        }
         if let Some(ready_url) = ready_url {
             println!("Ready URL: {ready_url}");
         }
@@ -3516,6 +3683,1981 @@ pub async fn rollback_service(options: ServiceRollbackOptions) -> Result<()> {
         .await
 }
 
+pub fn list_service_environments(options: ServiceEnvListOptions) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let path = repo_root.join(SERVICE_ENVIRONMENTS_PATH);
+    let file = read_service_environments_file(&path)?;
+    let mut environments = file
+        .get("environments")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(service_name) = options.service_name.as_deref() {
+        environments.retain(|environment| {
+            environment.get("serviceName").and_then(Value::as_str) == Some(service_name)
+        });
+    }
+    sort_service_environments(&mut environments);
+
+    if options.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "version": 1,
+                "environments": environments,
+            }))?
+        );
+        return Ok(());
+    }
+
+    if environments.is_empty() {
+        println!("No service environments configured.");
+        return Ok(());
+    }
+
+    for environment in environments {
+        let service_name = environment
+            .get("serviceName")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        let name = environment
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        let target = environment
+            .get("target")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        let namespace = environment
+            .get("namespace")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        let image = environment
+            .get("image")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        println!("{service_name}/{name}: target={target} namespace={namespace} image={image}");
+    }
+
+    Ok(())
+}
+
+pub fn add_service_environment(options: ServiceEnvAddOptions) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let path = repo_root.join(SERVICE_ENVIRONMENTS_PATH);
+    let mut file = read_service_environments_file(&path)?;
+    let environment = service_environment_value(&options);
+    upsert_service_environment(&mut file, environment.clone())?;
+    write_json(&path, &file)?;
+
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&environment)?);
+    } else {
+        println!(
+            "Configured service environment: {}/{}",
+            options.service_name, options.environment_name
+        );
+        if let Some(manifest_reference) =
+            environment.get("manifestReference").and_then(Value::as_str)
+        {
+            println!("manifest: {manifest_reference}");
+        }
+    }
+
+    Ok(())
+}
+
+pub fn remove_service_environment(options: ServiceEnvRemoveOptions) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let path = repo_root.join(SERVICE_ENVIRONMENTS_PATH);
+    let mut file = read_service_environments_file(&path)?;
+    let environments = service_environments_array_mut(&mut file)?;
+    let before = environments.len();
+    environments.retain(|environment| {
+        !service_environment_matches(
+            environment,
+            &options.service_name,
+            &options.environment_name,
+        )
+    });
+    let removed = before != environments.len();
+    if !removed {
+        bail!(
+            "Service environment not found: {}/{}",
+            options.service_name,
+            options.environment_name
+        );
+    }
+    sort_service_environments(environments);
+
+    if !options.dry_run {
+        write_json(&path, &file)?;
+    }
+
+    if options.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "dryRun": options.dry_run,
+                "removed": removed,
+                "serviceName": options.service_name,
+                "environment": options.environment_name,
+            }))?
+        );
+    } else if options.dry_run {
+        println!(
+            "Would remove service environment: {}/{}",
+            options.service_name, options.environment_name
+        );
+    } else {
+        println!(
+            "Removed service environment: {}/{}",
+            options.service_name, options.environment_name
+        );
+    }
+
+    Ok(())
+}
+
+pub fn verify_service_environment(options: ServiceEnvVerifyOptions) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let path = repo_root.join(SERVICE_ENVIRONMENTS_PATH);
+    let file = read_service_environments_file(&path)?;
+    let environment = file
+        .get("environments")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|environment| {
+            service_environment_matches(
+                environment,
+                &options.service_name,
+                &options.environment_name,
+            )
+        })
+        .cloned()
+        .ok_or_else(|| {
+            anyhow!(
+                "Service environment not found: {}/{}",
+                options.service_name,
+                options.environment_name
+            )
+        })?;
+
+    let checks = service_environment_checks(&repo_root, &environment);
+    let ok = checks
+        .iter()
+        .all(|check| check.get("status").and_then(Value::as_str) == Some("ok"));
+
+    if options.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "ok": ok,
+                "environment": environment,
+                "checks": checks,
+            }))?
+        );
+    } else {
+        println!(
+            "Service environment: {}/{}",
+            options.service_name, options.environment_name
+        );
+        for check in &checks {
+            println!(
+                "- [{}] {}{}",
+                check.get("status").and_then(Value::as_str).unwrap_or("-"),
+                check.get("name").and_then(Value::as_str).unwrap_or("-"),
+                check
+                    .get("detail")
+                    .and_then(Value::as_str)
+                    .map(|detail| format!(": {detail}"))
+                    .unwrap_or_default()
+            );
+        }
+    }
+
+    if ok {
+        Ok(())
+    } else {
+        bail!("Service environment verify failed")
+    }
+}
+
+fn read_service_environments_file(path: &Path) -> Result<Value> {
+    let mut file =
+        read_json_if_exists(path)?.unwrap_or_else(|| json!({ "version": 1, "environments": [] }));
+    if !file.is_object() {
+        bail!(
+            "Service environments file must be a JSON object: {}",
+            path.display()
+        );
+    }
+    if !file.get("environments").is_some_and(Value::is_array) {
+        file["environments"] = json!([]);
+    }
+    Ok(file)
+}
+
+fn service_environment_value(options: &ServiceEnvAddOptions) -> Value {
+    let mut environment = Map::new();
+    environment.insert("name".to_owned(), json!(options.environment_name));
+    environment.insert("serviceName".to_owned(), json!(options.service_name));
+    environment.insert("target".to_owned(), json!(options.target));
+    insert_optional_string(&mut environment, "namespace", options.namespace.as_deref());
+    insert_optional_string(
+        &mut environment,
+        "kubeContext",
+        options.kube_context.as_deref(),
+    );
+    insert_optional_string(&mut environment, "image", options.image.as_deref());
+    insert_optional_string(
+        &mut environment,
+        "publicBaseUrl",
+        options.public_base_url.as_deref(),
+    );
+    let manifest_reference = options
+        .manifest_reference
+        .clone()
+        .or_else(|| derived_service_manifest_reference(options.public_base_url.as_deref()));
+    insert_optional_string(
+        &mut environment,
+        "manifestReference",
+        manifest_reference.as_deref(),
+    );
+    environment.insert(
+        "releaseTrack".to_owned(),
+        json!(
+            options
+                .release_track
+                .as_deref()
+                .unwrap_or(&options.environment_name)
+        ),
+    );
+
+    let mut config = Map::new();
+    if let Some(replicas) = options.replicas {
+        config.insert("replicas".to_owned(), json!(replicas));
+    }
+    if let Some(port) = options.port {
+        config.insert("port".to_owned(), json!(port));
+    }
+    insert_optional_string(&mut config, "ingressHost", options.ingress_host.as_deref());
+    if !config.is_empty() {
+        environment.insert("config".to_owned(), Value::Object(config));
+    }
+
+    Value::Object(environment)
+}
+
+fn insert_optional_string(map: &mut Map<String, Value>, key: &str, value: Option<&str>) {
+    if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+        map.insert(key.to_owned(), json!(value));
+    }
+}
+
+fn derived_service_manifest_reference(public_base_url: Option<&str>) -> Option<String> {
+    public_base_url
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("{}/lenso/service/v1/manifest", trim_trailing_slashes(value)))
+}
+
+fn upsert_service_environment(file: &mut Value, environment: Value) -> Result<()> {
+    let service_name = environment
+        .get("serviceName")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("serviceName is required"))?
+        .to_owned();
+    let name = environment
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("name is required"))?
+        .to_owned();
+    let environments = service_environments_array_mut(file)?;
+    if let Some(existing) = environments
+        .iter_mut()
+        .find(|candidate| service_environment_matches(candidate, &service_name, &name))
+    {
+        *existing = environment;
+    } else {
+        environments.push(environment);
+    }
+    sort_service_environments(environments);
+    Ok(())
+}
+
+fn service_environments_array_mut(file: &mut Value) -> Result<&mut Vec<Value>> {
+    file.get_mut("environments")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow!("Service environments file environments must be an array"))
+}
+
+fn sort_service_environments(environments: &mut [Value]) {
+    environments.sort_by(|left, right| {
+        service_environment_sort_key(left).cmp(&service_environment_sort_key(right))
+    });
+}
+
+fn service_environment_sort_key(environment: &Value) -> (String, String) {
+    (
+        environment
+            .get("serviceName")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned(),
+        environment
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned(),
+    )
+}
+
+fn service_environment_matches(environment: &Value, service_name: &str, name: &str) -> bool {
+    environment.get("serviceName").and_then(Value::as_str) == Some(service_name)
+        && environment.get("name").and_then(Value::as_str) == Some(name)
+}
+
+fn service_environment_checks(repo_root: &Path, environment: &Value) -> Vec<Value> {
+    let service_name = environment
+        .get("serviceName")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let mut checks = Vec::new();
+
+    match installed_service_receipt(repo_root, service_name) {
+        Ok(_) => checks.push(service_env_check(
+            "service_installed",
+            "ok",
+            "service install receipt found",
+        )),
+        Err(error) => checks.push(service_env_check(
+            "service_installed",
+            "error",
+            &format!("install the service first ({error})"),
+        )),
+    }
+
+    let target = environment
+        .get("target")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if matches!(target, "kubernetes" | "operator") {
+        checks.push(service_env_check("target", "ok", target));
+        push_required_service_env_check(&mut checks, environment, "namespace");
+        push_required_service_env_check(&mut checks, environment, "image");
+        if service_environment_manifest_reference(environment).is_some() {
+            checks.push(service_env_check(
+                "manifest_reference",
+                "ok",
+                "manifest URL configured or derived",
+            ));
+        } else {
+            checks.push(service_env_check(
+                "manifest_reference",
+                "error",
+                "set --manifest-reference or --public-base-url",
+            ));
+        }
+    } else {
+        checks.push(service_env_check(
+            "target",
+            "error",
+            "unsupported target; expected kubernetes or operator",
+        ));
+    }
+
+    checks
+}
+
+fn push_required_service_env_check(checks: &mut Vec<Value>, environment: &Value, field: &str) {
+    if environment
+        .get(field)
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        checks.push(service_env_check(field, "ok", "configured"));
+    } else {
+        checks.push(service_env_check(field, "error", "missing"));
+    }
+}
+
+fn service_environment_manifest_reference(environment: &Value) -> Option<String> {
+    environment
+        .get("manifestReference")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            derived_service_manifest_reference(
+                environment.get("publicBaseUrl").and_then(Value::as_str),
+            )
+        })
+}
+
+fn service_env_check(name: &str, status: &str, detail: &str) -> Value {
+    json!({
+        "name": name,
+        "status": status,
+        "detail": detail,
+    })
+}
+
+pub fn export_service_deployment(options: ServiceDeployExportOptions) -> Result<()> {
+    match options.target.as_str() {
+        "kubernetes" => export_kubernetes_service_deployment(options),
+        "operator" => export_operator_service_provider(options),
+        other => bail!("Unsupported deployment target `{other}`; expected kubernetes or operator"),
+    }
+}
+
+fn export_kubernetes_service_deployment(options: ServiceDeployExportOptions) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let environment =
+        find_service_environment(&repo_root, &options.service_name, &options.environment_name)?
+            .unwrap_or_else(|| {
+                json!({
+                    "name": options.environment_name,
+                    "serviceName": options.service_name,
+                    "target": "kubernetes",
+                })
+            });
+    let namespace = options
+        .namespace
+        .clone()
+        .or_else(|| string_at(&environment, "/namespace"))
+        .ok_or_else(|| {
+            anyhow!("Kubernetes namespace is required; pass --namespace or configure service env")
+        })?;
+    let image = options
+        .image
+        .clone()
+        .or_else(|| string_at(&environment, "/image"))
+        .ok_or_else(|| {
+            anyhow!("Kubernetes image is required; pass --image or configure service env")
+        })?;
+    let port = options
+        .port
+        .or_else(|| u16_at(&environment, "/config/port"))
+        .unwrap_or(4100);
+    let replicas = options
+        .replicas
+        .or_else(|| u32_at(&environment, "/config/replicas"))
+        .unwrap_or(1);
+    let ingress_host = options
+        .ingress_host
+        .clone()
+        .or_else(|| string_at(&environment, "/config/ingressHost"));
+    let include_hpa = options.hpa || bool_at(&environment, "/config/autoscaling").unwrap_or(false);
+    let include_pdb =
+        options.pdb || bool_at(&environment, "/config/disruptionBudget").unwrap_or(replicas > 1);
+    let include_network_policy =
+        options.network_policy || bool_at(&environment, "/config/networkPolicy").unwrap_or(false);
+    let manifest_reference = service_environment_manifest_reference(&environment);
+    let release = latest_service_release_for_env(
+        &repo_root,
+        &options.service_name,
+        &options.environment_name,
+    )?;
+    let release_id = release
+        .as_ref()
+        .and_then(|release| release.get("id").and_then(Value::as_str))
+        .unwrap_or("pending");
+    let service_manifest = installed_service_receipt(&repo_root, &options.service_name)
+        .ok()
+        .and_then(|receipt| receipt.get("serviceManifestSnapshot").cloned())
+        .unwrap_or(Value::Null);
+    let modules = if service_manifest.is_null() {
+        Vec::new()
+    } else {
+        service_module_name_set(&service_manifest)
+            .into_iter()
+            .collect()
+    };
+    let env_names = service_manifest_env_names(&service_manifest);
+    let output_dir = resolve_path(&repo_root, &options.output_dir);
+    fs::create_dir_all(&output_dir)
+        .with_context(|| format!("create directory {}", output_dir.display()))?;
+
+    let deployment_name = kubernetes_name(&options.service_name);
+    let context = KubernetesExportContext {
+        deployment_name: &deployment_name,
+        env_names: &env_names,
+        image: &image,
+        ingress_host: ingress_host.as_deref(),
+        manifest_reference: manifest_reference.as_deref().unwrap_or(""),
+        modules: &modules,
+        namespace: &namespace,
+        port,
+        release_id,
+        replicas,
+        service_name: &options.service_name,
+        environment_name: &options.environment_name,
+    };
+
+    write_file(
+        &output_dir.join("deployment.yaml"),
+        kubernetes_deployment_yaml(&context).as_bytes(),
+    )?;
+    write_file(
+        &output_dir.join("service.yaml"),
+        kubernetes_service_yaml(&context).as_bytes(),
+    )?;
+    write_file(
+        &output_dir.join("configmap.yaml"),
+        kubernetes_configmap_yaml(&context).as_bytes(),
+    )?;
+    write_file(
+        &output_dir.join("secret.example.yaml"),
+        kubernetes_secret_example_yaml(&context).as_bytes(),
+    )?;
+    if ingress_host.is_some() {
+        write_file(
+            &output_dir.join("ingress.yaml"),
+            kubernetes_ingress_yaml(&context).as_bytes(),
+        )?;
+    }
+    if include_hpa {
+        write_file(
+            &output_dir.join("hpa.yaml"),
+            kubernetes_hpa_yaml(&context).as_bytes(),
+        )?;
+    }
+    if include_pdb {
+        write_file(
+            &output_dir.join("pdb.yaml"),
+            kubernetes_pdb_yaml(&context).as_bytes(),
+        )?;
+    }
+    if include_network_policy {
+        write_file(
+            &output_dir.join("networkpolicy.yaml"),
+            kubernetes_network_policy_yaml(&context).as_bytes(),
+        )?;
+    }
+    write_file(
+        &output_dir.join("kustomization.yaml"),
+        kubernetes_kustomization_yaml(
+            ingress_host.is_some(),
+            include_hpa,
+            include_pdb,
+            include_network_policy,
+        )
+        .as_bytes(),
+    )?;
+    write_file(
+        &output_dir.join("README.md"),
+        kubernetes_export_readme(&context).as_bytes(),
+    )?;
+
+    if options.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "serviceName": options.service_name,
+                "environment": options.environment_name,
+                "target": "kubernetes",
+                "outputDir": output_dir,
+                "files": kubernetes_export_files(
+                    ingress_host.is_some(),
+                    include_hpa,
+                    include_pdb,
+                    include_network_policy,
+                ),
+            }))?
+        );
+    } else {
+        println!(
+            "Wrote Kubernetes deployment files: {}",
+            output_dir.display()
+        );
+        println!("next: kubectl apply -k {}", output_dir.display());
+        println!(
+            "next: lenso service deploy status {} --env {} --write-state",
+            options.service_name, options.environment_name
+        );
+        println!(
+            "next: lenso service deploy wait {} --env {} --write-state",
+            options.service_name, options.environment_name
+        );
+    }
+
+    Ok(())
+}
+
+fn export_operator_service_provider(options: ServiceDeployExportOptions) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let environment =
+        find_service_environment(&repo_root, &options.service_name, &options.environment_name)?
+            .unwrap_or_else(|| {
+                json!({
+                    "name": options.environment_name,
+                    "serviceName": options.service_name,
+                    "target": "operator",
+                })
+            });
+    let namespace = options
+        .namespace
+        .clone()
+        .or_else(|| string_at(&environment, "/namespace"))
+        .ok_or_else(|| {
+            anyhow!("Kubernetes namespace is required; pass --namespace or configure service env")
+        })?;
+    let image = options
+        .image
+        .clone()
+        .or_else(|| string_at(&environment, "/image"))
+        .ok_or_else(|| {
+            anyhow!("Kubernetes image is required; pass --image or configure service env")
+        })?;
+    let port = options
+        .port
+        .or_else(|| u16_at(&environment, "/config/port"))
+        .unwrap_or(4100);
+    let replicas = options
+        .replicas
+        .or_else(|| u32_at(&environment, "/config/replicas"))
+        .unwrap_or(1);
+    let ingress_host = options
+        .ingress_host
+        .clone()
+        .or_else(|| string_at(&environment, "/config/ingressHost"));
+    let include_hpa = options.hpa || bool_at(&environment, "/config/autoscaling").unwrap_or(false);
+    let include_pdb =
+        options.pdb || bool_at(&environment, "/config/disruptionBudget").unwrap_or(replicas > 1);
+    let include_network_policy =
+        options.network_policy || bool_at(&environment, "/config/networkPolicy").unwrap_or(false);
+    let manifest_reference = service_environment_manifest_reference(&environment);
+    let release = latest_service_release_for_env(
+        &repo_root,
+        &options.service_name,
+        &options.environment_name,
+    )?;
+    let release_id = release
+        .as_ref()
+        .and_then(|release| release.get("id").and_then(Value::as_str))
+        .unwrap_or("pending");
+    let service_manifest = installed_service_receipt(&repo_root, &options.service_name)
+        .ok()
+        .and_then(|receipt| receipt.get("serviceManifestSnapshot").cloned())
+        .unwrap_or(Value::Null);
+    let modules = if service_manifest.is_null() {
+        Vec::new()
+    } else {
+        service_module_name_set(&service_manifest)
+            .into_iter()
+            .collect()
+    };
+    let env_names = service_manifest_env_names(&service_manifest);
+    let output_dir = resolve_path(&repo_root, &options.output_dir);
+    fs::create_dir_all(&output_dir)
+        .with_context(|| format!("create directory {}", output_dir.display()))?;
+
+    let deployment_name = kubernetes_name(&options.service_name);
+    let context = KubernetesExportContext {
+        deployment_name: &deployment_name,
+        env_names: &env_names,
+        image: &image,
+        ingress_host: ingress_host.as_deref(),
+        manifest_reference: manifest_reference.as_deref().unwrap_or(""),
+        modules: &modules,
+        namespace: &namespace,
+        port,
+        release_id,
+        replicas,
+        service_name: &options.service_name,
+        environment_name: &options.environment_name,
+    };
+
+    write_file(
+        &output_dir.join("lensoserviceprovider.yaml"),
+        operator_provider_cr_yaml(&context, include_hpa, include_pdb, include_network_policy)
+            .as_bytes(),
+    )?;
+    write_file(
+        &output_dir.join("kustomization.yaml"),
+        b"resources:\n  - lensoserviceprovider.yaml\n",
+    )?;
+    write_file(
+        &output_dir.join("README.md"),
+        operator_provider_export_readme(&context).as_bytes(),
+    )?;
+
+    if options.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "serviceName": options.service_name,
+                "environment": options.environment_name,
+                "target": "operator",
+                "outputDir": output_dir,
+                "files": ["lensoserviceprovider.yaml", "kustomization.yaml", "README.md"],
+            }))?
+        );
+    } else {
+        println!("Wrote LensoServiceProvider files: {}", output_dir.display());
+        println!("next: kubectl apply -k {}", output_dir.display());
+        println!(
+            "next: lenso service deploy status {} --env {} --source operator --write-state",
+            context.service_name, context.environment_name
+        );
+        println!(
+            "next: lenso service deploy wait {} --env {} --source operator --write-state",
+            context.service_name, context.environment_name
+        );
+    }
+
+    Ok(())
+}
+
+pub fn status_service_deployment(options: ServiceDeployStatusOptions) -> Result<()> {
+    let (repo_root, observation) = service_deployment_observation_for_options(&options)?;
+
+    if options.write_state {
+        upsert_service_deployment_observation(
+            &repo_root.join(SERVICE_DEPLOYMENTS_PATH),
+            observation.clone(),
+        )?;
+    }
+
+    print_service_deployment_observation(&options, &observation)?;
+
+    Ok(())
+}
+
+pub fn wait_service_deployment(options: ServiceDeployWaitOptions) -> Result<()> {
+    let timeout = Duration::from_secs(options.timeout_seconds);
+    let interval = Duration::from_secs(options.interval_seconds.max(1));
+    let started = Instant::now();
+
+    loop {
+        let status_options = ServiceDeployStatusOptions {
+            environment_name: options.environment_name.clone(),
+            from_file: options.from_file.clone(),
+            json: false,
+            repo_root: options.repo_root.clone(),
+            service_name: options.service_name.clone(),
+            source: options.source.clone(),
+            write_state: false,
+        };
+        let (repo_root, observation) = service_deployment_observation_for_options(&status_options)?;
+
+        if options.write_state {
+            upsert_service_deployment_observation(
+                &repo_root.join(SERVICE_DEPLOYMENTS_PATH),
+                observation.clone(),
+            )?;
+        }
+
+        if service_deployment_wait_ready(&observation) {
+            if options.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "status": "ready",
+                        "observation": observation,
+                    }))?
+                );
+            } else {
+                println!(
+                    "Service deployment ready: {}/{}",
+                    options.service_name, options.environment_name
+                );
+                println!(
+                    "state: {}",
+                    observation
+                        .get("state")
+                        .and_then(Value::as_str)
+                        .unwrap_or("-")
+                );
+                println!(
+                    "drift: {}",
+                    observation
+                        .get("drift")
+                        .and_then(Value::as_str)
+                        .unwrap_or("-")
+                );
+            }
+            return Ok(());
+        }
+
+        if service_deployment_wait_failed(&observation)
+            || options.from_file.is_some()
+            || started.elapsed() >= timeout
+        {
+            let state = observation
+                .get("state")
+                .and_then(Value::as_str)
+                .unwrap_or("-");
+            let drift = observation
+                .get("drift")
+                .and_then(Value::as_str)
+                .unwrap_or("-");
+            let next_action = observation
+                .get("nextAction")
+                .and_then(Value::as_str)
+                .unwrap_or("refresh deployment status");
+            bail!(
+                "Service deployment is not ready: {}/{} state={state} drift={drift}; next: {next_action}",
+                options.service_name,
+                options.environment_name
+            );
+        }
+
+        std::thread::sleep(interval);
+    }
+}
+
+fn service_deployment_observation_for_options(
+    options: &ServiceDeployStatusOptions,
+) -> Result<(PathBuf, Value)> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let environment =
+        find_service_environment(&repo_root, &options.service_name, &options.environment_name)?
+            .ok_or_else(|| {
+                anyhow!(
+                    "Service environment not found: {}/{}",
+                    options.service_name,
+                    options.environment_name
+                )
+            })?;
+    let observation = match options.source.as_str() {
+        "kubernetes" => {
+            let (deployment, service, ingress) =
+                if let Some(from_file) = options.from_file.as_deref() {
+                    let value = read_json(from_file)?;
+                    (
+                        value
+                            .get("deployment")
+                            .cloned()
+                            .unwrap_or_else(|| value.clone()),
+                        value.get("service").cloned(),
+                        value.get("ingress").cloned(),
+                    )
+                } else {
+                    let deployment = kubectl_get_deployment(&environment, &options.service_name)?;
+                    let service =
+                        kubectl_get_named(&environment, "service", &options.service_name).ok();
+                    let ingress = string_at(&environment, "/config/ingressHost").and_then(|_| {
+                        kubectl_get_named(&environment, "ingress", &options.service_name).ok()
+                    });
+                    (deployment, service, ingress)
+                };
+            service_deployment_observation(
+                &repo_root,
+                &options.service_name,
+                &options.environment_name,
+                &environment,
+                &deployment,
+                service.as_ref(),
+                ingress.as_ref(),
+            )?
+        }
+        "operator" => {
+            let provider = if let Some(from_file) = options.from_file.as_deref() {
+                read_json(from_file)?
+            } else {
+                kubectl_get_lenso_service_provider(&environment, &options.service_name)?
+            };
+            operator_service_deployment_observation(
+                &repo_root,
+                &options.service_name,
+                &options.environment_name,
+                &environment,
+                &provider,
+            )?
+        }
+        other => bail!("Unsupported deployment source `{other}`; expected kubernetes or operator"),
+    };
+    Ok((repo_root, observation))
+}
+
+fn print_service_deployment_observation(
+    options: &ServiceDeployStatusOptions,
+    observation: &Value,
+) -> Result<()> {
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(observation)?);
+        return Ok(());
+    }
+    let state = observation
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let drift = observation
+        .get("drift")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let next_action = observation
+        .get("nextAction")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    println!(
+        "Service deployment: {}/{}",
+        options.service_name, options.environment_name
+    );
+    println!("state: {state}");
+    println!("drift: {drift}");
+    println!("next action: {next_action}");
+    Ok(())
+}
+
+struct KubernetesExportContext<'a> {
+    deployment_name: &'a str,
+    env_names: &'a [String],
+    image: &'a str,
+    ingress_host: Option<&'a str>,
+    manifest_reference: &'a str,
+    modules: &'a [String],
+    namespace: &'a str,
+    port: u16,
+    release_id: &'a str,
+    replicas: u32,
+    service_name: &'a str,
+    environment_name: &'a str,
+}
+
+fn find_service_environment(
+    repo_root: &Path,
+    service_name: &str,
+    environment_name: &str,
+) -> Result<Option<Value>> {
+    let path = repo_root.join(SERVICE_ENVIRONMENTS_PATH);
+    let file = read_service_environments_file(&path)?;
+    Ok(file
+        .get("environments")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|environment| {
+            service_environment_matches(environment, service_name, environment_name)
+        })
+        .cloned())
+}
+
+fn kubernetes_deployment_yaml(context: &KubernetesExportContext<'_>) -> String {
+    let labels = kubernetes_labels_yaml(context, 4);
+    let pod_labels = kubernetes_labels_yaml(context, 8);
+    let env_from = if context.env_names.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "          envFrom:\n            - configMapRef:\n                name: {}-config\n            - secretRef:\n                name: {}-secrets\n                optional: true\n",
+            context.deployment_name, context.deployment_name
+        )
+    };
+    format!(
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: {name}\n  namespace: {namespace}\n  labels:\n{labels}  annotations:\n    lenso.dev/modules: {modules}\n    lenso.dev/release-id: {release_id}\n    lenso.dev/manifest-reference: {manifest_reference}\nspec:\n  replicas: {replicas}\n  selector:\n    matchLabels:\n      app.kubernetes.io/name: {name}\n  template:\n    metadata:\n      labels:\n{pod_labels}      annotations:\n        lenso.dev/release-id: {release_id}\n    spec:\n      containers:\n        - name: {name}\n          image: {image}\n          ports:\n            - containerPort: {port}\n          readinessProbe:\n            httpGet:\n              path: /lenso/service/v1/status\n              port: {port}\n          livenessProbe:\n            httpGet:\n              path: /lenso/service/v1/status\n              port: {port}\n{env_from}",
+        name = context.deployment_name,
+        namespace = context.namespace,
+        labels = labels,
+        modules = yaml_quote(&context.modules.join(",")),
+        release_id = yaml_quote(context.release_id),
+        manifest_reference = yaml_quote(context.manifest_reference),
+        replicas = context.replicas,
+        pod_labels = pod_labels,
+        image = context.image,
+        port = context.port,
+        env_from = env_from
+    )
+}
+
+fn kubernetes_service_yaml(context: &KubernetesExportContext<'_>) -> String {
+    let labels = kubernetes_labels_yaml(context, 4);
+    format!(
+        "apiVersion: v1\nkind: Service\nmetadata:\n  name: {name}\n  namespace: {namespace}\n  labels:\n{labels}spec:\n  selector:\n    app.kubernetes.io/name: {name}\n  ports:\n    - name: http\n      port: {port}\n      targetPort: {port}\n",
+        name = context.deployment_name,
+        namespace = context.namespace,
+        labels = labels,
+        port = context.port
+    )
+}
+
+fn kubernetes_configmap_yaml(context: &KubernetesExportContext<'_>) -> String {
+    let mut data = String::new();
+    for name in context.env_names {
+        data.push_str(&format!("  {}: \"\"\n", kubernetes_env_key(name)));
+    }
+    if data.is_empty() {
+        data.push_str("  LENSO_SERVICE_ENV: \"production\"\n");
+    }
+    format!(
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: {name}-config\n  namespace: {namespace}\ndata:\n{data}",
+        name = context.deployment_name,
+        namespace = context.namespace,
+        data = data
+    )
+}
+
+fn kubernetes_secret_example_yaml(context: &KubernetesExportContext<'_>) -> String {
+    format!(
+        "apiVersion: v1\nkind: Secret\nmetadata:\n  name: {name}-secrets\n  namespace: {namespace}\ntype: Opaque\nstringData:\n  SERVICE_TOKEN: replace-me\n",
+        name = context.deployment_name,
+        namespace = context.namespace
+    )
+}
+
+fn kubernetes_ingress_yaml(context: &KubernetesExportContext<'_>) -> String {
+    let host = context.ingress_host.unwrap_or_default();
+    format!(
+        "apiVersion: networking.k8s.io/v1\nkind: Ingress\nmetadata:\n  name: {name}\n  namespace: {namespace}\nspec:\n  rules:\n    - host: {host}\n      http:\n        paths:\n          - path: /\n            pathType: Prefix\n            backend:\n              service:\n                name: {name}\n                port:\n                  number: {port}\n",
+        name = context.deployment_name,
+        namespace = context.namespace,
+        host = host,
+        port = context.port
+    )
+}
+
+fn kubernetes_hpa_yaml(context: &KubernetesExportContext<'_>) -> String {
+    format!(
+        "apiVersion: autoscaling/v2\nkind: HorizontalPodAutoscaler\nmetadata:\n  name: {name}\n  namespace: {namespace}\nspec:\n  scaleTargetRef:\n    apiVersion: apps/v1\n    kind: Deployment\n    name: {name}\n  minReplicas: {replicas}\n  maxReplicas: {max_replicas}\n  metrics:\n    - type: Resource\n      resource:\n        name: cpu\n        target:\n          type: Utilization\n          averageUtilization: 70\n",
+        name = context.deployment_name,
+        namespace = context.namespace,
+        replicas = context.replicas.max(1),
+        max_replicas = (context.replicas.max(1) * 3).max(3)
+    )
+}
+
+fn kubernetes_pdb_yaml(context: &KubernetesExportContext<'_>) -> String {
+    format!(
+        "apiVersion: policy/v1\nkind: PodDisruptionBudget\nmetadata:\n  name: {name}\n  namespace: {namespace}\nspec:\n  minAvailable: 1\n  selector:\n    matchLabels:\n      app.kubernetes.io/name: {name}\n",
+        name = context.deployment_name,
+        namespace = context.namespace
+    )
+}
+
+fn kubernetes_network_policy_yaml(context: &KubernetesExportContext<'_>) -> String {
+    format!(
+        "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: {name}\n  namespace: {namespace}\nspec:\n  podSelector:\n    matchLabels:\n      app.kubernetes.io/name: {name}\n  policyTypes:\n    - Ingress\n  ingress:\n    - ports:\n        - protocol: TCP\n          port: {port}\n",
+        name = context.deployment_name,
+        namespace = context.namespace,
+        port = context.port
+    )
+}
+
+fn kubernetes_kustomization_yaml(
+    include_ingress: bool,
+    include_hpa: bool,
+    include_pdb: bool,
+    include_network_policy: bool,
+) -> String {
+    let mut resources = vec![
+        "deployment.yaml",
+        "service.yaml",
+        "configmap.yaml",
+        "secret.example.yaml",
+    ];
+    if include_ingress {
+        resources.push("ingress.yaml");
+    }
+    if include_hpa {
+        resources.push("hpa.yaml");
+    }
+    if include_pdb {
+        resources.push("pdb.yaml");
+    }
+    if include_network_policy {
+        resources.push("networkpolicy.yaml");
+    }
+    format!(
+        "resources:\n{}\n",
+        resources
+            .into_iter()
+            .map(|resource| format!("  - {resource}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+}
+
+fn kubernetes_export_readme(context: &KubernetesExportContext<'_>) -> String {
+    format!(
+        "# {service} {environment} Kubernetes Deployment\n\n```sh\nkubectl apply -k .\nlenso service deploy status {service} --env {environment} --write-state\nlenso service deploy wait {service} --env {environment} --write-state\n```\n",
+        service = context.service_name,
+        environment = context.environment_name
+    )
+}
+
+fn kubernetes_export_files(
+    include_ingress: bool,
+    include_hpa: bool,
+    include_pdb: bool,
+    include_network_policy: bool,
+) -> Vec<&'static str> {
+    let mut files = vec![
+        "deployment.yaml",
+        "service.yaml",
+        "configmap.yaml",
+        "secret.example.yaml",
+        "kustomization.yaml",
+        "README.md",
+    ];
+    if include_ingress {
+        files.push("ingress.yaml");
+    }
+    if include_hpa {
+        files.push("hpa.yaml");
+    }
+    if include_pdb {
+        files.push("pdb.yaml");
+    }
+    if include_network_policy {
+        files.push("networkpolicy.yaml");
+    }
+    files
+}
+
+fn operator_provider_cr_yaml(
+    context: &KubernetesExportContext<'_>,
+    include_hpa: bool,
+    include_pdb: bool,
+    include_network_policy: bool,
+) -> String {
+    let modules = if context.modules.is_empty() {
+        "  modules: []\n".to_owned()
+    } else {
+        format!(
+            "  modules:\n{}\n",
+            context
+                .modules
+                .iter()
+                .map(|module| format!("    - {module}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
+    let env_from = if context.env_names.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "  envFrom:\n    configMap: {}-config\n    secret: {}-secrets\n",
+            context.deployment_name, context.deployment_name
+        )
+    };
+    let ingress = context.ingress_host.map_or_else(String::new, |host| {
+        format!("  ingress:\n    host: {host}\n")
+    });
+    let autoscaling = if include_hpa {
+        format!(
+            "  autoscaling:\n    enabled: true\n    minReplicas: {min}\n    maxReplicas: {max}\n    targetCpuUtilization: 70\n",
+            min = context.replicas.max(1),
+            max = (context.replicas.max(1) * 3).max(3)
+        )
+    } else {
+        String::new()
+    };
+    let disruption_budget = if include_pdb {
+        "  disruptionBudget:\n    enabled: true\n    minAvailable: 1\n".to_owned()
+    } else {
+        String::new()
+    };
+    let network_policy = if include_network_policy {
+        "  networkPolicy:\n    enabled: true\n".to_owned()
+    } else {
+        String::new()
+    };
+
+    format!(
+        "apiVersion: lenso.dev/v1alpha1\nkind: LensoServiceProvider\nmetadata:\n  name: {name}\n  namespace: {namespace}\n  labels:\n    app.kubernetes.io/part-of: lenso\n    app.kubernetes.io/component: service-provider\n    lenso.dev/service-provider: {service}\n    lenso.dev/environment: {environment}\nspec:\n  serviceName: {service}\n  environment: {environment}\n  image: {image}\n  releaseId: {release_id}\n  manifestReference: {manifest_reference}\n{modules}  replicas: {replicas}\n  port: {port}\n{env_from}{ingress}{autoscaling}{disruption_budget}{network_policy}",
+        name = context.deployment_name,
+        namespace = context.namespace,
+        service = context.service_name,
+        environment = context.environment_name,
+        image = context.image,
+        release_id = context.release_id,
+        manifest_reference = context.manifest_reference,
+        modules = modules,
+        replicas = context.replicas,
+        port = context.port,
+        env_from = env_from,
+        ingress = ingress,
+        autoscaling = autoscaling,
+        disruption_budget = disruption_budget,
+        network_policy = network_policy
+    )
+}
+
+fn operator_provider_export_readme(context: &KubernetesExportContext<'_>) -> String {
+    format!(
+        "# {service} {environment} LensoServiceProvider\n\n```sh\nkubectl apply -k .\nlenso service deploy status {service} --env {environment} --source operator --write-state\nlenso service deploy wait {service} --env {environment} --source operator --write-state\n```\n",
+        service = context.service_name,
+        environment = context.environment_name
+    )
+}
+
+fn kubernetes_labels_yaml(context: &KubernetesExportContext<'_>, indent: usize) -> String {
+    let prefix = " ".repeat(indent);
+    format!(
+        "{prefix}app.kubernetes.io/name: {name}\n{prefix}app.kubernetes.io/part-of: lenso\n{prefix}app.kubernetes.io/component: service-provider\n{prefix}lenso.dev/service-provider: {service}\n{prefix}lenso.dev/environment: {environment}\n",
+        name = context.deployment_name,
+        service = context.deployment_name,
+        environment = context.environment_name
+    )
+}
+
+fn kubectl_get_deployment(environment: &Value, service_name: &str) -> Result<Value> {
+    kubectl_get_named(environment, "deployment", service_name)
+}
+
+fn kubectl_get_lenso_service_provider(environment: &Value, service_name: &str) -> Result<Value> {
+    kubectl_get_named(environment, "lensoserviceprovider", service_name)
+}
+
+fn kubectl_get_named(environment: &Value, kind: &str, service_name: &str) -> Result<Value> {
+    let namespace = string_at(environment, "/namespace")
+        .ok_or_else(|| anyhow!("Kubernetes namespace is required for deploy status"))?;
+    let name = kubernetes_name(service_name);
+    let mut command = Command::new("kubectl");
+    if let Some(context) = string_at(environment, "/kubeContext") {
+        command.args(["--context", &context]);
+    }
+    command.args(["get", kind, &name, "-n", &namespace, "-o", "json"]);
+    let output = command
+        .output()
+        .with_context(|| format!("run kubectl get {kind}"))?;
+    if !output.status.success() {
+        bail!(
+            "kubectl get {kind} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    serde_json::from_slice(&output.stdout).with_context(|| format!("parse kubectl {kind} JSON"))
+}
+
+fn service_deployment_observation(
+    repo_root: &Path,
+    service_name: &str,
+    environment_name: &str,
+    environment: &Value,
+    deployment: &Value,
+    service: Option<&Value>,
+    ingress: Option<&Value>,
+) -> Result<Value> {
+    let latest_release = latest_service_release_for_env(repo_root, service_name, environment_name)?;
+    let host_release_id = latest_release
+        .as_ref()
+        .and_then(|release| release.get("id").and_then(Value::as_str))
+        .map(ToOwned::to_owned);
+    let host_candidate_version = latest_release.as_ref().and_then(|release| {
+        release
+            .pointer("/candidate/version")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+    });
+    let cluster_release_id = deployment
+        .pointer("/metadata/annotations/lenso.dev~1release-id")
+        .and_then(Value::as_str)
+        .filter(|value| *value != "pending")
+        .map(ToOwned::to_owned);
+    let observed_image = deployment_container_image(deployment);
+    let expected_image = string_at(environment, "/image");
+    let state = kubernetes_deployment_state(deployment);
+    let drift = service_deployment_drift(
+        host_release_id.as_deref(),
+        cluster_release_id.as_deref(),
+        expected_image.as_deref(),
+        observed_image.as_deref(),
+    );
+    let namespace = deployment
+        .pointer("/metadata/namespace")
+        .and_then(Value::as_str)
+        .or_else(|| environment.get("namespace").and_then(Value::as_str))
+        .unwrap_or("default");
+    let deployment_name = deployment
+        .pointer("/metadata/name")
+        .and_then(Value::as_str)
+        .unwrap_or(service_name);
+    let desired_replicas = u32_at(deployment, "/spec/replicas");
+    let ready_replicas = u32_at(deployment, "/status/readyReplicas");
+    let available_replicas = u32_at(deployment, "/status/availableReplicas");
+    let manifest_reference = deployment
+        .pointer("/metadata/annotations/lenso.dev~1manifest-reference")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| service_environment_manifest_reference(environment));
+    let service_endpoint = service
+        .and_then(|service| service.pointer("/spec/clusterIP").and_then(Value::as_str))
+        .filter(|cluster_ip| *cluster_ip != "None")
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("{deployment_name}.{namespace}.svc.cluster.local"));
+    let ingress_host = ingress
+        .and_then(first_ingress_host)
+        .or_else(|| string_at(environment, "/config/ingressHost"));
+    let next_action = service_deployment_next_action(&state, &drift);
+
+    Ok(json!({
+        "serviceName": service_name,
+        "environment": environment_name,
+        "target": "kubernetes",
+        "observedAtUnixMs": current_time_millis()?,
+        "state": state,
+        "drift": drift,
+        "cluster": {
+            "namespace": namespace,
+            "deployment": deployment_name,
+            "readyReplicas": ready_replicas,
+            "desiredReplicas": desired_replicas,
+            "availableReplicas": available_replicas,
+            "image": observed_image,
+            "releaseId": cluster_release_id,
+            "manifestReference": manifest_reference,
+            "serviceEndpoint": service_endpoint,
+            "ingressHost": ingress_host,
+        },
+        "host": {
+            "releaseId": host_release_id,
+            "candidateVersion": host_candidate_version,
+        },
+        "checks": [
+            {
+                "name": "deployment_rollout",
+                "status": if state == "ready" { "ok" } else { "attention" },
+                "detail": format!(
+                    "{}/{} replicas ready",
+                    ready_replicas.unwrap_or(0),
+                    desired_replicas.unwrap_or(0)
+                ),
+            }
+        ],
+        "nextAction": next_action,
+    }))
+}
+
+fn operator_service_deployment_observation(
+    repo_root: &Path,
+    service_name: &str,
+    environment_name: &str,
+    environment: &Value,
+    provider: &Value,
+) -> Result<Value> {
+    let latest_release = latest_service_release_for_env(repo_root, service_name, environment_name)?;
+    let host_release_id = latest_release
+        .as_ref()
+        .and_then(|release| release.get("id").and_then(Value::as_str))
+        .map(ToOwned::to_owned);
+    let host_candidate_version = latest_release.as_ref().and_then(|release| {
+        release
+            .pointer("/candidate/version")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+    });
+    let status = provider.get("status").unwrap_or(&Value::Null);
+    let state = status
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_owned();
+    let observed_release_id = status
+        .get("observedReleaseId")
+        .and_then(Value::as_str)
+        .filter(|value| *value != "pending")
+        .map(ToOwned::to_owned);
+    let observed_image = status
+        .get("observedImage")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let expected_image = string_at(environment, "/image");
+    let drift = service_deployment_drift(
+        host_release_id.as_deref(),
+        observed_release_id.as_deref(),
+        expected_image.as_deref(),
+        observed_image.as_deref(),
+    );
+    let namespace = provider
+        .pointer("/metadata/namespace")
+        .and_then(Value::as_str)
+        .or_else(|| environment.get("namespace").and_then(Value::as_str))
+        .unwrap_or("default");
+    let resource = provider
+        .pointer("/metadata/name")
+        .and_then(Value::as_str)
+        .unwrap_or(service_name);
+    let ready_replicas = u32_at(status, "/readyReplicas");
+    let desired_replicas = u32_at(status, "/desiredReplicas");
+    let available_replicas = u32_at(status, "/availableReplicas");
+    let manifest_reference = status
+        .get("manifestReference")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| service_environment_manifest_reference(environment));
+    let conditions = status
+        .get("conditions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let next_action = operator_deployment_next_action(&state, &drift);
+
+    Ok(json!({
+        "serviceName": service_name,
+        "environment": environment_name,
+        "target": "operator",
+        "observedAtUnixMs": current_time_millis()?,
+        "state": state,
+        "drift": drift,
+        "operator": {
+            "resource": resource,
+            "namespace": namespace,
+            "observedGeneration": status.get("observedGeneration").and_then(Value::as_u64),
+            "conditions": conditions,
+        },
+        "cluster": {
+            "namespace": namespace,
+            "deployment": resource,
+            "readyReplicas": ready_replicas,
+            "desiredReplicas": desired_replicas,
+            "availableReplicas": available_replicas,
+            "image": observed_image,
+            "releaseId": observed_release_id,
+            "manifestReference": manifest_reference,
+        },
+        "host": {
+            "releaseId": host_release_id,
+            "candidateVersion": host_candidate_version,
+        },
+        "checks": [
+            {
+                "name": "operator_reconcile",
+                "status": if state == "ready" { "ok" } else { "attention" },
+                "detail": format!(
+                    "LensoServiceProvider/{resource} is {state}"
+                ),
+            }
+        ],
+        "nextAction": next_action,
+    }))
+}
+
+fn kubernetes_deployment_state(deployment: &Value) -> String {
+    if deployment_failed(deployment) {
+        return "failed".to_owned();
+    }
+    let desired = u32_at(deployment, "/spec/replicas")
+        .or_else(|| u32_at(deployment, "/status/replicas"))
+        .unwrap_or(1);
+    let ready = u32_at(deployment, "/status/readyReplicas").unwrap_or(0);
+    if desired > 0 && ready == desired {
+        "ready".to_owned()
+    } else {
+        "progressing".to_owned()
+    }
+}
+
+fn deployment_failed(deployment: &Value) -> bool {
+    deployment
+        .pointer("/status/conditions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|condition| {
+            condition.get("type").and_then(Value::as_str) == Some("Progressing")
+                && condition.get("status").and_then(Value::as_str) == Some("False")
+                && condition.get("reason").and_then(Value::as_str)
+                    == Some("ProgressDeadlineExceeded")
+        })
+}
+
+fn service_deployment_drift(
+    host_release_id: Option<&str>,
+    cluster_release_id: Option<&str>,
+    expected_image: Option<&str>,
+    observed_image: Option<&str>,
+) -> String {
+    if let (Some(expected), Some(observed)) = (expected_image, observed_image)
+        && expected != observed
+    {
+        return "image_drift".to_owned();
+    }
+    match (host_release_id, cluster_release_id) {
+        (Some(host), Some(cluster)) if host == cluster => "in_sync".to_owned(),
+        (Some(_), Some(_)) | (Some(_), None) => "host_ahead".to_owned(),
+        (None, Some(_)) => "cluster_ahead".to_owned(),
+        (None, None) => "unknown".to_owned(),
+    }
+}
+
+fn service_deployment_next_action(state: &str, drift: &str) -> &'static str {
+    match (state, drift) {
+        ("ready", "in_sync") => "monitor rollout and Remote Calls",
+        (_, "image_drift") => "export and apply manifests with the expected image",
+        (_, "host_ahead") => "apply the Kubernetes manifests or refresh deployment status",
+        (_, "cluster_ahead") => "check release ledger before promoting",
+        ("failed", _) => "inspect Kubernetes rollout and pod events",
+        ("progressing", _) => "wait for rollout or inspect Kubernetes deployment",
+        _ => "refresh deployment status",
+    }
+}
+
+fn operator_deployment_next_action(state: &str, drift: &str) -> &'static str {
+    match (state, drift) {
+        ("ready", "in_sync") => "monitor operator conditions, Remote Calls, and Runtime Story",
+        (_, "image_drift") => "update the LensoServiceProvider image or release environment",
+        (_, "host_ahead") => "wait for the operator to observe the latest release",
+        (_, "cluster_ahead") => "check release ledger before promoting",
+        ("failed", _) => "inspect LensoServiceProvider conditions and provider pods",
+        ("progressing", _) => "wait for operator reconciliation or inspect provider pods",
+        _ => "refresh operator status",
+    }
+}
+
+fn service_deployment_wait_ready(observation: &Value) -> bool {
+    observation.get("state").and_then(Value::as_str) == Some("ready")
+        && matches!(
+            observation.get("drift").and_then(Value::as_str),
+            Some("in_sync") | Some("unknown") | None
+        )
+}
+
+fn service_deployment_wait_failed(observation: &Value) -> bool {
+    matches!(
+        observation.get("state").and_then(Value::as_str),
+        Some("failed") | Some("unhealthy")
+    )
+}
+
+fn deployment_container_image(deployment: &Value) -> Option<String> {
+    deployment
+        .pointer("/spec/template/spec/containers")
+        .and_then(Value::as_array)
+        .and_then(|containers| containers.first())
+        .and_then(|container| container.get("image"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn first_ingress_host(ingress: &Value) -> Option<String> {
+    ingress
+        .pointer("/spec/rules")
+        .and_then(Value::as_array)
+        .and_then(|rules| rules.first())
+        .and_then(|rule| rule.get("host"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn upsert_service_deployment_observation(path: &Path, observation: Value) -> Result<()> {
+    let mut file = read_json_if_exists(path)?
+        .unwrap_or_else(|| json!({ "version": 2, "observations": [], "history": [] }));
+    file["version"] = json!(2);
+    if !file.get("observations").is_some_and(Value::is_array) {
+        file["observations"] = json!([]);
+    }
+    if !file.get("history").is_some_and(Value::is_array) {
+        file["history"] = json!([]);
+    }
+    let service_name = observation
+        .get("serviceName")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("deployment observation serviceName is required"))?
+        .to_owned();
+    let environment_name = observation
+        .get("environment")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("deployment observation environment is required"))?
+        .to_owned();
+    let observations = file
+        .get_mut("observations")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow!("service deployment observations must be an array"))?;
+    observations.retain(|candidate| {
+        candidate.get("serviceName").and_then(Value::as_str) != Some(service_name.as_str())
+            || candidate.get("environment").and_then(Value::as_str)
+                != Some(environment_name.as_str())
+    });
+    observations.push(observation.clone());
+    observations.sort_by(|left, right| {
+        (
+            left.get("serviceName")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+            left.get("environment")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+        )
+            .cmp(&(
+                right
+                    .get("serviceName")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+                right
+                    .get("environment")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+            ))
+    });
+    let history = file
+        .get_mut("history")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow!("service deployment history must be an array"))?;
+    history.push(observation);
+    history.sort_by_key(|entry| {
+        (
+            entry
+                .get("observedAtUnixMs")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            entry
+                .get("serviceName")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+            entry
+                .get("environment")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+        )
+    });
+    write_json(path, &file)
+}
+
+fn latest_service_release_for_env(
+    repo_root: &Path,
+    service_name: &str,
+    environment_name: &str,
+) -> Result<Option<Value>> {
+    Ok(
+        service_releases_for_env(repo_root, service_name, environment_name)?
+            .into_iter()
+            .next(),
+    )
+}
+
+fn rollback_service_release_target(
+    repo_root: &Path,
+    service_name: &str,
+    environment_name: &str,
+    release_id: Option<&str>,
+) -> Result<Value> {
+    let releases = service_releases_for_env(repo_root, service_name, environment_name)?;
+    if let Some(release_id) = release_id {
+        return releases
+            .into_iter()
+            .find(|release| release.get("id").and_then(Value::as_str) == Some(release_id))
+            .ok_or_else(|| {
+                anyhow!("Release `{release_id}` not found for {service_name}/{environment_name}")
+            });
+    }
+    releases
+        .into_iter()
+        .nth(1)
+        .ok_or_else(|| anyhow!("No previous release found for {service_name}/{environment_name}"))
+}
+
+fn service_releases_for_env(
+    repo_root: &Path,
+    service_name: &str,
+    environment_name: &str,
+) -> Result<Vec<Value>> {
+    let Some(ledger) = read_json_if_exists(&repo_root.join(SERVICE_RELEASE_LEDGER_PATH))? else {
+        return Ok(Vec::new());
+    };
+    let mut releases = ledger
+        .get("releases")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|release| release.get("serviceName").and_then(Value::as_str) == Some(service_name))
+        .filter(|release| {
+            release.pointer("/environment/name").and_then(Value::as_str) == Some(environment_name)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    releases.sort_by_key(|release| {
+        std::cmp::Reverse(
+            release
+                .get("appliedAtUnixMs")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        )
+    });
+    Ok(releases)
+}
+
+fn service_release_candidate_reference(release: &Value) -> Result<String> {
+    release
+        .pointer("/candidate/inputReference")
+        .or_else(|| release.pointer("/candidate/packageReference"))
+        .or_else(|| release.pointer("/candidate/manifestReference"))
+        .and_then(Value::as_str)
+        .filter(|reference| !reference.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("Release has no candidate manifest or package reference"))
+}
+
+fn write_or_print_release_plan(
+    plan: &Value,
+    output: Option<&Path>,
+    json: bool,
+    message: &str,
+) -> Result<()> {
+    if let Some(output) = output {
+        write_json(output, plan)?;
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(plan)?);
+    } else {
+        print_service_release_plan(plan);
+        if let Some(output) = output {
+            println!("{message}: {}", output.display());
+        }
+    }
+    Ok(())
+}
+
+fn service_manifest_env_names(manifest: &Value) -> Vec<String> {
+    manifest
+        .get("env")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|field| field.get("name").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn string_at(value: &Value, pointer: &str) -> Option<String> {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn u32_at(value: &Value, pointer: &str) -> Option<u32> {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+}
+
+fn u16_at(value: &Value, pointer: &str) -> Option<u16> {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_u64)
+        .and_then(|value| u16::try_from(value).ok())
+}
+
+fn bool_at(value: &Value, pointer: &str) -> Option<bool> {
+    value.pointer(pointer).and_then(Value::as_bool)
+}
+
+fn kubernetes_name(value: &str) -> String {
+    let mut name = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    while name.contains("--") {
+        name = name.replace("--", "-");
+    }
+    name.trim_matches('-').to_owned()
+}
+
+fn kubernetes_env_key(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn yaml_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+pub async fn plan_service_release(options: ServiceReleasePlanOptions) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let mut plan = build_service_release_plan(
+        &repo_root,
+        &options.service_name,
+        &options.manifest_reference,
+    )
+    .await?;
+    if let Some(environment_name) = options.environment_name.as_deref() {
+        attach_service_release_environment(
+            &repo_root,
+            &mut plan,
+            &options.service_name,
+            environment_name,
+        )?;
+    }
+    let policy = service_release_policy_from_plan(&plan)?;
+    enforce_service_release_fail_on(&policy, options.fail_on.as_deref())?;
+    plan["policy"] = policy;
+
+    if let Some(output) = &options.output {
+        write_json(output, &plan)?;
+    }
+
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&plan)?);
+    } else {
+        print_service_release_plan(&plan);
+        if let Some(output) = &options.output {
+            println!("Wrote release plan: {}", output.display());
+        }
+    }
+
+    Ok(())
+}
+
+pub fn check_service_release_plan(options: ServiceReleaseCheckOptions) -> Result<()> {
+    let mut plan = read_json(&options.plan_file)?;
+    validate_service_release_plan(&plan)?;
+    validate_service_release_plan_environment(&plan, options.environment_name.as_deref())?;
+    let policy = service_release_policy_from_plan(&plan)?;
+    enforce_service_release_fail_on(&policy, options.fail_on.as_deref())?;
+    plan["policy"] = policy;
+
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&plan)?);
+    } else {
+        print_service_release_plan(&plan);
+    }
+
+    Ok(())
+}
+
+pub fn policy_check_service_release_plan(options: ServiceReleaseCheckOptions) -> Result<()> {
+    let plan = read_json(&options.plan_file)?;
+    validate_service_release_plan(&plan)?;
+    validate_service_release_plan_environment(&plan, options.environment_name.as_deref())?;
+    let policy = service_release_policy_from_plan(&plan)?;
+    enforce_service_release_fail_on(&policy, options.fail_on.as_deref())?;
+
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&policy)?);
+    } else {
+        print_service_release_policy(&plan, &policy);
+    }
+
+    Ok(())
+}
+
+pub async fn apply_service_release_plan(options: ServiceReleaseApplyOptions) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let plan = read_json(&options.plan_file)?;
+    validate_service_release_plan(&plan)?;
+    validate_service_release_plan_environment(&plan, options.environment_name.as_deref())?;
+    let policy = service_release_policy_from_plan(&plan)?;
+    if service_release_risk_rank(policy_risk(&policy)?) >= service_release_risk_rank("blocked") {
+        bail!(
+            "Service release policy risk is blocked; run `lenso service policy check` for details"
+        );
+    }
+    let service_name = plan
+        .pointer("/service/name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("Service release plan service.name is required"))?
+        .to_owned();
+    let manifest_reference = plan
+        .pointer("/candidate/inputReference")
+        .or_else(|| plan.pointer("/candidate/manifestReference"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("Service release plan candidate manifest reference is required"))?
+        .to_owned();
+
+    upgrade_service(ServiceUpgradeOptions {
+        allow_incompatible: options.allow_incompatible,
+        base_url: options.base_url,
+        dry_run: options.dry_run,
+        env_file: options.env_file,
+        manifest_reference,
+        module_services_file: options.module_services_file,
+        repo_root: Some(repo_root.clone()),
+        service_name,
+    })
+    .await?;
+
+    if options.dry_run {
+        println!("Service release apply dry run; release ledger not updated.");
+    } else {
+        append_service_release_ledger(&repo_root, &plan, &policy)?;
+    }
+
+    Ok(())
+}
+
+pub async fn promote_service_release(options: ServiceReleasePromoteOptions) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let release = latest_service_release_for_env(
+        &repo_root,
+        &options.service_name,
+        &options.from_environment,
+    )?
+    .ok_or_else(|| {
+        anyhow!(
+            "No applied release found for {}/{}",
+            options.service_name,
+            options.from_environment
+        )
+    })?;
+    let candidate_reference = service_release_candidate_reference(&release)?;
+    let mut plan =
+        build_service_release_plan(&repo_root, &options.service_name, &candidate_reference).await?;
+    attach_service_release_environment(
+        &repo_root,
+        &mut plan,
+        &options.service_name,
+        &options.to_environment,
+    )?;
+    plan["promotion"] = json!({
+        "from": options.from_environment,
+        "to": options.to_environment,
+        "sourceReleaseId": release.get("id").cloned().unwrap_or(Value::Null),
+    });
+    let policy = service_release_policy_from_plan(&plan)?;
+    enforce_service_release_fail_on(&policy, options.fail_on.as_deref())?;
+    plan["policy"] = policy;
+    write_or_print_release_plan(
+        &plan,
+        options.output.as_deref(),
+        options.json,
+        "Wrote promotion release plan",
+    )
+}
+
+pub async fn plan_service_release_rollback(
+    options: ServiceReleaseRollbackPlanOptions,
+) -> Result<()> {
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let release = rollback_service_release_target(
+        &repo_root,
+        &options.service_name,
+        &options.environment_name,
+        options.release_id.as_deref(),
+    )?;
+    let candidate_reference = service_release_candidate_reference(&release)?;
+    let mut plan =
+        build_service_release_plan(&repo_root, &options.service_name, &candidate_reference).await?;
+    attach_service_release_environment(
+        &repo_root,
+        &mut plan,
+        &options.service_name,
+        &options.environment_name,
+    )?;
+    plan["rollback"] = json!({
+        "environment": options.environment_name,
+        "targetReleaseId": release.get("id").cloned().unwrap_or(Value::Null),
+    });
+    let policy = service_release_policy_from_plan(&plan)?;
+    plan["policy"] = policy;
+    write_or_print_release_plan(
+        &plan,
+        options.output.as_deref(),
+        options.json,
+        "Wrote rollback release plan",
+    )
+}
+
 fn installed_service_receipt(repo_root: &Path, service_name: &str) -> Result<Value> {
     let ledger_path = repo_root.join(MODULE_INSTALL_LEDGER_PATH);
     let ledger = read_json_if_exists(&ledger_path)?
@@ -3540,6 +5682,472 @@ fn ensure_service_name_matches(manifest: &Value, expected: &str) -> Result<()> {
         bail!("Service manifest is for `{actual}`, expected `{expected}`");
     }
     Ok(())
+}
+
+async fn build_service_release_plan(
+    repo_root: &Path,
+    service_name: &str,
+    candidate_reference: &str,
+) -> Result<Value> {
+    let receipt = installed_service_receipt(repo_root, service_name)?;
+    let current = receipt
+        .get("serviceManifestSnapshot")
+        .ok_or_else(|| {
+            anyhow!(
+                "Service `{service_name}` has no manifest snapshot; reinstall or upgrade it once before planning a release"
+            )
+        })?
+        .clone();
+    let (manifest_reference, candidate, package_context) =
+        read_service_or_package_manifest(candidate_reference).await?;
+    ensure_service_name_matches(&candidate, service_name)?;
+    let diff = service_manifest_diff(&current, &candidate);
+    let compatibility_issue = remote_module_manifest_compatibility_issue(&candidate);
+    let package_reference = package_context
+        .as_ref()
+        .map(|package| package.reference.clone());
+    let package_snapshot = package_context
+        .as_ref()
+        .map(|package| package.manifest.clone())
+        .unwrap_or(Value::Null);
+    let mut plan = json!({
+        "protocol": "lenso.service-release-plan.v1",
+        "createdAtUnixMs": current_time_millis()?,
+        "service": {
+            "name": service_name,
+        },
+        "current": service_release_manifest_summary(
+            &current,
+            receipt_manifest_reference(&receipt).as_deref(),
+            receipt.get("servicePackage").and_then(|package| package.get("manifestReference")).and_then(Value::as_str),
+        ),
+        "candidate": service_release_manifest_summary(
+            &candidate,
+            Some(&manifest_reference),
+            package_reference.as_deref(),
+        ),
+        "diff": diff,
+        "restartRequired": service_release_restart_required(&diff),
+    });
+    plan["candidate"]["inputReference"] = json!(candidate_reference);
+    plan["candidate"]["compatibilityIssue"] = compatibility_issue
+        .map(Value::String)
+        .unwrap_or(Value::Null);
+    if package_snapshot != Value::Null {
+        plan["candidate"]["packageSnapshot"] = package_snapshot;
+    }
+    let policy = service_release_policy_from_plan(&plan)?;
+    plan["policy"] = policy.clone();
+    plan["nextAction"] = json!(service_release_next_action(policy_risk(&policy)?));
+    Ok(plan)
+}
+
+fn validate_service_release_plan(plan: &Value) -> Result<()> {
+    let protocol = plan
+        .get("protocol")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("Service release plan protocol is required"))?;
+    if protocol != "lenso.service-release-plan.v1" {
+        bail!("Unsupported service release plan protocol: {protocol}");
+    }
+    plan.pointer("/service/name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("Service release plan service.name is required"))?;
+    plan.pointer("/candidate/manifestReference")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("Service release plan candidate.manifestReference is required"))?;
+    plan.get("diff")
+        .ok_or_else(|| anyhow!("Service release plan diff is required"))?;
+    Ok(())
+}
+
+fn attach_service_release_environment(
+    repo_root: &Path,
+    plan: &mut Value,
+    service_name: &str,
+    environment_name: &str,
+) -> Result<()> {
+    let environment = find_service_environment(repo_root, service_name, environment_name)?
+        .ok_or_else(|| {
+            anyhow!("Service environment not found: {service_name}/{environment_name}")
+        })?;
+    plan["environment"] = json!({
+        "name": environment_name,
+        "target": environment.get("target").cloned().unwrap_or_else(|| json!("kubernetes")),
+        "namespace": environment.get("namespace").cloned().unwrap_or(Value::Null),
+        "image": environment.get("image").cloned().unwrap_or(Value::Null),
+        "manifestReference": service_environment_manifest_reference(&environment),
+    });
+    Ok(())
+}
+
+fn validate_service_release_plan_environment(plan: &Value, expected: Option<&str>) -> Result<()> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let actual = plan
+        .pointer("/environment/name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            anyhow!("Service release plan has no environment; rerun `lenso service release plan --env {expected}`")
+        })?;
+    if actual != expected {
+        bail!("Service release plan environment is `{actual}`, expected `{expected}`");
+    }
+    Ok(())
+}
+
+fn service_release_manifest_summary(
+    manifest: &Value,
+    manifest_reference: Option<&str>,
+    package_reference: Option<&str>,
+) -> Value {
+    let mut summary = json!({
+        "manifestReference": manifest_reference.unwrap_or(""),
+        "name": manifest.get("name").and_then(Value::as_str).unwrap_or(""),
+        "version": manifest.get("version").and_then(Value::as_str).unwrap_or(""),
+        "modules": service_module_name_set(manifest).into_iter().collect::<Vec<_>>(),
+    });
+    if let Some(package_reference) = package_reference {
+        summary["packageReference"] = json!(package_reference);
+    }
+    if let Some(compatibility) = manifest.get("compatibility") {
+        summary["compatibility"] = compatibility.clone();
+    }
+    summary
+}
+
+fn receipt_manifest_reference(receipt: &Value) -> Option<String> {
+    receipt
+        .get("service")
+        .and_then(|service| service.get("manifestReference"))
+        .or_else(|| receipt.get("manifestReference"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn service_release_policy_from_plan(plan: &Value) -> Result<Value> {
+    validate_service_release_plan(plan)?;
+    let diff = plan
+        .get("diff")
+        .ok_or_else(|| anyhow!("Service release plan diff is required"))?;
+    let compatibility_issue = plan
+        .pointer("/candidate/compatibilityIssue")
+        .and_then(Value::as_str);
+    Ok(service_release_policy_from_diff(diff, compatibility_issue))
+}
+
+fn service_release_policy_from_diff(diff: &Value, compatibility_issue: Option<&str>) -> Value {
+    let mut issues = Vec::new();
+
+    if let Some(issue) = compatibility_issue {
+        push_release_issue(
+            &mut issues,
+            "blocked",
+            "host_incompatible",
+            issue.to_owned(),
+        );
+    } else if diff
+        .get("compatibilityChanged")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        push_release_issue(
+            &mut issues,
+            "needs_attention",
+            "compatibility_changed",
+            "Service compatibility metadata changed; review host support before applying."
+                .to_owned(),
+        );
+    }
+
+    for module in json_string_list(&diff["modules"]["removed"]) {
+        push_release_issue(
+            &mut issues,
+            "breaking",
+            "module_removed",
+            format!("Module `{module}` is removed by this release."),
+        );
+    }
+
+    for env in json_string_list(&diff["env"]["added"]) {
+        push_release_issue(
+            &mut issues,
+            "needs_attention",
+            "env_added",
+            format!("Environment value `{env}` is newly required by this release."),
+        );
+    }
+
+    for config in json_string_list(&diff["config"]["added"]) {
+        push_release_issue(
+            &mut issues,
+            "needs_attention",
+            "config_added",
+            format!("Runtime config `{config}` is newly declared by this release."),
+        );
+    }
+
+    for change in diff
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let module = change.get("module").and_then(Value::as_str).unwrap_or("-");
+        for capability in json_string_list(&change["removed"]) {
+            push_release_issue(
+                &mut issues,
+                "breaking",
+                "capability_removed",
+                format!("Capability `{capability}` is removed from module `{module}`."),
+            );
+        }
+    }
+
+    for change in diff
+        .get("operations")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let module = change.get("module").and_then(Value::as_str).unwrap_or("-");
+        for operation in json_string_list(&change["removed"]) {
+            push_release_issue(
+                &mut issues,
+                "breaking",
+                "operation_removed",
+                format!("Operation `{operation}` is removed from module `{module}`."),
+            );
+        }
+    }
+
+    let risk = issues
+        .iter()
+        .filter_map(|issue| issue.get("level").and_then(Value::as_str))
+        .max_by_key(|level| service_release_risk_rank(level))
+        .unwrap_or("safe");
+
+    json!({
+        "risk": risk,
+        "issues": issues,
+    })
+}
+
+fn push_release_issue(issues: &mut Vec<Value>, level: &str, code: &str, message: String) {
+    issues.push(json!({
+        "code": code,
+        "level": level,
+        "message": message,
+    }));
+}
+
+fn policy_risk(policy: &Value) -> Result<&str> {
+    policy
+        .get("risk")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("Service release policy risk is required"))
+}
+
+fn enforce_service_release_fail_on(policy: &Value, fail_on: Option<&str>) -> Result<()> {
+    let Some(fail_on) = fail_on else {
+        return Ok(());
+    };
+    let fail_on = fail_on.trim();
+    let risk = policy_risk(policy)?;
+    if service_release_risk_rank(fail_on) == 0 && fail_on != "safe" {
+        bail!(
+            "Unknown service release risk threshold `{fail_on}`; expected safe, needs_attention, breaking, or blocked"
+        );
+    }
+    if service_release_risk_rank(risk) >= service_release_risk_rank(fail_on) {
+        bail!("Service release policy risk `{risk}` meets --fail-on {fail_on}");
+    }
+    Ok(())
+}
+
+fn service_release_risk_rank(risk: &str) -> u8 {
+    match risk {
+        "safe" => 0,
+        "needs_attention" => 1,
+        "breaking" => 2,
+        "blocked" => 3,
+        _ => 0,
+    }
+}
+
+fn service_release_restart_required(diff: &Value) -> bool {
+    !json_string_list(&diff["modules"]["added"]).is_empty()
+        || !json_string_list(&diff["modules"]["removed"]).is_empty()
+        || !json_string_list(&diff["env"]["added"]).is_empty()
+        || !json_string_list(&diff["env"]["removed"]).is_empty()
+        || !json_string_list(&diff["config"]["added"]).is_empty()
+        || !json_string_list(&diff["config"]["removed"]).is_empty()
+        || diff
+            .get("compatibilityChanged")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        || diff_array_has_changes(&diff["capabilities"])
+        || diff_array_has_changes(&diff["operations"])
+}
+
+fn diff_array_has_changes(value: &Value) -> bool {
+    value.as_array().into_iter().flatten().any(|change| {
+        !json_string_list(&change["added"]).is_empty()
+            || !json_string_list(&change["removed"]).is_empty()
+    })
+}
+
+fn service_release_next_action(risk: &str) -> &'static str {
+    match risk {
+        "safe" => "Run `lenso service release apply <plan.json>` when ready.",
+        "needs_attention" => {
+            "Review required env/config, then run `lenso service release apply <plan.json>`."
+        }
+        "breaking" => "Review removed modules, capabilities, or operations before applying.",
+        "blocked" => "Fix blocked policy issues before applying this release.",
+        _ => "Run `lenso service policy check <plan.json>` before applying.",
+    }
+}
+
+fn print_service_release_plan(plan: &Value) {
+    let service_name = plan
+        .pointer("/service/name")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let current_version = plan
+        .pointer("/current/version")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let candidate_version = plan
+        .pointer("/candidate/version")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let policy = plan.get("policy").unwrap_or(&Value::Null);
+    let risk = policy.get("risk").and_then(Value::as_str).unwrap_or("safe");
+    println!("Service release plan: {service_name}");
+    if !current_version.is_empty() || !candidate_version.is_empty() {
+        println!(
+            "version: {} -> {}",
+            if current_version.is_empty() {
+                "-"
+            } else {
+                current_version
+            },
+            if candidate_version.is_empty() {
+                "-"
+            } else {
+                candidate_version
+            }
+        );
+    }
+    if let Some(environment) = plan.get("environment") {
+        let name = environment
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        let target = environment
+            .get("target")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        let namespace = environment
+            .get("namespace")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        println!("environment: {name} ({target}/{namespace})");
+    }
+    println!("risk: {risk}");
+    println!(
+        "restart required: {}",
+        plan.get("restartRequired")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    );
+    print_service_manifest_diff(service_name, &plan["diff"]);
+    let issues = policy
+        .get("issues")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if !issues.is_empty() {
+        println!("policy issues:");
+        for issue in issues {
+            println!(
+                "- [{}] {}",
+                issue.get("level").and_then(Value::as_str).unwrap_or("-"),
+                issue.get("message").and_then(Value::as_str).unwrap_or("-")
+            );
+        }
+    }
+    if let Some(next_action) = plan.get("nextAction").and_then(Value::as_str) {
+        println!("next action: {next_action}");
+    }
+}
+
+fn print_service_release_policy(plan: &Value, policy: &Value) {
+    let service_name = plan
+        .pointer("/service/name")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let risk = policy.get("risk").and_then(Value::as_str).unwrap_or("safe");
+    println!("Service policy check: {service_name}");
+    println!("risk: {risk}");
+    if let Some(issues) = policy.get("issues").and_then(Value::as_array)
+        && !issues.is_empty()
+    {
+        println!("issues:");
+        for issue in issues {
+            println!(
+                "- [{}] {}",
+                issue.get("level").and_then(Value::as_str).unwrap_or("-"),
+                issue.get("message").and_then(Value::as_str).unwrap_or("-")
+            );
+        }
+    }
+}
+
+fn append_service_release_ledger(repo_root: &Path, plan: &Value, policy: &Value) -> Result<()> {
+    let ledger_path = repo_root.join(SERVICE_RELEASE_LEDGER_PATH);
+    let mut ledger = read_json_if_exists(&ledger_path)?
+        .unwrap_or_else(|| json!({ "releases": [], "version": 1 }));
+    let releases = ledger
+        .get_mut("releases")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow!("Service release ledger releases must be an array"))?;
+    let service_name = plan
+        .pointer("/service/name")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let mut record = json!({
+        "appliedAtUnixMs": current_time_millis()?,
+        "id": uuid::Uuid::now_v7().to_string(),
+        "planCreatedAtUnixMs": plan.get("createdAtUnixMs").cloned().unwrap_or(Value::Null),
+        "protocol": "lenso.service-release-ledger.v1",
+        "risk": policy_risk(policy)?,
+        "rollbackTarget": plan.pointer("/current/manifestReference").cloned().unwrap_or(Value::Null),
+        "serviceName": service_name,
+        "current": plan.get("current").cloned().unwrap_or(Value::Null),
+        "candidate": plan.get("candidate").cloned().unwrap_or(Value::Null),
+        "diff": plan.get("diff").cloned().unwrap_or(Value::Null),
+        "policy": policy,
+    });
+    if let Some(environment) = plan.get("environment") {
+        record["environment"] = environment.clone();
+    }
+    releases.push(record);
+    write_json(&ledger_path, &ledger)?;
+    println!(
+        "Recorded service release: {}",
+        display_relative(repo_root, &ledger_path)
+    );
+    Ok(())
+}
+
+fn current_time_millis() -> Result<u64> {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis();
+    u64::try_from(millis).context("system clock timestamp exceeds u64")
 }
 
 fn service_manifest_diff(current: &Value, candidate: &Value) -> Value {
@@ -3773,6 +6381,52 @@ fn service_env_set(manifest: &Value) -> BTreeSet<String> {
             .map(ToOwned::to_owned),
     );
     values
+}
+
+fn service_check_config_summary(
+    manifest: &Value,
+    repo_root: Option<&Path>,
+    env_file: Option<&Path>,
+) -> Result<Value> {
+    let required_env = service_env_set(manifest).into_iter().collect::<Vec<_>>();
+    let Some(env_file) = env_file else {
+        return Ok(json!({
+            "checked": false,
+            "configuredEnv": [],
+            "envFile": Value::Null,
+            "missingEnv": [],
+            "requiredEnv": required_env,
+        }));
+    };
+    let repo_root = resolve_repo_root(repo_root)?;
+    let env_file_path = resolve_path(&repo_root, env_file);
+    let configured = env_keys_from_source(&read_text_if_exists(&env_file_path)?);
+    let missing_env = required_env
+        .iter()
+        .filter(|key| !configured.contains(*key))
+        .cloned()
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "checked": true,
+        "configuredEnv": configured.into_iter().collect::<Vec<_>>(),
+        "envFile": display_relative(&repo_root, &env_file_path),
+        "missingEnv": missing_env,
+        "requiredEnv": required_env,
+    }))
+}
+
+fn env_keys_from_source(source: &str) -> BTreeSet<String> {
+    source
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_start();
+            let line = line.strip_prefix("export ").unwrap_or(line);
+            (!line.starts_with('#'))
+                .then(|| line.split_once('=').map(|(key, _)| key.trim().to_owned()))
+                .flatten()
+        })
+        .filter(|key| !key.is_empty())
+        .collect()
 }
 
 fn service_config_set(manifest: &Value) -> BTreeSet<String> {
@@ -5082,7 +7736,7 @@ fn remote_manifest_json(context: &ConsolePackageContext, package_root_name: &str
         "modules": [module],
         "name": service_id,
         "protocol": "lenso.service.v1",
-        "requiredEnv": ["PORT"],
+        "requiredEnv": [],
         "statusPath": "/lenso/service/v1/status",
         "transports": ["http"],
         "version": "0.1.0",
@@ -5149,7 +7803,7 @@ fn remote_catalog_entry_json(context: &ConsolePackageContext) -> Value {
         ],
         "name": service_id.clone(),
         "service": {
-            "requiredEnv": ["PORT"],
+            "requiredEnv": [],
             "statusPath": "/lenso/service/v1/status",
             "statusUrl": "https://example.com/lenso/service/v1/status",
             "transports": ["http"],
@@ -5172,6 +7826,7 @@ fn remote_root_package_json(module_id: &str) -> Result<String> {
             "service:start": format!("lenso service start {} api --module-services-file module-services.local.json", service_id_for_module(module_id)),
             "service:status": format!("lenso service status {} api --module-services-file module-services.local.json", service_id_for_module(module_id)),
             "service:stop": format!("lenso service stop {} api --module-services-file module-services.local.json", service_id_for_module(module_id)),
+            "service:verify": "lenso service verify ./lenso.service.json",
             "smoke": "pnpm --dir backend smoke",
         },
         "type": "module",
@@ -5530,7 +8185,7 @@ const service = defineService({{
   }},
   modules: [providedModule],
   name: serviceName,
-  requiredEnv: ["PORT"],
+  requiredEnv: [],
   statusPath: "/lenso/service/v1/status",
   transports: ["http"],
   version: "0.1.0",
@@ -9598,6 +12253,511 @@ mod tests {
         assert!(runbook.contains("Runtime Console evidence should stay on the host side"));
         assert!(package_json.contains("\"service:export\""));
         assert!(package_json.contains("\"service:status\""));
+        assert!(package_json.contains("\"service:verify\""));
+    }
+
+    #[test]
+    fn service_environment_upsert_derives_manifest_and_sorts() {
+        let mut file = json!({ "version": 1, "environments": [] });
+        let prod = service_environment_value(&ServiceEnvAddOptions {
+            environment_name: "prod".to_owned(),
+            image: Some("ghcr.io/acme/support-suite-provider:0.4.0".to_owned()),
+            ingress_host: Some("support.example.com".to_owned()),
+            json: false,
+            kube_context: None,
+            manifest_reference: None,
+            namespace: Some("lenso-prod".to_owned()),
+            port: Some(4110),
+            public_base_url: Some("https://support.example.com/".to_owned()),
+            release_track: None,
+            replicas: Some(2),
+            repo_root: None,
+            service_name: "support-suite-provider".to_owned(),
+            target: "kubernetes".to_owned(),
+        });
+        let staging = service_environment_value(&ServiceEnvAddOptions {
+            environment_name: "staging".to_owned(),
+            image: Some("ghcr.io/acme/support-suite-provider:0.4.0".to_owned()),
+            ingress_host: None,
+            json: false,
+            kube_context: None,
+            manifest_reference: None,
+            namespace: Some("lenso-staging".to_owned()),
+            port: None,
+            public_base_url: None,
+            release_track: None,
+            replicas: None,
+            repo_root: None,
+            service_name: "support-suite-provider".to_owned(),
+            target: "kubernetes".to_owned(),
+        });
+
+        upsert_service_environment(&mut file, prod).unwrap();
+        upsert_service_environment(&mut file, staging).unwrap();
+
+        assert_eq!(file["environments"][0]["name"], "prod");
+        assert_eq!(
+            file["environments"][0]["manifestReference"],
+            "https://support.example.com/lenso/service/v1/manifest"
+        );
+        assert_eq!(file["environments"][0]["releaseTrack"], "prod");
+        assert_eq!(file["environments"][0]["config"]["replicas"], 2);
+        assert_eq!(file["environments"][1]["name"], "staging");
+    }
+
+    #[test]
+    fn service_environment_verify_accepts_operator_targets() {
+        let root = std::env::temp_dir().join(format!(
+            "lenso-cli-service-env-operator-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(".lenso")).unwrap();
+        write_json(
+            &root.join(MODULE_INSTALL_LEDGER_PATH),
+            &json!({
+                "version": 1,
+                "modules": [
+                    {
+                        "moduleName": "support-suite-provider",
+                        "source": "service",
+                        "serviceManifestSnapshot": {
+                            "protocol": "lenso.service.v1",
+                            "name": "support-suite-provider",
+                            "version": "0.4.0",
+                            "modules": []
+                        }
+                    }
+                ]
+            }),
+        )
+        .unwrap();
+        let checks = service_environment_checks(
+            &root,
+            &json!({
+                "name": "prod",
+                "serviceName": "support-suite-provider",
+                "target": "operator",
+                "namespace": "lenso-prod",
+                "image": "ghcr.io/acme/support-suite-provider:0.4.0",
+                "manifestReference": "https://support.example.com/lenso/service/v1/manifest"
+            }),
+        );
+
+        assert!(
+            checks
+                .iter()
+                .all(|check| { check.get("status").and_then(Value::as_str) == Some("ok") })
+        );
+        assert!(checks.iter().any(|check| {
+            check.get("name").and_then(Value::as_str) == Some("target")
+                && check.get("detail").and_then(Value::as_str) == Some("operator")
+        }));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn kubernetes_deployment_state_and_drift_are_computed() {
+        let deployment = json!({
+            "metadata": {
+                "name": "support-suite-provider",
+                "namespace": "lenso-staging",
+                "annotations": {
+                    "lenso.dev/release-id": "rel_1"
+                }
+            },
+            "spec": {
+                "replicas": 2,
+                "template": {
+                    "spec": {
+                        "containers": [
+                            { "name": "support-suite-provider", "image": "ghcr.io/acme/support-suite-provider:0.4.0" }
+                        ]
+                    }
+                }
+            },
+            "status": {
+                "readyReplicas": 2,
+                "availableReplicas": 2
+            }
+        });
+
+        assert_eq!(kubernetes_deployment_state(&deployment), "ready");
+        assert_eq!(
+            service_deployment_drift(
+                Some("rel_1"),
+                Some("rel_1"),
+                Some("ghcr.io/acme/support-suite-provider:0.4.0"),
+                deployment_container_image(&deployment).as_deref(),
+            ),
+            "in_sync"
+        );
+        assert_eq!(
+            service_deployment_drift(
+                Some("rel_1"),
+                Some("rel_1"),
+                Some("ghcr.io/acme/support-suite-provider:0.4.1"),
+                deployment_container_image(&deployment).as_deref(),
+            ),
+            "image_drift"
+        );
+        assert_eq!(
+            kubernetes_export_files(true, true, true, true),
+            vec![
+                "deployment.yaml",
+                "service.yaml",
+                "configmap.yaml",
+                "secret.example.yaml",
+                "kustomization.yaml",
+                "README.md",
+                "ingress.yaml",
+                "hpa.yaml",
+                "pdb.yaml",
+                "networkpolicy.yaml"
+            ]
+        );
+    }
+
+    #[test]
+    fn service_deployment_wait_readiness_uses_provider_neutral_observation() {
+        assert!(service_deployment_wait_ready(&json!({
+            "state": "ready",
+            "drift": "in_sync"
+        })));
+        assert!(service_deployment_wait_ready(&json!({
+            "state": "ready",
+            "drift": "unknown"
+        })));
+        assert!(!service_deployment_wait_ready(&json!({
+            "state": "ready",
+            "drift": "host_ahead"
+        })));
+        assert!(service_deployment_wait_failed(&json!({
+            "state": "failed",
+            "drift": "in_sync"
+        })));
+    }
+
+    #[test]
+    fn service_deployment_ledger_keeps_current_and_history() {
+        let root = std::env::temp_dir().join(format!(
+            "lenso-cli-deployment-ledger-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let path = root.join(".lenso/service-deployments.json");
+
+        upsert_service_deployment_observation(
+            &path,
+            json!({
+                "serviceName": "support-suite-provider",
+                "environment": "staging",
+                "target": "operator",
+                "observedAtUnixMs": 1,
+                "state": "progressing",
+                "drift": "host_ahead"
+            }),
+        )
+        .unwrap();
+        upsert_service_deployment_observation(
+            &path,
+            json!({
+                "serviceName": "support-suite-provider",
+                "environment": "staging",
+                "target": "operator",
+                "observedAtUnixMs": 2,
+                "state": "ready",
+                "drift": "in_sync"
+            }),
+        )
+        .unwrap();
+
+        let ledger: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(ledger["version"], 2);
+        assert_eq!(ledger["observations"].as_array().unwrap().len(), 1);
+        assert_eq!(ledger["observations"][0]["state"], "ready");
+        assert_eq!(ledger["history"].as_array().unwrap().len(), 2);
+        assert_eq!(ledger["history"][0]["state"], "progressing");
+        assert_eq!(ledger["history"][1]["state"], "ready");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn latest_service_release_for_env_ignores_newer_other_env_release() {
+        let root =
+            std::env::temp_dir().join(format!("lenso-cli-release-env-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(".lenso")).unwrap();
+        fs::write(
+            root.join(".lenso/service-releases.json"),
+            json!({
+                "version": 1,
+                "releases": [
+                    {
+                        "id": "rel_staging",
+                        "serviceName": "support-suite-provider",
+                        "appliedAtUnixMs": 1,
+                        "environment": {"name": "staging", "target": "operator"},
+                        "candidate": {"version": "0.4.0"}
+                    },
+                    {
+                        "id": "rel_prod",
+                        "serviceName": "support-suite-provider",
+                        "appliedAtUnixMs": 2,
+                        "environment": {"name": "prod", "target": "operator"},
+                        "candidate": {"version": "0.5.0"}
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let release =
+            latest_service_release_for_env(&root, "support-suite-provider", "staging").unwrap();
+
+        assert_eq!(
+            release
+                .as_ref()
+                .and_then(|release| release.get("id"))
+                .and_then(Value::as_str),
+            Some("rel_staging")
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn service_deploy_export_operator_writes_provider_cr() {
+        let root =
+            std::env::temp_dir().join(format!("lenso-cli-operator-export-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(".lenso")).unwrap();
+        fs::write(
+            root.join(".lenso/service-environments.json"),
+            json!({
+                "version": 1,
+                "environments": [{
+                    "name": "staging",
+                    "serviceName": "support-suite-provider",
+                    "target": "operator",
+                    "namespace": "lenso-staging",
+                    "image": "ghcr.io/acme/support-suite-provider:0.4.0",
+                    "manifestReference": "https://support-staging.example.com/lenso/service/v1/manifest",
+                    "config": {
+                        "port": 4110,
+                        "replicas": 2,
+                        "ingressHost": "support-staging.example.com",
+                        "autoscaling": true,
+                        "disruptionBudget": true,
+                        "networkPolicy": true
+                    }
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            root.join(".lenso/service-releases.json"),
+            json!({
+                "version": 1,
+                "releases": [
+                    {
+                        "id": "rel_staging",
+                        "serviceName": "support-suite-provider",
+                        "appliedAtUnixMs": 1,
+                        "environment": {"name": "staging", "target": "operator"},
+                        "candidate": {"version": "0.4.0"}
+                    },
+                    {
+                        "id": "rel_prod",
+                        "serviceName": "support-suite-provider",
+                        "appliedAtUnixMs": 2,
+                        "environment": {"name": "prod", "target": "operator"},
+                        "candidate": {"version": "0.5.0"}
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let output_dir = root.join("dist/operator/staging");
+
+        export_service_deployment(ServiceDeployExportOptions {
+            environment_name: "staging".to_owned(),
+            image: None,
+            ingress_host: None,
+            json: false,
+            hpa: false,
+            namespace: None,
+            network_policy: false,
+            output_dir: output_dir.clone(),
+            pdb: false,
+            port: None,
+            replicas: None,
+            repo_root: Some(root.clone()),
+            service_name: "support-suite-provider".to_owned(),
+            target: "operator".to_owned(),
+        })
+        .unwrap();
+
+        let cr = fs::read_to_string(output_dir.join("lensoserviceprovider.yaml")).unwrap();
+        assert!(cr.contains("kind: LensoServiceProvider"));
+        assert!(cr.contains("serviceName: support-suite-provider"));
+        assert!(cr.contains("releaseId: rel_staging"));
+        assert!(cr.contains("targetCpuUtilization: 70"));
+        assert!(output_dir.join("kustomization.yaml").exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn service_deploy_status_operator_maps_crd_status_to_observation() {
+        let root =
+            std::env::temp_dir().join(format!("lenso-cli-operator-status-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(".lenso")).unwrap();
+        fs::write(
+            root.join(".lenso/service-environments.json"),
+            json!({
+                "version": 1,
+                "environments": [{
+                    "name": "staging",
+                    "serviceName": "support-suite-provider",
+                    "target": "operator",
+                    "namespace": "lenso-staging",
+                    "image": "ghcr.io/acme/support-suite-provider:0.4.0"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            root.join(".lenso/service-releases.json"),
+            json!({
+                "version": 1,
+                "releases": [
+                    {
+                        "id": "rel_staging",
+                        "serviceName": "support-suite-provider",
+                        "appliedAtUnixMs": 1,
+                        "environment": {"name": "staging", "target": "operator"},
+                        "candidate": {"version": "0.4.0"}
+                    },
+                    {
+                        "id": "rel_prod",
+                        "serviceName": "support-suite-provider",
+                        "appliedAtUnixMs": 2,
+                        "environment": {"name": "prod", "target": "operator"},
+                        "candidate": {"version": "0.5.0"}
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let fixture = root.join("operator-status.json");
+        fs::write(
+            &fixture,
+            json!({
+                "apiVersion": "lenso.dev/v1alpha1",
+                "kind": "LensoServiceProvider",
+                "metadata": {
+                    "name": "support-suite-provider",
+                    "namespace": "lenso-staging",
+                    "generation": 3
+                },
+                "status": {
+                    "state": "ready",
+                    "observedGeneration": 3,
+                    "observedReleaseId": "rel_staging",
+                    "observedImage": "ghcr.io/acme/support-suite-provider:0.4.0",
+                    "readyReplicas": 2,
+                    "desiredReplicas": 2,
+                    "availableReplicas": 2,
+                    "manifestReference": "https://support-staging.example.com/lenso/service/v1/manifest",
+                    "conditions": [{
+                        "type": "Ready",
+                        "status": "True",
+                        "reason": "DeploymentAvailable",
+                        "message": "2/2 replicas are ready.",
+                        "lastTransitionTime": "2026-06-29T00:00:00Z"
+                    }]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        status_service_deployment(ServiceDeployStatusOptions {
+            environment_name: "staging".to_owned(),
+            from_file: Some(fixture),
+            json: false,
+            repo_root: Some(root.clone()),
+            service_name: "support-suite-provider".to_owned(),
+            source: "operator".to_owned(),
+            write_state: true,
+        })
+        .unwrap();
+
+        let observations: Value = serde_json::from_str(
+            &fs::read_to_string(root.join(".lenso/service-deployments.json")).unwrap(),
+        )
+        .unwrap();
+        let observation = &observations["observations"][0];
+        assert_eq!(observation["target"], "operator");
+        assert_eq!(
+            observation["operator"]["resource"],
+            "support-suite-provider"
+        );
+        assert_eq!(observation["host"]["releaseId"], "rel_staging");
+        assert_eq!(observation["drift"], "in_sync");
+        assert_eq!(observations["version"], 2);
+        assert_eq!(observations["history"].as_array().unwrap().len(), 1);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn service_release_environment_must_match_requested_env() {
+        let plan = json!({
+            "protocol": "lenso.service-release-plan.v1",
+            "service": { "name": "support-suite-provider" },
+            "candidate": { "manifestReference": "./lenso.service.json" },
+            "diff": {},
+            "environment": { "name": "staging", "target": "kubernetes" }
+        });
+
+        validate_service_release_plan_environment(&plan, Some("staging")).unwrap();
+        assert!(validate_service_release_plan_environment(&plan, Some("prod")).is_err());
+    }
+
+    #[test]
+    fn service_release_candidate_reference_prefers_input_then_package() {
+        let release = json!({
+            "candidate": {
+                "inputReference": "./dist/lenso.service-package.json",
+                "packageReference": "./fallback/lenso.service-package.json",
+                "manifestReference": "./fallback/lenso.service.json"
+            }
+        });
+        assert_eq!(
+            service_release_candidate_reference(&release).unwrap(),
+            "./dist/lenso.service-package.json"
+        );
+
+        let release = json!({
+            "candidate": {
+                "packageReference": "./fallback/lenso.service-package.json",
+                "manifestReference": "./fallback/lenso.service.json"
+            }
+        });
+        assert_eq!(
+            service_release_candidate_reference(&release).unwrap(),
+            "./fallback/lenso.service-package.json"
+        );
     }
 
     #[test]
@@ -11263,11 +14423,13 @@ mod tests {
             manifest_path.to_str().unwrap(),
             ServiceManifestCheckOptions {
                 cwd: None,
+                env_file: None,
                 json: true,
                 manifest_url: None,
                 operation: None,
                 ready_timeout_ms: 10_000,
                 ready_url: None,
+                repo_root: None,
                 sample_input: Some(missing_sample_input),
                 serve_command: None,
             },
@@ -11424,6 +14586,72 @@ mod tests {
             diff["operations"][0]["added"],
             json!(["route:POST /tickets"])
         );
+    }
+
+    #[test]
+    fn service_release_policy_prioritizes_blocking_and_breaking_changes() {
+        let diff = json!({
+            "capabilities": [
+                {
+                    "added": [],
+                    "module": "support-ticket",
+                    "removed": ["support.write"]
+                }
+            ],
+            "compatibilityChanged": false,
+            "config": {
+                "added": ["support.mode"],
+                "removed": []
+            },
+            "env": {
+                "added": ["SUPPORT_API_KEY"],
+                "removed": []
+            },
+            "modules": {
+                "added": [],
+                "removed": []
+            },
+            "operations": [
+                {
+                    "added": [],
+                    "module": "support-ticket",
+                    "removed": ["route:DELETE /tickets/{id}"]
+                }
+            ],
+        });
+
+        let breaking = service_release_policy_from_diff(&diff, None);
+        assert_eq!(breaking["risk"], json!("breaking"));
+
+        let blocked = service_release_policy_from_diff(&diff, Some("Remote protocol is newer"));
+        assert_eq!(blocked["risk"], json!("blocked"));
+        assert_eq!(blocked["issues"][0]["code"], json!("host_incompatible"));
+    }
+
+    #[test]
+    fn service_check_config_summary_reports_missing_env_from_explicit_file() {
+        let root = std::env::temp_dir().join(format!(
+            "lenso-service-config-summary-{}",
+            uuid::Uuid::now_v7()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(".env"), "PORT=4110\n").unwrap();
+        let manifest = json!({
+            "env": [{ "name": "SUPPORT_API_KEY" }],
+            "modules": [{ "name": "support-ticket" }],
+            "name": "support-suite-provider",
+            "requiredEnv": ["PORT"],
+            "version": "0.1.0"
+        });
+
+        let config =
+            service_check_config_summary(&manifest, Some(&root), Some(Path::new(".env"))).unwrap();
+
+        assert_eq!(config["checked"], json!(true));
+        assert_eq!(config["requiredEnv"], json!(["PORT", "SUPPORT_API_KEY"]));
+        assert_eq!(config["configuredEnv"], json!(["PORT"]));
+        assert_eq!(config["missingEnv"], json!(["SUPPORT_API_KEY"]));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
