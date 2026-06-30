@@ -9,12 +9,14 @@ use serde_json::{Value, json};
 const DEFAULT_SYSTEM_FILE: &str = "lenso.system.json";
 const SERVICE_SYSTEM_PROTOCOL: &str = "lenso.system.v1";
 const SYSTEM_RELEASE_PROTOCOL: &str = "lenso.system-release.v1";
+const SYSTEM_RUNBOOK_PROTOCOL: &str = "lenso.system-runbook.v1";
 const MODULE_INSTALLS_PATH: &str = ".lenso/module-installs.json";
 const MODULE_SERVICES_PATH: &str = ".lenso/module-services.json";
 const SERVICE_ENVIRONMENTS_PATH: &str = ".lenso/service-environments.json";
 const SERVICE_DEPLOYMENTS_PATH: &str = ".lenso/service-deployments.json";
 const SERVICE_RELEASES_PATH: &str = ".lenso/service-releases.json";
 const SYSTEM_RELEASES_PATH: &str = ".lenso/system-releases.json";
+const SYSTEM_RUNBOOKS_PATH: &str = ".lenso/system-runbooks.json";
 
 #[derive(Debug, Clone)]
 pub(crate) struct SystemInitOptions {
@@ -128,6 +130,38 @@ pub(crate) struct SystemReleaseRollbackOptions {
 
 #[derive(Debug, Clone)]
 pub(crate) struct SystemReleaseHistoryOptions {
+    pub(crate) json: bool,
+    pub(crate) repo_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SystemRunbookGenerateOptions {
+    pub(crate) json: bool,
+    pub(crate) output: Option<PathBuf>,
+    pub(crate) release_plan_file: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SystemRunbookCheckOptions {
+    pub(crate) json: bool,
+    pub(crate) runbook_file: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SystemRunbookRecordOptions {
+    pub(crate) json: bool,
+    pub(crate) repo_root: Option<PathBuf>,
+    pub(crate) runbook_file: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SystemRunbookHistoryOptions {
+    pub(crate) json: bool,
+    pub(crate) repo_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SystemRunbookDoctorOptions {
     pub(crate) json: bool,
     pub(crate) repo_root: Option<PathBuf>,
 }
@@ -323,6 +357,32 @@ struct SystemReleasePolicyIssue {
     level: String,
     code: String,
     message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemRunbook {
+    protocol: String,
+    id: String,
+    release_id: String,
+    system_name: String,
+    environment: String,
+    created_at_unix_ms: u64,
+    status: String,
+    steps: Vec<SystemRunbookStep>,
+    commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemRunbookStep {
+    id: String,
+    kind: String,
+    title: String,
+    status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    command: Option<String>,
+    manual: bool,
 }
 
 pub(crate) fn init_system(options: SystemInitOptions) -> Result<()> {
@@ -604,6 +664,96 @@ pub(crate) fn history_system_release(options: SystemReleaseHistoryOptions) -> Re
                 .unwrap_or("-");
             println!("  {id}: {system}/{env}");
         }
+    }
+    Ok(())
+}
+
+pub(crate) fn generate_system_runbook(options: SystemRunbookGenerateOptions) -> Result<()> {
+    let release = read_system_release_plan(&options.release_plan_file)?;
+    let runbook = build_system_runbook(&release, &options.release_plan_file)?;
+    write_system_runbook(options.output.as_deref(), &runbook)?;
+    print_or_json_system_runbook(&runbook, options.json);
+    Ok(())
+}
+
+pub(crate) fn check_system_runbook(options: SystemRunbookCheckOptions) -> Result<()> {
+    let runbook = read_system_runbook(&options.runbook_file)?;
+    print_or_json_system_runbook(&runbook, options.json);
+    if runbook.status == "blocked" {
+        bail!("System runbook is blocked");
+    }
+    Ok(())
+}
+
+pub(crate) fn record_system_runbook(options: SystemRunbookRecordOptions) -> Result<()> {
+    let repo_root = repo_root_path(options.repo_root.as_deref())?;
+    let runbook = read_system_runbook(&options.runbook_file)?;
+    append_system_runbook_history(&repo_root, &runbook)?;
+    if options.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "recorded": true,
+                "runbookId": runbook.id,
+                "path": display_relative(&repo_root, &repo_root.join(SYSTEM_RUNBOOKS_PATH)),
+            }))?
+        );
+    } else {
+        println!(
+            "System runbook record: recorded {} in {}",
+            runbook.id,
+            display_relative(&repo_root, &repo_root.join(SYSTEM_RUNBOOKS_PATH))
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn history_system_runbook(options: SystemRunbookHistoryOptions) -> Result<()> {
+    let repo_root = repo_root_path(options.repo_root.as_deref())?;
+    let runbooks = read_system_runbook_history(&repo_root)?;
+    if options.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "runbooks": runbooks,
+                "version": 1,
+            }))?
+        );
+    } else if runbooks.is_empty() {
+        println!("No system runbooks recorded.");
+    } else {
+        println!("System runbooks:");
+        for runbook in runbooks {
+            let id = string_field(&runbook, "id").unwrap_or_else(|| "<unknown>".to_owned());
+            let system = string_field(&runbook, "systemName").unwrap_or_else(|| "-".to_owned());
+            let env = string_field(&runbook, "environment").unwrap_or_else(|| "-".to_owned());
+            let status = string_field(&runbook, "status").unwrap_or_else(|| "-".to_owned());
+            println!("  {id}: {system}/{env} {status}");
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn doctor_system_runbook(options: SystemRunbookDoctorOptions) -> Result<()> {
+    let repo_root = repo_root_path(options.repo_root.as_deref())?;
+    let runbooks = read_system_runbook_history(&repo_root)?;
+    if options.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "status": if runbooks.is_empty() { "empty" } else { "ready" },
+                "runbooks": runbooks,
+                "version": 1,
+            }))?
+        );
+    } else if runbooks.is_empty() {
+        println!("System runbook doctor: empty");
+        println!(
+            "next: lenso system runbook generate system-release.json --output system-runbook.json"
+        );
+    } else {
+        println!("System runbook doctor: ready");
+        println!("next: lenso system runbook history");
     }
     Ok(())
 }
@@ -1364,6 +1514,160 @@ fn has_system_release_for_env(releases: &[Value], environment: &str) -> bool {
     })
 }
 
+fn build_system_runbook(
+    release: &SystemReleasePlan,
+    release_plan_file: &Path,
+) -> Result<SystemRunbook> {
+    let release_plan = path_string(release_plan_file);
+    let mut steps = vec![SystemRunbookStep {
+        command: Some(format!(
+            "lenso system release check {}",
+            shell_word(&release_plan)
+        )),
+        id: "check-release".to_owned(),
+        kind: "evidence".to_owned(),
+        manual: false,
+        status: "pending".to_owned(),
+        title: "Check system release".to_owned(),
+    }];
+    if release.status == "blocked" {
+        steps.push(SystemRunbookStep {
+            command: None,
+            id: "resolve-policy".to_owned(),
+            kind: "manual".to_owned(),
+            manual: true,
+            status: "blocked".to_owned(),
+            title: "Resolve system release policy".to_owned(),
+        });
+    } else {
+        for (index, command) in release.commands.iter().enumerate() {
+            let kind = if command.contains(" deploy status ") {
+                "service_deploy"
+            } else if command.contains(" service release ") {
+                "service_release"
+            } else {
+                "evidence"
+            };
+            steps.push(SystemRunbookStep {
+                command: Some(command.clone()),
+                id: format!("step-{}", index + 1),
+                kind: kind.to_owned(),
+                manual: false,
+                status: "pending".to_owned(),
+                title: match kind {
+                    "service_deploy" => "Record service deployment evidence",
+                    "service_release" => "Prepare service release",
+                    _ => "Run release command",
+                }
+                .to_owned(),
+            });
+        }
+        steps.push(SystemRunbookStep {
+            command: Some(format!(
+                "lenso system release apply {} --repo-root .",
+                shell_word(&release_plan)
+            )),
+            id: "record-release".to_owned(),
+            kind: "evidence".to_owned(),
+            manual: false,
+            status: "pending".to_owned(),
+            title: "Record system release".to_owned(),
+        });
+    }
+    let commands = steps
+        .iter()
+        .filter_map(|step| step.command.clone())
+        .collect::<Vec<_>>();
+    Ok(SystemRunbook {
+        commands,
+        created_at_unix_ms: current_time_millis()?,
+        environment: release.environment.clone(),
+        id: format!(
+            "sysrun_{}_{}",
+            release.environment,
+            uuid::Uuid::now_v7().simple()
+        ),
+        protocol: SYSTEM_RUNBOOK_PROTOCOL.to_owned(),
+        release_id: release.id.clone(),
+        status: if release.status == "blocked" {
+            "blocked".to_owned()
+        } else {
+            "ready".to_owned()
+        },
+        steps,
+        system_name: release.system_name.clone(),
+    })
+}
+
+fn write_system_runbook(output: Option<&Path>, runbook: &SystemRunbook) -> Result<()> {
+    if let Some(output) = output {
+        write_json(output, &serde_json::to_value(runbook)?)
+            .with_context(|| format!("write {}", output.display()))?;
+        println!("Wrote system runbook {}.", output.display());
+    }
+    Ok(())
+}
+
+fn read_system_runbook(path: &Path) -> Result<SystemRunbook> {
+    let source = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let runbook = serde_json::from_str::<SystemRunbook>(&source)
+        .with_context(|| format!("parse {}", path.display()))?;
+    if runbook.protocol != SYSTEM_RUNBOOK_PROTOCOL {
+        bail!(
+            "System runbook {} uses unsupported protocol `{}`",
+            path.display(),
+            runbook.protocol
+        );
+    }
+    Ok(runbook)
+}
+
+fn print_or_json_system_runbook(runbook: &SystemRunbook, json_output: bool) {
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(runbook).unwrap());
+        return;
+    }
+    println!(
+        "System runbook: {} {} ({})",
+        runbook.system_name, runbook.environment, runbook.status
+    );
+    println!("id: {}", runbook.id);
+    println!("release: {}", runbook.release_id);
+    println!("steps: {}", runbook.steps.len());
+    if let Some(command) = runbook.commands.first() {
+        println!("next: {command}");
+    }
+}
+
+fn append_system_runbook_history(repo_root: &Path, runbook: &SystemRunbook) -> Result<()> {
+    let path = repo_root.join(SYSTEM_RUNBOOKS_PATH);
+    let mut ledger =
+        read_json_if_exists(&path)?.unwrap_or_else(|| json!({ "runbooks": [], "version": 1 }));
+    if !ledger.get("runbooks").is_some_and(Value::is_array) {
+        ledger["runbooks"] = json!([]);
+    }
+    if let Some(runbooks) = ledger.get_mut("runbooks").and_then(Value::as_array_mut) {
+        for existing in runbooks {
+            existing["active"] = json!(false);
+        }
+    }
+    let mut record = serde_json::to_value(runbook)?;
+    record["active"] = json!(true);
+    record["recordedAtUnixMs"] = json!(current_time_millis()?);
+    ledger
+        .get_mut("runbooks")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow::anyhow!("system runbooks must be an array"))?
+        .push(record);
+    write_json(&path, &ledger)
+}
+
+fn read_system_runbook_history(repo_root: &Path) -> Result<Vec<Value>> {
+    Ok(read_json_if_exists(&repo_root.join(SYSTEM_RUNBOOKS_PATH))?
+        .and_then(|value| value.get("runbooks").and_then(Value::as_array).cloned())
+        .unwrap_or_default())
+}
+
 fn current_time_millis() -> Result<u64> {
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
@@ -1986,6 +2290,90 @@ mod tests {
 
         assert_eq!(history[0]["id"], plan.id);
         assert!(has_system_release_for_env(&history, "staging"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn system_runbook_generates_steps_from_release_plan() {
+        let root = test_root("runbook-generate");
+        fs::remove_dir_all(&root).ok();
+        fs::create_dir_all(root.join(".lenso")).unwrap();
+        let system_path = root.join("lenso.system.json");
+        write_system(&system_path, &support_system()).unwrap();
+        write_ready_host_state(&root);
+        let release = build_system_release_plan(
+            "release",
+            &SystemReleasePlanOptions {
+                allow_drift: false,
+                environment_name: "staging".to_owned(),
+                json: false,
+                output: None,
+                repo_root: Some(root.clone()),
+                source_environment: None,
+                system_file: Some(system_path),
+            },
+        )
+        .unwrap();
+
+        let runbook = build_system_runbook(&release, Path::new("system-release.json")).unwrap();
+
+        assert_eq!(runbook.protocol, SYSTEM_RUNBOOK_PROTOCOL);
+        assert_eq!(runbook.release_id, release.id);
+        assert_eq!(runbook.status, "ready");
+        assert!(runbook.steps.iter().any(|step| {
+            step.kind == "evidence"
+                && step.command.as_deref() == Some("lenso system release check system-release.json")
+        }));
+        assert!(
+            runbook
+                .steps
+                .iter()
+                .any(|step| step.kind == "service_deploy")
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn system_runbook_history_records_active_runbook() {
+        let root = test_root("runbook-history");
+        fs::remove_dir_all(&root).ok();
+        fs::create_dir_all(root.join(".lenso")).unwrap();
+        let release = SystemReleasePlan {
+            commands: vec![
+                "lenso service deploy status support --env staging --write-state".to_owned(),
+            ],
+            created_at_unix_ms: 1,
+            drift_status: "ready".to_owned(),
+            drifts: Vec::new(),
+            environment: "staging".to_owned(),
+            graph_issues: Vec::new(),
+            id: "sysrel_staging_1".to_owned(),
+            kind: "release".to_owned(),
+            modules: vec!["support-ticket".to_owned()],
+            policy: SystemReleasePolicy {
+                issues: Vec::new(),
+                risk: "safe".to_owned(),
+            },
+            protocol: SYSTEM_RELEASE_PROTOCOL.to_owned(),
+            rollback_available: true,
+            services: vec![SystemReleaseService {
+                manifest: None,
+                modules: vec!["support-ticket".to_owned()],
+                name: "support".to_owned(),
+                target: "operator".to_owned(),
+            }],
+            source_environment: None,
+            status: "ready".to_owned(),
+            system_file: "lenso.system.json".to_owned(),
+            system_name: "support-platform".to_owned(),
+        };
+        let runbook = build_system_runbook(&release, Path::new("system-release.json")).unwrap();
+
+        append_system_runbook_history(&root, &runbook).unwrap();
+        let history = read_system_runbook_history(&root).unwrap();
+
+        assert_eq!(history[0]["id"], runbook.id);
+        assert_eq!(history[0]["active"], true);
         fs::remove_dir_all(root).ok();
     }
 

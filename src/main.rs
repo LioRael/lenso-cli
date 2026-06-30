@@ -76,6 +76,11 @@ enum SystemCommand {
         #[command(subcommand)]
         command: SystemReleaseCommand,
     },
+    /// Generate, check, and record system runbooks.
+    Runbook {
+        #[command(subcommand)]
+        command: SystemRunbookCommand,
+    },
     /// Print the service/module dependency graph.
     Graph(SystemGraphArgs),
     /// Validate the service system graph.
@@ -244,6 +249,20 @@ enum SystemReleaseCommand {
     History(SystemReleaseHistoryArgs),
 }
 
+#[derive(Debug, Subcommand)]
+enum SystemRunbookCommand {
+    /// Generate a system runbook from a system release plan.
+    Generate(SystemRunbookGenerateArgs),
+    /// Check a system runbook.
+    Check(SystemRunbookCheckArgs),
+    /// Record a system runbook in host-local history.
+    Record(SystemRunbookRecordArgs),
+    /// List recorded system runbooks.
+    History(SystemRunbookHistoryArgs),
+    /// Diagnose system runbook state.
+    Doctor(SystemRunbookDoctorArgs),
+}
+
 #[derive(Debug, Args, Clone)]
 struct SystemReleasePlanArgs {
     /// Target environment.
@@ -351,6 +370,66 @@ struct SystemReleaseRollbackArgs {
 
 #[derive(Debug, Args, Clone)]
 struct SystemReleaseHistoryArgs {
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemRunbookGenerateArgs {
+    /// System release plan file.
+    release_plan_file: std::path::PathBuf,
+
+    /// Output runbook file.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemRunbookCheckArgs {
+    /// System runbook file.
+    runbook_file: std::path::PathBuf,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemRunbookRecordArgs {
+    /// System runbook file.
+    runbook_file: std::path::PathBuf,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemRunbookHistoryArgs {
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemRunbookDoctorArgs {
     /// Lenso host repository root.
     #[arg(long)]
     repo_root: Option<std::path::PathBuf>,
@@ -2529,6 +2608,40 @@ async fn main() -> anyhow::Result<()> {
                 }
                 SystemReleaseCommand::History(args) => {
                     system::history_system_release(system::SystemReleaseHistoryOptions {
+                        json: args.json,
+                        repo_root: args.repo_root,
+                    })?;
+                }
+            },
+            SystemCommand::Runbook { command } => match command {
+                SystemRunbookCommand::Generate(args) => {
+                    system::generate_system_runbook(system::SystemRunbookGenerateOptions {
+                        json: args.json,
+                        output: args.output,
+                        release_plan_file: args.release_plan_file,
+                    })?;
+                }
+                SystemRunbookCommand::Check(args) => {
+                    system::check_system_runbook(system::SystemRunbookCheckOptions {
+                        json: args.json,
+                        runbook_file: args.runbook_file,
+                    })?;
+                }
+                SystemRunbookCommand::Record(args) => {
+                    system::record_system_runbook(system::SystemRunbookRecordOptions {
+                        json: args.json,
+                        repo_root: args.repo_root,
+                        runbook_file: args.runbook_file,
+                    })?;
+                }
+                SystemRunbookCommand::History(args) => {
+                    system::history_system_runbook(system::SystemRunbookHistoryOptions {
+                        json: args.json,
+                        repo_root: args.repo_root,
+                    })?;
+                }
+                SystemRunbookCommand::Doctor(args) => {
+                    system::doctor_system_runbook(system::SystemRunbookDoctorOptions {
                         json: args.json,
                         repo_root: args.repo_root,
                     })?;
