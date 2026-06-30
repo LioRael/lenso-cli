@@ -65,6 +65,12 @@ enum SystemCommand {
     AddModule(SystemAddModuleArgs),
     /// Build the service system rollout and setup plan.
     Plan(SystemPlanArgs),
+    /// Compare lenso.system.json with host-local state.
+    Diff(SystemDiffArgs),
+    /// Apply safe host-local state from lenso.system.json.
+    Apply(SystemApplyArgs),
+    /// Diagnose system graph and host-local drift.
+    Doctor(SystemDoctorArgs),
     /// Print the service/module dependency graph.
     Graph(SystemGraphArgs),
     /// Validate the service system graph.
@@ -158,6 +164,59 @@ struct SystemPlanArgs {
     /// Fail when the system graph has issues.
     #[arg(long)]
     check: bool,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemDiffArgs {
+    /// Service system file.
+    #[arg(long)]
+    system_file: Option<std::path::PathBuf>,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Fail when drift or graph issues exist.
+    #[arg(long)]
+    check: bool,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemApplyArgs {
+    /// Service system file.
+    #[arg(long)]
+    system_file: Option<std::path::PathBuf>,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Preview changes without writing files.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemDoctorArgs {
+    /// Service system file.
+    #[arg(long)]
+    system_file: Option<std::path::PathBuf>,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
 
     /// Print machine-readable JSON.
     #[arg(long)]
@@ -2260,6 +2319,29 @@ async fn main() -> anyhow::Result<()> {
                 system::plan_system(system::SystemPlanOptions {
                     check: args.check,
                     json: args.json,
+                    system_file: args.system_file,
+                })?;
+            }
+            SystemCommand::Diff(args) => {
+                system::diff_system(system::SystemDiffOptions {
+                    check: args.check,
+                    json: args.json,
+                    repo_root: args.repo_root,
+                    system_file: args.system_file,
+                })?;
+            }
+            SystemCommand::Apply(args) => {
+                system::apply_system(system::SystemApplyOptions {
+                    dry_run: args.dry_run,
+                    json: args.json,
+                    repo_root: args.repo_root,
+                    system_file: args.system_file,
+                })?;
+            }
+            SystemCommand::Doctor(args) => {
+                system::doctor_system(system::SystemDoctorOptions {
+                    json: args.json,
+                    repo_root: args.repo_root,
                     system_file: args.system_file,
                 })?;
             }

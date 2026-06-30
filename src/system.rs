@@ -1,12 +1,18 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 const DEFAULT_SYSTEM_FILE: &str = "lenso.system.json";
 const SERVICE_SYSTEM_PROTOCOL: &str = "lenso.system.v1";
+const MODULE_INSTALLS_PATH: &str = ".lenso/module-installs.json";
+const MODULE_SERVICES_PATH: &str = ".lenso/module-services.json";
+const SERVICE_ENVIRONMENTS_PATH: &str = ".lenso/service-environments.json";
+const SERVICE_DEPLOYMENTS_PATH: &str = ".lenso/service-deployments.json";
+const SERVICE_RELEASES_PATH: &str = ".lenso/service-releases.json";
 
 #[derive(Debug, Clone)]
 pub(crate) struct SystemInitOptions {
@@ -48,6 +54,29 @@ pub(crate) struct SystemPlanOptions {
 #[derive(Debug, Clone)]
 pub(crate) struct SystemGraphOptions {
     pub(crate) json: bool,
+    pub(crate) system_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SystemDiffOptions {
+    pub(crate) check: bool,
+    pub(crate) json: bool,
+    pub(crate) repo_root: Option<PathBuf>,
+    pub(crate) system_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SystemApplyOptions {
+    pub(crate) dry_run: bool,
+    pub(crate) json: bool,
+    pub(crate) repo_root: Option<PathBuf>,
+    pub(crate) system_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SystemDoctorOptions {
+    pub(crate) json: bool,
+    pub(crate) repo_root: Option<PathBuf>,
     pub(crate) system_file: Option<PathBuf>,
 }
 
@@ -163,6 +192,40 @@ struct SystemPlan {
     commands: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemDriftReport {
+    version: u8,
+    system_file: String,
+    repo_root: String,
+    name: String,
+    status: String,
+    graph_issues: Vec<SystemIssue>,
+    drifts: Vec<SystemDrift>,
+    commands: Vec<String>,
+    applied: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemDrift {
+    code: String,
+    severity: String,
+    resource: String,
+    name: String,
+    message: String,
+    command: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct HostSystemState {
+    installed_modules: BTreeSet<String>,
+    configured_services: BTreeSet<String>,
+    environments: BTreeSet<String>,
+    deployments: BTreeSet<String>,
+    releases: BTreeSet<String>,
+}
+
 pub(crate) fn init_system(options: SystemInitOptions) -> Result<()> {
     let path = system_path(options.system_file.as_deref())?;
     if path.exists() && !options.force {
@@ -260,6 +323,73 @@ pub(crate) fn graph_system(options: SystemGraphOptions) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&graph)?);
     } else {
         print_system_graph(&graph);
+    }
+    Ok(())
+}
+
+pub(crate) fn diff_system(options: SystemDiffOptions) -> Result<()> {
+    let report = system_drift_report(
+        options.system_file.as_deref(),
+        options.repo_root.as_deref(),
+        Vec::new(),
+    )?;
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_system_drift_report(&report, "Service system drift");
+    }
+    if options.check && report.status != "ready" {
+        bail!("Service system has drift");
+    }
+    Ok(())
+}
+
+pub(crate) fn apply_system(options: SystemApplyOptions) -> Result<()> {
+    let path = system_read_path(options.system_file.as_deref())?;
+    let repo_root = repo_root_path(options.repo_root.as_deref())?;
+    let system = read_system(&path)?;
+    let mut applied = Vec::new();
+    applied.extend(apply_module_services(&repo_root, &system, options.dry_run)?);
+    applied.extend(apply_service_environments(
+        &repo_root,
+        &system,
+        options.dry_run,
+    )?);
+    let report = system_drift_report(Some(&path), Some(&repo_root), applied)?;
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_system_drift_report(
+            &report,
+            if options.dry_run {
+                "Service system apply preview"
+            } else {
+                "Service system apply"
+            },
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn doctor_system(options: SystemDoctorOptions) -> Result<()> {
+    let report = system_drift_report(
+        options.system_file.as_deref(),
+        options.repo_root.as_deref(),
+        Vec::new(),
+    )?;
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_system_drift_report(&report, "Service system doctor");
+        if report.status == "ready" {
+            println!("next: none");
+        } else if let Some(command) = report
+            .drifts
+            .iter()
+            .find_map(|drift| drift.command.as_ref())
+        {
+            println!("next: {command}");
+        }
     }
     Ok(())
 }
@@ -492,27 +622,8 @@ fn module_owner_name<'a>(
 fn system_commands(system: &ServiceSystem) -> Vec<String> {
     let mut commands = Vec::new();
     for service in &system.services {
-        if let (Some(cwd), Some(lang), Some(command), Some(ready_url)) = (
-            service.cwd.as_deref(),
-            service.lang.as_deref(),
-            service.command.as_deref(),
-            service.ready_url.as_deref(),
-        ) {
-            let mut line = format!(
-                "lenso service workspace add {} --cwd {} --lang {} --command {} --ready-url {}",
-                shell_word(&service.name),
-                shell_word(cwd),
-                shell_word(lang),
-                shell_word(command),
-                shell_word(ready_url)
-            );
-            if let Some(manifest) = service.manifest.as_deref() {
-                line.push_str(&format!(" --manifest {}", shell_word(manifest)));
-            }
-            for module in &service.modules {
-                line.push_str(&format!(" --module {}", shell_word(module)));
-            }
-            commands.push(line);
+        if let Some(command) = service_workspace_command(service) {
+            commands.push(command);
         }
         for environment in &system.environments {
             if matches!(service.target.as_str(), "kubernetes" | "operator") {
@@ -526,6 +637,273 @@ fn system_commands(system: &ServiceSystem) -> Vec<String> {
         }
     }
     commands
+}
+
+fn system_drift_report(
+    system_file: Option<&Path>,
+    repo_root: Option<&Path>,
+    applied: Vec<String>,
+) -> Result<SystemDriftReport> {
+    let path = system_read_path(system_file)?;
+    let repo_root = repo_root_path(repo_root)?;
+    let system = read_system(&path)?;
+    let graph = system_graph(&system);
+    let state = read_host_system_state(&repo_root)?;
+    let drifts = system_drifts(&system, &graph, &state);
+    let commands = drifts
+        .iter()
+        .filter_map(|drift| drift.command.clone())
+        .collect::<Vec<_>>();
+    let status = if !graph.issues.is_empty() {
+        "needs_attention"
+    } else if !drifts.is_empty() {
+        "drifted"
+    } else {
+        "ready"
+    };
+    Ok(SystemDriftReport {
+        version: 1,
+        system_file: path_string(&path),
+        repo_root: path_string(&repo_root),
+        name: system.name,
+        status: status.to_owned(),
+        graph_issues: graph.issues,
+        drifts,
+        commands,
+        applied,
+    })
+}
+
+fn system_drifts(
+    system: &ServiceSystem,
+    graph: &SystemGraph,
+    state: &HostSystemState,
+) -> Vec<SystemDrift> {
+    let mut drifts = Vec::new();
+    for service in &system.services {
+        if !state.configured_services.contains(&service.name) {
+            drifts.push(SystemDrift {
+                code: "service_not_configured".to_owned(),
+                severity: "warning".to_owned(),
+                resource: "service".to_owned(),
+                name: service.name.clone(),
+                message: format!("Service `{}` is declared but not configured.", service.name),
+                command: service_workspace_command(service),
+            });
+        }
+        if matches!(service.target.as_str(), "kubernetes" | "operator") {
+            for environment in &system.environments {
+                let key = service_environment_key(&service.name, environment);
+                if !state.environments.contains(&key) {
+                    drifts.push(SystemDrift {
+                        code: "service_env_missing".to_owned(),
+                        severity: "warning".to_owned(),
+                        resource: "environment".to_owned(),
+                        name: key.clone(),
+                        message: format!(
+                            "Service `{}` has no `{environment}` environment state.",
+                            service.name
+                        ),
+                        command: Some(format!(
+                            "lenso service env add {} --service {} --target {}",
+                            shell_word(environment),
+                            shell_word(&service.name),
+                            shell_word(&service.target)
+                        )),
+                    });
+                } else if !state.deployments.contains(&key) {
+                    drifts.push(SystemDrift {
+                        code: "deployment_state_missing".to_owned(),
+                        severity: "info".to_owned(),
+                        resource: "deployment".to_owned(),
+                        name: key.clone(),
+                        message: format!(
+                            "Service `{}` has `{environment}` env state but no deployment observation.",
+                            service.name
+                        ),
+                        command: Some(format!(
+                            "lenso service deploy status {} --env {} --source {} --write-state",
+                            shell_word(&service.name),
+                            shell_word(environment),
+                            shell_word(&service.target)
+                        )),
+                    });
+                }
+                if !state.releases.contains(&key) {
+                    drifts.push(SystemDrift {
+                        code: "release_state_missing".to_owned(),
+                        severity: "info".to_owned(),
+                        resource: "release".to_owned(),
+                        name: key,
+                        message: format!(
+                            "Service `{}` has no `{environment}` release record.",
+                            service.name
+                        ),
+                        command: Some(format!(
+                            "lenso service release plan {} <manifest-or-package> --env {} --output release-plan.json",
+                            shell_word(&service.name),
+                            shell_word(environment)
+                        )),
+                    });
+                }
+            }
+        }
+    }
+    for module in &graph.modules {
+        if !state.installed_modules.contains(&module.name) {
+            drifts.push(SystemDrift {
+                code: "module_not_installed".to_owned(),
+                severity: "warning".to_owned(),
+                resource: "module".to_owned(),
+                name: module.name.clone(),
+                message: format!("Module `{}` is declared but not installed.", module.name),
+                command: Some(format!("lenso module install {}", shell_word(&module.name))),
+            });
+        }
+    }
+    drifts
+}
+
+fn read_host_system_state(repo_root: &Path) -> Result<HostSystemState> {
+    Ok(HostSystemState {
+        installed_modules: read_installed_modules(&repo_root.join(MODULE_INSTALLS_PATH))?,
+        configured_services: read_configured_services(&repo_root.join(MODULE_SERVICES_PATH))?,
+        environments: read_service_environment_keys(&repo_root.join(SERVICE_ENVIRONMENTS_PATH))?,
+        deployments: read_service_deployment_keys(&repo_root.join(SERVICE_DEPLOYMENTS_PATH))?,
+        releases: read_service_release_keys(&repo_root.join(SERVICE_RELEASES_PATH))?,
+    })
+}
+
+fn read_installed_modules(path: &Path) -> Result<BTreeSet<String>> {
+    Ok(read_json_if_exists(path)?
+        .and_then(|value| value.get("modules").and_then(Value::as_array).cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|module| string_field(&module, "moduleName"))
+        .collect())
+}
+
+fn read_configured_services(path: &Path) -> Result<BTreeSet<String>> {
+    let mut services = BTreeSet::new();
+    let modules = read_json_if_exists(path)?
+        .and_then(|value| value.get("modules").and_then(Value::as_array).cloned())
+        .unwrap_or_default();
+    for module in modules {
+        if let Some(module_name) = string_field(&module, "moduleName") {
+            services.insert(module_name);
+        }
+        for service in module
+            .get("services")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+        {
+            if let Some(name) = string_field(&service, "name") {
+                services.insert(name);
+            }
+        }
+    }
+    Ok(services)
+}
+
+fn read_service_environment_keys(path: &Path) -> Result<BTreeSet<String>> {
+    Ok(read_json_if_exists(path)?
+        .and_then(|value| value.get("environments").and_then(Value::as_array).cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|environment| service_env_key_from_value(&environment))
+        .collect())
+}
+
+fn read_service_deployment_keys(path: &Path) -> Result<BTreeSet<String>> {
+    Ok(read_json_if_exists(path)?
+        .and_then(|value| value.get("observations").and_then(Value::as_array).cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|observation| service_env_key_from_value(&observation))
+        .collect())
+}
+
+fn read_service_release_keys(path: &Path) -> Result<BTreeSet<String>> {
+    Ok(read_json_if_exists(path)?
+        .and_then(|value| value.get("releases").and_then(Value::as_array).cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|release| {
+            let service = string_field(&release, "serviceName")?;
+            let environment = release
+                .get("environment")
+                .and_then(|environment| string_field(environment, "name"))
+                .unwrap_or_else(|| "default".to_owned());
+            Some(service_environment_key(&service, &environment))
+        })
+        .collect())
+}
+
+fn apply_module_services(
+    repo_root: &Path,
+    system: &ServiceSystem,
+    dry_run: bool,
+) -> Result<Vec<String>> {
+    let path = repo_root.join(MODULE_SERVICES_PATH);
+    let mut file =
+        read_json_if_exists(&path)?.unwrap_or_else(|| json!({ "modules": [], "version": 1 }));
+    if !file.get("modules").is_some_and(Value::is_array) {
+        file["modules"] = json!([]);
+    }
+    let mut applied = Vec::new();
+    for service in &system.services {
+        let Some(plan) = module_service_plan(service) else {
+            continue;
+        };
+        for module_name in &service.modules {
+            upsert_module_service_plan(&mut file, module_name, plan.clone())?;
+            applied.push(format!(
+                "{} {}",
+                if dry_run { "would update" } else { "updated" },
+                display_relative(repo_root, &path)
+            ));
+        }
+    }
+    if !dry_run && !applied.is_empty() {
+        write_json(&path, &file)?;
+    }
+    applied.sort();
+    applied.dedup();
+    Ok(applied)
+}
+
+fn apply_service_environments(
+    repo_root: &Path,
+    system: &ServiceSystem,
+    dry_run: bool,
+) -> Result<Vec<String>> {
+    let path = repo_root.join(SERVICE_ENVIRONMENTS_PATH);
+    let mut file =
+        read_json_if_exists(&path)?.unwrap_or_else(|| json!({ "environments": [], "version": 1 }));
+    if !file.get("environments").is_some_and(Value::is_array) {
+        file["environments"] = json!([]);
+    }
+    let mut applied = Vec::new();
+    for service in &system.services {
+        if !matches!(service.target.as_str(), "kubernetes" | "operator") {
+            continue;
+        }
+        for environment in &system.environments {
+            upsert_service_environment(&mut file, service, environment)?;
+            applied.push(format!(
+                "{} {}",
+                if dry_run { "would update" } else { "updated" },
+                display_relative(repo_root, &path)
+            ));
+        }
+    }
+    if !dry_run && !applied.is_empty() {
+        write_json(&path, &file)?;
+    }
+    applied.sort();
+    applied.dedup();
+    Ok(applied)
 }
 
 fn print_system_plan(plan: &SystemPlan) {
@@ -592,6 +970,40 @@ fn print_system_graph(graph: &SystemGraph) {
     }
 }
 
+fn print_system_drift_report(report: &SystemDriftReport, title: &str) {
+    println!("{title}: {} ({})", report.name, report.status);
+    println!("system: {}", report.system_file);
+    println!("repo: {}", report.repo_root);
+    if report.graph_issues.is_empty() {
+        println!("graph issues: none");
+    } else {
+        println!("graph issues:");
+        for issue in &report.graph_issues {
+            println!("  - {}: {}", issue.code, issue.message);
+        }
+    }
+    if report.drifts.is_empty() {
+        println!("drift: none");
+    } else {
+        println!("drift:");
+        for drift in &report.drifts {
+            println!("  - {} {}: {}", drift.resource, drift.name, drift.message);
+        }
+    }
+    if !report.applied.is_empty() {
+        println!("applied:");
+        for item in &report.applied {
+            println!("  - {item}");
+        }
+    }
+    if !report.commands.is_empty() {
+        println!("commands:");
+        for command in &report.commands {
+            println!("  {command}");
+        }
+    }
+}
+
 fn read_or_empty_system(path: &Path) -> Result<ServiceSystem> {
     if path.exists() {
         return read_system(path);
@@ -626,11 +1038,35 @@ fn write_system(path: &Path, system: &ServiceSystem) -> Result<()> {
     write_file(path, contents.as_bytes())
 }
 
+fn read_json_if_exists(path: &Path) -> Result<Option<Value>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let source = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    serde_json::from_str(&source)
+        .with_context(|| format!("parse {}", path.display()))
+        .map(Some)
+}
+
+fn write_json(path: &Path, value: &Value) -> Result<()> {
+    let mut contents = serde_json::to_string_pretty(value).context("serialize JSON")?;
+    contents.push('\n');
+    write_file(path, contents.as_bytes())
+}
+
 fn system_path(system_file: Option<&Path>) -> Result<PathBuf> {
     let current_dir = std::env::current_dir().context("resolve current directory")?;
     Ok(absolutize_from(
         &current_dir,
         system_file.unwrap_or_else(|| Path::new(DEFAULT_SYSTEM_FILE)),
+    ))
+}
+
+fn repo_root_path(repo_root: Option<&Path>) -> Result<PathBuf> {
+    let current_dir = std::env::current_dir().context("resolve current directory")?;
+    Ok(absolutize_from(
+        &current_dir,
+        repo_root.unwrap_or_else(|| Path::new(".")),
     ))
 }
 
@@ -660,6 +1096,13 @@ fn path_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+fn display_relative(base: &Path, path: &Path) -> String {
+    path.strip_prefix(base)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn shell_word(value: &str) -> String {
     if value
         .chars()
@@ -668,6 +1111,134 @@ fn shell_word(value: &str) -> String {
         return value.to_owned();
     }
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn service_workspace_command(service: &SystemService) -> Option<String> {
+    let (Some(cwd), Some(lang), Some(command), Some(ready_url)) = (
+        service.cwd.as_deref(),
+        service.lang.as_deref(),
+        service.command.as_deref(),
+        service.ready_url.as_deref(),
+    ) else {
+        return None;
+    };
+    let mut line = format!(
+        "lenso service workspace add {} --cwd {} --lang {} --command {} --ready-url {}",
+        shell_word(&service.name),
+        shell_word(cwd),
+        shell_word(lang),
+        shell_word(command),
+        shell_word(ready_url)
+    );
+    if let Some(manifest) = service.manifest.as_deref() {
+        line.push_str(&format!(" --manifest {}", shell_word(manifest)));
+    }
+    for module in &service.modules {
+        line.push_str(&format!(" --module {}", shell_word(module)));
+    }
+    Some(line)
+}
+
+fn module_service_plan(service: &SystemService) -> Option<Value> {
+    let (Some(command), Some(ready_url)) =
+        (service.command.as_deref(), service.ready_url.as_deref())
+    else {
+        return None;
+    };
+    Some(json!({
+        "autoStart": true,
+        "command": command,
+        "cwd": service.cwd.as_deref().unwrap_or("."),
+        "name": &service.name,
+        "readyTimeoutMs": 10000,
+        "readyUrl": ready_url,
+    }))
+}
+
+fn upsert_module_service_plan(file: &mut Value, module_name: &str, service: Value) -> Result<()> {
+    let modules = file
+        .get_mut("modules")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow::anyhow!("module services modules must be an array"))?;
+    let module_entry = if let Some(index) = modules
+        .iter()
+        .position(|entry| string_field(entry, "moduleName").as_deref() == Some(module_name))
+    {
+        &mut modules[index]
+    } else {
+        modules.push(json!({ "moduleName": module_name, "services": [] }));
+        modules.last_mut().expect("pushed module service entry")
+    };
+    if !module_entry.get("services").is_some_and(Value::is_array) {
+        module_entry["services"] = json!([]);
+    }
+    let service_name = string_field(&service, "name")
+        .ok_or_else(|| anyhow::anyhow!("module service name must be a string"))?;
+    let services = module_entry
+        .get_mut("services")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow::anyhow!("module service services must be an array"))?;
+    if let Some(existing) = services
+        .iter_mut()
+        .find(|entry| string_field(entry, "name").as_deref() == Some(service_name.as_str()))
+    {
+        *existing = service;
+    } else {
+        services.push(service);
+    }
+    Ok(())
+}
+
+fn upsert_service_environment(
+    file: &mut Value,
+    service: &SystemService,
+    environment: &str,
+) -> Result<()> {
+    let environments = file
+        .get_mut("environments")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow::anyhow!("service environments must be an array"))?;
+    let value = json!({
+        "name": environment,
+        "releaseTrack": environment,
+        "serviceName": &service.name,
+        "target": &service.target,
+    });
+    if let Some(existing) = environments.iter_mut().find(|entry| {
+        string_field(entry, "serviceName").as_deref() == Some(service.name.as_str())
+            && string_field(entry, "name").as_deref() == Some(environment)
+    }) {
+        *existing = value;
+    } else {
+        environments.push(value);
+    }
+    environments.sort_by_key(|entry| {
+        (
+            string_field(entry, "serviceName").unwrap_or_default(),
+            string_field(entry, "name").unwrap_or_default(),
+        )
+    });
+    Ok(())
+}
+
+fn service_env_key_from_value(value: &Value) -> Option<String> {
+    Some(service_environment_key(
+        &string_field(value, "serviceName")?,
+        &string_field(value, "environment").or_else(|| string_field(value, "name"))?,
+    ))
+}
+
+fn service_environment_key(service: &str, environment: &str) -> String {
+    format!("{service}/{environment}")
+}
+
+fn string_field(value: &Value, field: &str) -> Option<String> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 #[cfg(test)]
@@ -806,5 +1377,125 @@ mod tests {
 
         assert!(commands[0].contains("lenso service workspace add support"));
         assert!(commands[0].contains("--module support-ticket"));
+    }
+
+    #[test]
+    fn drift_report_reads_host_state() {
+        let root = test_root("drift-report");
+        fs::remove_dir_all(&root).ok();
+        fs::create_dir_all(root.join(".lenso")).unwrap();
+        let system_path = root.join("lenso.system.json");
+        write_system(&system_path, &support_system()).unwrap();
+        write_json(
+            &root.join(MODULE_INSTALLS_PATH),
+            &json!({
+                "modules": [{ "moduleName": "support-ticket", "source": "remote" }],
+                "version": 1
+            }),
+        )
+        .unwrap();
+        write_json(
+            &root.join(MODULE_SERVICES_PATH),
+            &json!({
+                "modules": [{
+                    "moduleName": "support-ticket",
+                    "services": [{ "name": "support", "command": "pnpm start", "readyUrl": "http://127.0.0.1:4110/status" }]
+                }],
+                "version": 1
+            }),
+        )
+        .unwrap();
+        write_json(
+            &root.join(SERVICE_ENVIRONMENTS_PATH),
+            &json!({
+                "environments": [{ "name": "staging", "serviceName": "support", "target": "operator" }],
+                "version": 1
+            }),
+        )
+        .unwrap();
+        write_json(
+            &root.join(SERVICE_DEPLOYMENTS_PATH),
+            &json!({
+                "observations": [{ "environment": "staging", "serviceName": "support" }],
+                "version": 2
+            }),
+        )
+        .unwrap();
+        write_json(
+            &root.join(SERVICE_RELEASES_PATH),
+            &json!({
+                "releases": [{ "environment": { "name": "staging" }, "serviceName": "support" }],
+                "version": 1
+            }),
+        )
+        .unwrap();
+
+        let report = system_drift_report(Some(&system_path), Some(&root), Vec::new()).unwrap();
+
+        assert_eq!(report.status, "ready");
+        assert!(report.drifts.is_empty());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn apply_writes_safe_host_state() {
+        let root = test_root("apply");
+        fs::remove_dir_all(&root).ok();
+        fs::create_dir_all(&root).unwrap();
+        let system = support_system();
+
+        let applied = apply_module_services(&root, &system, false).unwrap();
+        applied
+            .into_iter()
+            .chain(apply_service_environments(&root, &system, false).unwrap())
+            .for_each(drop);
+        let services = read_json_if_exists(&root.join(MODULE_SERVICES_PATH))
+            .unwrap()
+            .unwrap();
+        let environments = read_json_if_exists(&root.join(SERVICE_ENVIRONMENTS_PATH))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(services["modules"][0]["moduleName"], "support-ticket");
+        assert_eq!(services["modules"][0]["services"][0]["name"], "support");
+        assert_eq!(environments["environments"][0]["serviceName"], "support");
+        assert_eq!(environments["environments"][0]["name"], "staging");
+        fs::remove_dir_all(root).ok();
+    }
+
+    fn support_system() -> ServiceSystem {
+        ServiceSystem {
+            dependencies: Vec::new(),
+            environments: vec!["staging".to_owned()],
+            modules: vec![SystemModule {
+                capabilities: vec!["support.ticket.read".to_owned()],
+                dependencies: Vec::new(),
+                install_to: Some("service:support".to_owned()),
+                name: "support-ticket".to_owned(),
+            }],
+            name: "support-platform".to_owned(),
+            protocol: SERVICE_SYSTEM_PROTOCOL.to_owned(),
+            services: vec![SystemService {
+                command: Some("pnpm start".to_owned()),
+                cwd: Some("services/support".to_owned()),
+                lang: Some("ts".to_owned()),
+                manifest: Some("http://127.0.0.1:4110/lenso/service/v1/manifest".to_owned()),
+                modules: vec!["support-ticket".to_owned()],
+                name: "support".to_owned(),
+                ready_url: Some("http://127.0.0.1:4110/status".to_owned()),
+                target: "operator".to_owned(),
+            }],
+        }
+    }
+
+    fn test_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "lenso-system-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
     }
 }
