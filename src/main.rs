@@ -71,6 +71,11 @@ enum SystemCommand {
     Apply(SystemApplyArgs),
     /// Diagnose system graph and host-local drift.
     Doctor(SystemDoctorArgs),
+    /// Plan, check, apply, promote, and roll back system releases.
+    Release {
+        #[command(subcommand)]
+        command: SystemReleaseCommand,
+    },
     /// Print the service/module dependency graph.
     Graph(SystemGraphArgs),
     /// Validate the service system graph.
@@ -214,6 +219,138 @@ struct SystemDoctorArgs {
     #[arg(long)]
     system_file: Option<std::path::PathBuf>,
 
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum SystemReleaseCommand {
+    /// Create a system release plan.
+    Plan(SystemReleasePlanArgs),
+    /// Check a system release plan.
+    Check(SystemReleaseCheckArgs),
+    /// Apply a system release plan to host-local history.
+    Apply(SystemReleaseApplyArgs),
+    /// Create a system promotion plan.
+    Promote(SystemReleasePromoteArgs),
+    /// Create a system rollback plan.
+    Rollback(SystemReleaseRollbackArgs),
+    /// List applied system releases.
+    History(SystemReleaseHistoryArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemReleasePlanArgs {
+    /// Target environment.
+    #[arg(long = "env")]
+    environment_name: String,
+
+    /// Service system file.
+    #[arg(long)]
+    system_file: Option<std::path::PathBuf>,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Output plan file.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+
+    /// Allow deployment drift in the target environment.
+    #[arg(long)]
+    allow_drift: bool,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemReleaseCheckArgs {
+    /// System release plan file.
+    plan_file: std::path::PathBuf,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemReleaseApplyArgs {
+    /// System release plan file.
+    plan_file: std::path::PathBuf,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Preview without writing history.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemReleasePromoteArgs {
+    /// Source environment.
+    #[arg(long = "from")]
+    from_environment: String,
+
+    /// Target environment.
+    #[arg(long = "to")]
+    to_environment: String,
+
+    /// Service system file.
+    #[arg(long)]
+    system_file: Option<std::path::PathBuf>,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Output plan file.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemReleaseRollbackArgs {
+    /// Target environment.
+    #[arg(long = "env")]
+    environment_name: String,
+
+    /// Service system file.
+    #[arg(long)]
+    system_file: Option<std::path::PathBuf>,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Output plan file.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemReleaseHistoryArgs {
     /// Lenso host repository root.
     #[arg(long)]
     repo_root: Option<std::path::PathBuf>,
@@ -2345,6 +2482,58 @@ async fn main() -> anyhow::Result<()> {
                     system_file: args.system_file,
                 })?;
             }
+            SystemCommand::Release { command } => match command {
+                SystemReleaseCommand::Plan(args) => {
+                    system::plan_system_release(system::SystemReleasePlanOptions {
+                        allow_drift: args.allow_drift,
+                        environment_name: args.environment_name,
+                        json: args.json,
+                        output: args.output,
+                        repo_root: args.repo_root,
+                        source_environment: None,
+                        system_file: args.system_file,
+                    })?;
+                }
+                SystemReleaseCommand::Check(args) => {
+                    system::check_system_release(system::SystemReleaseCheckOptions {
+                        json: args.json,
+                        plan_file: args.plan_file,
+                    })?;
+                }
+                SystemReleaseCommand::Apply(args) => {
+                    system::apply_system_release(system::SystemReleaseApplyOptions {
+                        dry_run: args.dry_run,
+                        json: args.json,
+                        plan_file: args.plan_file,
+                        repo_root: args.repo_root,
+                    })?;
+                }
+                SystemReleaseCommand::Promote(args) => {
+                    system::promote_system_release(system::SystemReleasePromoteOptions {
+                        from_environment: args.from_environment,
+                        json: args.json,
+                        output: args.output,
+                        repo_root: args.repo_root,
+                        system_file: args.system_file,
+                        to_environment: args.to_environment,
+                    })?;
+                }
+                SystemReleaseCommand::Rollback(args) => {
+                    system::rollback_system_release(system::SystemReleaseRollbackOptions {
+                        environment_name: args.environment_name,
+                        json: args.json,
+                        output: args.output,
+                        repo_root: args.repo_root,
+                        system_file: args.system_file,
+                    })?;
+                }
+                SystemReleaseCommand::History(args) => {
+                    system::history_system_release(system::SystemReleaseHistoryOptions {
+                        json: args.json,
+                        repo_root: args.repo_root,
+                    })?;
+                }
+            },
             SystemCommand::Graph(args) => {
                 system::graph_system(system::SystemGraphOptions {
                     json: args.json,

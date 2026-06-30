@@ -8,11 +8,13 @@ use serde_json::{Value, json};
 
 const DEFAULT_SYSTEM_FILE: &str = "lenso.system.json";
 const SERVICE_SYSTEM_PROTOCOL: &str = "lenso.system.v1";
+const SYSTEM_RELEASE_PROTOCOL: &str = "lenso.system-release.v1";
 const MODULE_INSTALLS_PATH: &str = ".lenso/module-installs.json";
 const MODULE_SERVICES_PATH: &str = ".lenso/module-services.json";
 const SERVICE_ENVIRONMENTS_PATH: &str = ".lenso/service-environments.json";
 const SERVICE_DEPLOYMENTS_PATH: &str = ".lenso/service-deployments.json";
 const SERVICE_RELEASES_PATH: &str = ".lenso/service-releases.json";
+const SYSTEM_RELEASES_PATH: &str = ".lenso/system-releases.json";
 
 #[derive(Debug, Clone)]
 pub(crate) struct SystemInitOptions {
@@ -78,6 +80,56 @@ pub(crate) struct SystemDoctorOptions {
     pub(crate) json: bool,
     pub(crate) repo_root: Option<PathBuf>,
     pub(crate) system_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SystemReleasePlanOptions {
+    pub(crate) allow_drift: bool,
+    pub(crate) environment_name: String,
+    pub(crate) json: bool,
+    pub(crate) output: Option<PathBuf>,
+    pub(crate) repo_root: Option<PathBuf>,
+    pub(crate) source_environment: Option<String>,
+    pub(crate) system_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SystemReleaseCheckOptions {
+    pub(crate) json: bool,
+    pub(crate) plan_file: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SystemReleaseApplyOptions {
+    pub(crate) dry_run: bool,
+    pub(crate) json: bool,
+    pub(crate) plan_file: PathBuf,
+    pub(crate) repo_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SystemReleasePromoteOptions {
+    pub(crate) from_environment: String,
+    pub(crate) json: bool,
+    pub(crate) output: Option<PathBuf>,
+    pub(crate) repo_root: Option<PathBuf>,
+    pub(crate) system_file: Option<PathBuf>,
+    pub(crate) to_environment: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SystemReleaseRollbackOptions {
+    pub(crate) environment_name: String,
+    pub(crate) json: bool,
+    pub(crate) output: Option<PathBuf>,
+    pub(crate) repo_root: Option<PathBuf>,
+    pub(crate) system_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SystemReleaseHistoryOptions {
+    pub(crate) json: bool,
+    pub(crate) repo_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,7 +224,7 @@ struct SystemGraphDependency {
     to: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SystemIssue {
     code: String,
@@ -206,7 +258,7 @@ struct SystemDriftReport {
     applied: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SystemDrift {
     code: String,
@@ -224,6 +276,53 @@ struct HostSystemState {
     environments: BTreeSet<String>,
     deployments: BTreeSet<String>,
     releases: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemReleasePlan {
+    protocol: String,
+    id: String,
+    kind: String,
+    system_name: String,
+    environment: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_environment: Option<String>,
+    created_at_unix_ms: u64,
+    status: String,
+    system_file: String,
+    services: Vec<SystemReleaseService>,
+    modules: Vec<String>,
+    drift_status: String,
+    graph_issues: Vec<SystemIssue>,
+    drifts: Vec<SystemDrift>,
+    policy: SystemReleasePolicy,
+    rollback_available: bool,
+    commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemReleaseService {
+    name: String,
+    target: String,
+    modules: Vec<String>,
+    manifest: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemReleasePolicy {
+    risk: String,
+    issues: Vec<SystemReleasePolicyIssue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemReleasePolicyIssue {
+    level: String,
+    code: String,
+    message: String,
 }
 
 pub(crate) fn init_system(options: SystemInitOptions) -> Result<()> {
@@ -389,6 +488,121 @@ pub(crate) fn doctor_system(options: SystemDoctorOptions) -> Result<()> {
             .find_map(|drift| drift.command.as_ref())
         {
             println!("next: {command}");
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn plan_system_release(options: SystemReleasePlanOptions) -> Result<()> {
+    let plan = build_system_release_plan("release", &options)?;
+    write_system_release_plan(options.output.as_deref(), &plan)?;
+    print_or_json_system_release_plan(&plan, options.json);
+    Ok(())
+}
+
+pub(crate) fn check_system_release(options: SystemReleaseCheckOptions) -> Result<()> {
+    let plan = read_system_release_plan(&options.plan_file)?;
+    print_or_json_system_release_plan(&plan, options.json);
+    if plan.status == "blocked" {
+        bail!("System release is blocked");
+    }
+    Ok(())
+}
+
+pub(crate) fn apply_system_release(options: SystemReleaseApplyOptions) -> Result<()> {
+    let repo_root = repo_root_path(options.repo_root.as_deref())?;
+    let plan = read_system_release_plan(&options.plan_file)?;
+    if plan.status == "blocked" {
+        bail!("System release is blocked");
+    }
+    let applied = if options.dry_run {
+        format!(
+            "would record {} in {}",
+            plan.id,
+            display_relative(&repo_root, &repo_root.join(SYSTEM_RELEASES_PATH))
+        )
+    } else {
+        append_system_release_history(&repo_root, &plan)?;
+        format!(
+            "recorded {} in {}",
+            plan.id,
+            display_relative(&repo_root, &repo_root.join(SYSTEM_RELEASES_PATH))
+        )
+    };
+    if options.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "applied": applied,
+                "dryRun": options.dry_run,
+                "plan": plan,
+                "version": 1,
+            }))?
+        );
+    } else {
+        println!("System release apply: {applied}");
+    }
+    Ok(())
+}
+
+pub(crate) fn promote_system_release(options: SystemReleasePromoteOptions) -> Result<()> {
+    let plan_options = SystemReleasePlanOptions {
+        allow_drift: false,
+        environment_name: options.to_environment,
+        json: options.json,
+        output: options.output,
+        repo_root: options.repo_root,
+        source_environment: Some(options.from_environment),
+        system_file: options.system_file,
+    };
+    let plan = build_system_release_plan("promote", &plan_options)?;
+    write_system_release_plan(plan_options.output.as_deref(), &plan)?;
+    print_or_json_system_release_plan(&plan, plan_options.json);
+    Ok(())
+}
+
+pub(crate) fn rollback_system_release(options: SystemReleaseRollbackOptions) -> Result<()> {
+    let plan_options = SystemReleasePlanOptions {
+        allow_drift: true,
+        environment_name: options.environment_name,
+        json: options.json,
+        output: options.output,
+        repo_root: options.repo_root,
+        source_environment: None,
+        system_file: options.system_file,
+    };
+    let plan = build_system_release_plan("rollback", &plan_options)?;
+    write_system_release_plan(plan_options.output.as_deref(), &plan)?;
+    print_or_json_system_release_plan(&plan, plan_options.json);
+    Ok(())
+}
+
+pub(crate) fn history_system_release(options: SystemReleaseHistoryOptions) -> Result<()> {
+    let repo_root = repo_root_path(options.repo_root.as_deref())?;
+    let releases = read_system_release_history(&repo_root)?;
+    if options.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "releases": releases,
+                "version": 1,
+            }))?
+        );
+    } else if releases.is_empty() {
+        println!("No system releases recorded.");
+    } else {
+        println!("System releases:");
+        for release in releases {
+            let id = release.get("id").and_then(Value::as_str).unwrap_or("-");
+            let env = release
+                .get("environment")
+                .and_then(Value::as_str)
+                .unwrap_or("-");
+            let system = release
+                .get("systemName")
+                .and_then(Value::as_str)
+                .unwrap_or("-");
+            println!("  {id}: {system}/{env}");
         }
     }
     Ok(())
@@ -904,6 +1118,257 @@ fn apply_service_environments(
     applied.sort();
     applied.dedup();
     Ok(applied)
+}
+
+fn build_system_release_plan(
+    kind: &str,
+    options: &SystemReleasePlanOptions,
+) -> Result<SystemReleasePlan> {
+    let system_path = system_read_path(options.system_file.as_deref())?;
+    let repo_root = repo_root_path(options.repo_root.as_deref())?;
+    let system = read_system(&system_path)?;
+    let graph = system_graph(&system);
+    let state = read_host_system_state(&repo_root)?;
+    let drifts = release_drifts(
+        &system_drifts(&system, &graph, &state),
+        &options.environment_name,
+    );
+    let history = read_system_release_history(&repo_root)?;
+    let rollback_available = has_system_release_for_env(&history, &options.environment_name);
+    let mut policy_issues = Vec::new();
+    for issue in &graph.issues {
+        policy_issues.push(SystemReleasePolicyIssue {
+            code: issue.code.clone(),
+            level: "error".to_owned(),
+            message: issue.message.clone(),
+        });
+    }
+    for drift in &drifts {
+        let level = match drift.code.as_str() {
+            "module_not_installed" | "service_not_configured" | "service_env_missing" => "error",
+            "deployment_state_missing" if !options.allow_drift => "error",
+            _ => "info",
+        };
+        if level == "error" {
+            policy_issues.push(SystemReleasePolicyIssue {
+                code: drift.code.clone(),
+                level: level.to_owned(),
+                message: drift.message.clone(),
+            });
+        }
+    }
+    if let Some(source) = options.source_environment.as_deref()
+        && !has_system_release_for_env(&history, source)
+    {
+        policy_issues.push(SystemReleasePolicyIssue {
+            code: "source_system_release_missing".to_owned(),
+            level: "error".to_owned(),
+            message: format!("No applied system release found for `{source}`."),
+        });
+    }
+    if kind == "rollback" && !rollback_available {
+        policy_issues.push(SystemReleasePolicyIssue {
+            code: "rollback_unavailable".to_owned(),
+            level: "error".to_owned(),
+            message: format!(
+                "No applied system release found for `{}`.",
+                options.environment_name
+            ),
+        });
+    }
+    let risk = if policy_issues.iter().any(|issue| issue.level == "error") {
+        "blocked"
+    } else if policy_issues.is_empty() {
+        "safe"
+    } else {
+        "needs_attention"
+    };
+    let status = if risk == "blocked" {
+        "blocked"
+    } else {
+        "ready"
+    };
+    let commands = system_release_commands(&system, &options.environment_name, kind);
+    Ok(SystemReleasePlan {
+        protocol: SYSTEM_RELEASE_PROTOCOL.to_owned(),
+        id: format!(
+            "sysrel_{}_{}",
+            options.environment_name,
+            uuid::Uuid::now_v7().simple()
+        ),
+        kind: kind.to_owned(),
+        system_name: system.name,
+        environment: options.environment_name.clone(),
+        source_environment: options.source_environment.clone(),
+        created_at_unix_ms: current_time_millis()?,
+        status: status.to_owned(),
+        system_file: path_string(
+            options
+                .system_file
+                .as_deref()
+                .unwrap_or_else(|| Path::new(DEFAULT_SYSTEM_FILE)),
+        ),
+        services: system
+            .services
+            .into_iter()
+            .map(|service| SystemReleaseService {
+                manifest: service.manifest,
+                modules: service.modules,
+                name: service.name,
+                target: service.target,
+            })
+            .collect(),
+        modules: graph
+            .modules
+            .into_iter()
+            .map(|module| module.name)
+            .collect(),
+        drift_status: if drifts.is_empty() {
+            "ready".to_owned()
+        } else {
+            "drifted".to_owned()
+        },
+        graph_issues: graph.issues,
+        drifts,
+        policy: SystemReleasePolicy {
+            risk: risk.to_owned(),
+            issues: policy_issues,
+        },
+        rollback_available,
+        commands,
+    })
+}
+
+fn release_drifts(drifts: &[SystemDrift], environment: &str) -> Vec<SystemDrift> {
+    drifts
+        .iter()
+        .filter(|drift| {
+            matches!(drift.resource.as_str(), "module" | "service")
+                || drift.name.ends_with(&format!("/{environment}"))
+        })
+        .cloned()
+        .collect()
+}
+
+fn system_release_commands(system: &ServiceSystem, environment: &str, kind: &str) -> Vec<String> {
+    let mut commands = Vec::new();
+    for service in &system.services {
+        if matches!(service.target.as_str(), "kubernetes" | "operator") {
+            match kind {
+                "rollback" => commands.push(format!(
+                    "lenso service release rollback {} --env {} --output release-rollback-{}.json",
+                    shell_word(&service.name),
+                    shell_word(environment),
+                    shell_word(&service.name)
+                )),
+                _ => commands.push(format!(
+                    "lenso service release plan {} <manifest-or-package> --env {} --output release-plan-{}.json",
+                    shell_word(&service.name),
+                    shell_word(environment),
+                    shell_word(&service.name)
+                )),
+            }
+            commands.push(format!(
+                "lenso service deploy status {} --env {} --source {} --write-state",
+                shell_word(&service.name),
+                shell_word(environment),
+                shell_word(&service.target)
+            ));
+        }
+    }
+    commands
+}
+
+fn write_system_release_plan(output: Option<&Path>, plan: &SystemReleasePlan) -> Result<()> {
+    if let Some(output) = output {
+        write_json(output, &serde_json::to_value(plan)?)
+            .with_context(|| format!("write {}", output.display()))?;
+        println!("Wrote system release plan {}.", output.display());
+    }
+    Ok(())
+}
+
+fn read_system_release_plan(path: &Path) -> Result<SystemReleasePlan> {
+    let source = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let plan = serde_json::from_str::<SystemReleasePlan>(&source)
+        .with_context(|| format!("parse {}", path.display()))?;
+    if plan.protocol != SYSTEM_RELEASE_PROTOCOL {
+        bail!(
+            "System release plan {} uses unsupported protocol `{}`",
+            path.display(),
+            plan.protocol
+        );
+    }
+    Ok(plan)
+}
+
+fn print_or_json_system_release_plan(plan: &SystemReleasePlan, json_output: bool) {
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(plan).unwrap());
+        return;
+    }
+    println!(
+        "System release: {} {} ({})",
+        plan.system_name, plan.environment, plan.status
+    );
+    println!("id: {}", plan.id);
+    println!("kind: {}", plan.kind);
+    if let Some(source) = plan.source_environment.as_deref() {
+        println!("from: {source}");
+    }
+    println!(
+        "services: {} / modules: {} / drift: {}",
+        plan.services.len(),
+        plan.modules.len(),
+        plan.drift_status
+    );
+    println!("policy: {}", plan.policy.risk);
+    for issue in &plan.policy.issues {
+        println!("  - [{}] {}: {}", issue.level, issue.code, issue.message);
+    }
+    if !plan.commands.is_empty() {
+        println!("commands:");
+        for command in &plan.commands {
+            println!("  {command}");
+        }
+    }
+}
+
+fn append_system_release_history(repo_root: &Path, plan: &SystemReleasePlan) -> Result<()> {
+    let path = repo_root.join(SYSTEM_RELEASES_PATH);
+    let mut ledger =
+        read_json_if_exists(&path)?.unwrap_or_else(|| json!({ "releases": [], "version": 1 }));
+    if !ledger.get("releases").is_some_and(Value::is_array) {
+        ledger["releases"] = json!([]);
+    }
+    let mut record = serde_json::to_value(plan)?;
+    record["appliedAtUnixMs"] = json!(current_time_millis()?);
+    ledger
+        .get_mut("releases")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow::anyhow!("system releases must be an array"))?
+        .push(record);
+    write_json(&path, &ledger)
+}
+
+fn read_system_release_history(repo_root: &Path) -> Result<Vec<Value>> {
+    Ok(read_json_if_exists(&repo_root.join(SYSTEM_RELEASES_PATH))?
+        .and_then(|value| value.get("releases").and_then(Value::as_array).cloned())
+        .unwrap_or_default())
+}
+
+fn has_system_release_for_env(releases: &[Value], environment: &str) -> bool {
+    releases.iter().any(|release| {
+        string_field(release, "environment").as_deref() == Some(environment)
+            && string_field(release, "status").as_deref() == Some("ready")
+    })
+}
+
+fn current_time_millis() -> Result<u64> {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis();
+    u64::try_from(millis).context("system clock timestamp exceeds u64")
 }
 
 fn print_system_plan(plan: &SystemPlan) {
@@ -1463,6 +1928,67 @@ mod tests {
         fs::remove_dir_all(root).ok();
     }
 
+    #[test]
+    fn system_release_plan_blocks_on_drift() {
+        let root = test_root("release-blocked");
+        fs::remove_dir_all(&root).ok();
+        fs::create_dir_all(&root).unwrap();
+        let system_path = root.join("lenso.system.json");
+        write_system(&system_path, &support_system()).unwrap();
+
+        let plan = build_system_release_plan(
+            "release",
+            &SystemReleasePlanOptions {
+                allow_drift: false,
+                environment_name: "staging".to_owned(),
+                json: false,
+                output: None,
+                repo_root: Some(root.clone()),
+                source_environment: None,
+                system_file: Some(system_path),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(plan.protocol, SYSTEM_RELEASE_PROTOCOL);
+        assert_eq!(plan.status, "blocked");
+        assert!(plan.policy.issues.iter().any(|issue| {
+            issue.code == "service_not_configured" || issue.code == "module_not_installed"
+        }));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn system_release_history_records_applied_plan() {
+        let root = test_root("release-history");
+        fs::remove_dir_all(&root).ok();
+        fs::create_dir_all(root.join(".lenso")).unwrap();
+        let system_path = root.join("lenso.system.json");
+        write_system(&system_path, &support_system()).unwrap();
+        write_ready_host_state(&root);
+        let plan = build_system_release_plan(
+            "release",
+            &SystemReleasePlanOptions {
+                allow_drift: false,
+                environment_name: "staging".to_owned(),
+                json: false,
+                output: None,
+                repo_root: Some(root.clone()),
+                source_environment: None,
+                system_file: Some(system_path),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(plan.status, "ready");
+        append_system_release_history(&root, &plan).unwrap();
+        let history = read_system_release_history(&root).unwrap();
+
+        assert_eq!(history[0]["id"], plan.id);
+        assert!(has_system_release_for_env(&history, "staging"));
+        fs::remove_dir_all(root).ok();
+    }
+
     fn support_system() -> ServiceSystem {
         ServiceSystem {
             dependencies: Vec::new(),
@@ -1497,5 +2023,51 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    fn write_ready_host_state(root: &Path) {
+        write_json(
+            &root.join(MODULE_INSTALLS_PATH),
+            &json!({
+                "modules": [{ "moduleName": "support-ticket", "source": "remote" }],
+                "version": 1
+            }),
+        )
+        .unwrap();
+        write_json(
+            &root.join(MODULE_SERVICES_PATH),
+            &json!({
+                "modules": [{
+                    "moduleName": "support-ticket",
+                    "services": [{ "name": "support", "command": "pnpm start", "readyUrl": "http://127.0.0.1:4110/status" }]
+                }],
+                "version": 1
+            }),
+        )
+        .unwrap();
+        write_json(
+            &root.join(SERVICE_ENVIRONMENTS_PATH),
+            &json!({
+                "environments": [{ "name": "staging", "serviceName": "support", "target": "operator" }],
+                "version": 1
+            }),
+        )
+        .unwrap();
+        write_json(
+            &root.join(SERVICE_DEPLOYMENTS_PATH),
+            &json!({
+                "observations": [{ "environment": "staging", "serviceName": "support" }],
+                "version": 2
+            }),
+        )
+        .unwrap();
+        write_json(
+            &root.join(SERVICE_RELEASES_PATH),
+            &json!({
+                "releases": [{ "environment": { "name": "staging" }, "serviceName": "support" }],
+                "version": 1
+            }),
+        )
+        .unwrap();
     }
 }
