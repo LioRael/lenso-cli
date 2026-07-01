@@ -12,6 +12,7 @@ const LAUNCHPAD_PROTOCOL: &str = "lenso.launchpad.v1";
 const DEV_DOCTOR_PROTOCOL: &str = "lenso.dev-doctor.v1";
 const APP_PROOF_PROTOCOL: &str = "lenso.app-proof.v1";
 const APP_CHANGE_PLAN_PROTOCOL: &str = "lenso.app-change-plan.v1";
+const APP_COMPOSITION_PROTOCOL: &str = "lenso.app-composition.v1";
 const LAUNCHPAD_FILE: &str = ".lenso/launchpad.json";
 const DEV_DOCTOR_FILE: &str = ".lenso/dev-doctor.json";
 const APP_PROOF_FILE: &str = ".lenso/app-proof.json";
@@ -34,7 +35,7 @@ pub(crate) struct AppAddOptions {
 
 #[derive(Debug, Clone)]
 pub(crate) struct AppPlanOptions {
-    pub(crate) addon: Option<String>,
+    pub(crate) addons: Vec<String>,
     pub(crate) repo_root: Option<PathBuf>,
     pub(crate) write_plan: bool,
 }
@@ -50,6 +51,28 @@ pub(crate) struct AppUpgradeOptions {
 pub(crate) struct AppApplyOptions {
     pub(crate) dry_run: bool,
     pub(crate) plan: PathBuf,
+    pub(crate) repo_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AppComposeOptions {
+    pub(crate) addons: Vec<String>,
+    pub(crate) apply: bool,
+    pub(crate) blueprint: String,
+    pub(crate) dir: Option<PathBuf>,
+    pub(crate) explain: bool,
+    pub(crate) repo_root: Option<PathBuf>,
+    pub(crate) write_plan: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AppNextOptions {
+    pub(crate) live: bool,
+    pub(crate) repo_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AppExplainOptions {
     pub(crate) repo_root: Option<PathBuf>,
 }
 
@@ -84,6 +107,8 @@ pub(crate) struct DevDoctorOptions {
 
 #[derive(Debug, Clone)]
 pub(crate) struct AgentContextOptions {
+    pub(crate) for_module: Option<String>,
+    pub(crate) from_app_plan: bool,
     pub(crate) output: Option<PathBuf>,
     pub(crate) repo_root: Option<PathBuf>,
     pub(crate) task: Option<String>,
@@ -222,6 +247,8 @@ struct AppChangePlanState {
     changes: Vec<AppChangePlanItem>,
     blocked: Vec<AppChangePlanItem>,
     next_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    composition: Option<AppCompositionState>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -234,6 +261,28 @@ struct AppChangePlanItem {
     safe: bool,
     message: String,
     command: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppCompositionState {
+    protocol: String,
+    intent: Option<String>,
+    requested_addons: Vec<String>,
+    applied_addons: Vec<String>,
+    pending_addons: Vec<String>,
+    service_actions: Vec<AppCompositionAction>,
+    agent_actions: Vec<AppCompositionAction>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppCompositionAction {
+    id: String,
+    kind: String,
+    label: String,
+    command: Option<String>,
+    status: String,
 }
 
 #[derive(Debug, Clone)]
@@ -409,9 +458,92 @@ fn apply_addon_to_repo(repo_root: &Path, addon_name: &str) -> Result<Addon> {
     })
 }
 
+fn validate_app_compose_options(options: &AppComposeOptions) -> Result<()> {
+    if options.dir.is_some() && options.repo_root.is_some() {
+        bail!("use either a new app directory or --repo-root, not both");
+    }
+    if options.dir.is_none() && options.repo_root.is_none() {
+        bail!("app compose needs a new app directory or --repo-root");
+    }
+    if options.apply && options.explain {
+        bail!("--apply and --explain cannot be combined");
+    }
+    Ok(())
+}
+
+fn compose_new_app(options: AppComposeOptions, dir: PathBuf) -> Result<()> {
+    let composition = composition_preview_for_new_app(&options)?;
+    if !options.apply {
+        print_app_composition(&composition);
+        println!("Next: rerun with --apply to create the app.");
+        return Ok(());
+    }
+
+    create_app(AppCreateOptions {
+        blueprint: options.blueprint.clone(),
+        dir: dir.clone(),
+        force: false,
+    })?;
+    with_current_dir(&dir, || {
+        for addon in &options.addons {
+            if addon_already_applied(&read_launchpad_state_required(Path::new("."))?, addon) {
+                continue;
+            }
+            apply_addon_to_repo(Path::new("."), addon)?;
+        }
+        let launchpad = read_launchpad_state_required(Path::new("."))?;
+        let composition = composition_for_existing_app(&launchpad, &options.addons, None)?;
+        let plan = app_change_plan_state(Path::new("."), &options.addons, Some(composition))?;
+        write_json(Path::new(APP_CHANGE_PLAN_FILE), &plan)
+    })?;
+
+    println!("Composed app {}.", dir.display());
+    println!(
+        "Next: cd {} && lenso dev doctor --live --write-state",
+        dir.display()
+    );
+    Ok(())
+}
+
+fn compose_existing_app(options: AppComposeOptions) -> Result<()> {
+    let repo_root = options
+        .repo_root
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("."));
+    let launchpad = read_launchpad_state_required(&repo_root)?;
+    let composition = composition_for_existing_app(&launchpad, &options.addons, None)?;
+    let plan = app_change_plan_state(&repo_root, &options.addons, Some(composition))?;
+
+    if options.write_plan || options.apply {
+        write_json(&repo_root.join(APP_CHANGE_PLAN_FILE), &plan)?;
+        println!("Wrote {}.", repo_root.join(APP_CHANGE_PLAN_FILE).display());
+    }
+    print_app_change_plan(&plan);
+    if options.explain {
+        println!();
+        print_app_composition(plan.composition.as_ref().expect("composition exists"));
+    }
+    if options.apply {
+        app_apply(AppApplyOptions {
+            dry_run: false,
+            plan: PathBuf::from(APP_CHANGE_PLAN_FILE),
+            repo_root: Some(repo_root),
+        })?;
+    }
+    Ok(())
+}
+
+pub(crate) fn app_compose(options: AppComposeOptions) -> Result<()> {
+    validate_app_compose_options(&options)?;
+    if let Some(dir) = options.dir.clone() {
+        return compose_new_app(options, dir);
+    }
+    compose_existing_app(options)
+}
+
 pub(crate) fn app_plan(options: AppPlanOptions) -> Result<()> {
     let repo_root = options.repo_root.unwrap_or_else(|| PathBuf::from("."));
-    let plan = app_change_plan_state(&repo_root, options.addon.as_deref())?;
+    let plan = app_change_plan_state(&repo_root, &options.addons, None)?;
     print_app_change_plan(&plan);
     if options.write_plan {
         write_json(&repo_root.join(APP_CHANGE_PLAN_FILE), &plan)?;
@@ -425,7 +557,7 @@ pub(crate) fn app_plan(options: AppPlanOptions) -> Result<()> {
 
 pub(crate) fn app_upgrade(options: AppUpgradeOptions) -> Result<()> {
     let repo_root = options.repo_root.unwrap_or_else(|| PathBuf::from("."));
-    let plan = app_change_plan_state(&repo_root, None)?;
+    let plan = app_change_plan_state(&repo_root, &[], None)?;
     print_app_change_plan(&plan);
     if options.write_plan {
         write_json(&repo_root.join(APP_CHANGE_PLAN_FILE), &plan)?;
@@ -434,6 +566,60 @@ pub(crate) fn app_upgrade(options: AppUpgradeOptions) -> Result<()> {
     if options.check && plan.status != "ready" {
         bail!("app upgrade check failed with status {}", plan.status);
     }
+    Ok(())
+}
+
+pub(crate) fn app_next(options: AppNextOptions) -> Result<()> {
+    let repo_root = options.repo_root.unwrap_or_else(|| PathBuf::from("."));
+    let snapshot = app_lifecycle_snapshot(&repo_root, options.live)?;
+    let action = choose_app_next_action(&snapshot);
+    println!("Next: {}", action.command);
+    println!("Reason: {}", action.reason);
+    println!();
+    println!("Evidence:");
+    println!(
+        "- launchpad: {}",
+        snapshot.launchpad_status.as_deref().unwrap_or("missing")
+    );
+    println!(
+        "- app proof: {}",
+        snapshot.proof_status.as_deref().unwrap_or("missing")
+    );
+    println!(
+        "- change plan: {}",
+        snapshot.change_plan_status.as_deref().unwrap_or("missing")
+    );
+    println!(
+        "- dev doctor: {}",
+        snapshot.dev_doctor_status.as_deref().unwrap_or("missing")
+    );
+    println!(
+        "- services: {}",
+        if snapshot.first_service_command.is_some() {
+            "action recommended"
+        } else {
+            "no action"
+        }
+    );
+    Ok(())
+}
+
+pub(crate) fn app_explain(options: AppExplainOptions) -> Result<()> {
+    let repo_root = options.repo_root.unwrap_or_else(|| PathBuf::from("."));
+    let snapshot = app_lifecycle_snapshot(&repo_root, false)?;
+    let action = choose_app_next_action(&snapshot);
+    println!("Next: {}", action.command);
+    println!("Reason: {}", action.reason);
+    println!();
+    println!("Composer changes generated app state only:");
+    println!("- {}", LAUNCHPAD_FILE);
+    println!("- {}", WORKSPACE_FILE);
+    println!("- {}", SYSTEM_FILE);
+    println!("- missing generated service scaffold directories");
+    println!();
+    println!("Composer does not overwrite service source files.");
+    println!("Modules are installable business capabilities.");
+    println!("Services are out-of-process providers.");
     Ok(())
 }
 
@@ -618,7 +804,11 @@ pub(crate) fn agent_context(options: AgentContextOptions) -> Result<()> {
     let workspace = read_json_value_optional(&repo_root.join(WORKSPACE_FILE))?;
     let doctor = read_json_value_optional(&repo_root.join(DEV_DOCTOR_FILE))?;
     let proof = read_app_proof_state_optional(&repo_root)?;
-    let change_plan = read_app_change_plan_state_optional(&repo_root)?;
+    let change_plan = if options.from_app_plan {
+        read_app_change_plan_state_optional(&repo_root)?
+    } else {
+        None
+    };
     let markdown = agent_context_markdown(
         state.as_ref(),
         system.as_ref(),
@@ -626,6 +816,7 @@ pub(crate) fn agent_context(options: AgentContextOptions) -> Result<()> {
         doctor.as_ref(),
         proof.as_ref(),
         change_plan.as_ref(),
+        options.for_module.as_deref(),
         options.task.as_deref(),
     )?;
 
@@ -1439,7 +1630,11 @@ fn doctor_status(checks: &[DevDoctorCheck]) -> String {
     }
 }
 
-fn app_change_plan_state(repo_root: &Path, addon: Option<&str>) -> Result<AppChangePlanState> {
+fn app_change_plan_state(
+    repo_root: &Path,
+    addons: &[String],
+    composition: Option<AppCompositionState>,
+) -> Result<AppChangePlanState> {
     let launchpad = match read_launchpad_state_optional(repo_root)? {
         Some(state) => state,
         None => {
@@ -1448,6 +1643,7 @@ fn app_change_plan_state(repo_root: &Path, addon: Option<&str>) -> Result<AppCha
                 blocked: Vec::new(),
                 blueprint: None,
                 changes: Vec::new(),
+                composition,
                 generated_at_unix_ms: current_unix_ms(),
                 next_command: Some(
                     "lenso app create support-desk --blueprint support-desk".to_owned(),
@@ -1460,25 +1656,26 @@ fn app_change_plan_state(repo_root: &Path, addon: Option<&str>) -> Result<AppCha
         }
     };
     let proof_status = read_app_proof_state_optional(repo_root)?.map(|proof| proof.status);
-    let addons = launchpad
+    let applied_addons = launchpad
         .addons
         .iter()
         .map(|addon| addon.name.clone())
         .collect::<Vec<_>>();
 
-    let (changes, blocked) = if let Some(addon_name) = addon {
-        app_change_plan_for_addon(&launchpad, addon_name)?
-    } else {
+    let (changes, blocked) = if addons.is_empty() {
         app_change_plan_for_drift(repo_root, &launchpad)?
+    } else {
+        app_change_plan_for_addons(&launchpad, addons)?
     };
     let status = app_change_plan_status(&changes, &blocked).to_owned();
     let next_command = app_change_plan_next_command(&status);
 
     Ok(AppChangePlanState {
-        addons,
+        addons: applied_addons,
         blocked,
         blueprint: Some(launchpad.blueprint),
         changes,
+        composition,
         generated_at_unix_ms: current_unix_ms(),
         next_command,
         project_name: Some(launchpad.project_name),
@@ -1486,6 +1683,37 @@ fn app_change_plan_state(repo_root: &Path, addon: Option<&str>) -> Result<AppCha
         protocol: APP_CHANGE_PLAN_PROTOCOL.to_owned(),
         status,
     })
+}
+
+fn app_change_plan_for_addons(
+    launchpad: &LaunchpadState,
+    addons: &[String],
+) -> Result<(Vec<AppChangePlanItem>, Vec<AppChangePlanItem>)> {
+    let mut changes = Vec::new();
+    let mut blocked = Vec::new();
+    let mut seen = Vec::new();
+    for addon in addons {
+        if seen.contains(addon) {
+            continue;
+        }
+        seen.push(addon.clone());
+        let Ok(_recipe) = addon_by_name(addon) else {
+            blocked.push(AppChangePlanItem {
+                action: "choose-known-addon".to_owned(),
+                command: Some(format!("lenso app inspect {}", launchpad.blueprint)),
+                id: format!("addon-unknown-{addon}"),
+                kind: "addon-unknown".to_owned(),
+                message: format!("Addon {addon} is not built into this Lenso CLI."),
+                name: addon.clone(),
+                safe: false,
+            });
+            continue;
+        };
+        let (mut addon_changes, mut addon_blocked) = app_change_plan_for_addon(launchpad, addon)?;
+        changes.append(&mut addon_changes);
+        blocked.append(&mut addon_blocked);
+    }
+    Ok((changes, blocked))
 }
 
 fn app_change_plan_for_addon(
@@ -1622,6 +1850,251 @@ fn print_app_change_plan(plan: &AppChangePlanState) {
     if let Some(command) = &plan.next_command {
         println!("next: {command}");
     }
+}
+
+fn composition_preview_for_new_app(options: &AppComposeOptions) -> Result<AppCompositionState> {
+    let blueprint = blueprint_by_name(&options.blueprint)?;
+    let launchpad = launchpad_state_from_blueprint("new-app", &blueprint);
+    composition_for_existing_app(&launchpad, &options.addons, None)
+}
+
+fn composition_for_existing_app(
+    launchpad: &LaunchpadState,
+    requested_addons: &[String],
+    intent: Option<String>,
+) -> Result<AppCompositionState> {
+    let applied_addons = launchpad
+        .addons
+        .iter()
+        .map(|addon| addon.name.clone())
+        .collect::<Vec<_>>();
+    let mut requested = Vec::new();
+    let mut pending = Vec::new();
+    let mut service_actions = Vec::new();
+    for addon_name in requested_addons {
+        if requested.contains(addon_name) {
+            continue;
+        }
+        requested.push(addon_name.clone());
+        let Ok(addon) = addon_by_name(addon_name) else {
+            continue;
+        };
+        if applied_addons.contains(addon_name) {
+            continue;
+        }
+        pending.push(addon_name.clone());
+        for service in addon.services {
+            service_actions.push(AppCompositionAction {
+                command: Some(format!("lenso service workspace check {}", service.name)),
+                id: format!("service:check:{}", service.name),
+                kind: "service_check".to_owned(),
+                label: format!("Check {} service readiness", service.name),
+                status: "recommended".to_owned(),
+            });
+        }
+    }
+
+    let agent_actions = if requested.is_empty() {
+        Vec::new()
+    } else {
+        vec![AppCompositionAction {
+            command: Some(
+                "lenso agent task --from-app-plan \"add the requested business behavior\""
+                    .to_owned(),
+            ),
+            id: "agent:task:from-app-plan".to_owned(),
+            kind: "agent_task".to_owned(),
+            label: "Generate agent task pack from the app plan".to_owned(),
+            status: "recommended".to_owned(),
+        }]
+    };
+
+    Ok(AppCompositionState {
+        protocol: APP_COMPOSITION_PROTOCOL.to_owned(),
+        intent,
+        requested_addons: requested,
+        applied_addons,
+        pending_addons: pending,
+        service_actions,
+        agent_actions,
+    })
+}
+
+fn print_app_composition(composition: &AppCompositionState) {
+    println!("App composition: {}", composition.protocol);
+    if let Some(intent) = &composition.intent {
+        println!("intent: {intent}");
+    }
+    println!(
+        "requested addons: {}",
+        list_or_none(&composition.requested_addons)
+    );
+    println!(
+        "applied addons: {}",
+        list_or_none(&composition.applied_addons)
+    );
+    println!(
+        "pending addons: {}",
+        list_or_none(&composition.pending_addons)
+    );
+    for action in &composition.service_actions {
+        if let Some(command) = &action.command {
+            println!("service: {} -> {command}", action.label);
+        }
+    }
+    for action in &composition.agent_actions {
+        if let Some(command) = &action.command {
+            println!("agent: {} -> {command}", action.label);
+        }
+    }
+}
+
+fn list_or_none(items: &[String]) -> String {
+    if items.is_empty() {
+        "none".to_owned()
+    } else {
+        items.join(", ")
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AppLifecycleSnapshot {
+    has_launchpad: bool,
+    launchpad_status: Option<String>,
+    proof_status: Option<String>,
+    dev_doctor_status: Option<String>,
+    change_plan_status: Option<String>,
+    first_service_command: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AppNextAction {
+    command: String,
+    reason: String,
+    severity: AppNextSeverity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum AppNextSeverity {
+    Recommended,
+    Required,
+}
+
+fn app_lifecycle_snapshot(repo_root: &Path, live: bool) -> Result<AppLifecycleSnapshot> {
+    let launchpad = read_launchpad_state_optional(repo_root)?;
+    let proof = read_app_proof_state_optional(repo_root)?;
+    let doctor = read_json_value_optional(&repo_root.join(DEV_DOCTOR_FILE))?;
+    let change_plan = read_app_change_plan_state_optional(repo_root)?;
+    let first_service_command =
+        first_service_command(repo_root, change_plan.as_ref(), launchpad.as_ref(), live)?;
+
+    Ok(AppLifecycleSnapshot {
+        has_launchpad: launchpad.is_some(),
+        launchpad_status: launchpad.map(|state| state.status),
+        proof_status: proof.map(|proof| proof.status),
+        dev_doctor_status: json_status(doctor.as_ref()),
+        change_plan_status: change_plan.as_ref().map(|plan| plan.status.clone()),
+        first_service_command,
+    })
+}
+
+fn choose_app_next_action(state: &AppLifecycleSnapshot) -> AppNextAction {
+    if !state.has_launchpad {
+        return required(
+            "lenso app create ./my-lenso-app --blueprint support-desk",
+            "no Launchpad app state found",
+        );
+    }
+    if state.change_plan_status.as_deref() == Some("blocked") {
+        return required("lenso app explain", "app change plan is blocked");
+    }
+    if state.change_plan_status.as_deref() == Some("changes") {
+        return required(
+            &format!("lenso app apply {}", APP_CHANGE_PLAN_FILE),
+            "safe generated app changes are pending",
+        );
+    }
+    if state.proof_status.as_deref() != Some("ready") {
+        return required(
+            "lenso app verify --write-proof",
+            "app proof is missing or stale",
+        );
+    }
+    if state.dev_doctor_status.as_deref() != Some("ready") {
+        return recommended(
+            "lenso dev doctor --live --write-state",
+            "dev readiness has not been confirmed",
+        );
+    }
+    if let Some(command) = &state.first_service_command {
+        return recommended(command, "a service needs operator attention");
+    }
+    recommended(
+        "lenso dev up",
+        "app lifecycle is ready for local development",
+    )
+}
+
+fn required(command: &str, reason: &str) -> AppNextAction {
+    AppNextAction {
+        command: command.to_owned(),
+        reason: reason.to_owned(),
+        severity: AppNextSeverity::Required,
+    }
+}
+
+fn recommended(command: &str, reason: &str) -> AppNextAction {
+    AppNextAction {
+        command: command.to_owned(),
+        reason: reason.to_owned(),
+        severity: AppNextSeverity::Recommended,
+    }
+}
+
+fn json_status(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(|value| value.get("status"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+fn first_service_command(
+    repo_root: &Path,
+    change_plan: Option<&AppChangePlanState>,
+    launchpad: Option<&LaunchpadState>,
+    live: bool,
+) -> Result<Option<String>> {
+    if let Some(command) = change_plan
+        .and_then(|plan| plan.composition.as_ref())
+        .and_then(|composition| composition.service_actions.first())
+        .and_then(|action| action.command.clone())
+    {
+        return Ok(Some(command));
+    }
+    let workspace = read_json_value_optional(&repo_root.join(WORKSPACE_FILE))?;
+    if let Some(service) = first_json_service_name(workspace.as_ref()) {
+        let mut command = format!("lenso service workspace check {service}");
+        if live {
+            command.push_str(" --workspace-file lenso.workspace.json");
+        }
+        return Ok(Some(command));
+    }
+    Ok(launchpad.and_then(|state| {
+        state
+            .services
+            .first()
+            .map(|service| format!("lenso service workspace check {}", service.name))
+    }))
+}
+
+fn first_json_service_name(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(|value| value.get("services"))
+        .and_then(Value::as_array)
+        .and_then(|services| services.first())
+        .and_then(|service| service.get("name"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 fn app_proof_state(repo_root: &Path) -> Result<AppProofState> {
@@ -2010,6 +2483,7 @@ fn agent_context_markdown(
     doctor: Option<&Value>,
     proof: Option<&AppProofState>,
     change_plan: Option<&AppChangePlanState>,
+    for_module: Option<&str>,
     task: Option<&str>,
 ) -> Result<String> {
     let mut output = String::new();
@@ -2044,11 +2518,18 @@ fn agent_context_markdown(
         output.push('\n');
 
         output.push_str("## Modules\n\n");
-        for module in &state.modules {
+        for module in state
+            .modules
+            .iter()
+            .filter(|module| for_module.map_or(true, |name| module.name == name))
+        {
             output.push_str(&format!(
                 "- {} owned by {} for {}\n",
                 module.name, module.owner_service, module.capability
             ));
+        }
+        if let Some(module) = for_module {
+            output.push_str(&format!("- Scope requested: {module}\n"));
         }
         output.push('\n');
     } else {
@@ -2058,9 +2539,9 @@ fn agent_context_markdown(
             .push_str("- Next command: lenso app create support-desk --blueprint support-desk\n\n");
     }
 
-    output.push_str("## Boundaries\n\n");
+    output.push_str("## Service And Module Boundaries\n\n");
     output.push_str("- Host owns auth, runtime queues, retries, outbox, Runtime Story, and Technical Operations.\n");
-    output.push_str("- Services are remote processes that expose service manifests, routes, runtime functions, event handlers, and admin actions.\n");
+    output.push_str("- Services are out-of-process providers that expose service manifests, routes, runtime functions, event handlers, and admin actions.\n");
     output.push_str("- Modules live inside services or the host; generated Launchpad JSON is control-plane state, not a hand-authored module contract.\n\n");
 
     output.push_str("## Service System\n\n");
@@ -2123,6 +2604,26 @@ fn agent_context_markdown(
         ));
         if let Some(command) = &change_plan.next_command {
             output.push_str(&format!("- Next command: {command}\n"));
+        }
+        if let Some(composition) = &change_plan.composition {
+            output.push_str(&format!(
+                "- Requested addons: {}\n",
+                list_or_none(&composition.requested_addons)
+            ));
+            output.push_str(&format!(
+                "- Pending addons: {}\n",
+                list_or_none(&composition.pending_addons)
+            ));
+            for action in &composition.service_actions {
+                if let Some(command) = &action.command {
+                    output.push_str(&format!("- Service action: {command}\n"));
+                }
+            }
+            for action in &composition.agent_actions {
+                if let Some(command) = &action.command {
+                    output.push_str(&format!("- Agent action: {command}\n"));
+                }
+            }
         }
         output.push_str("- Generated control-plane files may be planned and applied.\n");
         output.push_str("- Existing service source files are user code.\n");
@@ -2518,6 +3019,55 @@ mod tests {
     }
 
     #[test]
+    fn composition_tracks_pending_and_applied_addons() {
+        let mut launchpad = support_desk_launchpad_state("acme-support");
+        launchpad
+            .addons
+            .push(launchpad_addon_from_addon(&support_sla_addon()));
+        let composition = composition_for_existing_app(
+            &launchpad,
+            &["support-sla".to_owned(), "customer-profile".to_owned()],
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(composition.applied_addons, vec!["support-sla"]);
+        assert_eq!(composition.pending_addons, vec!["customer-profile"]);
+        assert_eq!(composition.service_actions.len(), 1);
+    }
+
+    #[test]
+    fn next_action_prefers_blocked_change_plan() {
+        let snapshot = AppLifecycleSnapshot {
+            change_plan_status: Some("blocked".to_owned()),
+            dev_doctor_status: Some("ready".to_owned()),
+            first_service_command: Some("lenso service workspace check support-sla".to_owned()),
+            has_launchpad: true,
+            launchpad_status: Some("configured".to_owned()),
+            proof_status: Some("ready".to_owned()),
+        };
+        let action = choose_app_next_action(&snapshot);
+
+        assert_eq!(action.command, "lenso app explain");
+        assert_eq!(action.severity, AppNextSeverity::Required);
+    }
+
+    #[test]
+    fn next_action_recommends_service_after_clean_app_state() {
+        let snapshot = AppLifecycleSnapshot {
+            change_plan_status: Some("ready".to_owned()),
+            dev_doctor_status: Some("ready".to_owned()),
+            first_service_command: Some("lenso service workspace check support-sla".to_owned()),
+            has_launchpad: true,
+            launchpad_status: Some("configured".to_owned()),
+            proof_status: Some("ready".to_owned()),
+        };
+        let action = choose_app_next_action(&snapshot);
+
+        assert_eq!(action.command, "lenso service workspace check support-sla");
+    }
+
+    #[test]
     fn agent_context_mentions_app_proof_when_present() {
         let proof = AppProofState {
             addons: vec!["support-sla".to_owned()],
@@ -2532,7 +3082,7 @@ mod tests {
         };
 
         let markdown =
-            agent_context_markdown(None, None, None, None, Some(&proof), None, None).unwrap();
+            agent_context_markdown(None, None, None, None, Some(&proof), None, None, None).unwrap();
 
         assert!(markdown.contains("## App Proof"));
         assert!(markdown.contains("Status: ready"));
@@ -2556,6 +3106,7 @@ mod tests {
             }],
             generated_at_unix_ms: 1782900000000,
             next_command: Some(format!("lenso app apply {}", APP_CHANGE_PLAN_FILE)),
+            composition: None,
             project_name: Some("acme-support".to_owned()),
             proof_status: Some("drifted".to_owned()),
             protocol: APP_CHANGE_PLAN_PROTOCOL.to_owned(),
@@ -2563,11 +3114,53 @@ mod tests {
         };
 
         let markdown =
-            agent_context_markdown(None, None, None, None, None, Some(&change_plan), None).unwrap();
+            agent_context_markdown(None, None, None, None, None, Some(&change_plan), None, None)
+                .unwrap();
 
         assert!(markdown.contains("## App Change Plan"));
         assert!(markdown.contains("- Status: changes"));
         assert!(markdown.contains("- Safe changes: 1"));
+    }
+
+    #[test]
+    fn agent_context_mentions_app_composition_when_present() {
+        let launchpad = support_desk_launchpad_state("acme-support");
+        let plan = AppChangePlanState {
+            addons: vec!["support-sla".to_owned()],
+            blocked: Vec::new(),
+            blueprint: Some("support-desk".to_owned()),
+            changes: Vec::new(),
+            composition: Some(AppCompositionState {
+                agent_actions: Vec::new(),
+                applied_addons: Vec::new(),
+                intent: Some("support desk with SLA".to_owned()),
+                pending_addons: vec!["support-sla".to_owned()],
+                protocol: APP_COMPOSITION_PROTOCOL.to_owned(),
+                requested_addons: vec!["support-sla".to_owned()],
+                service_actions: Vec::new(),
+            }),
+            generated_at_unix_ms: 1782900000000,
+            next_command: Some(format!("lenso app apply {}", APP_CHANGE_PLAN_FILE)),
+            project_name: Some("acme-support".to_owned()),
+            proof_status: Some("ready".to_owned()),
+            protocol: APP_CHANGE_PLAN_PROTOCOL.to_owned(),
+            status: "changes".to_owned(),
+        };
+        let markdown = agent_context_markdown(
+            Some(&launchpad),
+            None,
+            None,
+            None,
+            None,
+            Some(&plan),
+            None,
+            Some("add SLA escalation"),
+        )
+        .unwrap();
+
+        assert!(markdown.contains("## App Change Plan"));
+        assert!(markdown.contains("Requested addons: support-sla"));
+        assert!(markdown.contains("Services are out-of-process providers"));
     }
 
     #[test]
@@ -2580,13 +3173,14 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some("Add ticket SLA fields."),
         )
         .unwrap();
 
         assert!(markdown.contains("# Lenso Agent Context"));
         assert!(markdown.contains("Host owns auth"));
-        assert!(markdown.contains("Services are remote processes"));
+        assert!(markdown.contains("Services are out-of-process providers"));
         assert!(markdown.contains("Add ticket SLA fields."));
     }
 
@@ -2606,6 +3200,7 @@ mod tests {
             None,
             None,
             Some(&doctor),
+            None,
             None,
             None,
             Some("Add overdue ticket escalation."),
