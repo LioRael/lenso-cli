@@ -2,6 +2,7 @@ mod host;
 mod module;
 mod operator;
 mod service;
+mod system;
 
 use clap::{Args, Parser, Subcommand};
 
@@ -42,11 +43,422 @@ enum Command {
         #[command(subcommand)]
         command: OperatorCommand,
     },
+    /// Manage a multi-service Lenso system manifest.
+    System {
+        #[command(subcommand)]
+        command: SystemCommand,
+    },
     /// Manage Runtime Console assets, access, and packages.
     Console {
         #[command(subcommand)]
         command: ConsoleCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum SystemCommand {
+    /// Create a lenso.system.json file.
+    Init(SystemInitArgs),
+    /// Add or update a service in lenso.system.json.
+    AddService(SystemAddServiceArgs),
+    /// Add or update a module in lenso.system.json.
+    AddModule(SystemAddModuleArgs),
+    /// Build the service system rollout and setup plan.
+    Plan(SystemPlanArgs),
+    /// Compare lenso.system.json with host-local state.
+    Diff(SystemDiffArgs),
+    /// Apply safe host-local state from lenso.system.json.
+    Apply(SystemApplyArgs),
+    /// Diagnose system graph and host-local drift.
+    Doctor(SystemDoctorArgs),
+    /// Plan, check, apply, promote, and roll back system releases.
+    Release {
+        #[command(subcommand)]
+        command: SystemReleaseCommand,
+    },
+    /// Generate, check, and record system runbooks.
+    Runbook {
+        #[command(subcommand)]
+        command: SystemRunbookCommand,
+    },
+    /// Print the service/module dependency graph.
+    Graph(SystemGraphArgs),
+    /// Validate the service system graph.
+    Check(SystemCheckArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemInitArgs {
+    /// Service system name.
+    name: String,
+
+    /// Environment name. Can be repeated.
+    #[arg(long = "env")]
+    environments: Vec<String>,
+
+    /// Service system file.
+    #[arg(long)]
+    system_file: Option<std::path::PathBuf>,
+
+    /// Replace an existing service system file.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemAddServiceArgs {
+    /// Service name.
+    name: String,
+
+    /// Runtime target, such as local, docker, kubernetes, operator, or external.
+    #[arg(long, default_value = "local")]
+    target: String,
+
+    /// Module owned by this service. Can be repeated.
+    #[arg(long = "module")]
+    modules: Vec<String>,
+
+    /// Service directory.
+    #[arg(long)]
+    cwd: Option<std::path::PathBuf>,
+
+    /// Service language label.
+    #[arg(long)]
+    lang: Option<String>,
+
+    /// Service start command for workspace planning.
+    #[arg(long)]
+    command: Option<String>,
+
+    /// Service readiness URL for workspace planning.
+    #[arg(long)]
+    ready_url: Option<String>,
+
+    /// Service manifest path.
+    #[arg(long)]
+    manifest: Option<String>,
+
+    /// Service system file.
+    #[arg(long)]
+    system_file: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemAddModuleArgs {
+    /// Module name.
+    name: String,
+
+    /// Install target, such as host or service:support.
+    #[arg(long = "to")]
+    install_to: Option<String>,
+
+    /// Capability provided by this module. Can be repeated.
+    #[arg(long = "capability")]
+    capabilities: Vec<String>,
+
+    /// Capability required by this module. Can be repeated.
+    #[arg(long = "dependency")]
+    dependencies: Vec<String>,
+
+    /// Service system file.
+    #[arg(long)]
+    system_file: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemPlanArgs {
+    /// Service system file.
+    #[arg(long)]
+    system_file: Option<std::path::PathBuf>,
+
+    /// Fail when the system graph has issues.
+    #[arg(long)]
+    check: bool,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemDiffArgs {
+    /// Service system file.
+    #[arg(long)]
+    system_file: Option<std::path::PathBuf>,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Fail when drift or graph issues exist.
+    #[arg(long)]
+    check: bool,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemApplyArgs {
+    /// Service system file.
+    #[arg(long)]
+    system_file: Option<std::path::PathBuf>,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Preview changes without writing files.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemDoctorArgs {
+    /// Service system file.
+    #[arg(long)]
+    system_file: Option<std::path::PathBuf>,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum SystemReleaseCommand {
+    /// Create a system release plan.
+    Plan(SystemReleasePlanArgs),
+    /// Check a system release plan.
+    Check(SystemReleaseCheckArgs),
+    /// Apply a system release plan to host-local history.
+    Apply(SystemReleaseApplyArgs),
+    /// Create a system promotion plan.
+    Promote(SystemReleasePromoteArgs),
+    /// Create a system rollback plan.
+    Rollback(SystemReleaseRollbackArgs),
+    /// List applied system releases.
+    History(SystemReleaseHistoryArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum SystemRunbookCommand {
+    /// Generate a system runbook from a system release plan.
+    Generate(SystemRunbookGenerateArgs),
+    /// Check a system runbook.
+    Check(SystemRunbookCheckArgs),
+    /// Record a system runbook in host-local history.
+    Record(SystemRunbookRecordArgs),
+    /// List recorded system runbooks.
+    History(SystemRunbookHistoryArgs),
+    /// Diagnose system runbook state.
+    Doctor(SystemRunbookDoctorArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemReleasePlanArgs {
+    /// Target environment.
+    #[arg(long = "env")]
+    environment_name: String,
+
+    /// Service system file.
+    #[arg(long)]
+    system_file: Option<std::path::PathBuf>,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Output plan file.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+
+    /// Allow deployment drift in the target environment.
+    #[arg(long)]
+    allow_drift: bool,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemReleaseCheckArgs {
+    /// System release plan file.
+    plan_file: std::path::PathBuf,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemReleaseApplyArgs {
+    /// System release plan file.
+    plan_file: std::path::PathBuf,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Preview without writing history.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemReleasePromoteArgs {
+    /// Source environment.
+    #[arg(long = "from")]
+    from_environment: String,
+
+    /// Target environment.
+    #[arg(long = "to")]
+    to_environment: String,
+
+    /// Service system file.
+    #[arg(long)]
+    system_file: Option<std::path::PathBuf>,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Output plan file.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemReleaseRollbackArgs {
+    /// Target environment.
+    #[arg(long = "env")]
+    environment_name: String,
+
+    /// Service system file.
+    #[arg(long)]
+    system_file: Option<std::path::PathBuf>,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Output plan file.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemReleaseHistoryArgs {
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemRunbookGenerateArgs {
+    /// System release plan file.
+    release_plan_file: std::path::PathBuf,
+
+    /// Output runbook file.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemRunbookCheckArgs {
+    /// System runbook file.
+    runbook_file: std::path::PathBuf,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemRunbookRecordArgs {
+    /// System runbook file.
+    runbook_file: std::path::PathBuf,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemRunbookHistoryArgs {
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemRunbookDoctorArgs {
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemGraphArgs {
+    /// Service system file.
+    #[arg(long)]
+    system_file: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemCheckArgs {
+    /// Service system file.
+    #[arg(long)]
+    system_file: Option<std::path::PathBuf>,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2086,6 +2498,167 @@ async fn main() -> anyhow::Result<()> {
         Command::Operator { command } => match command {
             OperatorCommand::ExportCrd(args) => {
                 operator::export_crd_bundle((&args).into())?;
+            }
+        },
+        Command::System { command } => match command {
+            SystemCommand::Init(args) => {
+                system::init_system(system::SystemInitOptions {
+                    environments: args.environments,
+                    force: args.force,
+                    name: args.name,
+                    system_file: args.system_file,
+                })?;
+            }
+            SystemCommand::AddService(args) => {
+                system::add_system_service(system::SystemAddServiceOptions {
+                    command: args.command,
+                    cwd: args.cwd,
+                    lang: args.lang,
+                    manifest: args.manifest,
+                    modules: args.modules,
+                    name: args.name,
+                    ready_url: args.ready_url,
+                    system_file: args.system_file,
+                    target: args.target,
+                })?;
+            }
+            SystemCommand::AddModule(args) => {
+                system::add_system_module(system::SystemAddModuleOptions {
+                    capabilities: args.capabilities,
+                    dependencies: args.dependencies,
+                    install_to: args.install_to,
+                    name: args.name,
+                    system_file: args.system_file,
+                })?;
+            }
+            SystemCommand::Plan(args) => {
+                system::plan_system(system::SystemPlanOptions {
+                    check: args.check,
+                    json: args.json,
+                    system_file: args.system_file,
+                })?;
+            }
+            SystemCommand::Diff(args) => {
+                system::diff_system(system::SystemDiffOptions {
+                    check: args.check,
+                    json: args.json,
+                    repo_root: args.repo_root,
+                    system_file: args.system_file,
+                })?;
+            }
+            SystemCommand::Apply(args) => {
+                system::apply_system(system::SystemApplyOptions {
+                    dry_run: args.dry_run,
+                    json: args.json,
+                    repo_root: args.repo_root,
+                    system_file: args.system_file,
+                })?;
+            }
+            SystemCommand::Doctor(args) => {
+                system::doctor_system(system::SystemDoctorOptions {
+                    json: args.json,
+                    repo_root: args.repo_root,
+                    system_file: args.system_file,
+                })?;
+            }
+            SystemCommand::Release { command } => match command {
+                SystemReleaseCommand::Plan(args) => {
+                    system::plan_system_release(system::SystemReleasePlanOptions {
+                        allow_drift: args.allow_drift,
+                        environment_name: args.environment_name,
+                        json: args.json,
+                        output: args.output,
+                        repo_root: args.repo_root,
+                        source_environment: None,
+                        system_file: args.system_file,
+                    })?;
+                }
+                SystemReleaseCommand::Check(args) => {
+                    system::check_system_release(system::SystemReleaseCheckOptions {
+                        json: args.json,
+                        plan_file: args.plan_file,
+                    })?;
+                }
+                SystemReleaseCommand::Apply(args) => {
+                    system::apply_system_release(system::SystemReleaseApplyOptions {
+                        dry_run: args.dry_run,
+                        json: args.json,
+                        plan_file: args.plan_file,
+                        repo_root: args.repo_root,
+                    })?;
+                }
+                SystemReleaseCommand::Promote(args) => {
+                    system::promote_system_release(system::SystemReleasePromoteOptions {
+                        from_environment: args.from_environment,
+                        json: args.json,
+                        output: args.output,
+                        repo_root: args.repo_root,
+                        system_file: args.system_file,
+                        to_environment: args.to_environment,
+                    })?;
+                }
+                SystemReleaseCommand::Rollback(args) => {
+                    system::rollback_system_release(system::SystemReleaseRollbackOptions {
+                        environment_name: args.environment_name,
+                        json: args.json,
+                        output: args.output,
+                        repo_root: args.repo_root,
+                        system_file: args.system_file,
+                    })?;
+                }
+                SystemReleaseCommand::History(args) => {
+                    system::history_system_release(system::SystemReleaseHistoryOptions {
+                        json: args.json,
+                        repo_root: args.repo_root,
+                    })?;
+                }
+            },
+            SystemCommand::Runbook { command } => match command {
+                SystemRunbookCommand::Generate(args) => {
+                    system::generate_system_runbook(system::SystemRunbookGenerateOptions {
+                        json: args.json,
+                        output: args.output,
+                        release_plan_file: args.release_plan_file,
+                    })?;
+                }
+                SystemRunbookCommand::Check(args) => {
+                    system::check_system_runbook(system::SystemRunbookCheckOptions {
+                        json: args.json,
+                        runbook_file: args.runbook_file,
+                    })?;
+                }
+                SystemRunbookCommand::Record(args) => {
+                    system::record_system_runbook(system::SystemRunbookRecordOptions {
+                        json: args.json,
+                        repo_root: args.repo_root,
+                        runbook_file: args.runbook_file,
+                    })?;
+                }
+                SystemRunbookCommand::History(args) => {
+                    system::history_system_runbook(system::SystemRunbookHistoryOptions {
+                        json: args.json,
+                        repo_root: args.repo_root,
+                    })?;
+                }
+                SystemRunbookCommand::Doctor(args) => {
+                    system::doctor_system_runbook(system::SystemRunbookDoctorOptions {
+                        json: args.json,
+                        repo_root: args.repo_root,
+                    })?;
+                }
+            },
+            SystemCommand::Graph(args) => {
+                system::graph_system(system::SystemGraphOptions {
+                    json: args.json,
+                    system_file: args.system_file,
+                })?;
+            }
+            SystemCommand::Check(args) => {
+                system::plan_system(system::SystemPlanOptions {
+                    check: true,
+                    json: args.json,
+                    system_file: args.system_file,
+                })?;
             }
         },
         Command::Module { command } => match command {
