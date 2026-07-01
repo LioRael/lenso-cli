@@ -75,6 +75,12 @@ enum Command {
 enum AppCommand {
     /// Create a Lenso application from a Launchpad blueprint.
     Create(AppCreateArgs),
+    /// List built-in product blueprints.
+    List,
+    /// Inspect a built-in product blueprint.
+    Inspect(AppInspectArgs),
+    /// Add a built-in addon to the current Launchpad app.
+    Add(AppAddArgs),
 }
 
 #[derive(Debug, Args, Clone)]
@@ -91,12 +97,26 @@ struct AppCreateArgs {
     force: bool,
 }
 
+#[derive(Debug, Args, Clone)]
+struct AppInspectArgs {
+    /// Blueprint name.
+    blueprint: String,
+}
+
+#[derive(Debug, Args, Clone)]
+struct AppAddArgs {
+    /// Addon name.
+    addon: String,
+}
+
 #[derive(Debug, Subcommand)]
 enum DevCommand {
     /// Start services and host for local development.
     Up(DevUpArgs),
     /// Inspect the generated Launchpad state.
     Status(DevStatusArgs),
+    /// Diagnose Launchpad local development readiness.
+    Doctor(DevDoctorArgs),
     /// Explain how to stop the foreground dev process.
     Stop,
 }
@@ -137,6 +157,21 @@ struct DevStatusArgs {
     /// Lenso host repository root.
     #[arg(long)]
     repo_root: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct DevDoctorArgs {
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Probe service ready URLs in addition to static checks.
+    #[arg(long)]
+    live: bool,
+
+    /// Write .lenso/dev-doctor.json.
+    #[arg(long)]
+    write_state: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2596,6 +2631,15 @@ async fn main() -> anyhow::Result<()> {
                     force: args.force,
                 })?;
             }
+            AppCommand::List => {
+                launchpad::list_blueprints();
+            }
+            AppCommand::Inspect(args) => {
+                launchpad::inspect_blueprint(&args.blueprint)?;
+            }
+            AppCommand::Add(args) => {
+                launchpad::add_app_addon(launchpad::AppAddOptions { addon: args.addon })?;
+            }
         },
         Command::Dev { command } => match command {
             DevCommand::Up(args) => {
@@ -2614,6 +2658,14 @@ async fn main() -> anyhow::Result<()> {
                 launchpad::dev_status(launchpad::DevStatusOptions {
                     repo_root: args.repo_root,
                 })?;
+            }
+            DevCommand::Doctor(args) => {
+                launchpad::dev_doctor(launchpad::DevDoctorOptions {
+                    live: args.live,
+                    repo_root: args.repo_root,
+                    write_state: args.write_state,
+                })
+                .await?;
             }
             DevCommand::Stop => {
                 launchpad::dev_stop();
@@ -3117,6 +3169,43 @@ mod tests {
     }
 
     #[test]
+    fn parses_app_list() {
+        let cli = Cli::parse_from(["lenso", "app", "list"]);
+        let Command::App {
+            command: AppCommand::List,
+        } = cli.command
+        else {
+            panic!("expected app list");
+        };
+    }
+
+    #[test]
+    fn parses_app_inspect() {
+        let cli = Cli::parse_from(["lenso", "app", "inspect", "support-desk"]);
+        let Command::App {
+            command: AppCommand::Inspect(args),
+        } = cli.command
+        else {
+            panic!("expected app inspect");
+        };
+
+        assert_eq!(args.blueprint, "support-desk");
+    }
+
+    #[test]
+    fn parses_app_add() {
+        let cli = Cli::parse_from(["lenso", "app", "add", "support-sla"]);
+        let Command::App {
+            command: AppCommand::Add(args),
+        } = cli.command
+        else {
+            panic!("expected app add");
+        };
+
+        assert_eq!(args.addon, "support-sla");
+    }
+
+    #[test]
     fn parses_dev_command_status() {
         let cli = Cli::parse_from(["lenso", "dev", "status", "--repo-root", "support-desk"]);
         let Command::Dev {
@@ -3130,6 +3219,20 @@ mod tests {
             args.repo_root.as_deref(),
             Some(std::path::Path::new("support-desk"))
         );
+    }
+
+    #[test]
+    fn parses_dev_doctor() {
+        let cli = Cli::parse_from(["lenso", "dev", "doctor", "--live", "--write-state"]);
+        let Command::Dev {
+            command: DevCommand::Doctor(args),
+        } = cli.command
+        else {
+            panic!("expected dev doctor");
+        };
+
+        assert!(args.live);
+        assert!(args.write_state);
     }
 
     #[test]
