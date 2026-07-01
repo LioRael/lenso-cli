@@ -1,3 +1,4 @@
+mod capability;
 mod host;
 mod launchpad;
 mod module;
@@ -38,6 +39,11 @@ enum Command {
     Agent {
         #[command(subcommand)]
         command: AgentCommand,
+    },
+    /// Author and inspect local reusable capability packs.
+    Capability {
+        #[command(subcommand)]
+        command: CapabilityCommand,
     },
     /// Scaffold and manage Lenso host applications.
     Host {
@@ -137,6 +143,10 @@ struct AppPlanArgs {
     #[arg(long = "addon")]
     addons: Vec<String>,
 
+    /// Include a local capability pack in the plan. Can be repeated.
+    #[arg(long = "pack")]
+    packs: Vec<std::path::PathBuf>,
+
     /// Write .lenso/app-change-plan.json.
     #[arg(long)]
     write_plan: bool,
@@ -158,6 +168,10 @@ struct AppComposeArgs {
     /// Addon to compose into the app. Can be repeated.
     #[arg(long = "addon")]
     addons: Vec<String>,
+
+    /// Local capability pack to compose into the app. Can be repeated.
+    #[arg(long = "pack")]
+    packs: Vec<std::path::PathBuf>,
 
     /// Apply safe generated app changes.
     #[arg(long)]
@@ -338,6 +352,10 @@ struct AgentContextArgs {
     /// Scope handoff to one module when known.
     #[arg(long = "for-module")]
     for_module: Option<String>,
+
+    /// Scope handoff to one capability pack when known.
+    #[arg(long = "for-capability")]
+    for_capability: Option<String>,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -360,6 +378,54 @@ struct AgentTaskArgs {
     /// Scope handoff to one module when known.
     #[arg(long = "for-module")]
     for_module: Option<String>,
+
+    /// Scope handoff to one capability pack when known.
+    #[arg(long = "for-capability")]
+    for_capability: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+enum CapabilityCommand {
+    /// Create a local capability pack.
+    Init(CapabilityInitArgs),
+    /// Validate a local capability pack.
+    Check(CapabilityCheckArgs),
+    /// Inspect a local capability pack.
+    Inspect(CapabilityInspectArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+struct CapabilityInitArgs {
+    /// Capability pack name.
+    name: String,
+
+    /// Directory that receives the capability pack.
+    #[arg(long)]
+    dir: std::path::PathBuf,
+
+    /// Service SDK language.
+    #[arg(long, default_value = "ts")]
+    lang: String,
+
+    /// Supported Launchpad blueprint. Can be repeated.
+    #[arg(long = "for-blueprint")]
+    for_blueprint: Vec<String>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct CapabilityCheckArgs {
+    /// Capability pack directory or lenso.capability.json path.
+    path: std::path::PathBuf,
+
+    /// Print JSON report.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct CapabilityInspectArgs {
+    /// Capability pack directory or lenso.capability.json path.
+    path: std::path::PathBuf,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2802,6 +2868,7 @@ async fn main() -> anyhow::Result<()> {
                     blueprint: args.blueprint,
                     dir: args.dir,
                     explain: args.explain,
+                    packs: args.packs,
                     repo_root: args.repo_root,
                     write_plan: args.write_plan,
                 })?;
@@ -2809,6 +2876,7 @@ async fn main() -> anyhow::Result<()> {
             AppCommand::Plan(args) => {
                 launchpad::app_plan(launchpad::AppPlanOptions {
                     addons: args.addons,
+                    packs: args.packs,
                     repo_root: args.repo_root,
                     write_plan: args.write_plan,
                 })?;
@@ -2889,6 +2957,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Agent { command } => match command {
             AgentCommand::Context(args) => {
                 launchpad::agent_context(launchpad::AgentContextOptions {
+                    for_capability: args.for_capability,
                     for_module: args.for_module,
                     from_app_plan: args.from_app_plan,
                     output: args.output,
@@ -2898,12 +2967,32 @@ async fn main() -> anyhow::Result<()> {
             }
             AgentCommand::Task(args) => {
                 launchpad::agent_context(launchpad::AgentContextOptions {
+                    for_capability: args.for_capability,
                     for_module: args.for_module,
                     from_app_plan: args.from_app_plan,
                     output: args.output,
                     repo_root: args.repo_root,
                     task: Some(args.task),
                 })?;
+            }
+        },
+        Command::Capability { command } => match command {
+            CapabilityCommand::Init(args) => {
+                capability::init(capability::InitOptions {
+                    blueprints: args.for_blueprint,
+                    dir: args.dir,
+                    lang: args.lang,
+                    name: args.name,
+                })?;
+            }
+            CapabilityCommand::Check(args) => {
+                capability::check(capability::CheckOptions {
+                    json: args.json,
+                    path: args.path,
+                })?;
+            }
+            CapabilityCommand::Inspect(args) => {
+                capability::inspect(capability::InspectOptions { path: args.path })?;
             }
         },
         Command::Host { command } => match command {
@@ -3432,6 +3521,8 @@ mod tests {
             "plan",
             "--addon",
             "support-sla",
+            "--pack",
+            "./capabilities/support-sla",
             "--addon",
             "customer-profile",
             "--write-plan",
@@ -3445,6 +3536,10 @@ mod tests {
 
         assert!(args.write_plan);
         assert_eq!(args.addons, vec!["support-sla", "customer-profile"]);
+        assert_eq!(
+            args.packs,
+            vec![std::path::PathBuf::from("./capabilities/support-sla")]
+        );
     }
 
     #[test]
@@ -3472,6 +3567,33 @@ mod tests {
         assert_eq!(args.dir, Some(std::path::PathBuf::from("./acme-support")));
         assert_eq!(args.addons, vec!["support-sla", "customer-profile"]);
         assert!(args.apply);
+    }
+
+    #[test]
+    fn parses_app_compose_pack() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "app",
+            "compose",
+            "./acme-support",
+            "--blueprint",
+            "support-desk",
+            "--pack",
+            "./capabilities/support-sla",
+            "--write-plan",
+        ]);
+        let Command::App {
+            command: AppCommand::Compose(args),
+        } = cli.command
+        else {
+            panic!("expected app compose");
+        };
+
+        assert_eq!(
+            args.packs,
+            vec![std::path::PathBuf::from("./capabilities/support-sla")]
+        );
+        assert!(args.write_plan);
     }
 
     #[test]
@@ -3559,6 +3681,26 @@ mod tests {
     }
 
     #[test]
+    fn parses_agent_task_for_capability() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "agent",
+            "task",
+            "--for-capability",
+            "support-sla",
+            "add enterprise escalation",
+        ]);
+        let Command::Agent {
+            command: AgentCommand::Task(args),
+        } = cli.command
+        else {
+            panic!("expected agent task");
+        };
+
+        assert_eq!(args.for_capability.as_deref(), Some("support-sla"));
+    }
+
+    #[test]
     fn parses_app_verify() {
         let cli = Cli::parse_from(["lenso", "app", "verify", "--write-proof"]);
         let Command::App {
@@ -3641,6 +3783,55 @@ mod tests {
             args.output.as_deref(),
             Some(std::path::Path::new("AGENT_CONTEXT.md"))
         );
+    }
+
+    #[test]
+    fn parses_capability_init_ts() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "capability",
+            "init",
+            "support-sla",
+            "--dir",
+            "./capabilities/support-sla",
+            "--lang",
+            "ts",
+            "--for-blueprint",
+            "support-desk",
+        ]);
+        let Command::Capability { command } = cli.command else {
+            panic!("expected capability command");
+        };
+        let CapabilityCommand::Init(args) = command else {
+            panic!("expected capability init");
+        };
+
+        assert_eq!(args.name, "support-sla");
+        assert_eq!(args.lang, "ts");
+        assert_eq!(args.for_blueprint, vec!["support-desk"]);
+    }
+
+    #[test]
+    fn parses_capability_check_json() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "capability",
+            "check",
+            "./capabilities/support-sla",
+            "--json",
+        ]);
+        let Command::Capability { command } = cli.command else {
+            panic!("expected capability command");
+        };
+        let CapabilityCommand::Check(args) = command else {
+            panic!("expected capability check");
+        };
+
+        assert_eq!(
+            args.path,
+            std::path::PathBuf::from("./capabilities/support-sla")
+        );
+        assert!(args.json);
     }
 
     #[test]
