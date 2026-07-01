@@ -10,8 +10,10 @@ use crate::{ServiceLanguage, host, service};
 
 const LAUNCHPAD_PROTOCOL: &str = "lenso.launchpad.v1";
 const DEV_DOCTOR_PROTOCOL: &str = "lenso.dev-doctor.v1";
+const APP_PROOF_PROTOCOL: &str = "lenso.app-proof.v1";
 const LAUNCHPAD_FILE: &str = ".lenso/launchpad.json";
 const DEV_DOCTOR_FILE: &str = ".lenso/dev-doctor.json";
+const APP_PROOF_FILE: &str = ".lenso/app-proof.json";
 const SYSTEM_FILE: &str = "lenso.system.json";
 const WORKSPACE_FILE: &str = "lenso.workspace.json";
 const DEFAULT_BLUEPRINT: &str = "support-desk";
@@ -26,6 +28,23 @@ pub(crate) struct AppCreateOptions {
 #[derive(Debug, Clone)]
 pub(crate) struct AppAddOptions {
     pub(crate) addon: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AppVerifyOptions {
+    pub(crate) repo_root: Option<PathBuf>,
+    pub(crate) write_proof: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AppDiffOptions {
+    pub(crate) repo_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AppRepairOptions {
+    pub(crate) dry_run: bool,
+    pub(crate) repo_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +149,39 @@ struct DevDoctorCheck {
     id: String,
     label: String,
     status: String,
+    message: String,
+    command: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppProofState {
+    protocol: String,
+    status: String,
+    checked_at_unix_ms: u64,
+    project_name: Option<String>,
+    blueprint: Option<String>,
+    addons: Vec<String>,
+    checks: Vec<AppProofCheck>,
+    drifts: Vec<AppProofDrift>,
+    next_command: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppProofCheck {
+    id: String,
+    label: String,
+    status: String,
+    message: String,
+    command: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppProofDrift {
+    resource: String,
+    name: String,
     message: String,
     command: Option<String>,
 }
@@ -301,6 +353,67 @@ pub(crate) fn add_app_addon(options: AppAddOptions) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn app_verify(options: AppVerifyOptions) -> Result<()> {
+    let repo_root = options.repo_root.unwrap_or_else(|| PathBuf::from("."));
+    let proof = app_proof_state(&repo_root)?;
+    print_app_proof(&proof);
+    if options.write_proof {
+        write_json(&repo_root.join(APP_PROOF_FILE), &proof)?;
+        println!("Wrote {}.", repo_root.join(APP_PROOF_FILE).display());
+    }
+    if matches!(proof.status.as_str(), "failed" | "needs_attention") {
+        bail!("app proof status is {}", proof.status);
+    }
+    Ok(())
+}
+
+pub(crate) fn app_diff(options: AppDiffOptions) -> Result<()> {
+    let repo_root = options.repo_root.unwrap_or_else(|| PathBuf::from("."));
+    let proof = app_proof_state(&repo_root)?;
+    if proof.status == "ready" {
+        println!("No app drift found.");
+        return Ok(());
+    }
+    for drift in &proof.drifts {
+        println!("- {} {}: {}", drift.resource, drift.name, drift.message);
+        if let Some(command) = &drift.command {
+            println!("  command: {command}");
+        }
+    }
+    for check in proof
+        .checks
+        .iter()
+        .filter(|check| matches!(check.status.as_str(), "failed" | "needs_attention"))
+    {
+        println!("- {}: {} ({})", check.id, check.status, check.message);
+        if let Some(command) = &check.command {
+            println!("  command: {command}");
+        }
+    }
+    bail!("app proof status is {}", proof.status)
+}
+
+pub(crate) fn app_repair(options: AppRepairOptions) -> Result<()> {
+    let repo_root = options.repo_root.unwrap_or_else(|| PathBuf::from("."));
+    let proof = app_proof_state(&repo_root)?;
+    let repairs = app_repair_plan(&proof.drifts);
+    if repairs.is_empty() {
+        println!("No safe app repairs needed.");
+        return Ok(());
+    }
+    for repair in &repairs {
+        println!("- {repair}");
+    }
+    if options.dry_run {
+        println!("dry run: no files changed");
+        return Ok(());
+    }
+    repair_generated_state(&repo_root)?;
+    println!("Repaired generated app state.");
+    println!("Next: lenso app verify --write-proof");
+    Ok(())
+}
+
 pub(crate) fn dev_status(options: DevStatusOptions) -> Result<()> {
     let repo_root = options.repo_root.unwrap_or_else(|| PathBuf::from("."));
     let Some(state) = read_launchpad_state_optional(&repo_root)? else {
@@ -368,11 +481,13 @@ pub(crate) fn agent_context(options: AgentContextOptions) -> Result<()> {
     let system = read_json_value_optional(&repo_root.join(SYSTEM_FILE))?;
     let workspace = read_json_value_optional(&repo_root.join(WORKSPACE_FILE))?;
     let doctor = read_json_value_optional(&repo_root.join(DEV_DOCTOR_FILE))?;
+    let proof = read_app_proof_state_optional(&repo_root)?;
     let markdown = agent_context_markdown(
         state.as_ref(),
         system.as_ref(),
         workspace.as_ref(),
         doctor.as_ref(),
+        proof.as_ref(),
         options.task.as_deref(),
     )?;
 
@@ -1186,6 +1301,368 @@ fn doctor_status(checks: &[DevDoctorCheck]) -> String {
     }
 }
 
+fn app_proof_state(repo_root: &Path) -> Result<AppProofState> {
+    let launchpad = read_launchpad_state_required(repo_root)?;
+    let doctor = read_dev_doctor_state_optional(repo_root)?;
+    let workspace = read_json_value_optional(&repo_root.join(WORKSPACE_FILE))?;
+    let system = read_json_value_optional(&repo_root.join(SYSTEM_FILE))?;
+    let (checks, mut drifts) =
+        app_diff_from_values(&launchpad, workspace.as_ref(), system.as_ref())?;
+    if doctor.is_none() {
+        drifts.push(AppProofDrift {
+            command: Some("lenso dev doctor --write-state".to_owned()),
+            message: format!("{DEV_DOCTOR_FILE} is missing"),
+            name: DEV_DOCTOR_FILE.to_owned(),
+            resource: "dev-doctor".to_owned(),
+        });
+    }
+    Ok(app_proof_state_from_parts(
+        &launchpad,
+        doctor.as_ref(),
+        checks,
+        drifts,
+    ))
+}
+
+fn app_diff_from_values(
+    launchpad: &LaunchpadState,
+    workspace: Option<&Value>,
+    system: Option<&Value>,
+) -> Result<(Vec<AppProofCheck>, Vec<AppProofDrift>)> {
+    let mut checks = Vec::new();
+    let mut drifts = Vec::new();
+    let workspace_services = workspace_service_names(workspace);
+    let system_services = system_service_names(system);
+    let launchpad_services = launchpad
+        .services
+        .iter()
+        .map(|service| service.name.clone())
+        .collect::<Vec<_>>();
+    let expected_services = expected_services_from_launchpad(launchpad)?;
+
+    for service in &expected_services {
+        push_service_check(
+            &mut checks,
+            &mut drifts,
+            "launchpad-service",
+            &format!("launchpad-service-{}", service.name),
+            &service.name,
+            launchpad_services.contains(&service.name),
+            "lenso app repair",
+            LAUNCHPAD_FILE,
+        );
+        push_service_check(
+            &mut checks,
+            &mut drifts,
+            "workspace-service",
+            &format!("workspace-service-{}", service.name),
+            &service.name,
+            workspace_services.contains(&service.name),
+            "lenso app repair",
+            WORKSPACE_FILE,
+        );
+        push_service_check(
+            &mut checks,
+            &mut drifts,
+            "system-service",
+            &format!("system-service-{}", service.name),
+            &service.name,
+            system_services.contains(&service.name),
+            "lenso app repair",
+            SYSTEM_FILE,
+        );
+    }
+
+    Ok((checks, drifts))
+}
+
+fn expected_services_from_launchpad(launchpad: &LaunchpadState) -> Result<Vec<BlueprintService>> {
+    let blueprint = blueprint_by_name(&launchpad.blueprint)?;
+    let mut services = blueprint.services;
+    for addon in &launchpad.addons {
+        services.extend(addon_by_name(&addon.name)?.services);
+    }
+    Ok(services)
+}
+
+fn workspace_service_names(workspace: Option<&Value>) -> Vec<String> {
+    workspace
+        .and_then(|value| value.get("services"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|service| service.get("name").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn system_service_names(system: Option<&Value>) -> Vec<String> {
+    system
+        .and_then(|value| value.get("services"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|service| service.get("name").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn push_service_check(
+    checks: &mut Vec<AppProofCheck>,
+    drifts: &mut Vec<AppProofDrift>,
+    resource: &str,
+    id: &str,
+    service: &str,
+    present: bool,
+    command: &str,
+    file: &str,
+) {
+    if present {
+        checks.push(AppProofCheck {
+            command: None,
+            id: id.to_owned(),
+            label: format!("{service} in {file}"),
+            message: format!("{service} is present in {file}"),
+            status: "passed".to_owned(),
+        });
+    } else {
+        checks.push(AppProofCheck {
+            command: Some(command.to_owned()),
+            id: id.to_owned(),
+            label: format!("{service} in {file}"),
+            message: format!("{service} is missing from {file}"),
+            status: "drifted".to_owned(),
+        });
+        drifts.push(AppProofDrift {
+            command: Some(command.to_owned()),
+            message: format!("{service} is missing from {file}"),
+            name: service.to_owned(),
+            resource: resource.to_owned(),
+        });
+    }
+}
+
+fn app_proof_state_from_parts(
+    launchpad: &LaunchpadState,
+    doctor: Option<&DevDoctorState>,
+    mut checks: Vec<AppProofCheck>,
+    drifts: Vec<AppProofDrift>,
+) -> AppProofState {
+    checks.push(AppProofCheck {
+        command: match doctor {
+            Some(state) if state.status == "ready" => None,
+            _ => Some("lenso dev doctor --write-state".to_owned()),
+        },
+        id: "launchpad-doctor-state".to_owned(),
+        label: "Launchpad doctor state".to_owned(),
+        message: match doctor {
+            Some(state) => format!("{DEV_DOCTOR_FILE} status is {}", state.status),
+            None => format!("{DEV_DOCTOR_FILE} is missing"),
+        },
+        status: match doctor {
+            Some(state) if state.status == "ready" => "passed".to_owned(),
+            Some(state) => state.status.clone(),
+            None => "needs_attention".to_owned(),
+        },
+    });
+
+    let status = app_proof_status(&checks, &drifts).to_owned();
+    let next_command = app_proof_next_command(&checks, &drifts);
+
+    AppProofState {
+        addons: launchpad
+            .addons
+            .iter()
+            .map(|addon| addon.name.clone())
+            .collect(),
+        blueprint: Some(launchpad.blueprint.clone()),
+        checked_at_unix_ms: current_unix_ms(),
+        checks,
+        drifts,
+        next_command,
+        project_name: Some(launchpad.project_name.clone()),
+        protocol: APP_PROOF_PROTOCOL.to_owned(),
+        status,
+    }
+}
+
+fn app_proof_status(checks: &[AppProofCheck], drifts: &[AppProofDrift]) -> &'static str {
+    if checks.iter().any(|check| check.status == "failed") {
+        "failed"
+    } else if checks.iter().any(|check| check.status == "needs_attention") {
+        "needs_attention"
+    } else if !drifts.is_empty() || checks.iter().any(|check| check.status == "drifted") {
+        "drifted"
+    } else if checks.is_empty() {
+        "empty"
+    } else {
+        "ready"
+    }
+}
+
+fn app_proof_next_command(checks: &[AppProofCheck], drifts: &[AppProofDrift]) -> Option<String> {
+    drifts
+        .iter()
+        .find_map(|drift| drift.command.clone())
+        .or_else(|| checks.iter().find_map(|check| check.command.clone()))
+}
+
+fn print_app_proof(proof: &AppProofState) {
+    println!("App proof: {}", proof.status);
+    if let Some(project_name) = &proof.project_name {
+        println!("project: {project_name}");
+    }
+    if let Some(blueprint) = &proof.blueprint {
+        println!("blueprint: {blueprint}");
+    }
+    let addons = if proof.addons.is_empty() {
+        "none".to_owned()
+    } else {
+        proof.addons.join(", ")
+    };
+    println!("addons: {addons}");
+    println!("checks: {}", proof.checks.len());
+    println!("drifts: {}", proof.drifts.len());
+    if let Some(command) = &proof.next_command {
+        println!("next: {command}");
+    }
+}
+
+fn app_repair_plan(drifts: &[AppProofDrift]) -> Vec<String> {
+    drifts
+        .iter()
+        .filter_map(|drift| match drift.resource.as_str() {
+            "launchpad-service" => Some(format!("restore Launchpad service {}", drift.name)),
+            "workspace-service" => Some(format!("restore workspace service {}", drift.name)),
+            "system-service" => Some(format!("restore system service {}", drift.name)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn repair_generated_state(repo_root: &Path) -> Result<()> {
+    let launchpad = read_launchpad_state_required(repo_root)?;
+    let blueprint = blueprint_by_name(&launchpad.blueprint)?;
+    let addon_recipes = launchpad
+        .addons
+        .iter()
+        .map(|addon| addon_by_name(&addon.name))
+        .collect::<Result<Vec<_>>>()?;
+    with_current_dir(repo_root, || {
+        repair_launchpad_state(&launchpad, &blueprint, &addon_recipes)?;
+        repair_workspace_recipes(&blueprint, &addon_recipes)?;
+        repair_system_recipes(&launchpad.project_name, &blueprint, &addon_recipes)?;
+        repair_missing_service_scaffolds(&blueprint.services)?;
+        for addon in &addon_recipes {
+            repair_missing_service_scaffolds(&addon.services)?;
+        }
+        Ok(())
+    })
+}
+
+fn repair_launchpad_state(
+    launchpad: &LaunchpadState,
+    blueprint: &Blueprint,
+    addons: &[Addon],
+) -> Result<()> {
+    let mut repaired = launchpad_state_from_blueprint(&launchpad.project_name, blueprint);
+    for addon in &launchpad.addons {
+        let addon_recipe = addons
+            .iter()
+            .find(|recipe| recipe.name == addon.name)
+            .with_context(|| format!("unknown addon {}", addon.name))?;
+        for service in &addon_recipe.services {
+            if !repaired
+                .services
+                .iter()
+                .any(|item| item.name == service.name)
+            {
+                repaired
+                    .services
+                    .push(launchpad_service_from_blueprint(service));
+            }
+        }
+        for module in &addon_recipe.modules {
+            if !repaired.modules.iter().any(|item| item.name == module.name) {
+                repaired
+                    .modules
+                    .push(launchpad_module_from_blueprint(module));
+            }
+        }
+        if !repaired.addons.iter().any(|item| item.name == addon.name) {
+            repaired.addons.push(addon.clone());
+        }
+    }
+    write_json(Path::new(LAUNCHPAD_FILE), &repaired)
+}
+
+fn repair_workspace_recipes(blueprint: &Blueprint, addons: &[Addon]) -> Result<()> {
+    for service in &blueprint.services {
+        upsert_workspace_service(service)?;
+    }
+    for addon in addons {
+        for service in &addon.services {
+            upsert_workspace_service(service)?;
+        }
+    }
+    Ok(())
+}
+
+fn repair_system_recipes(
+    project_name: &str,
+    blueprint: &Blueprint,
+    addons: &[Addon],
+) -> Result<()> {
+    let path = Path::new(SYSTEM_FILE);
+    let mut system = if path.exists() {
+        read_json_value_required(path)?
+    } else {
+        system_from_blueprint(project_name, blueprint)
+    };
+    for service in &blueprint.services {
+        upsert_json_object_by_name(
+            &mut system,
+            "services",
+            system_service_from_blueprint(service),
+        )?;
+    }
+    for module in system_modules_from_blueprint(blueprint) {
+        upsert_json_object_by_name(&mut system, "modules", module)?;
+    }
+    for dependency in &blueprint.dependencies {
+        upsert_json_dependency(&mut system, system_dependency_from_blueprint(dependency))?;
+    }
+    for addon in addons {
+        for service in &addon.services {
+            upsert_json_object_by_name(
+                &mut system,
+                "services",
+                system_service_from_blueprint(service),
+            )?;
+        }
+        for module in &addon.modules {
+            upsert_json_object_by_name(
+                &mut system,
+                "modules",
+                system_module_from_blueprint(module),
+            )?;
+        }
+        for dependency in &addon.dependencies {
+            upsert_json_dependency(&mut system, system_dependency_from_blueprint(dependency))?;
+        }
+    }
+    write_json(path, &system)
+}
+
+fn repair_missing_service_scaffolds(services: &[BlueprintService]) -> Result<()> {
+    for service in services {
+        if !Path::new(&service_cwd(service)).exists() {
+            create_service_scaffold(service)?;
+        }
+    }
+    Ok(())
+}
+
 fn check_id(relative: &str) -> String {
     relative
         .trim_start_matches(".lenso/")
@@ -1208,6 +1685,7 @@ fn agent_context_markdown(
     system: Option<&Value>,
     workspace: Option<&Value>,
     doctor: Option<&Value>,
+    proof: Option<&AppProofState>,
     task: Option<&str>,
 ) -> Result<String> {
     let mut output = String::new();
@@ -1297,6 +1775,19 @@ fn agent_context_markdown(
         output.push_str(&format!("- Needs attention: {needs_attention}\n"));
     }
 
+    if let Some(proof) = proof {
+        output.push('\n');
+        output.push_str("## App Proof\n\n");
+        output.push_str(&format!("- Status: {}\n", proof.status));
+        output.push_str(&format!("- Drifts: {}\n", proof.drifts.len()));
+        if let Some(command) = &proof.next_command {
+            output.push_str(&format!("- Next command: {command}\n"));
+        }
+        output.push_str("- Generated control-plane files may be repaired.\n");
+        output.push_str("- Existing service source files are user code.\n");
+        output.push_str("- Unknown services should not be deleted.\n");
+    }
+
     if let Some(task) = task {
         output.push('\n');
         output.push_str("## Task\n\n");
@@ -1337,6 +1828,28 @@ fn read_launchpad_state_required(repo_root: &Path) -> Result<LaunchpadState> {
             repo_root.join(LAUNCHPAD_FILE).display()
         )
     })
+}
+
+fn read_dev_doctor_state_optional(repo_root: &Path) -> Result<Option<DevDoctorState>> {
+    let path = repo_root.join(DEV_DOCTOR_FILE);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let contents = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    serde_json::from_str(&contents)
+        .with_context(|| format!("parse {}", path.display()))
+        .map(Some)
+}
+
+fn read_app_proof_state_optional(repo_root: &Path) -> Result<Option<AppProofState>> {
+    let path = repo_root.join(APP_PROOF_FILE);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let contents = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    serde_json::from_str(&contents)
+        .with_context(|| format!("parse {}", path.display()))
+        .map(Some)
 }
 
 fn read_json_value_optional(path: &Path) -> Result<Option<Value>> {
@@ -1477,12 +1990,146 @@ mod tests {
     }
 
     #[test]
+    fn app_proof_status_ready_when_checks_pass() {
+        let checks = vec![AppProofCheck {
+            command: None,
+            id: "workspace".to_owned(),
+            label: "Workspace".to_owned(),
+            message: "ok".to_owned(),
+            status: "passed".to_owned(),
+        }];
+
+        assert_eq!(app_proof_status(&checks, &[]), "ready");
+    }
+
+    #[test]
+    fn app_proof_status_drifted_when_drift_exists() {
+        let checks = vec![AppProofCheck {
+            command: Some("lenso app repair".to_owned()),
+            id: "workspace-service-support-sla".to_owned(),
+            label: "support-sla workspace entry".to_owned(),
+            message: "missing".to_owned(),
+            status: "drifted".to_owned(),
+        }];
+        let drifts = vec![AppProofDrift {
+            command: Some("lenso app repair".to_owned()),
+            message: "support-sla is missing from lenso.workspace.json".to_owned(),
+            name: "support-sla".to_owned(),
+            resource: "workspace-service".to_owned(),
+        }];
+
+        assert_eq!(app_proof_status(&checks, &drifts), "drifted");
+    }
+
+    #[test]
+    fn app_proof_state_includes_blueprint_addon_and_doctor() {
+        let mut launchpad = support_desk_launchpad_state("acme-support");
+        launchpad.addons.push(LaunchpadAddon {
+            label: "Support SLA".to_owned(),
+            modules: vec!["support-sla".to_owned()],
+            name: "support-sla".to_owned(),
+            services: vec!["support-sla".to_owned()],
+            status: "configured".to_owned(),
+        });
+        let doctor = DevDoctorState {
+            checked_at_unix_ms: 1782900000000,
+            checks: vec![DevDoctorCheck {
+                command: None,
+                id: "env".to_owned(),
+                label: ".env file".to_owned(),
+                message: ".env exists".to_owned(),
+                status: "passed".to_owned(),
+            }],
+            live: false,
+            protocol: DEV_DOCTOR_PROTOCOL.to_owned(),
+            status: "ready".to_owned(),
+        };
+
+        let proof = app_proof_state_from_parts(&launchpad, Some(&doctor), Vec::new(), Vec::new());
+
+        assert_eq!(proof.protocol, APP_PROOF_PROTOCOL);
+        assert_eq!(proof.project_name.as_deref(), Some("acme-support"));
+        assert_eq!(proof.blueprint.as_deref(), Some("support-desk"));
+        assert_eq!(proof.addons, vec!["support-sla"]);
+        assert_eq!(proof.status, "ready");
+    }
+
+    #[test]
+    fn app_diff_detects_missing_workspace_service() {
+        let launchpad = support_desk_launchpad_state("acme-support");
+        let workspace = json!({
+            "protocol": "lenso.service-workspace.v1",
+            "services": []
+        });
+
+        let (checks, drifts) = app_diff_from_values(&launchpad, Some(&workspace), None).unwrap();
+
+        assert!(
+            drifts.iter().any(|drift| {
+                drift.resource == "workspace-service" && drift.name == "support-api"
+            })
+        );
+        assert!(checks.iter().any(|check| {
+            check.id == "workspace-service-support-api" && check.status == "drifted"
+        }));
+    }
+
+    #[test]
+    fn app_repair_plan_mentions_missing_workspace_service() {
+        let drifts = vec![AppProofDrift {
+            command: Some("lenso app repair".to_owned()),
+            message: "support-sla is missing from lenso.workspace.json".to_owned(),
+            name: "support-sla".to_owned(),
+            resource: "workspace-service".to_owned(),
+        }];
+
+        assert_eq!(
+            app_repair_plan(&drifts),
+            vec!["restore workspace service support-sla"]
+        );
+    }
+
+    #[test]
+    fn app_repair_plan_does_not_include_source_overwrite() {
+        let drifts = vec![AppProofDrift {
+            command: Some("manual review".to_owned()),
+            message: "service directory exists with user code".to_owned(),
+            name: "support-api".to_owned(),
+            resource: "service-source".to_owned(),
+        }];
+
+        assert!(app_repair_plan(&drifts).is_empty());
+    }
+
+    #[test]
+    fn agent_context_mentions_app_proof_when_present() {
+        let proof = AppProofState {
+            addons: vec!["support-sla".to_owned()],
+            blueprint: Some("support-desk".to_owned()),
+            checked_at_unix_ms: 1782900000000,
+            checks: Vec::new(),
+            drifts: Vec::new(),
+            next_command: Some("lenso app verify --write-proof".to_owned()),
+            project_name: Some("acme-support".to_owned()),
+            protocol: APP_PROOF_PROTOCOL.to_owned(),
+            status: "ready".to_owned(),
+        };
+
+        let markdown = agent_context_markdown(None, None, None, None, Some(&proof), None).unwrap();
+
+        assert!(markdown.contains("## App Proof"));
+        assert!(markdown.contains("Status: ready"));
+        assert!(markdown.contains("Existing service source files are user code."));
+    }
+
+    #[test]
     fn agent_context_mentions_boundaries_and_task() {
         let state = support_desk_launchpad_state("support-desk");
         let markdown = agent_context_markdown(
             Some(&state),
             Some(&support_desk_system("support-desk")),
             Some(&json!({"protocol": "lenso.service-workspace.v1", "services": []})),
+            None,
             None,
             Some("Add ticket SLA fields."),
         )
@@ -1510,6 +2157,7 @@ mod tests {
             None,
             None,
             Some(&doctor),
+            None,
             Some("Add overdue ticket escalation."),
         )
         .unwrap();

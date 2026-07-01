@@ -81,6 +81,12 @@ enum AppCommand {
     Inspect(AppInspectArgs),
     /// Add a built-in addon to the current Launchpad app.
     Add(AppAddArgs),
+    /// Verify a generated Launchpad app and optionally write App Proof.
+    Verify(AppVerifyArgs),
+    /// Compare the generated app state with its blueprint and addons.
+    Diff(AppDiffArgs),
+    /// Repair safe generated app state drift.
+    Repair(AppRepairArgs),
 }
 
 #[derive(Debug, Args, Clone)]
@@ -107,6 +113,35 @@ struct AppInspectArgs {
 struct AppAddArgs {
     /// Addon name.
     addon: String,
+}
+
+#[derive(Debug, Args, Clone)]
+struct AppVerifyArgs {
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Write .lenso/app-proof.json.
+    #[arg(long)]
+    write_proof: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct AppDiffArgs {
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct AppRepairArgs {
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print planned safe repairs without writing files.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2640,6 +2675,23 @@ async fn main() -> anyhow::Result<()> {
             AppCommand::Add(args) => {
                 launchpad::add_app_addon(launchpad::AppAddOptions { addon: args.addon })?;
             }
+            AppCommand::Verify(args) => {
+                launchpad::app_verify(launchpad::AppVerifyOptions {
+                    repo_root: args.repo_root,
+                    write_proof: args.write_proof,
+                })?;
+            }
+            AppCommand::Diff(args) => {
+                launchpad::app_diff(launchpad::AppDiffOptions {
+                    repo_root: args.repo_root,
+                })?;
+            }
+            AppCommand::Repair(args) => {
+                launchpad::app_repair(launchpad::AppRepairOptions {
+                    dry_run: args.dry_run,
+                    repo_root: args.repo_root,
+                })?;
+            }
         },
         Command::Dev { command } => match command {
             DevCommand::Up(args) => {
@@ -3203,6 +3255,45 @@ mod tests {
         };
 
         assert_eq!(args.addon, "support-sla");
+    }
+
+    #[test]
+    fn parses_app_verify() {
+        let cli = Cli::parse_from(["lenso", "app", "verify", "--write-proof"]);
+        let Command::App {
+            command: AppCommand::Verify(args),
+        } = cli.command
+        else {
+            panic!("expected app verify");
+        };
+
+        assert!(args.write_proof);
+    }
+
+    #[test]
+    fn parses_app_diff() {
+        let cli = Cli::parse_from(["lenso", "app", "diff"]);
+        let Command::App {
+            command: AppCommand::Diff(args),
+        } = cli.command
+        else {
+            panic!("expected app diff");
+        };
+
+        assert!(args.repo_root.is_none());
+    }
+
+    #[test]
+    fn parses_app_repair_dry_run() {
+        let cli = Cli::parse_from(["lenso", "app", "repair", "--dry-run"]);
+        let Command::App {
+            command: AppCommand::Repair(args),
+        } = cli.command
+        else {
+            panic!("expected app repair");
+        };
+
+        assert!(args.dry_run);
     }
 
     #[test]
