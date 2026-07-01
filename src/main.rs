@@ -1,4 +1,5 @@
 mod host;
+mod launchpad;
 mod module;
 mod operator;
 mod service;
@@ -23,6 +24,21 @@ struct Cli {
 enum Command {
     /// Start a Lenso host project locally.
     Serve(ServeArgs),
+    /// Create Launchpad-ready Lenso applications.
+    App {
+        #[command(subcommand)]
+        command: AppCommand,
+    },
+    /// Run and inspect a Launchpad development environment.
+    Dev {
+        #[command(subcommand)]
+        command: DevCommand,
+    },
+    /// Emit concise context for coding agents.
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommand,
+    },
     /// Scaffold and manage Lenso host applications.
     Host {
         #[command(subcommand)]
@@ -53,6 +69,177 @@ enum Command {
         #[command(subcommand)]
         command: ConsoleCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum AppCommand {
+    /// Create a Lenso application from a Launchpad blueprint.
+    Create(AppCreateArgs),
+    /// List built-in product blueprints.
+    List,
+    /// Inspect a built-in product blueprint.
+    Inspect(AppInspectArgs),
+    /// Add a built-in addon to the current Launchpad app.
+    Add(AppAddArgs),
+    /// Verify a generated Launchpad app and optionally write App Proof.
+    Verify(AppVerifyArgs),
+    /// Compare the generated app state with its blueprint and addons.
+    Diff(AppDiffArgs),
+    /// Repair safe generated app state drift.
+    Repair(AppRepairArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+struct AppCreateArgs {
+    /// Directory that receives the generated application.
+    dir: std::path::PathBuf,
+
+    /// Launchpad blueprint name.
+    #[arg(long, default_value = "support-desk")]
+    blueprint: String,
+
+    /// Replace an existing host directory.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct AppInspectArgs {
+    /// Blueprint name.
+    blueprint: String,
+}
+
+#[derive(Debug, Args, Clone)]
+struct AppAddArgs {
+    /// Addon name.
+    addon: String,
+}
+
+#[derive(Debug, Args, Clone)]
+struct AppVerifyArgs {
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Write .lenso/app-proof.json.
+    #[arg(long)]
+    write_proof: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct AppDiffArgs {
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct AppRepairArgs {
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print planned safe repairs without writing files.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum DevCommand {
+    /// Start services and host for local development.
+    Up(DevUpArgs),
+    /// Inspect the generated Launchpad state.
+    Status(DevStatusArgs),
+    /// Diagnose Launchpad local development readiness.
+    Doctor(DevDoctorArgs),
+    /// Explain how to stop the foreground dev process.
+    Stop,
+}
+
+#[derive(Debug, Args, Clone)]
+struct DevUpArgs {
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Remote module services file.
+    #[arg(long)]
+    module_services_file: Option<std::path::PathBuf>,
+
+    /// Service workspace file.
+    #[arg(long)]
+    workspace_file: Option<std::path::PathBuf>,
+
+    /// Do not start service workspace entries.
+    #[arg(long)]
+    no_workspace: bool,
+
+    /// Do not start the template Postgres service.
+    #[arg(long)]
+    skip_db: bool,
+
+    /// Do not run migrations before starting services.
+    #[arg(long)]
+    skip_migrate: bool,
+
+    /// Run API and worker as separate local processes.
+    #[arg(long)]
+    separate_worker: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct DevStatusArgs {
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct DevDoctorArgs {
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Probe service ready URLs in addition to static checks.
+    #[arg(long)]
+    live: bool,
+
+    /// Write .lenso/dev-doctor.json.
+    #[arg(long)]
+    write_state: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum AgentCommand {
+    /// Print Launchpad, system, and workspace context for an agent.
+    Context(AgentContextArgs),
+    /// Print agent context with a task appended.
+    Task(AgentTaskArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+struct AgentContextArgs {
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Write the context to a file instead of stdout.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct AgentTaskArgs {
+    /// Task text to append to the generated context.
+    task: String,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Write the context to a file instead of stdout.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2471,6 +2658,87 @@ async fn main() -> anyhow::Result<()> {
             )
             .await?;
         }
+        Command::App { command } => match command {
+            AppCommand::Create(args) => {
+                launchpad::create_app(launchpad::AppCreateOptions {
+                    blueprint: args.blueprint,
+                    dir: args.dir,
+                    force: args.force,
+                })?;
+            }
+            AppCommand::List => {
+                launchpad::list_blueprints();
+            }
+            AppCommand::Inspect(args) => {
+                launchpad::inspect_blueprint(&args.blueprint)?;
+            }
+            AppCommand::Add(args) => {
+                launchpad::add_app_addon(launchpad::AppAddOptions { addon: args.addon })?;
+            }
+            AppCommand::Verify(args) => {
+                launchpad::app_verify(launchpad::AppVerifyOptions {
+                    repo_root: args.repo_root,
+                    write_proof: args.write_proof,
+                })?;
+            }
+            AppCommand::Diff(args) => {
+                launchpad::app_diff(launchpad::AppDiffOptions {
+                    repo_root: args.repo_root,
+                })?;
+            }
+            AppCommand::Repair(args) => {
+                launchpad::app_repair(launchpad::AppRepairOptions {
+                    dry_run: args.dry_run,
+                    repo_root: args.repo_root,
+                })?;
+            }
+        },
+        Command::Dev { command } => match command {
+            DevCommand::Up(args) => {
+                service::dev_service(service::ServiceDevOptions {
+                    module_services_file: args.module_services_file,
+                    no_workspace: args.no_workspace,
+                    repo_root: args.repo_root,
+                    separate_worker: args.separate_worker,
+                    skip_db: args.skip_db,
+                    skip_migrate: args.skip_migrate,
+                    workspace_file: args.workspace_file,
+                })
+                .await?;
+            }
+            DevCommand::Status(args) => {
+                launchpad::dev_status(launchpad::DevStatusOptions {
+                    repo_root: args.repo_root,
+                })?;
+            }
+            DevCommand::Doctor(args) => {
+                launchpad::dev_doctor(launchpad::DevDoctorOptions {
+                    live: args.live,
+                    repo_root: args.repo_root,
+                    write_state: args.write_state,
+                })
+                .await?;
+            }
+            DevCommand::Stop => {
+                launchpad::dev_stop();
+            }
+        },
+        Command::Agent { command } => match command {
+            AgentCommand::Context(args) => {
+                launchpad::agent_context(launchpad::AgentContextOptions {
+                    output: args.output,
+                    repo_root: args.repo_root,
+                    task: None,
+                })?;
+            }
+            AgentCommand::Task(args) => {
+                launchpad::agent_context(launchpad::AgentContextOptions {
+                    output: args.output,
+                    repo_root: args.repo_root,
+                    task: Some(args.task),
+                })?;
+            }
+        },
         Command::Host { command } => match command {
             HostCommand::Init { dir, name, force } => host::init(&dir, name.as_deref(), force)?,
         },
@@ -2928,6 +3196,149 @@ mod tests {
         assert_eq!(
             args.workspace_file.as_deref(),
             Some(std::path::Path::new("lenso.workspace.json"))
+        );
+    }
+
+    #[test]
+    fn parses_app_command_create_support_desk() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "app",
+            "create",
+            "support-desk",
+            "--blueprint",
+            "support-desk",
+        ]);
+        let Command::App {
+            command: AppCommand::Create(args),
+        } = cli.command
+        else {
+            panic!("expected app create");
+        };
+
+        assert_eq!(args.dir, std::path::PathBuf::from("support-desk"));
+        assert_eq!(args.blueprint, "support-desk");
+    }
+
+    #[test]
+    fn parses_app_list() {
+        let cli = Cli::parse_from(["lenso", "app", "list"]);
+        let Command::App {
+            command: AppCommand::List,
+        } = cli.command
+        else {
+            panic!("expected app list");
+        };
+    }
+
+    #[test]
+    fn parses_app_inspect() {
+        let cli = Cli::parse_from(["lenso", "app", "inspect", "support-desk"]);
+        let Command::App {
+            command: AppCommand::Inspect(args),
+        } = cli.command
+        else {
+            panic!("expected app inspect");
+        };
+
+        assert_eq!(args.blueprint, "support-desk");
+    }
+
+    #[test]
+    fn parses_app_add() {
+        let cli = Cli::parse_from(["lenso", "app", "add", "support-sla"]);
+        let Command::App {
+            command: AppCommand::Add(args),
+        } = cli.command
+        else {
+            panic!("expected app add");
+        };
+
+        assert_eq!(args.addon, "support-sla");
+    }
+
+    #[test]
+    fn parses_app_verify() {
+        let cli = Cli::parse_from(["lenso", "app", "verify", "--write-proof"]);
+        let Command::App {
+            command: AppCommand::Verify(args),
+        } = cli.command
+        else {
+            panic!("expected app verify");
+        };
+
+        assert!(args.write_proof);
+    }
+
+    #[test]
+    fn parses_app_diff() {
+        let cli = Cli::parse_from(["lenso", "app", "diff"]);
+        let Command::App {
+            command: AppCommand::Diff(args),
+        } = cli.command
+        else {
+            panic!("expected app diff");
+        };
+
+        assert!(args.repo_root.is_none());
+    }
+
+    #[test]
+    fn parses_app_repair_dry_run() {
+        let cli = Cli::parse_from(["lenso", "app", "repair", "--dry-run"]);
+        let Command::App {
+            command: AppCommand::Repair(args),
+        } = cli.command
+        else {
+            panic!("expected app repair");
+        };
+
+        assert!(args.dry_run);
+    }
+
+    #[test]
+    fn parses_dev_command_status() {
+        let cli = Cli::parse_from(["lenso", "dev", "status", "--repo-root", "support-desk"]);
+        let Command::Dev {
+            command: DevCommand::Status(args),
+        } = cli.command
+        else {
+            panic!("expected dev status");
+        };
+
+        assert_eq!(
+            args.repo_root.as_deref(),
+            Some(std::path::Path::new("support-desk"))
+        );
+    }
+
+    #[test]
+    fn parses_dev_doctor() {
+        let cli = Cli::parse_from(["lenso", "dev", "doctor", "--live", "--write-state"]);
+        let Command::Dev {
+            command: DevCommand::Doctor(args),
+        } = cli.command
+        else {
+            panic!("expected dev doctor");
+        };
+
+        assert!(args.live);
+        assert!(args.write_state);
+    }
+
+    #[test]
+    fn parses_agent_command_context() {
+        let cli = Cli::parse_from(["lenso", "agent", "context", "--output", "AGENT_CONTEXT.md"]);
+        let Command::Agent {
+            command: AgentCommand::Context(args),
+        } = cli.command
+        else {
+            panic!("expected agent context");
+        };
+
+        assert_eq!(
+            args.output.as_deref(),
+            Some(std::path::Path::new("AGENT_CONTEXT.md"))
         );
     }
 
