@@ -81,12 +81,18 @@ enum AppCommand {
     Inspect(AppInspectArgs),
     /// Add a built-in addon to the current Launchpad app.
     Add(AppAddArgs),
+    /// Compose a Launchpad app from a blueprint and addons.
+    Compose(AppComposeArgs),
     /// Plan safe generated app changes before applying them.
     Plan(AppPlanArgs),
     /// Check whether generated app state matches the current blueprint.
     Upgrade(AppUpgradeArgs),
     /// Apply a previously written app change plan.
     Apply(AppApplyArgs),
+    /// Print the next useful app lifecycle command.
+    Next(AppNextArgs),
+    /// Explain generated-state, module, and service actions.
+    Explain(AppExplainArgs),
     /// Verify a generated Launchpad app and optionally write App Proof.
     Verify(AppVerifyArgs),
     /// Compare the generated app state with its blueprint and addons.
@@ -127,13 +133,43 @@ struct AppPlanArgs {
     #[arg(long)]
     repo_root: Option<std::path::PathBuf>,
 
-    /// Include a built-in addon in the plan.
-    #[arg(long)]
-    addon: Option<String>,
+    /// Include a built-in addon in the plan. Can be repeated.
+    #[arg(long = "addon")]
+    addons: Vec<String>,
 
     /// Write .lenso/app-change-plan.json.
     #[arg(long)]
     write_plan: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct AppComposeArgs {
+    /// New app directory. Omit when composing an existing app with --repo-root.
+    dir: Option<std::path::PathBuf>,
+
+    /// Existing Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Launchpad blueprint name for new apps.
+    #[arg(long, default_value = "support-desk")]
+    blueprint: String,
+
+    /// Addon to compose into the app. Can be repeated.
+    #[arg(long = "addon")]
+    addons: Vec<String>,
+
+    /// Apply safe generated app changes.
+    #[arg(long)]
+    apply: bool,
+
+    /// Write .lenso/app-change-plan.json.
+    #[arg(long)]
+    write_plan: bool,
+
+    /// Print explanation without writing files.
+    #[arg(long)]
+    explain: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -163,6 +199,24 @@ struct AppApplyArgs {
     /// Print planned changes without writing files.
     #[arg(long)]
     dry_run: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct AppNextArgs {
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Include live readiness guidance when supported by existing state.
+    #[arg(long)]
+    live: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct AppExplainArgs {
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -276,6 +330,14 @@ struct AgentContextArgs {
     /// Write the context to a file instead of stdout.
     #[arg(long)]
     output: Option<std::path::PathBuf>,
+
+    /// Include .lenso/app-change-plan.json composition context.
+    #[arg(long)]
+    from_app_plan: bool,
+
+    /// Scope handoff to one module when known.
+    #[arg(long = "for-module")]
+    for_module: Option<String>,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -290,6 +352,14 @@ struct AgentTaskArgs {
     /// Write the context to a file instead of stdout.
     #[arg(long)]
     output: Option<std::path::PathBuf>,
+
+    /// Include .lenso/app-change-plan.json composition context.
+    #[arg(long)]
+    from_app_plan: bool,
+
+    /// Scope handoff to one module when known.
+    #[arg(long = "for-module")]
+    for_module: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2725,9 +2795,20 @@ async fn main() -> anyhow::Result<()> {
             AppCommand::Add(args) => {
                 launchpad::add_app_addon(launchpad::AppAddOptions { addon: args.addon })?;
             }
+            AppCommand::Compose(args) => {
+                launchpad::app_compose(launchpad::AppComposeOptions {
+                    addons: args.addons,
+                    apply: args.apply,
+                    blueprint: args.blueprint,
+                    dir: args.dir,
+                    explain: args.explain,
+                    repo_root: args.repo_root,
+                    write_plan: args.write_plan,
+                })?;
+            }
             AppCommand::Plan(args) => {
                 launchpad::app_plan(launchpad::AppPlanOptions {
-                    addon: args.addon,
+                    addons: args.addons,
                     repo_root: args.repo_root,
                     write_plan: args.write_plan,
                 })?;
@@ -2743,6 +2824,17 @@ async fn main() -> anyhow::Result<()> {
                 launchpad::app_apply(launchpad::AppApplyOptions {
                     dry_run: args.dry_run,
                     plan: args.plan,
+                    repo_root: args.repo_root,
+                })?;
+            }
+            AppCommand::Next(args) => {
+                launchpad::app_next(launchpad::AppNextOptions {
+                    live: args.live,
+                    repo_root: args.repo_root,
+                })?;
+            }
+            AppCommand::Explain(args) => {
+                launchpad::app_explain(launchpad::AppExplainOptions {
                     repo_root: args.repo_root,
                 })?;
             }
@@ -2797,6 +2889,8 @@ async fn main() -> anyhow::Result<()> {
         Command::Agent { command } => match command {
             AgentCommand::Context(args) => {
                 launchpad::agent_context(launchpad::AgentContextOptions {
+                    for_module: args.for_module,
+                    from_app_plan: args.from_app_plan,
                     output: args.output,
                     repo_root: args.repo_root,
                     task: None,
@@ -2804,6 +2898,8 @@ async fn main() -> anyhow::Result<()> {
             }
             AgentCommand::Task(args) => {
                 launchpad::agent_context(launchpad::AgentContextOptions {
+                    for_module: args.for_module,
+                    from_app_plan: args.from_app_plan,
                     output: args.output,
                     repo_root: args.repo_root,
                     task: Some(args.task),
@@ -3330,7 +3426,16 @@ mod tests {
 
     #[test]
     fn parses_app_plan_write_plan() {
-        let cli = Cli::parse_from(["lenso", "app", "plan", "--write-plan"]);
+        let cli = Cli::parse_from([
+            "lenso",
+            "app",
+            "plan",
+            "--addon",
+            "support-sla",
+            "--addon",
+            "customer-profile",
+            "--write-plan",
+        ]);
         let Command::App {
             command: AppCommand::Plan(args),
         } = cli.command
@@ -3339,6 +3444,60 @@ mod tests {
         };
 
         assert!(args.write_plan);
+        assert_eq!(args.addons, vec!["support-sla", "customer-profile"]);
+    }
+
+    #[test]
+    fn parses_app_compose_new_app_with_two_addons() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "app",
+            "compose",
+            "./acme-support",
+            "--blueprint",
+            "support-desk",
+            "--addon",
+            "support-sla",
+            "--addon",
+            "customer-profile",
+            "--apply",
+        ]);
+        let Command::App {
+            command: AppCommand::Compose(args),
+        } = cli.command
+        else {
+            panic!("expected app compose");
+        };
+
+        assert_eq!(args.dir, Some(std::path::PathBuf::from("./acme-support")));
+        assert_eq!(args.addons, vec!["support-sla", "customer-profile"]);
+        assert!(args.apply);
+    }
+
+    #[test]
+    fn parses_app_next_live() {
+        let cli = Cli::parse_from(["lenso", "app", "next", "--live"]);
+        let Command::App {
+            command: AppCommand::Next(args),
+        } = cli.command
+        else {
+            panic!("expected app next");
+        };
+
+        assert!(args.live);
+    }
+
+    #[test]
+    fn parses_app_explain_repo_root() {
+        let cli = Cli::parse_from(["lenso", "app", "explain", "--repo-root", "./acme"]);
+        let Command::App {
+            command: AppCommand::Explain(args),
+        } = cli.command
+        else {
+            panic!("expected app explain");
+        };
+
+        assert_eq!(args.repo_root, Some(std::path::PathBuf::from("./acme")));
     }
 
     #[test]
@@ -3375,6 +3534,28 @@ mod tests {
             args.plan,
             std::path::PathBuf::from(".lenso/app-change-plan.json")
         );
+    }
+
+    #[test]
+    fn parses_agent_task_from_app_plan_for_module() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "agent",
+            "task",
+            "--from-app-plan",
+            "--for-module",
+            "support-ticket",
+            "add private notes",
+        ]);
+        let Command::Agent {
+            command: AgentCommand::Task(args),
+        } = cli.command
+        else {
+            panic!("expected agent task");
+        };
+
+        assert!(args.from_app_plan);
+        assert_eq!(args.for_module, Some("support-ticket".to_owned()));
     }
 
     #[test]
