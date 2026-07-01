@@ -81,6 +81,12 @@ enum AppCommand {
     Inspect(AppInspectArgs),
     /// Add a built-in addon to the current Launchpad app.
     Add(AppAddArgs),
+    /// Plan safe generated app changes before applying them.
+    Plan(AppPlanArgs),
+    /// Check whether generated app state matches the current blueprint.
+    Upgrade(AppUpgradeArgs),
+    /// Apply a previously written app change plan.
+    Apply(AppApplyArgs),
     /// Verify a generated Launchpad app and optionally write App Proof.
     Verify(AppVerifyArgs),
     /// Compare the generated app state with its blueprint and addons.
@@ -113,6 +119,50 @@ struct AppInspectArgs {
 struct AppAddArgs {
     /// Addon name.
     addon: String,
+}
+
+#[derive(Debug, Args, Clone)]
+struct AppPlanArgs {
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Include a built-in addon in the plan.
+    #[arg(long)]
+    addon: Option<String>,
+
+    /// Write .lenso/app-change-plan.json.
+    #[arg(long)]
+    write_plan: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct AppUpgradeArgs {
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Exit with an error when generated app changes are pending.
+    #[arg(long)]
+    check: bool,
+
+    /// Write .lenso/app-change-plan.json.
+    #[arg(long)]
+    write_plan: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct AppApplyArgs {
+    /// App change plan file.
+    plan: std::path::PathBuf,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print planned changes without writing files.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -2675,6 +2725,27 @@ async fn main() -> anyhow::Result<()> {
             AppCommand::Add(args) => {
                 launchpad::add_app_addon(launchpad::AppAddOptions { addon: args.addon })?;
             }
+            AppCommand::Plan(args) => {
+                launchpad::app_plan(launchpad::AppPlanOptions {
+                    addon: args.addon,
+                    repo_root: args.repo_root,
+                    write_plan: args.write_plan,
+                })?;
+            }
+            AppCommand::Upgrade(args) => {
+                launchpad::app_upgrade(launchpad::AppUpgradeOptions {
+                    check: args.check,
+                    repo_root: args.repo_root,
+                    write_plan: args.write_plan,
+                })?;
+            }
+            AppCommand::Apply(args) => {
+                launchpad::app_apply(launchpad::AppApplyOptions {
+                    dry_run: args.dry_run,
+                    plan: args.plan,
+                    repo_root: args.repo_root,
+                })?;
+            }
             AppCommand::Verify(args) => {
                 launchpad::app_verify(launchpad::AppVerifyOptions {
                     repo_root: args.repo_root,
@@ -3255,6 +3326,55 @@ mod tests {
         };
 
         assert_eq!(args.addon, "support-sla");
+    }
+
+    #[test]
+    fn parses_app_plan_write_plan() {
+        let cli = Cli::parse_from(["lenso", "app", "plan", "--write-plan"]);
+        let Command::App {
+            command: AppCommand::Plan(args),
+        } = cli.command
+        else {
+            panic!("expected app plan");
+        };
+
+        assert!(args.write_plan);
+    }
+
+    #[test]
+    fn parses_app_upgrade_check() {
+        let cli = Cli::parse_from(["lenso", "app", "upgrade", "--check"]);
+        let Command::App {
+            command: AppCommand::Upgrade(args),
+        } = cli.command
+        else {
+            panic!("expected app upgrade");
+        };
+
+        assert!(args.check);
+    }
+
+    #[test]
+    fn parses_app_apply_dry_run() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "app",
+            "apply",
+            ".lenso/app-change-plan.json",
+            "--dry-run",
+        ]);
+        let Command::App {
+            command: AppCommand::Apply(args),
+        } = cli.command
+        else {
+            panic!("expected app apply");
+        };
+
+        assert!(args.dry_run);
+        assert_eq!(
+            args.plan,
+            std::path::PathBuf::from(".lenso/app-change-plan.json")
+        );
     }
 
     #[test]
