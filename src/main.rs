@@ -392,6 +392,25 @@ enum CapabilityCommand {
     Check(CapabilityCheckArgs),
     /// Inspect a local capability pack.
     Inspect(CapabilityInspectArgs),
+    /// Manage the local capability pack library.
+    Library {
+        #[command(subcommand)]
+        command: CapabilityLibraryCommand,
+    },
+    /// Check whether a capability pack fits the current Launchpad app.
+    Fit(CapabilityFitArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum CapabilityLibraryCommand {
+    /// Create .lenso/lenso.capability-library.json.
+    Init(CapabilityLibraryInitArgs),
+    /// Add a local capability pack to the library.
+    Add(CapabilityLibraryAddArgs),
+    /// List local capability packs from the library.
+    List(CapabilityLibraryListArgs),
+    /// Check every pack recorded in the library.
+    Check(CapabilityLibraryCheckArgs),
 }
 
 #[derive(Debug, Args, Clone)]
@@ -426,6 +445,59 @@ struct CapabilityCheckArgs {
 struct CapabilityInspectArgs {
     /// Capability pack directory or lenso.capability.json path.
     path: std::path::PathBuf,
+}
+
+#[derive(Debug, Args, Clone)]
+struct CapabilityLibraryInitArgs {
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct CapabilityLibraryAddArgs {
+    /// Capability pack directory or lenso.capability.json path.
+    path: std::path::PathBuf,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct CapabilityLibraryListArgs {
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct CapabilityLibraryCheckArgs {
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct CapabilityFitArgs {
+    /// Capability pack name from the library, directory, or manifest path.
+    pack: std::path::PathBuf,
+
+    /// Lenso host repository root.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Print JSON report.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2994,6 +3066,38 @@ async fn main() -> anyhow::Result<()> {
             CapabilityCommand::Inspect(args) => {
                 capability::inspect(capability::InspectOptions { path: args.path })?;
             }
+            CapabilityCommand::Library { command } => match command {
+                CapabilityLibraryCommand::Init(args) => {
+                    capability::library_init(capability::LibraryInitOptions {
+                        repo_root: args.repo_root,
+                    })?;
+                }
+                CapabilityLibraryCommand::Add(args) => {
+                    capability::library_add(capability::LibraryAddOptions {
+                        path: args.path,
+                        repo_root: args.repo_root,
+                    })?;
+                }
+                CapabilityLibraryCommand::List(args) => {
+                    capability::library_list(capability::LibraryListOptions {
+                        json: args.json,
+                        repo_root: args.repo_root,
+                    })?;
+                }
+                CapabilityLibraryCommand::Check(args) => {
+                    capability::library_check(capability::LibraryCheckOptions {
+                        json: args.json,
+                        repo_root: args.repo_root,
+                    })?;
+                }
+            },
+            CapabilityCommand::Fit(args) => {
+                launchpad::capability_fit(launchpad::CapabilityFitOptions {
+                    json: args.json,
+                    pack: args.pack,
+                    repo_root: args.repo_root,
+                })?;
+            }
         },
         Command::Host { command } => match command {
             HostCommand::Init { dir, name, force } => host::init(&dir, name.as_deref(), force)?,
@@ -3831,6 +3935,75 @@ mod tests {
             args.path,
             std::path::PathBuf::from("./capabilities/support-sla")
         );
+        assert!(args.json);
+    }
+
+    #[test]
+    fn parses_capability_library_add() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "capability",
+            "library",
+            "add",
+            "./capabilities/support-sla",
+            "--repo-root",
+            "./acme-support",
+        ]);
+        let Command::Capability { command } = cli.command else {
+            panic!("expected capability command");
+        };
+        let CapabilityCommand::Library {
+            command: CapabilityLibraryCommand::Add(args),
+        } = command
+        else {
+            panic!("expected capability library add");
+        };
+
+        assert_eq!(
+            args.path,
+            std::path::PathBuf::from("./capabilities/support-sla")
+        );
+        assert_eq!(
+            args.repo_root.as_deref(),
+            Some(std::path::Path::new("./acme-support"))
+        );
+    }
+
+    #[test]
+    fn parses_capability_library_list_json() {
+        let cli = Cli::parse_from(["lenso", "capability", "library", "list", "--json"]);
+        let Command::Capability { command } = cli.command else {
+            panic!("expected capability command");
+        };
+        let CapabilityCommand::Library {
+            command: CapabilityLibraryCommand::List(args),
+        } = command
+        else {
+            panic!("expected capability library list");
+        };
+
+        assert!(args.json);
+    }
+
+    #[test]
+    fn parses_capability_fit_json() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "capability",
+            "fit",
+            "support-sla",
+            "--repo-root",
+            ".",
+            "--json",
+        ]);
+        let Command::Capability { command } = cli.command else {
+            panic!("expected capability command");
+        };
+        let CapabilityCommand::Fit(args) = command else {
+            panic!("expected capability fit");
+        };
+
+        assert_eq!(args.pack, std::path::PathBuf::from("support-sla"));
         assert!(args.json);
     }
 

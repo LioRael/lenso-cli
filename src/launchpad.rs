@@ -117,6 +117,13 @@ pub(crate) struct AgentContextOptions {
     pub(crate) task: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct CapabilityFitOptions {
+    pub(crate) json: bool,
+    pub(crate) pack: PathBuf,
+    pub(crate) repo_root: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LaunchpadState {
@@ -298,6 +305,8 @@ struct AppCompositionState {
     #[serde(default)]
     capability_packs: Vec<AppCompositionCapabilityPack>,
     #[serde(default)]
+    pack_fit: Vec<AppCompositionPackFit>,
+    #[serde(default)]
     service_actions: Vec<AppCompositionAction>,
     #[serde(default)]
     agent_actions: Vec<AppCompositionAction>,
@@ -312,6 +321,16 @@ struct AppCompositionCapabilityPack {
     modules: Vec<String>,
     services: Vec<String>,
     next_command: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppCompositionPackFit {
+    name: String,
+    path: String,
+    status: String,
+    issues: Vec<String>,
+    command: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -532,7 +551,7 @@ fn compose_new_app(options: AppComposeOptions, dir: PathBuf) -> Result<()> {
         }
         let launchpad = read_launchpad_state_required(Path::new("."))?;
         let composition =
-            composition_for_existing_app(&launchpad, &options.addons, &options.packs, None)?;
+            composition_for_existing_app(&dir, &launchpad, &options.addons, &options.packs, None)?;
         let plan = app_change_plan_state(
             Path::new("."),
             &options.addons,
@@ -564,8 +583,13 @@ fn compose_existing_app(options: AppComposeOptions) -> Result<()> {
         .clone()
         .unwrap_or_else(|| PathBuf::from("."));
     let launchpad = read_launchpad_state_required(&repo_root)?;
-    let composition =
-        composition_for_existing_app(&launchpad, &options.addons, &options.packs, None)?;
+    let composition = composition_for_existing_app(
+        &repo_root,
+        &launchpad,
+        &options.addons,
+        &options.packs,
+        None,
+    )?;
     let plan = app_change_plan_state(
         &repo_root,
         &options.addons,
@@ -889,6 +913,33 @@ pub(crate) fn agent_context(options: AgentContextOptions) -> Result<()> {
         println!("Wrote agent context to {}.", output.display());
     } else {
         print!("{markdown}");
+    }
+    Ok(())
+}
+
+pub(crate) fn capability_fit(options: CapabilityFitOptions) -> Result<()> {
+    let repo_root = options.repo_root.unwrap_or_else(|| PathBuf::from("."));
+    let launchpad = read_launchpad_state_required(&repo_root)?;
+    let (_, _, _, fit) = app_change_plan_for_packs(&repo_root, &launchpad, &[options.pack])?;
+    let report = fit
+        .into_iter()
+        .next()
+        .context("capability fit report was empty")?;
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("Capability pack: {}", report.name);
+        println!("Status: {}", report.status);
+        println!("Path: {}", report.path);
+        for issue in &report.issues {
+            println!("- {issue}");
+        }
+        if let Some(command) = &report.command {
+            println!("Next: {command}");
+        }
+    }
+    if report.status == "blocked" {
+        bail!("capability pack does not fit");
     }
     Ok(())
 }
@@ -1734,7 +1785,8 @@ fn app_change_plan_state(
         app_change_plan_for_addons(&launchpad, addons)?
     };
     if !packs.is_empty() {
-        let (mut pack_changes, mut pack_blocked, _) = app_change_plan_for_packs(&launchpad, packs)?;
+        let (mut pack_changes, mut pack_blocked, _, _) =
+            app_change_plan_for_packs(repo_root, &launchpad, packs)?;
         changes.append(&mut pack_changes);
         blocked.append(&mut pack_blocked);
     }
@@ -1831,32 +1883,44 @@ fn app_change_plan_for_addon(
 }
 
 fn app_change_plan_for_packs(
+    repo_root: &Path,
     launchpad: &LaunchpadState,
     packs: &[PathBuf],
 ) -> Result<(
     Vec<AppChangePlanItem>,
     Vec<AppChangePlanItem>,
     Vec<AppCompositionCapabilityPack>,
+    Vec<AppCompositionPackFit>,
 )> {
     let mut changes = Vec::new();
     let mut blocked = Vec::new();
     let mut planned = Vec::new();
+    let mut fit = Vec::new();
     let mut seen = Vec::new();
 
-    for path in packs {
+    for requested_path in packs {
+        let path = capability::resolve_pack_path(repo_root, requested_path);
         let display_path = path.display().to_string();
-        let pack = match capability::read_pack(path) {
+        let pack = match capability::read_pack(&path) {
             Ok(pack) => pack,
             Err(err) => {
-                let name = pack_name_from_path(path);
+                let name = pack_name_from_path(&path);
+                let message = format!("Capability pack cannot be read: {err}");
                 blocked.push(AppChangePlanItem {
                     action: "fix-capability-pack".to_owned(),
                     command: Some(format!("lenso capability check {display_path}")),
                     id: format!("capability-pack-read-{name}"),
                     kind: "capability-pack".to_owned(),
-                    message: format!("Capability pack cannot be read: {err}"),
-                    name,
+                    message: message.clone(),
+                    name: name.clone(),
                     safe: false,
+                });
+                fit.push(AppCompositionPackFit {
+                    command: Some(format!("lenso capability check {display_path}")),
+                    issues: vec![message],
+                    name,
+                    path: display_path,
+                    status: "blocked".to_owned(),
                 });
                 continue;
             }
@@ -1865,6 +1929,33 @@ fn app_change_plan_for_packs(
             continue;
         }
         seen.push(pack.name.clone());
+
+        let check_report = capability::check_pack(&path)?;
+        let check_issues = check_report
+            .issues
+            .iter()
+            .filter(|issue| issue.severity == "error")
+            .map(|issue| format!("{}: {}", issue.code, issue.message))
+            .collect::<Vec<_>>();
+        if !check_issues.is_empty() {
+            blocked.push(AppChangePlanItem {
+                action: "fix-capability-pack".to_owned(),
+                command: Some(format!("lenso capability check {display_path}")),
+                id: format!("capability-pack-check-{}", pack.name),
+                kind: "capability-pack".to_owned(),
+                message: format!("Capability pack {} failed validation.", pack.name),
+                name: pack.name.clone(),
+                safe: false,
+            });
+            fit.push(AppCompositionPackFit {
+                command: Some(format!("lenso capability check {display_path}")),
+                issues: check_issues,
+                name: pack.name,
+                path: display_path,
+                status: "blocked".to_owned(),
+            });
+            continue;
+        }
 
         let modules = pack
             .modules
@@ -1892,22 +1983,37 @@ fn app_change_plan_for_packs(
         });
 
         if pack_already_applied(launchpad, &pack.name) {
+            fit.push(AppCompositionPackFit {
+                command: None,
+                issues: Vec::new(),
+                name: pack.name,
+                path: display_path,
+                status: "applied".to_owned(),
+            });
             continue;
         }
         if !pack.supports.blueprints.is_empty()
             && !pack.supports.blueprints.contains(&launchpad.blueprint)
         {
+            let message = format!(
+                "Capability pack {} does not support blueprint {}.",
+                pack.name, launchpad.blueprint
+            );
             blocked.push(AppChangePlanItem {
                 action: "choose-supported-capability-pack".to_owned(),
                 command: Some(format!("lenso capability inspect {display_path}")),
                 id: format!("capability-pack-unsupported-{}", pack.name),
                 kind: "capability-pack".to_owned(),
-                message: format!(
-                    "Capability pack {} does not support blueprint {}.",
-                    pack.name, launchpad.blueprint
-                ),
-                name: pack.name,
+                message: message.clone(),
+                name: pack.name.clone(),
                 safe: false,
+            });
+            fit.push(AppCompositionPackFit {
+                command: Some(format!("lenso capability inspect {display_path}")),
+                issues: vec![message],
+                name: pack.name,
+                path: display_path,
+                status: "blocked".to_owned(),
             });
             continue;
         }
@@ -1917,14 +2023,22 @@ fn app_change_plan_for_packs(
                 .iter()
                 .any(|existing| existing.name == **module)
         }) {
+            let message = format!("Capability pack module {module} already exists.");
             blocked.push(AppChangePlanItem {
                 action: "rename-capability-module".to_owned(),
                 command: Some(format!("lenso capability inspect {display_path}")),
                 id: format!("capability-pack-duplicate-module-{module}"),
                 kind: "capability-pack".to_owned(),
-                message: format!("Capability pack module {module} already exists."),
-                name: pack.name,
+                message: message.clone(),
+                name: pack.name.clone(),
                 safe: false,
+            });
+            fit.push(AppCompositionPackFit {
+                command: Some(format!("lenso capability inspect {display_path}")),
+                issues: vec![message],
+                name: pack.name,
+                path: display_path,
+                status: "blocked".to_owned(),
             });
             continue;
         }
@@ -1934,21 +2048,36 @@ fn app_change_plan_for_packs(
                 .iter()
                 .any(|existing| existing.name == service.service)
         }) {
+            let message = format!(
+                "Capability pack service {} already exists.",
+                service.service
+            );
             blocked.push(AppChangePlanItem {
                 action: "rename-capability-service".to_owned(),
                 command: Some(format!("lenso capability inspect {display_path}")),
                 id: format!("capability-pack-duplicate-service-{}", service.service),
                 kind: "capability-pack".to_owned(),
-                message: format!(
-                    "Capability pack service {} already exists.",
-                    service.service
-                ),
-                name: pack.name,
+                message: message.clone(),
+                name: pack.name.clone(),
                 safe: false,
+            });
+            fit.push(AppCompositionPackFit {
+                command: Some(format!("lenso capability inspect {display_path}")),
+                issues: vec![message],
+                name: pack.name,
+                path: display_path,
+                status: "blocked".to_owned(),
             });
             continue;
         }
 
+        fit.push(AppCompositionPackFit {
+            command: Some(format!("lenso app compose --pack {}", pack.name)),
+            issues: Vec::new(),
+            name: pack.name.clone(),
+            path: display_path.clone(),
+            status: "ready".to_owned(),
+        });
         changes.push(AppChangePlanItem {
             action: "compose-capability-pack".to_owned(),
             command: Some(format!("lenso capability check {display_path}")),
@@ -1960,7 +2089,7 @@ fn app_change_plan_for_packs(
         });
     }
 
-    Ok((changes, blocked, planned))
+    Ok((changes, blocked, planned, fit))
 }
 
 fn apply_capability_pack_to_repo(
@@ -2107,10 +2236,12 @@ fn print_app_change_plan(plan: &AppChangePlanState) {
 fn composition_preview_for_new_app(options: &AppComposeOptions) -> Result<AppCompositionState> {
     let blueprint = blueprint_by_name(&options.blueprint)?;
     let launchpad = launchpad_state_from_blueprint("new-app", &blueprint);
-    composition_for_existing_app(&launchpad, &options.addons, &options.packs, None)
+    let repo_root = options.dir.as_deref().unwrap_or_else(|| Path::new("."));
+    composition_for_existing_app(repo_root, &launchpad, &options.addons, &options.packs, None)
 }
 
 fn composition_for_existing_app(
+    repo_root: &Path,
     launchpad: &LaunchpadState,
     requested_addons: &[String],
     requested_packs: &[PathBuf],
@@ -2151,7 +2282,8 @@ fn composition_for_existing_app(
         .iter()
         .map(|pack| pack.name.clone())
         .collect::<Vec<_>>();
-    let (_, _, capability_packs) = app_change_plan_for_packs(launchpad, requested_packs)?;
+    let (_, _, capability_packs, pack_fit) =
+        app_change_plan_for_packs(repo_root, launchpad, requested_packs)?;
     let requested_pack_names = capability_packs
         .iter()
         .map(|pack| pack.name.clone())
@@ -2200,6 +2332,7 @@ fn composition_for_existing_app(
         applied_packs,
         pending_packs,
         capability_packs,
+        pack_fit,
         service_actions,
         agent_actions,
     })
@@ -2236,6 +2369,12 @@ fn print_app_composition(composition: &AppCompositionState) {
     );
     for pack in &composition.capability_packs {
         println!("pack: {} ({}) -> {}", pack.name, pack.status, pack.path);
+    }
+    for fit in &composition.pack_fit {
+        println!("pack fit: {} ({}) -> {}", fit.name, fit.status, fit.path);
+        for issue in &fit.issues {
+            println!("- {issue}");
+        }
     }
     for action in &composition.service_actions {
         if let Some(command) = &action.command {
@@ -2865,6 +3004,20 @@ fn agent_context_markdown(
                 output.push_str(&format!("- Next command: {command}\n"));
             }
         }
+        if let Some(fit) = change_plan
+            .and_then(|plan| plan.composition.as_ref())
+            .and_then(|composition| {
+                composition
+                    .pack_fit
+                    .iter()
+                    .find(|fit| fit.name == capability)
+            })
+        {
+            output.push_str(&format!("- Fit: {}\n", fit.status));
+            for issue in &fit.issues {
+                output.push_str(&format!("  - {issue}\n"));
+            }
+        }
         output.push_str("- Capability Pack is local authoring metadata; modules and services remain the runtime units.\n");
         output.push_str("- Runtime queues, retries, Outbox, Runtime Story, Technical Operations, and auth stay Host-owned.\n\n");
     }
@@ -2951,6 +3104,14 @@ fn agent_context_markdown(
                 output.push_str(&format!(
                     "- Capability pack: {} ({}) at {}\n",
                     pack.name, pack.status, pack.path
+                ));
+            }
+            for fit in &composition.pack_fit {
+                output.push_str(&format!(
+                    "- Pack fit: {} ({}) issues: {}\n",
+                    fit.name,
+                    fit.status,
+                    fit.issues.len()
                 ));
             }
             for action in &composition.service_actions {
@@ -3364,6 +3525,7 @@ mod tests {
             .addons
             .push(launchpad_addon_from_addon(&support_sla_addon()));
         let composition = composition_for_existing_app(
+            Path::new("."),
             &launchpad,
             &["support-sla".to_owned(), "customer-profile".to_owned()],
             &[],
@@ -3393,12 +3555,18 @@ mod tests {
         .unwrap();
         let launchpad = support_desk_launchpad_state("acme-support");
 
-        let composition =
-            composition_for_existing_app(&launchpad, &[], std::slice::from_ref(&pack_dir), None)
-                .unwrap();
+        let composition = composition_for_existing_app(
+            &root,
+            &launchpad,
+            &[],
+            std::slice::from_ref(&pack_dir),
+            None,
+        )
+        .unwrap();
 
         assert_eq!(composition.requested_packs, vec!["support-sla"]);
         assert_eq!(composition.pending_packs, vec!["support-sla"]);
+        assert_eq!(composition.pack_fit[0].status, "ready");
         assert_eq!(
             composition.capability_packs[0].services,
             vec!["support-sla-provider/api"]
@@ -3409,6 +3577,44 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains("lenso capability check")
+        );
+    }
+
+    #[test]
+    fn capability_pack_composition_resolves_library_name() {
+        let root = std::env::temp_dir().join(format!(
+            "lenso-capability-library-composition-{}",
+            current_unix_ms()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        capability::init(capability::InitOptions {
+            blueprints: vec!["support-desk".to_owned()],
+            dir: root.join("capabilities/support-sla"),
+            lang: "ts".to_owned(),
+            name: "support-sla".to_owned(),
+        })
+        .unwrap();
+        capability::library_add(capability::LibraryAddOptions {
+            path: PathBuf::from("capabilities/support-sla"),
+            repo_root: Some(root.clone()),
+        })
+        .unwrap();
+
+        let launchpad = support_desk_launchpad_state("acme-support");
+        let composition = composition_for_existing_app(
+            &root,
+            &launchpad,
+            &[],
+            &[PathBuf::from("support-sla")],
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(composition.requested_packs, vec!["support-sla"]);
+        assert_eq!(composition.pack_fit[0].status, "ready");
+        assert_eq!(
+            composition.capability_packs[0].path,
+            root.join("capabilities/support-sla").display().to_string()
         );
     }
 
@@ -3522,6 +3728,7 @@ mod tests {
                 applied_packs: Vec::new(),
                 capability_packs: Vec::new(),
                 intent: Some("support desk with SLA".to_owned()),
+                pack_fit: Vec::new(),
                 pending_addons: vec!["support-sla".to_owned()],
                 pending_packs: Vec::new(),
                 protocol: APP_COMPOSITION_PROTOCOL.to_owned(),
@@ -3577,6 +3784,7 @@ mod tests {
                     status: "pending".to_owned(),
                 }],
                 intent: None,
+                pack_fit: Vec::new(),
                 pending_addons: Vec::new(),
                 pending_packs: vec!["support-sla".to_owned()],
                 protocol: APP_COMPOSITION_PROTOCOL.to_owned(),
