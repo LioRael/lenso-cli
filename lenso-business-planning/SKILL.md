@@ -32,7 +32,13 @@ Do not ask for exhaustive product requirements before giving a path.
 4. Decide whether each new module should stay linked in Rust or be provided by a service.
 5. Sketch the required declarations: manifest, HTTP routes, schema-admin data, admin actions, runtime functions, events, lifecycle jobs, console surfaces, config, and dependencies.
 6. Identify cross-module collaboration through declared dependencies, events, host-owned queues, remote HTTP/proxy surfaces, or public APIs.
-7. Leave the next concrete command and follow-up skill.
+7. If the slice should be reused across apps or mixes modules, services, and agent work, create a capability pack before composing it:
+   `lenso capability init support-sla --dir ./capabilities/support-sla --lang ts --for-blueprint support-desk`,
+   `lenso capability library add ./capabilities/support-sla`,
+   `lenso capability fit support-sla --repo-root .`,
+   `lenso app compose ./acme-support --blueprint support-desk --pack support-sla --apply`.
+8. When a built-in blueprint fits, leave `lenso app compose ./acme-support --blueprint support-desk --addon support-sla --apply`, then `lenso app next`, `lenso app explain`, and `lenso agent task --from-app-plan "add the requested business behavior"`.
+9. Leave the next concrete command and follow-up skill.
 
 ## Boundary Heuristics
 
@@ -43,6 +49,16 @@ Split into multiple modules when capabilities can be installed separately, have 
 Choose a linked Rust module when the capability is first-party, should ship in the same deployable host, needs local transactions, or is the fastest path to prove the product slice.
 
 Choose a service when the capability is third-party, team-owned outside the host, JavaScript or TypeScript based, publishable on its own, or already needs an out-of-process service boundary.
+
+Choose a capability pack when the business slice needs a repeatable app-level
+bundle: linked modules, service-provided modules, seed manifests, docs, and
+agent handoff instructions. A pack is authoring metadata; it does not replace
+`lenso module install` for installable modules or `lenso service install` for
+out-of-process providers.
+
+Use the local capability library when the pack should be reused by name across
+App Composer, Console evidence, and agent handoff. It is still local discovery,
+not install or trust.
 
 When choosing a service, include the operator loop in the first slice:
 run the service, install the manifest, check `lenso service list`, check
@@ -65,6 +81,8 @@ For a clarified plan, return:
 Use these follow-up routes:
 
 - blank host -> `lenso host init <dir>` -> `lenso-starter-host`
+- composed app -> `lenso app compose ./acme-support --blueprint support-desk --addon support-sla --apply` -> `lenso app next`
+- capability pack -> `lenso capability init support-sla --dir ./capabilities/support-sla --lang ts --for-blueprint support-desk` -> `lenso capability library add ./capabilities/support-sla` -> `lenso capability fit support-sla --repo-root .` -> `lenso app compose ./acme-support --blueprint support-desk --pack support-sla --apply` -> `lenso agent task --for-capability support-sla "add enterprise SLA escalation"`
 - in-host module -> `lenso module create <name>` -> `lenso-module-authoring`
 - service -> `@lenso/service-kit` -> `lenso-remote-module-authoring` -> service lifecycle checks
 - API client or integration check -> committed OpenAPI contract -> `lenso-api-client`

@@ -16,6 +16,18 @@ Keep declarations serializable and keep host internals out of the module API.
 cargo add lenso@0.3.16
 ```
 
+When working inside a composed app, read the app handoff first:
+
+```sh
+lenso agent task --from-app-plan --for-module <module> "add the requested business behavior"
+```
+
+When the module belongs to a capability pack, narrow the handoff to that pack:
+
+```sh
+lenso agent task --for-capability support-sla "add enterprise SLA escalation"
+```
+
 Use `ModuleManifest` for declarations:
 
 - module capabilities
@@ -31,6 +43,8 @@ Use `ModuleManifest` for declarations:
 - Keep module behavior behind the host boundary.
 - Keep the module vertical.
 - Do not import another module's internals.
+- Treat modules as installable business capabilities; services are out-of-process providers.
+- Treat capability packs as composition metadata around modules and services, not as a replacement for module install.
 - Use the committed OpenAPI and contract artifacts for API-facing work.
 - Prefer `lenso module create <name>` before hand-building a module shape.
 

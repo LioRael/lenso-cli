@@ -19,6 +19,23 @@ cp .env.example .env
 lenso serve
 ```
 
+For a generated business app, prefer the App Composer path:
+
+```sh
+lenso app compose ./acme-support --blueprint support-desk --addon support-sla --apply
+lenso app next
+lenso app explain
+```
+
+For a generated app with a reusable capability pack:
+
+```sh
+lenso capability init support-sla --dir ./capabilities/support-sla --lang ts --for-blueprint support-desk
+lenso capability library add ./capabilities/support-sla
+lenso capability fit support-sla --repo-root .
+lenso app compose ./acme-support --blueprint support-desk --pack support-sla --apply
+```
+
 Use separate processes only when debugging service boundaries:
 
 ```sh
@@ -36,6 +53,7 @@ cargo run --bin worker
 - local Postgres
 - linked module wiring
 - service-provided module proxying
+- capability pack composition state
 
 ## Guardrails
 
@@ -56,6 +74,8 @@ When creating or fixing a starter host, leave:
 
 - the scaffolded project path
 - the command used to start it
+- the `lenso app next` or `lenso app explain` result when the host is a composed app
+- the `lenso capability fit <pack>` result when the host was composed with a capability pack
 - the URL for `/console` when the API is running
 - one focused check result
 
