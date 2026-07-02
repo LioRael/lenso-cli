@@ -6,7 +6,9 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 pub(crate) const PROTOCOL: &str = "lenso.capability-pack.v1";
+const LIBRARY_PROTOCOL: &str = "lenso.capability-library.v1";
 const MANIFEST: &str = "lenso.capability.json";
+const LIBRARY_FILE: &str = ".lenso/lenso.capability-library.json";
 
 #[derive(Debug, Clone)]
 pub(crate) struct InitOptions {
@@ -25,6 +27,29 @@ pub(crate) struct CheckOptions {
 #[derive(Debug, Clone)]
 pub(crate) struct InspectOptions {
     pub(crate) path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LibraryInitOptions {
+    pub(crate) repo_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LibraryAddOptions {
+    pub(crate) path: PathBuf,
+    pub(crate) repo_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LibraryListOptions {
+    pub(crate) json: bool,
+    pub(crate) repo_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LibraryCheckOptions {
+    pub(crate) json: bool,
+    pub(crate) repo_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -73,6 +98,29 @@ pub(crate) struct CapabilityAgent {
     pub(crate) default_task: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CapabilityLibrary {
+    pub(crate) protocol: String,
+    #[serde(default)]
+    pub(crate) packs: Vec<CapabilityLibraryEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CapabilityLibraryEntry {
+    pub(crate) name: String,
+    pub(crate) path: String,
+    pub(crate) label: String,
+    pub(crate) summary: String,
+    #[serde(default)]
+    pub(crate) blueprints: Vec<String>,
+    #[serde(default)]
+    pub(crate) modules: Vec<String>,
+    #[serde(default)]
+    pub(crate) services: Vec<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CapabilityCheckReport {
@@ -86,6 +134,13 @@ pub(crate) struct CapabilityCheckIssue {
     pub(crate) code: String,
     pub(crate) message: String,
     pub(crate) severity: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CapabilityLibraryCheckReport {
+    pub(crate) status: String,
+    pub(crate) packs: Vec<CapabilityCheckReport>,
 }
 
 pub(crate) fn init(options: InitOptions) -> Result<()> {
@@ -187,11 +242,109 @@ pub(crate) fn inspect(options: InspectOptions) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn library_init(options: LibraryInitOptions) -> Result<()> {
+    let repo_root = repo_root(options.repo_root)?;
+    let path = library_path(&repo_root);
+    if path.exists() {
+        println!("Capability library already exists: {}", path.display());
+        return Ok(());
+    }
+    write_json(
+        &path,
+        &CapabilityLibrary {
+            packs: Vec::new(),
+            protocol: LIBRARY_PROTOCOL.to_owned(),
+        },
+    )?;
+    println!("Created capability library {}.", path.display());
+    Ok(())
+}
+
+pub(crate) fn library_add(options: LibraryAddOptions) -> Result<()> {
+    let repo_root = repo_root(options.repo_root)?;
+    let pack_path = resolve_input_path(&repo_root, &options.path);
+    let report = check_pack(&pack_path)?;
+    if report.issues.iter().any(|issue| issue.severity == "error") {
+        bail!(
+            "capability pack check failed; run lenso capability check {}",
+            pack_path.display()
+        );
+    }
+    let pack = read_pack(&pack_path)?;
+    let mut library = read_library_or_default(&repo_root)?;
+    let entry = library_entry_from_pack(&repo_root, &pack_path, &pack);
+    library.packs.retain(|existing| existing.name != entry.name);
+    library.packs.push(entry.clone());
+    library.packs.sort_by(|a, b| a.name.cmp(&b.name));
+    write_json(&library_path(&repo_root), &library)?;
+    println!("Added capability pack {}.", entry.name);
+    println!("Next: lenso app compose --pack {}", entry.name);
+    Ok(())
+}
+
+pub(crate) fn library_list(options: LibraryListOptions) -> Result<()> {
+    let repo_root = repo_root(options.repo_root)?;
+    let library = read_library_or_default(&repo_root)?;
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&library)?);
+    } else if library.packs.is_empty() {
+        println!("Capability library is empty.");
+        println!("Next: lenso capability library add ./capabilities/support-sla");
+    } else {
+        for pack in &library.packs {
+            println!("{} -> {}", pack.name, pack.path);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn library_check(options: LibraryCheckOptions) -> Result<()> {
+    let repo_root = repo_root(options.repo_root)?;
+    let report = check_library(&repo_root)?;
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("Capability library: {}", report.status);
+        for pack in &report.packs {
+            println!(
+                "- {}: {}",
+                pack.name,
+                if pack.issues.is_empty() {
+                    "ready"
+                } else {
+                    "failed"
+                }
+            );
+        }
+    }
+    if report.status == "failed" {
+        bail!("capability library check failed");
+    }
+    Ok(())
+}
+
 pub(crate) fn read_pack(path: &Path) -> Result<CapabilityPack> {
     let manifest = manifest_path(path);
     let contents =
         fs::read_to_string(&manifest).with_context(|| format!("read {}", manifest.display()))?;
     serde_json::from_str(&contents).with_context(|| format!("parse {}", manifest.display()))
+}
+
+pub(crate) fn resolve_pack_path(repo_root: &Path, requested: &Path) -> PathBuf {
+    let path = resolve_input_path(repo_root, requested);
+    if manifest_path(&path).exists() {
+        return path;
+    }
+    let Some(name) = requested.to_str() else {
+        return path;
+    };
+    if requested.components().count() == 1
+        && let Ok(library) = read_library_or_default(repo_root)
+        && let Some(entry) = library.packs.iter().find(|entry| entry.name == name)
+    {
+        return repo_root.join(&entry.path);
+    }
+    path
 }
 
 pub(crate) fn check_pack(path: &Path) -> Result<CapabilityCheckReport> {
@@ -258,6 +411,103 @@ pub(crate) fn check_pack(path: &Path) -> Result<CapabilityCheckReport> {
         issues,
         name: pack.name,
     })
+}
+
+pub(crate) fn check_library(repo_root: &Path) -> Result<CapabilityLibraryCheckReport> {
+    let library = read_library_or_default(repo_root)?;
+    let packs = library
+        .packs
+        .iter()
+        .map(|entry| check_pack(&repo_root.join(&entry.path)))
+        .collect::<Result<Vec<_>>>()?;
+    let status = if packs
+        .iter()
+        .any(|pack| pack.issues.iter().any(|issue| issue.severity == "error"))
+    {
+        "failed"
+    } else {
+        "ready"
+    }
+    .to_owned();
+    Ok(CapabilityLibraryCheckReport { packs, status })
+}
+
+pub(crate) fn library_path(repo_root: &Path) -> PathBuf {
+    repo_root.join(LIBRARY_FILE)
+}
+
+fn read_library_or_default(repo_root: &Path) -> Result<CapabilityLibrary> {
+    let path = library_path(repo_root);
+    if !path.exists() {
+        return Ok(CapabilityLibrary {
+            packs: Vec::new(),
+            protocol: LIBRARY_PROTOCOL.to_owned(),
+        });
+    }
+    let contents = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let mut library: CapabilityLibrary =
+        serde_json::from_str(&contents).with_context(|| format!("parse {}", path.display()))?;
+    if library.protocol.is_empty() {
+        library.protocol = LIBRARY_PROTOCOL.to_owned();
+    }
+    Ok(library)
+}
+
+fn library_entry_from_pack(
+    repo_root: &Path,
+    pack_path: &Path,
+    pack: &CapabilityPack,
+) -> CapabilityLibraryEntry {
+    CapabilityLibraryEntry {
+        blueprints: pack.supports.blueprints.clone(),
+        label: pack.label.clone(),
+        modules: pack
+            .modules
+            .iter()
+            .map(|module| module.name.clone())
+            .collect(),
+        name: pack.name.clone(),
+        path: display_pack_path(repo_root, pack_path),
+        services: pack
+            .services
+            .iter()
+            .map(|service| format!("{}/{}", service.provider, service.service))
+            .collect(),
+        summary: pack.summary.clone(),
+    }
+}
+
+fn repo_root(repo_root: Option<PathBuf>) -> Result<PathBuf> {
+    match repo_root {
+        Some(path) => Ok(path),
+        None => std::env::current_dir().context("read current directory"),
+    }
+}
+
+fn resolve_input_path(repo_root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        let repo_path = repo_root.join(path);
+        if manifest_path(&repo_path).exists() {
+            repo_path
+        } else {
+            path.to_path_buf()
+        }
+    }
+}
+
+fn display_pack_path(repo_root: &Path, pack_path: &Path) -> String {
+    let absolute_pack = fs::canonicalize(manifest_path(pack_path))
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf));
+    let absolute_root = fs::canonicalize(repo_root).ok();
+    if let (Some(root), Some(pack)) = (absolute_root, absolute_pack)
+        && let Ok(relative) = pack.strip_prefix(root)
+    {
+        return relative.display().to_string();
+    }
+    pack_path.display().to_string()
 }
 
 fn write_seed_manifests(dir: &Path, pack: &CapabilityPack) -> Result<()> {
@@ -457,5 +707,52 @@ mod tests {
 
         let report = check_pack(&dir).unwrap();
         assert!(report.issues.iter().any(|issue| issue.code == "path"));
+    }
+
+    #[test]
+    fn capability_library_add_records_pack() {
+        let root = temp_test_dir("capability-library-add");
+        let dir = root.join("capabilities/support-sla");
+        init(InitOptions {
+            blueprints: vec!["support-desk".to_owned()],
+            dir: dir.clone(),
+            lang: "ts".to_owned(),
+            name: "support-sla".to_owned(),
+        })
+        .unwrap();
+
+        library_add(LibraryAddOptions {
+            path: PathBuf::from("capabilities/support-sla"),
+            repo_root: Some(root.clone()),
+        })
+        .unwrap();
+
+        let library = read_library_or_default(&root).unwrap();
+        assert_eq!(library.packs.len(), 1);
+        assert_eq!(library.packs[0].name, "support-sla");
+        assert_eq!(library.packs[0].path, "capabilities/support-sla");
+    }
+
+    #[test]
+    fn resolve_pack_path_uses_library_name() {
+        let root = temp_test_dir("capability-library-resolve");
+        let dir = root.join("capabilities/support-sla");
+        init(InitOptions {
+            blueprints: vec!["support-desk".to_owned()],
+            dir,
+            lang: "ts".to_owned(),
+            name: "support-sla".to_owned(),
+        })
+        .unwrap();
+        library_add(LibraryAddOptions {
+            path: PathBuf::from("capabilities/support-sla"),
+            repo_root: Some(root.clone()),
+        })
+        .unwrap();
+
+        assert_eq!(
+            resolve_pack_path(&root, Path::new("support-sla")),
+            root.join("capabilities/support-sla")
+        );
     }
 }
