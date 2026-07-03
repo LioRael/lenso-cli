@@ -11430,12 +11430,24 @@ fn builtin_linked_module_descriptor(reference: &str) -> Option<Value> {
                 }
             }
         })),
+        "organization" => Some(json!({
+            "name": "organization",
+            "source": "linked",
+            "dependencies": ["auth"],
+            "linked": {
+                "call": "organization::module::linked_module()",
+                "cargo": {
+                    "package": "lenso-module-organization",
+                    "version": "0.1.0"
+                }
+            }
+        })),
         _ => None,
     }
 }
 
 fn builtin_linked_module_names() -> &'static [&'static str] {
-    &["auth", "auth-password", "auth-device"]
+    &["auth", "auth-password", "auth-device", "organization"]
 }
 
 fn apply_linked_install_profiles(
@@ -13198,6 +13210,26 @@ mod tests {
             json!({
                 "package": "lenso-module-auth-device",
                 "version": "0.1.1"
+            })
+        );
+    }
+
+    #[test]
+    fn builtin_organization_descriptor_declares_external_linked_crate() {
+        let descriptor =
+            builtin_linked_module_descriptor("organization").expect("organization descriptor");
+
+        assert_eq!(descriptor["source"], "linked");
+        assert_eq!(descriptor["dependencies"], json!(["auth"]));
+        assert_eq!(
+            descriptor["linked"]["call"],
+            "organization::module::linked_module()"
+        );
+        assert_eq!(
+            descriptor["linked"]["cargo"],
+            json!({
+                "package": "lenso-module-organization",
+                "version": "0.1.0"
             })
         );
     }
