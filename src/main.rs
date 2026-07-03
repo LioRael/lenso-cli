@@ -1048,11 +1048,6 @@ enum ModuleCommand {
         #[command(subcommand)]
         command: ModuleServiceCommand,
     },
-    /// Manage a local module catalog.
-    Catalog {
-        #[command(subcommand)]
-        command: ModuleCatalogCommand,
-    },
     /// Install services.
     Marketplace {
         #[command(subcommand)]
@@ -1061,16 +1056,10 @@ enum ModuleCommand {
 }
 
 #[derive(Debug, Subcommand)]
-enum ModuleCatalogCommand {
-    /// Add a service manifest to the local catalog.
-    Add(ModuleCatalogAddArgs),
-}
-
-#[derive(Debug, Subcommand)]
 enum ModuleReleaseCommand {
-    /// Inspect a module release artifact or local catalog entry.
+    /// Inspect a module release artifact.
     Inspect(ModuleReleaseInspectArgs),
-    /// Validate a module release artifact or local catalog entry.
+    /// Validate a module release artifact.
     Check(ModuleReleaseInspectArgs),
 }
 
@@ -2050,6 +2039,10 @@ struct RemoteModuleInstallArgs {
     #[arg(long)]
     base_url: Option<String>,
 
+    /// Catalog registry URL used when installing by name.
+    #[arg(long)]
+    catalog_url: Option<String>,
+
     /// Install descriptor profile to apply.
     #[arg(long = "profile", alias = "with", value_delimiter = ',')]
     install_profiles: Vec<String>,
@@ -2083,12 +2076,8 @@ struct ServiceInstallArgs {
 
 #[derive(Debug, Args, Clone)]
 struct ModuleReleaseInspectArgs {
-    /// Module release artifact path/URL, or local catalog module name.
+    /// Module release artifact path or URL.
     release_reference: String,
-
-    /// Lenso host repository root for resolving catalog module names.
-    #[arg(long)]
-    repo_root: Option<std::path::PathBuf>,
 
     /// Runtime service base URL to use when installing local package artifacts.
     #[arg(long)]
@@ -2187,32 +2176,6 @@ struct ModuleDoctorArgs {
     /// Print machine-readable JSON.
     #[arg(long)]
     json: bool,
-}
-
-#[derive(Debug, Args)]
-struct ModuleCatalogAddArgs {
-    /// Remote module manifest URL, file URL, or local JSON path.
-    manifest_reference: String,
-
-    /// Lenso host repository root.
-    #[arg(long)]
-    repo_root: Option<std::path::PathBuf>,
-
-    /// Module catalog file to update.
-    #[arg(long)]
-    catalog_file: Option<std::path::PathBuf>,
-
-    /// Remote module base URL.
-    #[arg(long)]
-    base_url: Option<String>,
-
-    /// Catalog summary text.
-    #[arg(long)]
-    summary: Option<String>,
-
-    /// Print catalog changes without writing them.
-    #[arg(long)]
-    dry_run: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2379,6 +2342,7 @@ impl From<&RemoteModuleInstallArgs> for module::RemoteModuleInstallOptions {
         Self {
             allow_incompatible: args.allow_incompatible,
             base_url: args.base_url.clone(),
+            catalog_url: args.catalog_url.clone(),
             console_plan: args.console_plan,
             dry_run: args.dry_run,
             env_file: args.env_file.clone(),
@@ -2397,7 +2361,6 @@ impl From<&ModuleReleaseInspectArgs> for module::ModuleReleaseInspectOptions {
             base_url: args.base_url.clone(),
             check: false,
             json: args.json,
-            repo_root: args.repo_root.clone(),
         }
     }
 }
@@ -2810,18 +2773,6 @@ impl From<&ConsolePackageCreateArgs> for module::ConsolePackageCreateOptions {
             runtime_console_root: args.runtime_console_root.clone(),
             source: args.source.clone(),
             surface_name: args.surface_name.clone(),
-        }
-    }
-}
-
-impl From<&ModuleCatalogAddArgs> for module::ModuleCatalogAddOptions {
-    fn from(args: &ModuleCatalogAddArgs) -> Self {
-        Self {
-            base_url: args.base_url.clone(),
-            catalog_file: args.catalog_file.clone(),
-            dry_run: args.dry_run,
-            repo_root: args.repo_root.clone(),
-            summary: args.summary.clone(),
         }
     }
 }
@@ -3343,12 +3294,6 @@ async fn main() -> anyhow::Result<()> {
                 }
                 ModuleServiceCommand::Stop(args) => {
                     module::stop_module_service((&args).into()).await?;
-                }
-            },
-            ModuleCommand::Catalog { command } => match command {
-                ModuleCatalogCommand::Add(args) => {
-                    module::add_module_catalog_entry(&args.manifest_reference, (&args).into())
-                        .await?;
                 }
             },
             ModuleCommand::Marketplace { command } => match command {
