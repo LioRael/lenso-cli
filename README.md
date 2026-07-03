@@ -126,9 +126,6 @@ lenso module release check dist/lenso-service/support-suite-provider/modules/sup
   --base-url http://127.0.0.1:4100/lenso/service/v1
 lenso module install dist/lenso-service/support-suite-provider/modules/support-ticket/lenso.module-release.json \
   --base-url http://127.0.0.1:4100/lenso/service/v1
-lenso module catalog add dist/lenso-service/support-suite-provider/modules/support-ticket/lenso.module-release.json \
-  --base-url http://127.0.0.1:4100/lenso/service/v1
-lenso module install support-ticket
 lenso module enable support-ticket
 lenso module disable support-ticket
 ```
@@ -174,9 +171,11 @@ lenso module install auth-device
 ```
 
 `module install` reads `source` from the module descriptor when one is present.
-For V5 service-backed modules, `module install <name>` is the business-capability
-entrypoint: the catalog resolves the provider service, installs it when needed,
-then enables the requested module.
+When the reference is a module name, the CLI resolves it from the official
+catalog at `https://catalog.lenso.dev/v1/modules.json` unless `--catalog-url`
+points at another registry. For V5 service-backed modules, `module install
+<name>` is the business-capability entrypoint: the catalog resolves the provider
+service, installs it when needed, then enables the requested module.
 For module releases, `module install <module-release.json>` resolves the
 release by source, then records `moduleRelease` provenance in
 `.lenso/module-installs.json` where the source supports a receipt.

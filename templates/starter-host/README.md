@@ -70,7 +70,7 @@ sign-in uses this registered redirect URI:
 http://127.0.0.1:3000/console/oidc/callback
 ```
 
-Set `LENSO_MODULE_AUTH_OIDC__ENABLED=true` only with a real issuer, JWKS,
+Set `LENSO_MODULE_AUTH_OIDC_ENABLED=true` only with a real issuer, JWKS,
 RSA signing key, and `CONSOLE_REDIRECT_URIS` that includes the callback above.
 When writing JSON values in `.env`, wrap the whole JSON value in single quotes
 so dotenv preserves the inner double quotes.

@@ -12,6 +12,7 @@ use serde_json::{Map, Value, json};
 pub struct RemoteModuleInstallOptions {
     pub allow_incompatible: bool,
     pub base_url: Option<String>,
+    pub catalog_url: Option<String>,
     pub console_plan: bool,
     pub dry_run: bool,
     pub env_file: Option<PathBuf>,
@@ -27,7 +28,6 @@ pub struct ModuleReleaseInspectOptions {
     pub base_url: Option<String>,
     pub check: bool,
     pub json: bool,
-    pub repo_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -304,15 +304,6 @@ pub struct ModuleServiceStopOptions {
 }
 
 #[derive(Debug, Clone)]
-pub struct ModuleCatalogAddOptions {
-    pub base_url: Option<String>,
-    pub catalog_file: Option<PathBuf>,
-    pub dry_run: bool,
-    pub repo_root: Option<PathBuf>,
-    pub summary: Option<String>,
-}
-
-#[derive(Debug, Clone)]
 pub struct ModuleCreateOptions {
     pub area: Option<String>,
     pub capability: Option<String>,
@@ -368,6 +359,17 @@ pub struct AppliedConsolePlan;
 enum ModuleSource {
     Linked,
     Remote,
+}
+
+#[derive(Debug, Clone)]
+enum CatalogInstallTarget {
+    Descriptor {
+        descriptor: Value,
+        descriptor_reference: String,
+    },
+    ServiceManifest {
+        manifest_reference: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -542,7 +544,7 @@ struct RepoPaths {
 
 type PendingWrites = BTreeMap<PathBuf, String>;
 
-const MODULE_CATALOG_PATH: &str = ".lenso/module-catalog.json";
+pub const OFFICIAL_MODULE_CATALOG_URL: &str = "https://catalog.lenso.dev/v1/modules.json";
 const MODULE_INSTALL_LEDGER_PATH: &str = ".lenso/module-installs.json";
 const SERVICE_RELEASE_LEDGER_PATH: &str = ".lenso/service-releases.json";
 const SERVICE_ENVIRONMENTS_PATH: &str = ".lenso/service-environments.json";
@@ -734,7 +736,11 @@ pub async fn install_module(
     options: RemoteModuleInstallOptions,
 ) -> Result<()> {
     let source = parse_module_source(&options.source)?;
-    if let Some(descriptor) = read_install_descriptor(module_reference).await? {
+    let should_resolve_catalog_name = should_resolve_service_catalog_entry(source)
+        && !looks_like_json_reference(module_reference);
+    if !should_resolve_catalog_name
+        && let Some(descriptor) = read_install_descriptor(module_reference).await?
+    {
         if is_module_release_descriptor(&descriptor) {
             return install_module_descriptor(&descriptor, module_reference, options).await;
         }
@@ -746,22 +752,29 @@ pub async fn install_module(
         return install_module_descriptor(&descriptor, module_reference, options).await;
     }
 
-    if should_resolve_service_catalog_entry(source)
-        && !looks_like_json_reference(module_reference)
-        && let Some((descriptor_reference, descriptor)) =
-            local_catalog_module_release_descriptor(module_reference, options.repo_root.as_deref())?
+    if should_resolve_catalog_name
+        && let Some(target) =
+            official_catalog_install_target(module_reference, options.catalog_url.as_deref())
+                .await?
     {
-        return install_module_descriptor(&descriptor, &descriptor_reference, options).await;
+        return match target {
+            CatalogInstallTarget::Descriptor {
+                descriptor,
+                descriptor_reference,
+            } => install_module_descriptor(&descriptor, &descriptor_reference, options).await,
+            CatalogInstallTarget::ServiceManifest { manifest_reference } => {
+                add_remote_module(&manifest_reference, options).await
+            }
+        };
     }
 
-    if should_resolve_service_catalog_entry(source)
-        && !looks_like_json_reference(module_reference)
-        && let Some(manifest_reference) = local_catalog_service_manifest_reference(
-            module_reference,
-            options.repo_root.as_deref(),
-        )?
+    if should_resolve_catalog_name
+        && let Some(descriptor) = read_install_descriptor(module_reference).await?
     {
-        return add_remote_module(&manifest_reference, options).await;
+        if is_module_release_descriptor(&descriptor) {
+            return install_module_descriptor(&descriptor, module_reference, options).await;
+        }
+        return install_module_descriptor(&descriptor, module_reference, options).await;
     }
 
     match source {
@@ -816,6 +829,13 @@ fn catalog_entry_is_service(entry: &Value) -> bool {
         .is_some_and(|source| source.eq_ignore_ascii_case("service"))
 }
 
+fn catalog_entry_is_linked(entry: &Value) -> bool {
+    entry
+        .get("source")
+        .and_then(Value::as_str)
+        .is_some_and(|source| source.eq_ignore_ascii_case("linked"))
+}
+
 fn catalog_entry_is_module_release(entry: &Value) -> bool {
     entry.get("protocol").and_then(Value::as_str) == Some("lenso.module-release.v1")
 }
@@ -834,50 +854,168 @@ fn catalog_module_release_service_reference(entry: &Value) -> Option<&str> {
         .filter(|value| !value.is_empty())
 }
 
-fn local_catalog_module_release_descriptor(
+async fn official_catalog_install_target(
     module_name: &str,
-    repo_root: Option<&Path>,
-) -> Result<Option<(String, Value)>> {
-    let repo_root = resolve_repo_root(repo_root)?;
-    let Some(catalog) = read_json_if_exists(&repo_root.join(MODULE_CATALOG_PATH))? else {
-        return Ok(None);
-    };
-    let modules = catalog
-        .get("modules")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("Module catalog modules must be an array"))?;
-    Ok(modules
-        .iter()
-        .find(|entry| {
-            catalog_entry_is_module_release(entry)
-                && entry.get("name").and_then(Value::as_str) == Some(module_name)
-        })
-        .map(|entry| {
-            let reference = entry
-                .get("manifestReference")
-                .and_then(Value::as_str)
-                .unwrap_or(module_name)
-                .to_owned();
-            (reference, entry.clone())
-        }))
+    catalog_url: Option<&str>,
+) -> Result<Option<CatalogInstallTarget>> {
+    let catalog_url = catalog_url
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(OFFICIAL_MODULE_CATALOG_URL);
+    let catalog = read_json_reference(catalog_url)
+        .await
+        .with_context(|| format!("resolve official module catalog {catalog_url}"))?;
+    catalog_install_target_for_module(&catalog, module_name)
 }
 
-fn local_catalog_service_manifest_reference(
+fn catalog_install_target_for_module(
+    catalog: &Value,
     module_name: &str,
-    repo_root: Option<&Path>,
-) -> Result<Option<String>> {
-    let repo_root = resolve_repo_root(repo_root)?;
-    let Some(catalog) = read_json_if_exists(&repo_root.join(MODULE_CATALOG_PATH))? else {
-        return Ok(None);
-    };
+) -> Result<Option<CatalogInstallTarget>> {
     let modules = catalog
         .get("modules")
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow!("Module catalog modules must be an array"))?;
-    Ok(modules
-        .iter()
-        .find_map(|entry| catalog_service_manifest_reference_for_module(entry, module_name))
-        .map(ToOwned::to_owned))
+    for entry in modules {
+        if catalog_entry_is_module_release(entry)
+            && entry.get("name").and_then(Value::as_str) == Some(module_name)
+        {
+            let descriptor_reference = catalog_entry_manifest_reference(entry, module_name);
+            return Ok(Some(CatalogInstallTarget::Descriptor {
+                descriptor: entry.clone(),
+                descriptor_reference,
+            }));
+        }
+
+        if catalog_entry_is_linked(entry)
+            && entry.get("name").and_then(Value::as_str) == Some(module_name)
+        {
+            let descriptor_reference = catalog_entry_manifest_reference(entry, module_name);
+            let descriptor = linked_catalog_descriptor(entry, module_name, &descriptor_reference)?;
+            return Ok(Some(CatalogInstallTarget::Descriptor {
+                descriptor,
+                descriptor_reference,
+            }));
+        }
+
+        if let Some(manifest_reference) =
+            catalog_service_manifest_reference_for_module(entry, module_name)
+        {
+            return Ok(Some(CatalogInstallTarget::ServiceManifest {
+                manifest_reference: manifest_reference.to_owned(),
+            }));
+        }
+    }
+    Ok(None)
+}
+
+fn catalog_entry_manifest_reference(entry: &Value, module_name: &str) -> String {
+    entry
+        .get("manifestReference")
+        .or_else(|| entry.get("manifest_reference"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(module_name)
+        .to_owned()
+}
+
+fn linked_catalog_descriptor(
+    entry: &Value,
+    module_name: &str,
+    descriptor_reference: &str,
+) -> Result<Value> {
+    if let Some(builtin_module_name) = descriptor_reference
+        .strip_prefix("builtin:")
+        .or_else(|| descriptor_reference.strip_prefix("linked:"))
+        && let Some(descriptor) = builtin_linked_module_descriptor(builtin_module_name)
+    {
+        return Ok(merge_linked_catalog_metadata(descriptor, entry));
+    }
+    if let Some(descriptor) = builtin_linked_module_descriptor(module_name) {
+        return Ok(merge_linked_catalog_metadata(descriptor, entry));
+    }
+    if entry.get("linked").is_some() {
+        return Ok(merge_linked_catalog_metadata(entry.clone(), entry));
+    }
+    bail!(
+        "Official catalog module `{module_name}` points to linked source `{descriptor_reference}`, but this lenso-cli version does not know how to install it"
+    );
+}
+
+fn merge_linked_catalog_metadata(mut descriptor: Value, entry: &Value) -> Value {
+    if let Some(console_packages) = entry
+        .get("consolePackages")
+        .or_else(|| entry.get("console_packages"))
+        .and_then(Value::as_array)
+    {
+        let console = console_packages
+            .iter()
+            .filter_map(catalog_console_package_surface)
+            .collect::<Vec<_>>();
+        if !console.is_empty() {
+            descriptor["console"] = Value::Array(console);
+        }
+    }
+    descriptor
+}
+
+fn catalog_console_package_surface(package: &Value) -> Option<Value> {
+    let package_name = package
+        .get("packageName")
+        .or_else(|| package.get("package_name"))
+        .and_then(Value::as_str)?;
+    let export_name = package
+        .get("exportName")
+        .or_else(|| package.get("export_name"))
+        .and_then(Value::as_str)?;
+    let mut surface = json!({
+        "package": {
+            "export": export_name,
+            "name": package_name,
+        },
+    });
+    let surface_object = surface.as_object_mut()?;
+    if let Some(bundle_url) = package
+        .get("bundleUrl")
+        .or_else(|| package.get("bundle_url"))
+        .and_then(Value::as_str)
+    {
+        surface_object
+            .get_mut("package")?
+            .as_object_mut()?
+            .insert("bundleUrl".to_owned(), json!(bundle_url));
+    }
+    if let Some(host_api) = package
+        .get("hostApi")
+        .or_else(|| package.get("host_api"))
+        .and_then(Value::as_str)
+    {
+        surface_object
+            .get_mut("package")?
+            .as_object_mut()?
+            .insert("hostApi".to_owned(), json!(host_api));
+    }
+    if let Some(version) = package.get("version").and_then(Value::as_str) {
+        surface_object
+            .get_mut("package")?
+            .as_object_mut()?
+            .insert("version".to_owned(), json!(version));
+    }
+    if let Some(route) = package.get("route").and_then(Value::as_str) {
+        surface_object.insert("route".to_owned(), json!(route));
+    }
+    if let Some(required_capabilities) = package
+        .get("requiredCapabilities")
+        .or_else(|| package.get("required_capabilities"))
+        .cloned()
+    {
+        surface_object.insert("required_capabilities".to_owned(), required_capabilities);
+    }
+    if let Some(styles) = package.get("styles").cloned() {
+        surface_object.insert("styles".to_owned(), styles);
+    }
+    Some(surface)
 }
 
 async fn install_module_descriptor(
@@ -943,8 +1081,7 @@ pub async fn inspect_module_release(
     options: ModuleReleaseInspectOptions,
 ) -> Result<()> {
     let (descriptor_reference, descriptor) =
-        read_module_release_descriptor_for_inspect(release_reference, options.repo_root.as_deref())
-            .await?;
+        read_module_release_descriptor_for_inspect(release_reference).await?;
     let release = validate_module_release_descriptor(descriptor)?;
     let source = module_release_source(&release)?;
     let provider = release.get("provider").and_then(Value::as_object);
@@ -992,15 +1129,12 @@ pub async fn inspect_module_release(
     };
     let install_command =
         module_release_install_command(&descriptor_reference, base_url.as_deref());
-    let catalog_command =
-        module_release_catalog_command(&descriptor_reference, base_url.as_deref());
 
     if options.json {
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({
                 "baseUrl": base_url,
-                "catalogCommand": catalog_command,
                 "installCommand": install_command,
                 "issues": &issues,
                 "name": string_field(&release, "name")?.trim(),
@@ -1045,7 +1179,6 @@ pub async fn inspect_module_release(
             );
         }
         println!("- install: {install_command}");
-        println!("- catalog: {catalog_command}");
         if !issues.is_empty() {
             println!("Issues:");
             for issue in &issues {
@@ -1062,20 +1195,11 @@ pub async fn inspect_module_release(
 
 async fn read_module_release_descriptor_for_inspect(
     release_reference: &str,
-    repo_root: Option<&Path>,
 ) -> Result<(String, Value)> {
     if let Some(descriptor) = read_install_descriptor(release_reference).await? {
         return Ok((release_reference.to_owned(), descriptor));
     }
-    if !looks_like_json_reference(release_reference)
-        && let Some((descriptor_reference, descriptor)) =
-            local_catalog_module_release_descriptor(release_reference, repo_root)?
-    {
-        return Ok((descriptor_reference, descriptor));
-    }
-    bail!(
-        "Module release `{release_reference}` was not found as a file, URL, or local catalog entry"
-    );
+    bail!("Module release `{release_reference}` was not found as a file or URL");
 }
 
 fn module_release_inspect_issues(
@@ -1098,15 +1222,6 @@ fn module_release_inspect_issues(
 fn module_release_install_command(release_reference: &str, base_url: Option<&str>) -> String {
     format!(
         "lenso module install {release_reference}{}",
-        base_url
-            .map(|base_url| format!(" --base-url {base_url}"))
-            .unwrap_or_default()
-    )
-}
-
-fn module_release_catalog_command(release_reference: &str, base_url: Option<&str>) -> String {
-    format!(
-        "lenso module catalog add {release_reference}{}",
         base_url
             .map(|base_url| format!(" --base-url {base_url}"))
             .unwrap_or_default()
@@ -1197,6 +1312,7 @@ async fn update_remote_module_from_receipt(
                     .base_url
                     .clone()
                     .or_else(|| service_receipt_base_url(receipt)),
+                catalog_url: None,
                 console_plan: options.console_plan,
                 dry_run: options.dry_run,
                 env_file: options.env_file,
@@ -1234,6 +1350,7 @@ async fn update_remote_module_from_receipt(
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned)
             }),
+            catalog_url: None,
             console_plan: options.console_plan,
             dry_run: options.dry_run,
             env_file: options.env_file,
@@ -1271,6 +1388,7 @@ async fn update_linked_module_from_receipt(
         RemoteModuleInstallOptions {
             allow_incompatible: options.allow_incompatible,
             base_url: None,
+            catalog_url: None,
             console_plan: options.console_plan,
             dry_run: options.dry_run,
             env_file: options.env_file,
@@ -2824,141 +2942,6 @@ fn write_service_lock(lock_file_path: &Path) -> Result<()> {
     )
 }
 
-pub async fn add_module_catalog_entry(
-    manifest_reference: &str,
-    options: ModuleCatalogAddOptions,
-) -> Result<()> {
-    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
-    let catalog_file_path = resolve_path(
-        &repo_root,
-        options
-            .catalog_file
-            .as_deref()
-            .unwrap_or_else(|| Path::new(MODULE_CATALOG_PATH)),
-    );
-    let manifest = read_json_reference(manifest_reference).await?;
-    if is_module_release_descriptor(&manifest) {
-        let manifest = validate_module_release_descriptor(manifest)?;
-        let module_name = string_field(&manifest, "name")?.trim().to_owned();
-        let version = string_field(&manifest, "version")?.trim().to_owned();
-        let mut catalog = read_json_if_exists(&catalog_file_path)?
-            .unwrap_or_else(|| json!({ "modules": [], "version": 1 }));
-        let modules = catalog
-            .get_mut("modules")
-            .and_then(Value::as_array_mut)
-            .ok_or_else(|| anyhow!("Module catalog modules must be an array"))?;
-        modules.retain(|entry| {
-            entry.get("name").and_then(Value::as_str) != Some(module_name.as_str())
-        });
-        modules.push(module_release_catalog_entry_from_manifest(
-            &manifest,
-            manifest_reference,
-            options.base_url.as_deref(),
-            options.summary.as_deref(),
-        )?);
-
-        if options.dry_run {
-            println!("Module catalog dry run:");
-            println!("- {}", display_relative(&repo_root, &catalog_file_path));
-            println!("- {module_name} {version}");
-            return Ok(());
-        }
-
-        write_json(&catalog_file_path, &catalog)?;
-        println!("Added module release {module_name} to module catalog.");
-        println!("Updated:");
-        println!("- {}", display_relative(&repo_root, &catalog_file_path));
-        println!("Install:");
-        println!("- lenso module install {module_name}");
-        return Ok(());
-    }
-    let service_package = if is_service_package_manifest(&manifest) {
-        let package = validate_service_package_manifest(manifest.clone())?;
-        let service_manifest_reference =
-            service_package_manifest_reference(manifest_reference, &package)?;
-        Some((
-            ServicePackageInstallContext {
-                manifest: package,
-                reference: manifest_reference.to_owned(),
-            },
-            service_manifest_reference,
-        ))
-    } else {
-        None
-    };
-    let (manifest_reference, manifest) =
-        if let Some((_, service_manifest_reference)) = service_package.as_ref() {
-            (
-                service_manifest_reference.as_str(),
-                read_json_reference(service_manifest_reference).await?,
-            )
-        } else {
-            (manifest_reference, manifest)
-        };
-    let is_service = is_service_manifest(&manifest);
-    let manifest = if is_service {
-        validate_service_manifest(manifest)?
-    } else {
-        validate_remote_module_manifest(manifest)?
-    };
-    let module_name = string_field(&manifest, "name")?.trim().to_owned();
-    let version = string_field(&manifest, "version")?.trim().to_owned();
-    let base_url = derive_remote_base_url(options.base_url.as_deref(), manifest_reference)?;
-    let mut catalog = read_json_if_exists(&catalog_file_path)?
-        .unwrap_or_else(|| json!({ "modules": [], "version": 1 }));
-    let modules = catalog
-        .get_mut("modules")
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| anyhow!("Module catalog modules must be an array"))?;
-    modules.retain(|entry| entry.get("name").and_then(Value::as_str) != Some(module_name.as_str()));
-    let mut entry = if is_service {
-        service_catalog_entry_from_manifest(
-            &manifest,
-            manifest_reference,
-            &base_url,
-            options.summary.as_deref(),
-        )?
-    } else {
-        module_catalog_entry_from_manifest(
-            &manifest,
-            manifest_reference,
-            &base_url,
-            options.summary.as_deref(),
-        )?
-    };
-    if let Some((package_context, _)) = &service_package {
-        entry["servicePackage"] = json!({
-            "manifestReference": package_context.reference.clone(),
-            "manifestSnapshot": package_context.manifest.clone(),
-        });
-    }
-    modules.push(entry);
-
-    if options.dry_run {
-        println!("Module catalog dry run:");
-        println!("- {}", display_relative(&repo_root, &catalog_file_path));
-        println!("- {module_name} {version}");
-        return Ok(());
-    }
-
-    write_json(&catalog_file_path, &catalog)?;
-    if is_service {
-        println!("Added service {module_name} to module catalog.");
-    } else {
-        println!("Added {module_name} to module catalog.");
-    }
-    println!("Updated:");
-    println!("- {}", display_relative(&repo_root, &catalog_file_path));
-    println!("Install:");
-    if is_service {
-        println!("- lenso service install {manifest_reference}");
-    } else {
-        println!("- lenso module install {manifest_reference}");
-    }
-
-    Ok(())
-}
-
 pub async fn check_service_manifest_reference(
     manifest_reference: &str,
     options: ServiceManifestCheckOptions,
@@ -3628,6 +3611,7 @@ pub async fn upgrade_service(options: ServiceUpgradeOptions) -> Result<()> {
     let install_options = RemoteModuleInstallOptions {
         allow_incompatible: options.allow_incompatible,
         base_url: options.base_url,
+        catalog_url: None,
         console_plan: false,
         dry_run: options.dry_run,
         env_file: options.env_file,
@@ -3670,6 +3654,7 @@ pub async fn rollback_service(options: ServiceRollbackOptions) -> Result<()> {
     let install_options = RemoteModuleInstallOptions {
         allow_incompatible: true,
         base_url: service_receipt_base_url(&receipt),
+        catalog_url: None,
         console_plan: false,
         dry_run: options.dry_run,
         env_file: options.env_file,
@@ -6601,9 +6586,7 @@ async fn create_remote_module(options: ModuleCreateOptions) -> Result<()> {
     println!("Next steps:");
     println!("- pnpm --dir {package_root_name}/backend dev");
     println!("- lenso service install http://127.0.0.1:4100/lenso/service/v1/manifest");
-    println!(
-        "- lenso module catalog add http://127.0.0.1:4100/lenso/service/v1/manifest # optional discovery"
-    );
+    println!("- publish the module entry to a catalog registry for name-based installs");
     println!("- publish or install the console package");
     println!("- pnpm install");
 
@@ -7536,11 +7519,6 @@ fn queue_remote_module_files(
     );
     queue_write(
         pending_writes,
-        package_root.join("catalog-entry.json"),
-        json_string_pretty(&remote_catalog_entry_json(context))?,
-    );
-    queue_write(
-        pending_writes,
         package_root.join("module-services.local.json"),
         json_string_pretty(&remote_module_services_local_json(context))?,
     );
@@ -7765,55 +7743,6 @@ fn remote_module_services_local_json(context: &ConsolePackageContext) -> Value {
     })
 }
 
-fn remote_catalog_entry_json(context: &ConsolePackageContext) -> Value {
-    let service_id = service_id_for_module(&context.module_id);
-    json!({
-        "baseUrl": "https://example.com/lenso/service/v1",
-        "compatibility": {
-            "consolePackageApi": CONSOLE_BUNDLE_HOST_API,
-            "remoteProtocolVersion": REMOTE_PROTOCOL_VERSION,
-            "requiredHostFeatures": SUPPORTED_SERVICE_MODULE_FEATURES,
-        },
-        "consolePackages": [
-            {
-                "exportName": context.module_name,
-                "packageName": context.package_name,
-                "route": context.route,
-            },
-        ],
-        "deployment": {
-            "commands": ["pnpm --dir backend dev"],
-            "target": "container-paas",
-        },
-        "install": {
-            "services": [
-                {
-                    "command": "pnpm --dir backend dev",
-                    "name": service_id.clone(),
-                },
-            ],
-        },
-        "manifestReference": "https://example.com/lenso/service/v1/manifest",
-        "modules": [
-            {
-                "capabilities": [context.capability],
-                "name": context.module_id,
-                "version": "0.1.0",
-            },
-        ],
-        "name": service_id.clone(),
-        "service": {
-            "requiredEnv": [],
-            "statusPath": "/lenso/service/v1/status",
-            "statusUrl": "https://example.com/lenso/service/v1/status",
-            "transports": ["http"],
-        },
-        "source": "service",
-        "summary": format!("{} workspace and operations", context.label),
-        "version": "0.1.0",
-    })
-}
-
 fn remote_root_package_json(module_id: &str) -> Result<String> {
     json_string_pretty(&json!({
         "name": format!("lenso-{module_id}"),
@@ -7843,7 +7772,6 @@ Lenso service package scaffold.
 ## Shape
 
 - `lenso.service.json`: install-time service manifest.
-- `catalog-entry.json`: optional local catalog entry for discovery.
 - `module-services.local.json`: local service lifecycle file for CLI checks.
 - `RUNBOOK.md`: create, run, install, inspect, and troubleshoot steps.
 - `backend/`: service backend implementation.
@@ -7875,18 +7803,16 @@ GET https://example.com/lenso/service/v1/manifest
 GET https://example.com/lenso/service/v1/status
 ```
 
-Use `catalog-entry.json` as the local discovery record, or add the manifest
-URL directly:
+Install the service directly by manifest URL:
 
 ```sh
 lenso service install https://example.com/lenso/service/v1/manifest
 ```
 
-If you want it to appear in Available Modules before installing it, add a local
-catalog entry:
+Publish a module entry to a catalog registry to support name-based installs:
 
 ```sh
-lenso module catalog add https://example.com/lenso/service/v1/manifest
+lenso module install {module_id} --catalog-url https://catalog.example.com/v1/modules.json
 ```
 
 If the manifest is inspected from a local file, provide the runtime base URL:
@@ -11144,151 +11070,6 @@ fn remove_stale_module_console_artifacts(
     Ok(changed)
 }
 
-fn module_catalog_entry_from_manifest(
-    manifest: &Value,
-    manifest_reference: &str,
-    base_url: &str,
-    summary: Option<&str>,
-) -> Result<Value> {
-    let empty = Vec::new();
-    let console_surfaces = manifest
-        .get("console")
-        .and_then(Value::as_array)
-        .unwrap_or(&empty);
-    let console_packages = console_surfaces
-        .iter()
-        .filter_map(|surface| {
-            let package = surface.get("package").and_then(Value::as_object)?;
-            let mut package_hint = json!({
-                "exportName": package.get("export")?.as_str()?,
-                "packageName": package.get("name")?.as_str()?,
-                "route": surface.get("route").and_then(Value::as_str).unwrap_or("-"),
-            });
-            if let Some(bundle_url) = console_bundle_url(surface, Some(package)) {
-                package_hint["bundleUrl"] = json!(bundle_url);
-            }
-            let styles = console_bundle_styles(surface, Some(package));
-            if !styles.is_empty() {
-                package_hint["styles"] = json!(styles);
-            }
-            if let Some(host_api) = package
-                .get("hostApi")
-                .or_else(|| package.get("host_api"))
-                .or_else(|| surface.get("hostApi"))
-                .or_else(|| surface.get("host_api"))
-                .and_then(Value::as_str)
-            {
-                package_hint["hostApi"] = json!(host_api);
-            }
-            if let Some(version) = package
-                .get("version")
-                .or_else(|| surface.get("version"))
-                .and_then(Value::as_str)
-            {
-                package_hint["version"] = json!(version);
-            }
-            Some(package_hint)
-        })
-        .collect::<Vec<_>>();
-    Ok(json!({
-        "baseUrl": base_url,
-        "consolePackages": console_packages,
-        "manifestReference": manifest_reference,
-        "name": string_field(manifest, "name")?.trim(),
-        "source": "remote",
-        "summary": summary.or_else(|| manifest.get("summary").and_then(Value::as_str)).unwrap_or("-"),
-        "version": string_field(manifest, "version")?.trim(),
-    }))
-}
-
-fn module_release_catalog_entry_from_manifest(
-    manifest: &Value,
-    manifest_reference: &str,
-    base_url: Option<&str>,
-    summary: Option<&str>,
-) -> Result<Value> {
-    let source = module_release_source(manifest)?;
-    let mut entry = json!({
-        "manifestReference": manifest_reference,
-        "name": string_field(manifest, "name")?.trim(),
-        "protocol": "lenso.module-release.v1",
-        "source": source,
-        "summary": summary.or_else(|| manifest.get("summary").and_then(Value::as_str)).unwrap_or("-"),
-        "version": string_field(manifest, "version")?.trim(),
-    });
-    if source == "service" {
-        let provider = module_release_provider(manifest)?;
-        let provider_name = provider
-            .get("name")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| anyhow!("Module release provider.name is required"))?;
-        entry["providedBy"] = json!(provider_name);
-        entry["provider"] = Value::Object(provider.clone());
-        if let Some(service_manifest) = provider
-            .get("serviceManifest")
-            .or_else(|| provider.get("service_manifest"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            entry["serviceManifest"] = json!(service_manifest);
-        }
-    }
-    if let Some(base_url) = base_url.map(str::trim).filter(|value| !value.is_empty()) {
-        entry["baseUrl"] = json!(base_url);
-    }
-    copy_optional_manifest_field(manifest, &mut entry, "capabilities");
-    copy_optional_manifest_field(manifest, &mut entry, "dependencies");
-    copy_optional_manifest_field(manifest, &mut entry, "compatibility");
-    copy_optional_manifest_field(manifest, &mut entry, "linked");
-    Ok(entry)
-}
-
-fn service_catalog_entry_from_manifest(
-    manifest: &Value,
-    manifest_reference: &str,
-    base_url: &str,
-    summary: Option<&str>,
-) -> Result<Value> {
-    let provided_modules = manifest
-        .get("modules")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("Service manifest modules must be an array"))?
-        .iter()
-        .map(|module| {
-            json!({
-                "capabilities": module.get("capabilities").cloned().unwrap_or_else(|| json!([])),
-                "name": string_field(module, "name").unwrap_or("-").trim(),
-                "version": module
-                    .get("version")
-                    .and_then(Value::as_str)
-                    .unwrap_or_else(|| string_field(manifest, "version").unwrap_or("0.1.0")),
-            })
-        })
-        .collect::<Vec<_>>();
-    let mut entry = json!({
-        "baseUrl": base_url,
-        "manifestReference": manifest_reference,
-        "modules": provided_modules,
-        "name": string_field(manifest, "name")?.trim(),
-        "service": {
-            "requiredEnv": manifest.get("required_env").or_else(|| manifest.get("requiredEnv")).cloned().unwrap_or_else(|| json!([])),
-            "statusPath": service_status_path(manifest),
-            "statusUrl": service_status_url(manifest, base_url),
-            "transports": manifest.get("transports").cloned().unwrap_or_else(|| json!(["http"])),
-        },
-        "source": "service",
-        "summary": summary.or_else(|| manifest.get("summary").and_then(Value::as_str)).unwrap_or("-"),
-        "version": string_field(manifest, "version")?.trim(),
-    });
-    copy_optional_manifest_field(manifest, &mut entry, "compatibility");
-    copy_optional_manifest_field(manifest, &mut entry, "deployment");
-    copy_optional_manifest_field(manifest, &mut entry, "install");
-    Ok(entry)
-}
-
 fn unique_console_package_plan_items(install_plan: &Value) -> Vec<ConsolePackagePlanItem> {
     let mut items_by_key = BTreeMap::new();
     for module_plan in install_plan
@@ -11377,12 +11158,12 @@ fn builtin_linked_module_descriptor(reference: &str) -> Option<Value> {
             "console": [
                 {
                     "package": {
-                        "bundleUrl": "https://cdn.jsdelivr.net/npm/@lenso/auth-console@0.1.1/dist/auth-console.js",
+                        "bundleUrl": "https://cdn.jsdelivr.net/npm/@lenso/auth-console@0.1.3/dist/auth-console.js",
                         "export": "authConsoleModule",
                         "hostApi": "1",
                         "name": "@lenso/auth-console",
-                        "styles": ["https://cdn.jsdelivr.net/npm/@lenso/auth-console@0.1.1/dist/auth-console.css"],
-                        "version": "0.1.1"
+                        "styles": ["https://cdn.jsdelivr.net/npm/@lenso/auth-console@0.1.3/dist/auth-console.css"],
+                        "version": "0.1.3"
                     },
                     "required_capabilities": ["auth.users.read"]
                 }
@@ -11410,12 +11191,72 @@ fn builtin_linked_module_descriptor(reference: &str) -> Option<Value> {
                 }
             }
         })),
+        "auth-oauth" => Some(json!({
+            "name": "auth-oauth",
+            "source": "linked",
+            "dependencies": ["auth"],
+            "linked": {
+                "call": "auth_oauth::module::linked_module()",
+                "cargo": {
+                    "package": "lenso-module-auth-oauth",
+                    "version": "0.1.0"
+                }
+            }
+        })),
+        "auth-anonymous" => Some(json!({
+            "name": "auth-anonymous",
+            "source": "linked",
+            "dependencies": ["auth"],
+            "linked": {
+                "call": "auth_anonymous::module::linked_module()",
+                "cargo": {
+                    "package": "lenso-module-auth-anonymous",
+                    "version": "0.1.0"
+                }
+            }
+        })),
         "auth-password" => Some(json!({
             "name": "auth-password",
             "source": "linked",
             "dependencies": ["auth"],
             "linked": {
                 "call": "builtins::auth_password()"
+            }
+        })),
+        "auth-github" => Some(json!({
+            "name": "auth-github",
+            "source": "linked",
+            "dependencies": ["auth", "auth-oauth"],
+            "linked": {
+                "call": "auth_github::module::linked_module()",
+                "cargo": {
+                    "package": "lenso-module-auth-github",
+                    "version": "0.1.0"
+                }
+            }
+        })),
+        "auth-google" => Some(json!({
+            "name": "auth-google",
+            "source": "linked",
+            "dependencies": ["auth", "auth-oauth"],
+            "linked": {
+                "call": "auth_google::module::linked_module()",
+                "cargo": {
+                    "package": "lenso-module-auth-google",
+                    "version": "0.1.0"
+                }
+            }
+        })),
+        "auth-oidc" => Some(json!({
+            "name": "auth-oidc",
+            "source": "linked",
+            "dependencies": ["auth"],
+            "linked": {
+                "call": "auth_oidc::module::linked_module()",
+                "cargo": {
+                    "package": "lenso-module-auth-oidc",
+                    "version": "0.1.0"
+                }
             }
         })),
         "auth-device" => Some(json!({
@@ -11447,7 +11288,17 @@ fn builtin_linked_module_descriptor(reference: &str) -> Option<Value> {
 }
 
 fn builtin_linked_module_names() -> &'static [&'static str] {
-    &["auth", "auth-password", "auth-device", "organization"]
+    &[
+        "auth",
+        "auth-oauth",
+        "auth-anonymous",
+        "auth-password",
+        "auth-github",
+        "auth-google",
+        "auth-oidc",
+        "auth-device",
+        "organization",
+    ]
 }
 
 fn apply_linked_install_profiles(
@@ -13190,8 +13041,57 @@ mod tests {
         assert_eq!(descriptor["linked"]["call"], "builtins::auth()");
         assert_eq!(
             descriptor["console"][0]["package"]["bundleUrl"],
-            "https://cdn.jsdelivr.net/npm/@lenso/auth-console@0.1.1/dist/auth-console.js"
+            "https://cdn.jsdelivr.net/npm/@lenso/auth-console@0.1.3/dist/auth-console.js"
         );
+    }
+
+    #[test]
+    fn catalog_linked_entry_resolves_builtin_descriptor_and_console_metadata() {
+        let catalog = json!({
+            "version": 1,
+            "modules": [
+                {
+                    "name": "auth",
+                    "version": "0.1.4",
+                    "source": "linked",
+                    "manifestReference": "builtin:auth",
+                    "consolePackages": [
+                        {
+                            "packageName": "@lenso/auth-console",
+                            "exportName": "authConsoleModule",
+                            "bundleUrl": "https://cdn.example.test/auth-console.js",
+                            "hostApi": "1",
+                            "requiredCapabilities": ["auth.users.read"],
+                            "styles": ["https://cdn.example.test/auth-console.css"],
+                            "version": "0.1.99"
+                        }
+                    ]
+                }
+            ]
+        });
+
+        let target = catalog_install_target_for_module(&catalog, "auth")
+            .unwrap()
+            .expect("catalog target");
+
+        let CatalogInstallTarget::Descriptor {
+            descriptor,
+            descriptor_reference,
+        } = target
+        else {
+            panic!("expected linked descriptor target");
+        };
+        assert_eq!(descriptor_reference, "builtin:auth");
+        assert_eq!(descriptor["linked"]["call"], "builtins::auth()");
+        assert_eq!(
+            descriptor["console"][0]["package"]["bundleUrl"],
+            "https://cdn.example.test/auth-console.js"
+        );
+        assert_eq!(
+            descriptor["console"][0]["required_capabilities"],
+            json!(["auth.users.read"])
+        );
+        assert_eq!(descriptor["console"][0]["package"]["version"], "0.1.99");
     }
 
     #[test]
@@ -13212,6 +13112,32 @@ mod tests {
                 "version": "0.1.1"
             })
         );
+    }
+
+    #[test]
+    fn builtin_auth_oauth_provider_descriptors_declare_external_linked_crates() {
+        let oauth = builtin_linked_module_descriptor("auth-oauth").expect("auth-oauth descriptor");
+        let github =
+            builtin_linked_module_descriptor("auth-github").expect("auth-github descriptor");
+        let google =
+            builtin_linked_module_descriptor("auth-google").expect("auth-google descriptor");
+        let oidc = builtin_linked_module_descriptor("auth-oidc").expect("auth-oidc descriptor");
+
+        assert_eq!(oauth["dependencies"], json!(["auth"]));
+        assert_eq!(
+            oauth["linked"]["call"],
+            "auth_oauth::module::linked_module()"
+        );
+        assert_eq!(github["dependencies"], json!(["auth", "auth-oauth"]));
+        assert_eq!(
+            github["linked"]["cargo"]["package"],
+            "lenso-module-auth-github"
+        );
+        assert_eq!(
+            google["linked"]["call"],
+            "auth_google::module::linked_module()"
+        );
+        assert_eq!(oidc["linked"]["call"], "auth_oidc::module::linked_module()");
     }
 
     #[test]
@@ -13709,6 +13635,7 @@ mod tests {
             RemoteModuleInstallOptions {
                 allow_incompatible: false,
                 base_url: Some("http://127.0.0.1:4110/lenso/service/v1".to_owned()),
+                catalog_url: None,
                 console_plan: false,
                 dry_run: false,
                 env_file: None,
@@ -13812,6 +13739,7 @@ mod tests {
             RemoteModuleInstallOptions {
                 allow_incompatible: false,
                 base_url: Some("http://127.0.0.1:4110/lenso/service/v1".to_owned()),
+                catalog_url: None,
                 console_plan: false,
                 dry_run: false,
                 env_file: None,
@@ -13849,9 +13777,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn module_catalog_install_resolves_module_release() {
+    async fn module_install_resolves_service_release_from_catalog_url() {
         let repo_root = std::env::temp_dir().join(format!(
-            "lenso-module-release-catalog-{}",
+            "lenso-module-release-registry-{}",
             uuid::Uuid::now_v7()
         ));
         let package_dir = repo_root.join("artifact");
@@ -13883,8 +13811,9 @@ mod tests {
         )
         .unwrap();
         let release_path = package_dir.join("lenso.module-release.json");
+        let catalog_path = repo_root.join("official-catalog.json");
         write_json(
-            &repo_root.join(MODULE_CATALOG_PATH),
+            &catalog_path,
             &json!({
                 "version": 1,
                 "modules": [
@@ -13910,6 +13839,7 @@ mod tests {
             RemoteModuleInstallOptions {
                 allow_incompatible: false,
                 base_url: None,
+                catalog_url: Some(catalog_path.to_string_lossy().to_string()),
                 console_plan: false,
                 dry_run: false,
                 env_file: None,
@@ -13943,113 +13873,79 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn module_catalog_add_records_module_release_entry() {
+    async fn module_install_resolves_linked_module_from_official_catalog() {
         let repo_root = std::env::temp_dir().join(format!(
-            "lenso-module-release-catalog-add-{}",
+            "lenso-official-catalog-install-{}",
             uuid::Uuid::now_v7()
         ));
-        let release_path = repo_root.join("lenso.module-release.json");
+        fs::create_dir_all(repo_root.join("src")).unwrap();
+        write_file(
+            &repo_root.join("Cargo.toml"),
+            b"[package]\nname = \"host\"\n\n[dependencies]\nlenso = { version = \"0.3.16\", features = [\"host\"] }\n",
+        )
+        .unwrap();
+        write_file(
+            &repo_root.join("src/lib.rs"),
+            b"mod modules;\n\nuse lenso::host::prelude::*;\n\npub fn host_composition() -> HostComposition {\n    HostBuilder::new()\n        .linked_module(modules::app::linked_module())\n        .build()\n}\n",
+        )
+        .unwrap();
+        let catalog_path = repo_root.join("official-catalog.json");
         write_json(
-            &release_path,
+            &catalog_path,
             &json!({
-                "protocol": "lenso.module-release.v1",
-                "name": "support-ticket",
-                "version": "0.5.0",
-                "source": "service",
-                "provider": {
-                    "name": "support-suite-provider",
-                    "serviceManifest": "http://127.0.0.1:4110/lenso/service/v1/manifest"
-                },
-                "capabilities": ["support_ticket.tickets.read"]
+                "version": 1,
+                "modules": [
+                    {
+                        "name": "auth-github",
+                        "version": "0.1.0",
+                        "source": "linked",
+                        "manifestReference": "builtin:auth-github",
+                        "dependencies": ["auth", "auth-oauth"]
+                    }
+                ]
             }),
         )
         .unwrap();
 
-        add_module_catalog_entry(
-            &release_path.to_string_lossy(),
-            ModuleCatalogAddOptions {
-                base_url: Some("http://127.0.0.1:4110/lenso/service/v1".to_owned()),
-                catalog_file: None,
-                dry_run: false,
-                repo_root: Some(repo_root.clone()),
-                summary: None,
-            },
-        )
-        .await
-        .unwrap();
-
-        let catalog = read_json(&repo_root.join(MODULE_CATALOG_PATH)).unwrap();
-        assert_eq!(catalog["modules"][0]["name"], json!("support-ticket"));
-        assert_eq!(
-            catalog["modules"][0]["protocol"],
-            json!("lenso.module-release.v1")
-        );
-        assert_eq!(
-            catalog["modules"][0]["manifestReference"],
-            json!(release_path.to_string_lossy().to_string())
-        );
-        assert_eq!(
-            catalog["modules"][0]["provider"]["name"],
-            json!("support-suite-provider")
-        );
-        assert_eq!(
-            catalog["modules"][0]["providedBy"],
-            json!("support-suite-provider")
-        );
-        assert_eq!(
-            catalog["modules"][0]["serviceManifest"],
-            json!("http://127.0.0.1:4110/lenso/service/v1/manifest")
-        );
-        assert_eq!(
-            catalog["modules"][0]["baseUrl"],
-            json!("http://127.0.0.1:4110/lenso/service/v1")
-        );
-        fs::remove_dir_all(repo_root).ok();
-    }
-
-    #[tokio::test]
-    async fn module_catalog_add_records_linked_module_release_entry() {
-        let repo_root = std::env::temp_dir().join(format!(
-            "lenso-linked-module-release-catalog-add-{}",
-            uuid::Uuid::now_v7()
-        ));
-        let release_path = repo_root.join("lenso.module-release.json");
-        write_json(
-            &release_path,
-            &json!({
-                "protocol": "lenso.module-release.v1",
-                "name": "auth-password",
-                "version": "0.5.0",
-                "source": "linked",
-                "capabilities": ["auth.password.login"],
-                "linked": {
-                    "call": "modules::auth_password::linked_module()"
-                }
-            }),
-        )
-        .unwrap();
-
-        add_module_catalog_entry(
-            &release_path.to_string_lossy(),
-            ModuleCatalogAddOptions {
+        install_module(
+            "auth-github",
+            RemoteModuleInstallOptions {
+                allow_incompatible: false,
                 base_url: None,
-                catalog_file: None,
+                catalog_url: Some(catalog_path.to_string_lossy().to_string()),
+                console_plan: false,
                 dry_run: false,
+                env_file: None,
+                install_profiles: Vec::new(),
+                module_services_file: None,
                 repo_root: Some(repo_root.clone()),
-                summary: None,
+                run_install_commands: false,
+                source: "remote".to_owned(),
             },
         )
         .await
         .unwrap();
 
-        let catalog = read_json(&repo_root.join(MODULE_CATALOG_PATH)).unwrap();
-        assert_eq!(catalog["modules"][0]["name"], json!("auth-password"));
-        assert_eq!(catalog["modules"][0]["source"], json!("linked"));
-        assert_eq!(catalog["modules"][0]["provider"], Value::Null);
-        assert_eq!(
-            catalog["modules"][0]["linked"]["call"],
-            json!("modules::auth_password::linked_module()")
-        );
+        let env = read_text(&repo_root.join(".env")).unwrap();
+        assert!(env.contains("LENSO_MODULE_AUTH_ENABLED=true"));
+        assert!(env.contains("LENSO_MODULE_AUTH_OAUTH_ENABLED=true"));
+        assert!(env.contains("LENSO_MODULE_AUTH_GITHUB_ENABLED=true"));
+        let cargo_toml = read_text(&repo_root.join("Cargo.toml")).unwrap();
+        assert!(cargo_toml.contains("lenso-module-auth-oauth = \"0.1.0\""));
+        assert!(cargo_toml.contains("lenso-module-auth-github = \"0.1.0\""));
+        let host_lib = read_text(&repo_root.join("src/lib.rs")).unwrap();
+        assert!(host_lib.contains(".linked_module(builtins::auth())"));
+        assert!(host_lib.contains(".linked_module(auth_oauth::module::linked_module())"));
+        assert!(host_lib.contains(".linked_module(auth_github::module::linked_module())"));
+        let ledger = read_json(&repo_root.join(MODULE_INSTALL_LEDGER_PATH)).unwrap();
+        let entry = ledger["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["moduleName"] == "auth-github")
+            .unwrap();
+        assert_eq!(entry["manifestReference"], json!("builtin:auth-github"));
+        assert_eq!(entry["dependencies"], json!(["auth", "auth-oauth"]));
         fs::remove_dir_all(repo_root).ok();
     }
 
@@ -14082,7 +13978,6 @@ mod tests {
                 base_url: None,
                 check: true,
                 json: true,
-                repo_root: None,
             },
         )
         .await
@@ -14126,7 +14021,6 @@ mod tests {
                 base_url: Some("http://127.0.0.1:4110/lenso/service/v1".to_owned()),
                 check: true,
                 json: true,
-                repo_root: None,
             },
         )
         .await
@@ -14159,7 +14053,6 @@ mod tests {
                 base_url: None,
                 check: true,
                 json: true,
-                repo_root: None,
             },
         )
         .await
@@ -14684,58 +14577,6 @@ mod tests {
         assert_eq!(config["configuredEnv"], json!(["PORT"]));
         assert_eq!(config["missingEnv"], json!(["SUPPORT_API_KEY"]));
         fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn service_catalog_entry_records_provider_and_modules() {
-        let manifest = validate_service_manifest(json!({
-            "compatibility": { "remoteProtocolVersion": "1" },
-            "deployment": { "target": "container-paas" },
-            "install": {
-                "services": [
-                    {
-                        "command": "pnpm start",
-                        "name": "support-service"
-                    }
-                ]
-            },
-            "modules": [
-                {
-                    "capabilities": ["support.tickets.read"],
-                    "name": "support-ticket",
-                    "version": "0.1.0"
-                }
-            ],
-            "name": "support-service",
-            "protocol": "lenso.service.v1",
-            "required_env": ["PORT"],
-            "status_path": "/lenso/service/v1/status",
-            "transports": ["http"],
-            "version": "0.1.0"
-        }))
-        .unwrap();
-
-        let entry = service_catalog_entry_from_manifest(
-            &manifest,
-            "http://127.0.0.1:4110/lenso/service/v1/manifest",
-            "http://127.0.0.1:4110/lenso/service/v1",
-            Some("Support ticket service"),
-        )
-        .unwrap();
-
-        assert_eq!(entry["name"], json!("support-service"));
-        assert_eq!(entry["source"], json!("service"));
-        assert_eq!(entry["modules"][0]["name"], json!("support-ticket"));
-        assert_eq!(
-            entry["service"]["statusUrl"],
-            json!("http://127.0.0.1:4110/lenso/service/v1/status")
-        );
-        assert_eq!(entry["deployment"]["target"], json!("container-paas"));
-        assert_eq!(
-            entry["install"]["services"][0]["name"],
-            json!("support-service")
-        );
-        assert_eq!(entry["compatibility"]["remoteProtocolVersion"], json!("1"));
     }
 
     #[test]
