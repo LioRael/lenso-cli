@@ -161,6 +161,30 @@ The Runtime Console package generator is available directly as:
 lenso console package create billing
 ```
 
+### Runtime Console package development
+
+Preview a console package while editing it:
+
+```sh
+lenso console dev --package packages/auth-console
+```
+
+From a module repository root, discover every local console package:
+
+```sh
+lenso module dev --console
+```
+
+Both commands default to standalone mock mode. Add `--host` to proxy real Lenso
+host APIs while still loading the local package bundle:
+
+```sh
+lenso module dev --console --host http://localhost:3000
+```
+
+Set `LENSO_RUNTIME_CONSOLE_ROOT=/path/to/lenso-runtime-console` when the Runtime
+Console checkout is not a sibling of the current repository.
+
 ## Install a module
 
 ```sh
