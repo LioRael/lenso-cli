@@ -1,4 +1,5 @@
 mod capability;
+mod console_dev;
 mod host;
 mod launchpad;
 mod module;
@@ -998,6 +999,8 @@ enum ConsoleCommand {
     Update(ConsoleUpdateArgs),
     /// Grant Runtime Console admin scopes to an auth user.
     BootstrapAdmin(ConsoleBootstrapAdminArgs),
+    /// Start a Runtime Console package development shell.
+    Dev(ConsoleDevArgs),
     /// Manage Runtime Console package registration.
     Package {
         #[command(subcommand)]
@@ -1020,10 +1023,35 @@ struct ConsoleUpdateArgs {
     console_version: String,
 }
 
+#[derive(Debug, Args, Clone)]
+struct ConsoleDevArgs {
+    /// Console package directory. Defaults to the current directory.
+    #[arg(long = "package")]
+    package: Option<std::path::PathBuf>,
+
+    /// Real Lenso host URL to proxy. Omit for standalone mock mode.
+    #[arg(long)]
+    host: Option<String>,
+
+    /// Runtime Console dev server port.
+    #[arg(long, default_value_t = 5174)]
+    port: u16,
+
+    /// Open browser after startup.
+    #[arg(long)]
+    open: bool,
+
+    /// Runtime Console repository root.
+    #[arg(long = "runtime-console-root")]
+    runtime_console_root: Option<std::path::PathBuf>,
+}
+
 #[derive(Debug, Subcommand)]
 enum ModuleCommand {
     /// Create a linked module or service scaffold.
     Create(ModuleCreateArgs),
+    /// Start module-local development helpers.
+    Dev(ModuleDevArgs),
     /// Install a module capability from a release, catalog entry, service, or linked source.
     Install(RemoteModuleInstallArgs),
     /// Enable a module capability.
@@ -1053,6 +1081,33 @@ enum ModuleCommand {
         #[command(subcommand)]
         command: ModuleMarketplaceCommand,
     },
+}
+
+#[derive(Debug, Args, Clone)]
+struct ModuleDevArgs {
+    /// Start the Runtime Console package dev shell for this module repository.
+    #[arg(long)]
+    console: bool,
+
+    /// Module repository root. Defaults to the current directory.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Real Lenso host URL to proxy. Omit for standalone mock mode.
+    #[arg(long)]
+    host: Option<String>,
+
+    /// Runtime Console dev server port.
+    #[arg(long, default_value_t = 5174)]
+    port: u16,
+
+    /// Open browser after startup.
+    #[arg(long)]
+    open: bool,
+
+    /// Runtime Console repository root.
+    #[arg(long = "runtime-console-root")]
+    runtime_console_root: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -3065,6 +3120,16 @@ async fn main() -> anyhow::Result<()> {
             ConsoleCommand::BootstrapAdmin(args) => {
                 host::bootstrap_admin((&args).into()).await?;
             }
+            ConsoleCommand::Dev(args) => {
+                console_dev::run_console_dev(console_dev::ConsoleDevOptions {
+                    cwd: None,
+                    host: args.host,
+                    open: args.open,
+                    package: args.package,
+                    port: args.port,
+                    runtime_console_root: args.runtime_console_root,
+                })?;
+            }
             ConsoleCommand::Package { command } => match command {
                 ConsolePackageCommand::Create(args) => {
                     module::create_console_package((&args).into()).await?;
@@ -3243,6 +3308,19 @@ async fn main() -> anyhow::Result<()> {
         Command::Module { command } => match command {
             ModuleCommand::Create(args) => {
                 module::create_module((&args).into()).await?;
+            }
+            ModuleCommand::Dev(args) => {
+                if !args.console {
+                    anyhow::bail!("`lenso module dev` currently requires --console");
+                }
+                console_dev::run_console_dev(console_dev::ConsoleDevOptions {
+                    cwd: args.repo_root,
+                    host: args.host,
+                    open: args.open,
+                    package: None,
+                    port: args.port,
+                    runtime_console_root: args.runtime_console_root,
+                })?;
             }
             ModuleCommand::Install(args) => {
                 warn_module_install_manifest_reference(&args.manifest_reference);
@@ -3816,6 +3894,80 @@ mod tests {
 
         assert!(args.live);
         assert!(args.write_state);
+    }
+
+    #[test]
+    fn parses_console_dev() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "console",
+            "dev",
+            "--package",
+            "packages/auth-console",
+            "--host",
+            "http://127.0.0.1:3000",
+            "--port",
+            "5175",
+            "--open",
+            "--runtime-console-root",
+            "../lenso-runtime-console",
+        ]);
+        let Command::Console {
+            command: ConsoleCommand::Dev(args),
+        } = cli.command
+        else {
+            panic!("expected console dev");
+        };
+
+        assert_eq!(
+            args.package.as_deref(),
+            Some(std::path::Path::new("packages/auth-console"))
+        );
+        assert_eq!(args.host.as_deref(), Some("http://127.0.0.1:3000"));
+        assert_eq!(args.port, 5175);
+        assert!(args.open);
+        assert_eq!(
+            args.runtime_console_root.as_deref(),
+            Some(std::path::Path::new("../lenso-runtime-console"))
+        );
+    }
+
+    #[test]
+    fn parses_module_dev_console() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "module",
+            "dev",
+            "--console",
+            "--repo-root",
+            "./module-repo",
+            "--host",
+            "http://127.0.0.1:3000",
+            "--port",
+            "5176",
+            "--open",
+            "--runtime-console-root",
+            "../lenso-runtime-console",
+        ]);
+        let Command::Module {
+            command: ModuleCommand::Dev(args),
+        } = cli.command
+        else {
+            panic!("expected module dev");
+        };
+
+        assert!(args.console);
+        assert_eq!(
+            args.repo_root.as_deref(),
+            Some(std::path::Path::new("./module-repo"))
+        );
+        assert_eq!(args.host.as_deref(), Some("http://127.0.0.1:3000"));
+        assert_eq!(args.port, 5176);
+        assert!(args.open);
+        assert_eq!(
+            args.runtime_console_root.as_deref(),
+            Some(std::path::Path::new("../lenso-runtime-console"))
+        );
     }
 
     #[test]
