@@ -45,6 +45,7 @@ jobs:
           VITE_RUNTIME_CONSOLE_MODE: api
       - run: |
           rm -rf console/dist
+          mkdir -p console
           cp -R ../lenso-runtime-console/dist console/dist
           test -f console/dist/index.html
           test -f console/dist/extensions/host/runtime-console-api.js
