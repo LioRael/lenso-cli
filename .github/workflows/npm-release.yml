@@ -14,8 +14,10 @@ jobs:
     steps:
       - run: |
           test -n "$LENSO_RUNTIME_CONSOLE_TOKEN"
+          test -n "$NPM_TOKEN"
         env:
           LENSO_RUNTIME_CONSOLE_TOKEN: ${{ secrets.LENSO_RUNTIME_CONSOLE_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   console:
     name: build Runtime Console
@@ -160,7 +162,7 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
-      - name: Ensure npm supports trusted publishing
+      - name: Ensure npm CLI is current
         run: |
           npm install --global npm@^11.5.1
           npm --version
@@ -177,6 +179,8 @@ jobs:
           npm run check:npm-publish
           npm pack --dry-run --ignore-scripts
         working-directory: lenso-cli
-      - name: Publish to npm with trusted publishing
+      - name: Publish to npm
         run: npm publish --access public --ignore-scripts
         working-directory: lenso-cli
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
