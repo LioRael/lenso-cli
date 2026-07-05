@@ -545,6 +545,8 @@ struct RepoPaths {
 type PendingWrites = BTreeMap<PathBuf, String>;
 
 pub const OFFICIAL_MODULE_CATALOG_URL: &str = "https://catalog.lenso.dev/v1/modules.json";
+pub const OFFICIAL_MODULE_CATALOG_FALLBACK_URL: &str =
+    "https://lenso-catalog.lenso.workers.dev/v1/modules.json";
 const MODULE_INSTALL_LEDGER_PATH: &str = ".lenso/module-installs.json";
 const SERVICE_RELEASE_LEDGER_PATH: &str = ".lenso/service-releases.json";
 const SERVICE_ENVIRONMENTS_PATH: &str = ".lenso/service-environments.json";
@@ -858,14 +860,47 @@ async fn official_catalog_install_target(
     module_name: &str,
     catalog_url: Option<&str>,
 ) -> Result<Option<CatalogInstallTarget>> {
-    let catalog_url = catalog_url
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(OFFICIAL_MODULE_CATALOG_URL);
-    let catalog = read_json_reference(catalog_url)
-        .await
-        .with_context(|| format!("resolve official module catalog {catalog_url}"))?;
-    catalog_install_target_for_module(&catalog, module_name)
+    if let Some(catalog_url) = catalog_url.map(str::trim).filter(|value| !value.is_empty()) {
+        let catalog = read_json_reference(catalog_url)
+            .await
+            .with_context(|| format!("resolve official module catalog {catalog_url}"))?;
+        return catalog_install_target_for_module(&catalog, module_name);
+    }
+
+    official_catalog_install_target_from_urls(
+        module_name,
+        OFFICIAL_MODULE_CATALOG_URL,
+        &[OFFICIAL_MODULE_CATALOG_FALLBACK_URL.to_owned()],
+    )
+    .await
+}
+
+async fn official_catalog_install_target_from_urls(
+    module_name: &str,
+    primary_url: &str,
+    fallback_urls: &[String],
+) -> Result<Option<CatalogInstallTarget>> {
+    let mut errors = Vec::new();
+    for catalog_url in std::iter::once(primary_url).chain(fallback_urls.iter().map(String::as_str))
+    {
+        let catalog = match read_json_reference(catalog_url).await {
+            Ok(catalog) => catalog,
+            Err(error) => {
+                errors.push(format!("{catalog_url}: {error:#}"));
+                continue;
+            }
+        };
+        return catalog_install_target_for_module(&catalog, module_name);
+    }
+
+    let attempted_urls = std::iter::once(primary_url)
+        .chain(fallback_urls.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(", ");
+    bail!(
+        "Failed to resolve official module catalog from {attempted_urls}: {}",
+        errors.join("; ")
+    );
 }
 
 fn catalog_install_target_for_module(
@@ -13980,6 +14015,73 @@ mod tests {
         assert_eq!(entry["manifestReference"], json!("builtin:auth-github"));
         assert_eq!(entry["dependencies"], json!(["auth", "auth-oauth"]));
         fs::remove_dir_all(repo_root).ok();
+    }
+
+    #[tokio::test]
+    async fn official_catalog_uses_fallback_when_primary_is_challenged() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0; 1024];
+                let _ = stream.read(&mut buffer);
+                let request = String::from_utf8_lossy(&buffer);
+                if request.starts_with("GET /primary") {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 403 Forbidden\r\nContent-Type: text/html\r\nContent-Length: 14\r\n\r\nJust a moment!",
+                        )
+                        .unwrap();
+                } else {
+                    let body = json!({
+                        "version": 1,
+                        "modules": [
+                            {
+                                "name": "audit-log",
+                                "version": "0.1.0",
+                                "source": "linked",
+                                "manifestReference": "builtin:audit-log"
+                            }
+                        ]
+                    })
+                    .to_string();
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .unwrap();
+                }
+            }
+        });
+
+        let target = official_catalog_install_target_from_urls(
+            "audit-log",
+            &format!("http://{addr}/primary"),
+            &[format!("http://{addr}/fallback")],
+        )
+        .await
+        .unwrap()
+        .expect("catalog target");
+
+        server.join().unwrap();
+
+        match target {
+            CatalogInstallTarget::Descriptor {
+                descriptor,
+                descriptor_reference,
+            } => {
+                assert_eq!(descriptor["name"], json!("audit-log"));
+                assert_eq!(descriptor_reference, "builtin:audit-log");
+            }
+            CatalogInstallTarget::ServiceManifest { .. } => {
+                panic!("expected linked descriptor");
+            }
+        }
     }
 
     #[tokio::test]
