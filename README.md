@@ -197,9 +197,12 @@ lenso module install auth-device
 `module install` reads `source` from the module descriptor when one is present.
 When the reference is a module name, the CLI resolves it from the official
 catalog at `https://catalog.lenso.dev/v1/modules.json` unless `--catalog-url`
-points at another registry. For V5 service-backed modules, `module install
-<name>` is the business-capability entrypoint: the catalog resolves the provider
-service, installs it when needed, then enables the requested module.
+points at another registry. If the primary official catalog endpoint is
+temporarily blocked by edge security, the CLI falls back to the official
+workers.dev mirror at `https://lenso-catalog.lenso.workers.dev/v1/modules.json`.
+For V5 service-backed modules, `module install <name>` is the business-capability
+entrypoint: the catalog resolves the provider service, installs it when needed,
+then enables the requested module.
 For module releases, `module install <module-release.json>` resolves the
 release by source, then records `moduleRelease` provenance in
 `.lenso/module-installs.json` where the source supports a receipt.
