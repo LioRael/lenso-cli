@@ -11283,6 +11283,18 @@ fn builtin_linked_module_descriptor(reference: &str) -> Option<Value> {
                 }
             }
         })),
+        "audit-log" => Some(json!({
+            "name": "audit-log",
+            "source": "linked",
+            "capabilities": ["audit_log.events.read"],
+            "linked": {
+                "call": "audit_log::module::linked_module()",
+                "cargo": {
+                    "package": "lenso-module-audit-log",
+                    "version": "0.1.0"
+                }
+            }
+        })),
         _ => None,
     }
 }
@@ -11298,6 +11310,7 @@ fn builtin_linked_module_names() -> &'static [&'static str] {
         "auth-oidc",
         "auth-device",
         "organization",
+        "audit-log",
     ]
 }
 
@@ -13155,6 +13168,26 @@ mod tests {
             descriptor["linked"]["cargo"],
             json!({
                 "package": "lenso-module-organization",
+                "version": "0.1.0"
+            })
+        );
+    }
+
+    #[test]
+    fn builtin_audit_log_descriptor_declares_external_linked_crate() {
+        let descriptor =
+            builtin_linked_module_descriptor("audit-log").expect("audit-log descriptor");
+
+        assert_eq!(descriptor["source"], "linked");
+        assert_eq!(descriptor["capabilities"], json!(["audit_log.events.read"]));
+        assert_eq!(
+            descriptor["linked"]["call"],
+            "audit_log::module::linked_module()"
+        );
+        assert_eq!(
+            descriptor["linked"]["cargo"],
+            json!({
+                "package": "lenso-module-audit-log",
                 "version": "0.1.0"
             })
         );
