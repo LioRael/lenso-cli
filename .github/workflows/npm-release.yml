@@ -135,6 +135,8 @@ jobs:
           node bin/lenso.js --version
           tmpdir="$(mktemp -d)"
           node bin/lenso.js host init "$tmpdir/app"
+          test -f "$tmpdir/app/Cargo.toml"
+          node bin/lenso.js console update --repo-root "$tmpdir/app" --artifact console/dist
           test -f "$tmpdir/app/.lenso/console/dist/index.html"
         working-directory: lenso-cli
       - uses: actions/upload-artifact@v6
