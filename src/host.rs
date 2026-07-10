@@ -914,6 +914,18 @@ mod tests {
     }
 
     #[test]
+    fn starter_http_routes_include_current_operation_metadata() {
+        let source = TEMPLATE_DIR
+            .get_file("src/modules/app/mod.rs")
+            .expect("starter app module template")
+            .contents_utf8()
+            .expect("starter app module is UTF-8");
+
+        assert_eq!(source.matches("ModuleHttpRoute {").count(), 6);
+        assert_eq!(source.matches("operation: None,").count(), 6);
+    }
+
+    #[test]
     fn cargo_run_args_target_host_bins() {
         assert_eq!(cargo_run_args("api"), vec!["run", "--bin", "api"]);
         assert_eq!(cargo_run_args("serve"), vec!["run", "--bin", "serve"]);

@@ -29,6 +29,7 @@ pub fn http_routes() -> Vec<ModuleHttpRoute> {
             capability: Some(APP_STATUS_READ_CAPABILITY.to_owned()),
             display_name: Some("App Status".to_owned()),
             story_title: Some("App Status".to_owned()),
+            operation: None,
         },
         ModuleHttpRoute {
             method: ModuleHttpMethod::Get,
@@ -36,6 +37,7 @@ pub fn http_routes() -> Vec<ModuleHttpRoute> {
             capability: Some(APP_ITEMS_READ_CAPABILITY.to_owned()),
             display_name: Some("List App Items".to_owned()),
             story_title: Some("App Items".to_owned()),
+            operation: None,
         },
         ModuleHttpRoute {
             method: ModuleHttpMethod::Get,
@@ -43,6 +45,7 @@ pub fn http_routes() -> Vec<ModuleHttpRoute> {
             capability: Some(APP_ITEMS_READ_CAPABILITY.to_owned()),
             display_name: Some("Get App Item".to_owned()),
             story_title: Some("App Items".to_owned()),
+            operation: None,
         },
         ModuleHttpRoute {
             method: ModuleHttpMethod::Patch,
@@ -50,6 +53,7 @@ pub fn http_routes() -> Vec<ModuleHttpRoute> {
             capability: Some(APP_ITEMS_WRITE_CAPABILITY.to_owned()),
             display_name: Some("Update App Item".to_owned()),
             story_title: Some("App Items".to_owned()),
+            operation: None,
         },
         ModuleHttpRoute {
             method: ModuleHttpMethod::Delete,
@@ -57,6 +61,7 @@ pub fn http_routes() -> Vec<ModuleHttpRoute> {
             capability: Some(APP_ITEMS_WRITE_CAPABILITY.to_owned()),
             display_name: Some("Delete App Item".to_owned()),
             story_title: Some("App Items".to_owned()),
+            operation: None,
         },
         ModuleHttpRoute {
             method: ModuleHttpMethod::Post,
@@ -64,6 +69,7 @@ pub fn http_routes() -> Vec<ModuleHttpRoute> {
             capability: Some(APP_ITEMS_WRITE_CAPABILITY.to_owned()),
             display_name: Some("Create App Item".to_owned()),
             story_title: Some("App Items".to_owned()),
+            operation: None,
         },
     ]
 }
