@@ -366,6 +366,7 @@ enum CatalogInstallTarget {
     Descriptor {
         descriptor: Value,
         descriptor_reference: String,
+        provenance: ManifestProvenance,
     },
     ServiceManifest {
         manifest_reference: String,
@@ -741,17 +742,30 @@ pub async fn install_module(
     let should_resolve_catalog_name = should_resolve_service_catalog_entry(source)
         && !looks_like_json_reference(module_reference);
     if !should_resolve_catalog_name
-        && let Some(descriptor) = read_install_descriptor(module_reference).await?
+        && let Some(loaded) = read_install_descriptor(module_reference).await?
     {
+        let descriptor = loaded.value;
         if is_module_release_descriptor(&descriptor) {
-            return install_module_descriptor(&descriptor, module_reference, options).await;
+            return install_module_descriptor(
+                &descriptor,
+                module_reference,
+                &loaded.provenance,
+                options,
+            )
+            .await;
         }
         if should_resolve_service_catalog_entry(source)
             && let Some(manifest_reference) = catalog_service_manifest_reference(&descriptor)
         {
             return add_remote_module(manifest_reference, options).await;
         }
-        return install_module_descriptor(&descriptor, module_reference, options).await;
+        return install_module_descriptor(
+            &descriptor,
+            module_reference,
+            &loaded.provenance,
+            options,
+        )
+        .await;
     }
 
     if should_resolve_catalog_name
@@ -763,7 +777,11 @@ pub async fn install_module(
             CatalogInstallTarget::Descriptor {
                 descriptor,
                 descriptor_reference,
-            } => install_module_descriptor(&descriptor, &descriptor_reference, options).await,
+                provenance,
+            } => {
+                install_module_descriptor(&descriptor, &descriptor_reference, &provenance, options)
+                    .await
+            }
             CatalogInstallTarget::ServiceManifest { manifest_reference } => {
                 add_remote_module(&manifest_reference, options).await
             }
@@ -771,12 +789,25 @@ pub async fn install_module(
     }
 
     if should_resolve_catalog_name
-        && let Some(descriptor) = read_install_descriptor(module_reference).await?
+        && let Some(loaded) = read_install_descriptor(module_reference).await?
     {
+        let descriptor = loaded.value;
         if is_module_release_descriptor(&descriptor) {
-            return install_module_descriptor(&descriptor, module_reference, options).await;
+            return install_module_descriptor(
+                &descriptor,
+                module_reference,
+                &loaded.provenance,
+                options,
+            )
+            .await;
         }
-        return install_module_descriptor(&descriptor, module_reference, options).await;
+        return install_module_descriptor(
+            &descriptor,
+            module_reference,
+            &loaded.provenance,
+            options,
+        )
+        .await;
     }
 
     match source {
@@ -861,10 +892,14 @@ async fn official_catalog_install_target(
     catalog_url: Option<&str>,
 ) -> Result<Option<CatalogInstallTarget>> {
     if let Some(catalog_url) = catalog_url.map(str::trim).filter(|value| !value.is_empty()) {
-        let catalog = read_json_reference(catalog_url)
+        let catalog = read_json_reference_with_provenance(catalog_url)
             .await
             .with_context(|| format!("resolve official module catalog {catalog_url}"))?;
-        return catalog_install_target_for_module(&catalog, module_name);
+        return catalog_install_target_for_module_with_provenance(
+            &catalog.value,
+            module_name,
+            catalog.provenance,
+        );
     }
 
     official_catalog_install_target_from_urls(
@@ -883,14 +918,18 @@ async fn official_catalog_install_target_from_urls(
     let mut errors = Vec::new();
     for catalog_url in std::iter::once(primary_url).chain(fallback_urls.iter().map(String::as_str))
     {
-        let catalog = match read_json_reference(catalog_url).await {
+        let catalog = match read_json_reference_with_provenance(catalog_url).await {
             Ok(catalog) => catalog,
             Err(error) => {
                 errors.push(format!("{catalog_url}: {error:#}"));
                 continue;
             }
         };
-        return catalog_install_target_for_module(&catalog, module_name);
+        return catalog_install_target_for_module_with_provenance(
+            &catalog.value,
+            module_name,
+            catalog.provenance,
+        );
     }
 
     let attempted_urls = std::iter::once(primary_url)
@@ -907,6 +946,18 @@ fn catalog_install_target_for_module(
     catalog: &Value,
     module_name: &str,
 ) -> Result<Option<CatalogInstallTarget>> {
+    catalog_install_target_for_module_with_provenance(
+        catalog,
+        module_name,
+        ManifestProvenance::Builtin,
+    )
+}
+
+fn catalog_install_target_for_module_with_provenance(
+    catalog: &Value,
+    module_name: &str,
+    provenance: ManifestProvenance,
+) -> Result<Option<CatalogInstallTarget>> {
     let modules = catalog
         .get("modules")
         .and_then(Value::as_array)
@@ -919,6 +970,7 @@ fn catalog_install_target_for_module(
             return Ok(Some(CatalogInstallTarget::Descriptor {
                 descriptor: entry.clone(),
                 descriptor_reference,
+                provenance: provenance.clone(),
             }));
         }
 
@@ -930,6 +982,7 @@ fn catalog_install_target_for_module(
             return Ok(Some(CatalogInstallTarget::Descriptor {
                 descriptor,
                 descriptor_reference,
+                provenance: provenance.clone(),
             }));
         }
 
@@ -1056,10 +1109,17 @@ fn catalog_console_package_surface(package: &Value) -> Option<Value> {
 async fn install_module_descriptor(
     descriptor: &Value,
     descriptor_reference: &str,
+    provenance: &ManifestProvenance,
     options: RemoteModuleInstallOptions,
 ) -> Result<()> {
     if is_module_release_descriptor(descriptor) {
-        return install_module_release_descriptor(descriptor, descriptor_reference, options).await;
+        return install_module_release_descriptor(
+            descriptor,
+            descriptor_reference,
+            provenance,
+            options,
+        )
+        .await;
     }
     match parse_module_source(string_field(descriptor, "source")?)? {
         ModuleSource::Remote => {
@@ -1075,7 +1135,8 @@ async fn install_module_descriptor(
             add_remote_module(manifest_reference, options).await
         }
         ModuleSource::Linked => {
-            install_linked_module_descriptor(descriptor, descriptor_reference, options).await
+            install_linked_module_descriptor(descriptor, descriptor_reference, provenance, options)
+                .await
         }
     }
 }
@@ -1083,13 +1144,20 @@ async fn install_module_descriptor(
 async fn install_module_release_descriptor(
     descriptor: &Value,
     descriptor_reference: &str,
+    provenance: &ManifestProvenance,
     mut options: RemoteModuleInstallOptions,
 ) -> Result<()> {
     let release = validate_module_release_descriptor(descriptor.clone())?;
     let source = module_release_source(&release)?;
     if source == "linked" || source == "bundled" {
         if release.get("linked").is_some() {
-            return install_linked_module_descriptor(&release, descriptor_reference, options).await;
+            return install_linked_module_descriptor(
+                &release,
+                descriptor_reference,
+                provenance,
+                options,
+            )
+            .await;
         }
         let module_name = string_field(&release, "name")?.trim().to_owned();
         return install_linked_module(&module_name, options);
@@ -1231,8 +1299,8 @@ pub async fn inspect_module_release(
 async fn read_module_release_descriptor_for_inspect(
     release_reference: &str,
 ) -> Result<(String, Value)> {
-    if let Some(descriptor) = read_install_descriptor(release_reference).await? {
-        return Ok((release_reference.to_owned(), descriptor));
+    if let Some(loaded) = read_install_descriptor(release_reference).await? {
+        return Ok((release_reference.to_owned(), loaded.value));
     }
     bail!("Module release `{release_reference}` was not found as a file or URL");
 }
@@ -1466,13 +1534,15 @@ async fn add_remote_module_with_context(
             .as_deref()
             .unwrap_or_else(|| Path::new(".lenso/module-services.json")),
     );
-    let manifest = read_json_reference(manifest_reference).await?;
+    let loaded = read_json_reference_with_provenance(manifest_reference).await?;
+    let manifest = loaded.value;
     if is_service_package_manifest(&manifest) {
         let package = validate_service_package_manifest(manifest)?;
         let service_manifest_reference =
             service_package_manifest_reference(manifest_reference, &package)?;
-        let service_manifest =
-            validate_service_manifest(read_json_reference(&service_manifest_reference).await?)?;
+        let service_loaded =
+            read_json_reference_with_provenance(&service_manifest_reference).await?;
+        let service_manifest = validate_service_manifest(service_loaded.value)?;
         ensure_service_package_matches_manifest(&package, &service_manifest)?;
         let package_context = ServicePackageInstallContext {
             manifest: package,
@@ -1481,6 +1551,7 @@ async fn add_remote_module_with_context(
         return add_service_manifest_with_paths(
             &service_manifest_reference,
             service_manifest,
+            &service_loaded.provenance,
             &options,
             &repo_root,
             &env_file_path,
@@ -1496,6 +1567,7 @@ async fn add_remote_module_with_context(
         return add_service_manifest_with_paths(
             manifest_reference,
             validate_service_manifest(manifest)?,
+            &loaded.provenance,
             &options,
             &repo_root,
             &env_file_path,
@@ -1526,7 +1598,7 @@ async fn add_remote_module_with_context(
         &repo_root,
         &console_extension_registry_path,
         &manifest,
-        &base_url,
+        &loaded.provenance,
         options.console_plan,
         options.dry_run,
     )
@@ -1628,6 +1700,7 @@ async fn add_remote_module_with_context(
 async fn add_service_manifest_with_options(
     manifest_reference: &str,
     manifest: Value,
+    provenance: &ManifestProvenance,
     options: &RemoteModuleInstallOptions,
     package_context: Option<&ServicePackageInstallContext>,
     module_release_context: Option<&ModuleReleaseInstallContext>,
@@ -1652,6 +1725,7 @@ async fn add_service_manifest_with_options(
     add_service_manifest_with_paths(
         manifest_reference,
         manifest,
+        provenance,
         options,
         &repo_root,
         &env_file_path,
@@ -1666,17 +1740,25 @@ async fn add_service_manifest_with_options(
 
 async fn read_service_or_package_manifest(
     reference: &str,
-) -> Result<(String, Value, Option<ServicePackageInstallContext>)> {
-    let manifest = read_json_reference(reference).await?;
+) -> Result<(
+    String,
+    Value,
+    ManifestProvenance,
+    Option<ServicePackageInstallContext>,
+)> {
+    let loaded = read_json_reference_with_provenance(reference).await?;
+    let manifest = loaded.value;
     if is_service_package_manifest(&manifest) {
         let package = validate_service_package_manifest(manifest)?;
         let service_manifest_reference = service_package_manifest_reference(reference, &package)?;
-        let service_manifest =
-            validate_service_manifest(read_json_reference(&service_manifest_reference).await?)?;
+        let service_loaded =
+            read_json_reference_with_provenance(&service_manifest_reference).await?;
+        let service_manifest = validate_service_manifest(service_loaded.value)?;
         ensure_service_package_matches_manifest(&package, &service_manifest)?;
         return Ok((
             service_manifest_reference,
             service_manifest,
+            service_loaded.provenance,
             Some(ServicePackageInstallContext {
                 manifest: package,
                 reference: reference.to_owned(),
@@ -1686,6 +1768,7 @@ async fn read_service_or_package_manifest(
     Ok((
         reference.to_owned(),
         validate_service_manifest(manifest)?,
+        loaded.provenance,
         None,
     ))
 }
@@ -1705,6 +1788,7 @@ struct ModuleReleaseInstallContext {
 async fn add_service_manifest_with_paths(
     manifest_reference: &str,
     manifest: Value,
+    provenance: &ManifestProvenance,
     options: &RemoteModuleInstallOptions,
     repo_root: &Path,
     env_file_path: &Path,
@@ -1757,7 +1841,7 @@ async fn add_service_manifest_with_paths(
             repo_root,
             console_extension_registry_path,
             module_manifest,
-            &module_base_url,
+            provenance,
             options.console_plan,
             options.dry_run,
         )
@@ -1899,6 +1983,7 @@ fn install_linked_module(module_name: &str, options: RemoteModuleInstallOptions)
 async fn install_linked_module_descriptor(
     descriptor: &Value,
     descriptor_reference: &str,
+    provenance: &ManifestProvenance,
     options: RemoteModuleInstallOptions,
 ) -> Result<()> {
     let module_name = string_field(descriptor, "name")?.trim().to_owned();
@@ -1995,9 +2080,9 @@ async fn install_linked_module_descriptor(
     )?;
     let mut console_manifests = dependency_descriptors
         .iter()
-        .map(|(_, descriptor)| descriptor)
+        .map(|(_, descriptor)| (descriptor, ManifestProvenance::Builtin))
         .collect::<Vec<_>>();
-    console_manifests.push(&descriptor);
+    console_manifests.push((&descriptor, provenance.clone()));
     let console_bundle_install = install_runtime_console_bundles_for_manifests(
         &repo_root,
         &console_extension_registry_path,
@@ -2987,7 +3072,7 @@ pub async fn check_service_manifest_reference(
     let (manifest_reference, initial_manifest) = if defer_manifest_fetch {
         (manifest_reference.to_owned(), None)
     } else {
-        let (manifest_reference, manifest, _) =
+        let (manifest_reference, manifest, _, _) =
             read_service_or_package_manifest(manifest_reference).await?;
         (manifest_reference, Some(manifest))
     };
@@ -3627,7 +3712,8 @@ pub async fn diff_service(options: ServiceDiffOptions) -> Result<()> {
             )
         })?
         .clone();
-    let (_, candidate, _) = read_service_or_package_manifest(&options.manifest_reference).await?;
+    let (_, candidate, _, _) =
+        read_service_or_package_manifest(&options.manifest_reference).await?;
     ensure_service_name_matches(&candidate, &options.service_name)?;
     let diff = service_manifest_diff(&current, &candidate);
 
@@ -3640,7 +3726,7 @@ pub async fn diff_service(options: ServiceDiffOptions) -> Result<()> {
 }
 
 pub async fn upgrade_service(options: ServiceUpgradeOptions) -> Result<()> {
-    let (manifest_reference, candidate, package_context) =
+    let (manifest_reference, candidate, provenance, package_context) =
         read_service_or_package_manifest(&options.manifest_reference).await?;
     ensure_service_name_matches(&candidate, &options.service_name)?;
     let install_options = RemoteModuleInstallOptions {
@@ -3659,6 +3745,7 @@ pub async fn upgrade_service(options: ServiceUpgradeOptions) -> Result<()> {
     add_service_manifest_with_options(
         &manifest_reference,
         candidate,
+        &provenance,
         &install_options,
         package_context.as_ref(),
         None,
@@ -3699,8 +3786,15 @@ pub async fn rollback_service(options: ServiceRollbackOptions) -> Result<()> {
         run_install_commands: false,
         source: "remote".to_owned(),
     };
-    add_service_manifest_with_options(&manifest_reference, previous, &install_options, None, None)
-        .await
+    add_service_manifest_with_options(
+        &manifest_reference,
+        previous,
+        &ManifestProvenance::Builtin,
+        &install_options,
+        None,
+        None,
+    )
+    .await
 }
 
 pub fn list_service_environments(options: ServiceEnvListOptions) -> Result<()> {
@@ -5718,7 +5812,7 @@ async fn build_service_release_plan(
             )
         })?
         .clone();
-    let (manifest_reference, candidate, package_context) =
+    let (manifest_reference, candidate, _, package_context) =
         read_service_or_package_manifest(candidate_reference).await?;
     ensure_service_name_matches(&candidate, service_name)?;
     let diff = service_manifest_diff(&current, &candidate);
@@ -9238,8 +9332,14 @@ fn parse_version(value: &str) -> Option<[u64; 3]> {
 }
 
 async fn read_json_reference(reference: &str) -> Result<Value> {
+    Ok(read_json_reference_with_provenance(reference).await?.value)
+}
+
+async fn read_json_reference_with_provenance(reference: &str) -> Result<LoadedJsonReference> {
     if reference.starts_with("http://") || reference.starts_with("https://") {
-        let response = reqwest::get(reference)
+        let url = reqwest::Url::parse(reference)
+            .with_context(|| format!("parse module manifest URL {reference}"))?;
+        let response = reqwest::get(url.clone())
             .await
             .with_context(|| format!("fetch module manifest {reference}"))?;
         if !response.status().is_success() {
@@ -9249,17 +9349,33 @@ async fn read_json_reference(reference: &str) -> Result<Value> {
                 response.status().canonical_reason().unwrap_or("")
             );
         }
-        return response
+        let value = response
             .json::<Value>()
             .await
-            .context("parse remote module manifest JSON");
+            .context("parse remote module manifest JSON")?;
+        let base = url
+            .join(".")
+            .with_context(|| format!("derive module manifest base URL {reference}"))?;
+        return Ok(LoadedJsonReference {
+            value,
+            provenance: ManifestProvenance::Remote { base },
+        });
     }
     let path = if let Some(file_path) = reference.strip_prefix("file://") {
         PathBuf::from(file_path)
     } else {
         PathBuf::from(reference)
     };
-    read_json(&path)
+    let path = fs::canonicalize(&path)
+        .with_context(|| format!("canonicalize local manifest {}", path.display()))?;
+    let root = path
+        .parent()
+        .ok_or_else(|| anyhow!("local manifest has no parent directory: {}", path.display()))?
+        .to_path_buf();
+    Ok(LoadedJsonReference {
+        value: read_json(&path)?,
+        provenance: ManifestProvenance::Local { root },
+    })
 }
 
 fn derive_remote_base_url(base_url: Option<&str>, manifest_reference: &str) -> Result<String> {
@@ -10083,7 +10199,7 @@ struct ConsoleBundleInstall {
 
 #[derive(Debug, Clone)]
 struct ConsoleBundleSpec {
-    bundle_url: String,
+    bundle_reference: ResolvedBundleReference,
     entry: String,
     export_name: String,
     host_api: String,
@@ -10098,15 +10214,43 @@ struct ConsoleBundleSpec {
 #[derive(Debug, Clone)]
 struct ConsoleBundleStyleSpec {
     entry: String,
-    source_url: String,
+    source_reference: ResolvedBundleReference,
     target_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+enum ManifestProvenance {
+    Local { root: PathBuf },
+    Remote { base: reqwest::Url },
+    Builtin,
+}
+
+#[derive(Debug, Clone)]
+struct LoadedJsonReference {
+    value: Value,
+    provenance: ManifestProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ResolvedBundleReference {
+    Http(reqwest::Url),
+    Local(PathBuf),
+}
+
+impl ResolvedBundleReference {
+    fn display(&self) -> String {
+        match self {
+            Self::Http(url) => url.to_string(),
+            Self::Local(path) => path.display().to_string(),
+        }
+    }
 }
 
 async fn install_runtime_console_bundles(
     repo_root: &Path,
     registry_path: &Path,
     manifest: &Value,
-    base_url: &str,
+    provenance: &ManifestProvenance,
     enabled: bool,
     dry_run: bool,
 ) -> Result<ConsoleBundleInstall> {
@@ -10118,14 +10262,14 @@ async fn install_runtime_console_bundles(
         });
     }
 
-    let specs = remote_module_console_bundle_specs(repo_root, manifest, base_url)?;
+    let specs = remote_module_console_bundle_specs(repo_root, manifest, provenance)?;
     install_runtime_console_bundle_specs(registry_path, specs, dry_run).await
 }
 
 async fn install_runtime_console_bundles_for_manifests(
     repo_root: &Path,
     registry_path: &Path,
-    manifests: &[&Value],
+    manifests: &[(&Value, ManifestProvenance)],
     enabled: bool,
     dry_run: bool,
 ) -> Result<ConsoleBundleInstall> {
@@ -10138,8 +10282,10 @@ async fn install_runtime_console_bundles_for_manifests(
     }
 
     let mut specs = Vec::new();
-    for manifest in manifests {
-        specs.extend(remote_module_console_bundle_specs(repo_root, manifest, "")?);
+    for (manifest, provenance) in manifests {
+        specs.extend(remote_module_console_bundle_specs(
+            repo_root, manifest, provenance,
+        )?);
     }
     install_runtime_console_bundle_specs(registry_path, specs, dry_run).await
 }
@@ -10159,10 +10305,10 @@ async fn install_runtime_console_bundle_specs(
 
     if !dry_run {
         for spec in &specs {
-            let bytes = read_bundle_reference(&spec.bundle_url).await?;
+            let bytes = read_bundle_reference(&spec.bundle_reference).await?;
             write_file(&spec.target_path, &bytes)?;
             for style in &spec.styles {
-                let bytes = read_bundle_reference(&style.source_url).await?;
+                let bytes = read_bundle_reference(&style.source_reference).await?;
                 write_file(&style.target_path, &bytes)?;
             }
         }
@@ -10186,7 +10332,7 @@ async fn install_runtime_console_bundle_specs(
 fn remote_module_console_bundle_specs(
     repo_root: &Path,
     manifest: &Value,
-    base_url: &str,
+    provenance: &ManifestProvenance,
 ) -> Result<Vec<ConsoleBundleSpec>> {
     let module_name = string_field(manifest, "name")?.trim();
     let module_slug = slugify(module_name);
@@ -10208,8 +10354,8 @@ fn remote_module_console_bundle_specs(
         let Some(bundle_reference) = console_bundle_url(surface, package) else {
             continue;
         };
-        let bundle_url = resolve_bundle_reference(bundle_reference, base_url)?;
-        let file_name = console_bundle_file_name(&bundle_url, export_name);
+        let bundle_reference = resolve_bundle_reference(bundle_reference, provenance)?;
+        let file_name = console_bundle_file_name(&bundle_reference, export_name);
         let target_path = repo_root
             .join(".lenso/console/extensions")
             .join(&module_slug)
@@ -10218,11 +10364,11 @@ fn remote_module_console_bundle_specs(
         let styles = console_bundle_styles(surface, package)
             .into_iter()
             .map(|style_reference| {
-                let source_url = resolve_bundle_reference(style_reference, base_url)?;
-                let file_name = console_style_file_name(&source_url, export_name);
+                let source_reference = resolve_bundle_reference(style_reference, provenance)?;
+                let file_name = console_style_file_name(&source_reference, export_name);
                 Ok(ConsoleBundleStyleSpec {
                     entry: format!("{CONSOLE_EXTENSION_ROUTE_PREFIX}/{module_slug}/{file_name}"),
-                    source_url,
+                    source_reference,
                     target_path: repo_root
                         .join(".lenso/console/extensions")
                         .join(&module_slug)
@@ -10231,7 +10377,7 @@ fn remote_module_console_bundle_specs(
             })
             .collect::<Result<Vec<_>>>()?;
         specs.push(ConsoleBundleSpec {
-            bundle_url,
+            bundle_reference,
             entry,
             export_name: export_name.to_owned(),
             host_api: console_bundle_host_api(surface, package).to_owned(),
@@ -10326,53 +10472,79 @@ fn console_bundle_host_api<'a>(
         .unwrap_or(CONSOLE_BUNDLE_HOST_API)
 }
 
-fn resolve_bundle_reference(reference: &str, base_url: &str) -> Result<String> {
-    if reference.starts_with("http://")
-        || reference.starts_with("https://")
-        || reference.starts_with("file://")
-    {
-        return Ok(reference.to_owned());
+fn resolve_bundle_reference(
+    reference: &str,
+    provenance: &ManifestProvenance,
+) -> Result<ResolvedBundleReference> {
+    match provenance {
+        ManifestProvenance::Local { root } => {
+            if reference.starts_with("file:") || Path::new(reference).is_absolute() {
+                bail!("local manifest console bundle reference must be relative: {reference}");
+            }
+            let resolved = fs::canonicalize(root.join(reference))
+                .with_context(|| format!("resolve local manifest console bundle {reference}"))?;
+            if !resolved.starts_with(root) {
+                bail!("local manifest console bundle reference escapes its directory: {reference}");
+            }
+            Ok(ResolvedBundleReference::Local(resolved))
+        }
+        ManifestProvenance::Remote { base } => {
+            let resolved = base
+                .join(reference)
+                .with_context(|| format!("resolve remote manifest console bundle {reference}"))?;
+            if !matches!(resolved.scheme(), "http" | "https") {
+                bail!(
+                    "remote manifest console bundle reference must use http or https: {reference}"
+                );
+            }
+            Ok(ResolvedBundleReference::Http(resolved))
+        }
+        ManifestProvenance::Builtin => {
+            let resolved = reqwest::Url::parse(reference)
+                .with_context(|| format!("resolve builtin console bundle {reference}"))?;
+            if !matches!(resolved.scheme(), "http" | "https") {
+                bail!("builtin console bundle reference must use http or https: {reference}");
+            }
+            Ok(ResolvedBundleReference::Http(resolved))
+        }
     }
-    let normalized_base = format!("{}/", trim_trailing_slashes(base_url));
-    let base = reqwest::Url::parse(&normalized_base)
-        .with_context(|| format!("parse base URL {base_url}"))?;
-    let resolved = base
-        .join(reference)
-        .with_context(|| format!("resolve console bundle URL {reference}"))?;
-    Ok(resolved.to_string())
 }
 
-fn console_bundle_file_name(bundle_url: &str, export_name: &str) -> String {
-    console_asset_file_name(bundle_url, export_name, "js")
+fn console_bundle_file_name(
+    bundle_reference: &ResolvedBundleReference,
+    export_name: &str,
+) -> String {
+    console_asset_file_name(bundle_reference, export_name, "js")
 }
 
-fn console_style_file_name(style_url: &str, export_name: &str) -> String {
-    console_asset_file_name(style_url, export_name, "css")
+fn console_style_file_name(style_reference: &ResolvedBundleReference, export_name: &str) -> String {
+    console_asset_file_name(style_reference, export_name, "css")
 }
 
-fn console_asset_file_name(asset_url: &str, export_name: &str, extension: &str) -> String {
-    reqwest::Url::parse(asset_url)
-        .ok()
-        .and_then(|url| {
-            url.path_segments()
-                .and_then(Iterator::last)
-                .filter(|segment| !segment.is_empty())
-                .map(ToOwned::to_owned)
-        })
-        .or_else(|| {
-            Path::new(asset_url)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(ToOwned::to_owned)
-        })
-        .unwrap_or_else(|| format!("{}.{}", slugify(export_name), extension))
+fn console_asset_file_name(
+    reference: &ResolvedBundleReference,
+    export_name: &str,
+    extension: &str,
+) -> String {
+    match reference {
+        ResolvedBundleReference::Http(url) => url
+            .path_segments()
+            .and_then(Iterator::last)
+            .filter(|segment| !segment.is_empty())
+            .map(ToOwned::to_owned),
+        ResolvedBundleReference::Local(path) => path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(ToOwned::to_owned),
+    }
+    .unwrap_or_else(|| format!("{}.{}", slugify(export_name), extension))
 }
 
-async fn read_bundle_reference(reference: &str) -> Result<Vec<u8>> {
-    if reference.starts_with("http://") || reference.starts_with("https://") {
-        let response = reqwest::get(reference)
+async fn read_bundle_reference(reference: &ResolvedBundleReference) -> Result<Vec<u8>> {
+    if let ResolvedBundleReference::Http(url) = reference {
+        let response = reqwest::get(url.clone())
             .await
-            .with_context(|| format!("fetch console bundle {reference}"))?;
+            .with_context(|| format!("fetch console bundle {}", reference.display()))?;
         if !response.status().is_success() {
             bail!(
                 "Failed to fetch console bundle: {} {}",
@@ -10386,12 +10558,10 @@ async fn read_bundle_reference(reference: &str) -> Result<Vec<u8>> {
             .map(|bytes| bytes.to_vec())
             .context("read console bundle bytes");
     }
-    let path = if let Some(file_path) = reference.strip_prefix("file://") {
-        PathBuf::from(file_path)
-    } else {
-        PathBuf::from(reference)
+    let ResolvedBundleReference::Local(path) = reference else {
+        unreachable!("HTTP references return above");
     };
-    fs::read(&path).with_context(|| format!("read console bundle {}", path.display()))
+    fs::read(path).with_context(|| format!("read console bundle {}", path.display()))
 }
 
 fn update_runtime_console_bundle_registry(
@@ -11169,18 +11339,21 @@ fn console_package_key(package_name: &str, export_name: &str) -> String {
     format!("{package_name}#{export_name}")
 }
 
-async fn read_install_descriptor(reference: &str) -> Result<Option<Value>> {
+async fn read_install_descriptor(reference: &str) -> Result<Option<LoadedJsonReference>> {
     if let Some(descriptor) = builtin_linked_module_descriptor(reference) {
-        return Ok(Some(descriptor));
+        return Ok(Some(LoadedJsonReference {
+            value: descriptor,
+            provenance: ManifestProvenance::Builtin,
+        }));
     }
 
     if !looks_like_json_reference(reference) {
         return Ok(None);
     }
 
-    let descriptor = read_json_reference(reference).await?;
+    let descriptor = read_json_reference_with_provenance(reference).await?;
     Ok(
-        (descriptor.get("source").is_some() && !is_service_manifest(&descriptor))
+        (descriptor.value.get("source").is_some() && !is_service_manifest(&descriptor.value))
             .then_some(descriptor),
     )
 }
@@ -13125,6 +13298,7 @@ mod tests {
         let CatalogInstallTarget::Descriptor {
             descriptor,
             descriptor_reference,
+            provenance: _,
         } = target
         else {
             panic!("expected linked descriptor target");
@@ -13140,6 +13314,44 @@ mod tests {
             json!(["auth.users.read"])
         );
         assert_eq!(descriptor["console"][0]["package"]["version"], "0.1.99");
+    }
+
+    #[test]
+    fn remote_catalog_descriptor_cannot_claim_local_bundle_provenance() {
+        let catalog = json!({
+            "version": 1,
+            "modules": [{
+                "name": "auth",
+                "source": "linked",
+                "manifestReference": "/tmp/catalog-spoof.json",
+                "consolePackages": [{
+                    "packageName": "@lenso/auth-console",
+                    "exportName": "authConsoleModule",
+                    "bundleUrl": "file:///etc/passwd"
+                }]
+            }]
+        });
+        let catalog_provenance = ManifestProvenance::Remote {
+            base: reqwest::Url::parse("https://catalog.example.test/v1/").unwrap(),
+        };
+        let target =
+            catalog_install_target_for_module_with_provenance(&catalog, "auth", catalog_provenance)
+                .unwrap()
+                .expect("catalog target");
+        let CatalogInstallTarget::Descriptor {
+            descriptor,
+            provenance,
+            ..
+        } = target
+        else {
+            panic!("expected linked descriptor target");
+        };
+
+        let error =
+            remote_module_console_bundle_specs(Path::new("/tmp/host"), &descriptor, &provenance)
+                .expect_err("remote catalog descriptors must not resolve local files");
+
+        assert!(error.to_string().contains("remote manifest"));
     }
 
     #[test]
@@ -14074,6 +14286,7 @@ mod tests {
             CatalogInstallTarget::Descriptor {
                 descriptor,
                 descriptor_reference,
+                provenance: _,
             } => {
                 assert_eq!(descriptor["name"], json!("audit-log"));
                 assert_eq!(descriptor_reference, "builtin:audit-log");
@@ -14973,16 +15186,16 @@ mod tests {
             "name": "remote-crm"
         });
 
-        let specs = remote_module_console_bundle_specs(
-            Path::new("/tmp/host"),
-            &manifest,
-            "https://module.example.test/lenso/module/v1",
-        )
-        .unwrap();
+        let provenance = ManifestProvenance::Remote {
+            base: reqwest::Url::parse("https://module.example.test/lenso/module/v1/").unwrap(),
+        };
+        let specs =
+            remote_module_console_bundle_specs(Path::new("/tmp/host"), &manifest, &provenance)
+                .unwrap();
 
         assert_eq!(specs.len(), 1);
         assert_eq!(
-            specs[0].bundle_url,
+            specs[0].bundle_reference.display(),
             "https://module.example.test/lenso/module/v1/console/entry.js"
         );
         assert_eq!(specs[0].entry, "/console/extensions/remote-crm/entry.js");
@@ -14991,7 +15204,7 @@ mod tests {
             PathBuf::from("/tmp/host/.lenso/console/extensions/remote-crm/entry.js")
         );
         assert_eq!(
-            specs[0].styles[0].source_url,
+            specs[0].styles[0].source_reference.display(),
             "https://module.example.test/lenso/module/v1/console/entry.css"
         );
         assert_eq!(
@@ -15007,10 +15220,104 @@ mod tests {
     }
 
     #[test]
+    fn console_bundle_reference_rejects_remote_file_url() {
+        let manifest = json!({
+            "console": [{
+                "package": {
+                    "bundleUrl": "file:///etc/passwd",
+                    "export": "crmConsoleModule",
+                    "name": "@vendor/crm-console"
+                }
+            }],
+            "name": "remote-crm"
+        });
+        let provenance = ManifestProvenance::Remote {
+            base: reqwest::Url::parse("https://module.example.test/lenso/module/v1/").unwrap(),
+        };
+
+        let error =
+            remote_module_console_bundle_specs(Path::new("/tmp/host"), &manifest, &provenance)
+                .expect_err("remote manifests must not resolve file URLs");
+
+        assert!(error.to_string().contains("remote manifest"));
+    }
+
+    fn console_bundle_test_root() -> PathBuf {
+        std::env::temp_dir().join(format!("lenso-cli-console-bundle-{}", uuid::Uuid::now_v7()))
+    }
+
+    #[test]
+    fn console_bundle_reference_allows_local_child_asset() {
+        let root = console_bundle_test_root();
+        let assets = root.join("assets");
+        fs::create_dir_all(&assets).unwrap();
+        let asset = assets.join("entry.js");
+        fs::write(&asset, "export default {};").unwrap();
+        let manifest = json!({
+            "console": [{
+                "package": {
+                    "bundleUrl": "./assets/entry.js",
+                    "export": "crmConsoleModule",
+                    "name": "@vendor/crm-console"
+                }
+            }],
+            "name": "local-crm"
+        });
+        let provenance = ManifestProvenance::Local {
+            root: fs::canonicalize(&root).unwrap(),
+        };
+
+        let specs =
+            remote_module_console_bundle_specs(Path::new("/tmp/host"), &manifest, &provenance)
+                .expect("local asset below the manifest root is allowed");
+
+        assert_eq!(
+            specs[0].bundle_reference,
+            ResolvedBundleReference::Local(fs::canonicalize(&asset).unwrap())
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn console_bundle_reference_rejects_local_parent_escape() {
+        let root = console_bundle_test_root();
+        fs::create_dir_all(&root).unwrap();
+        let outside = root.with_file_name(format!(
+            "{}-outside.js",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        fs::write(&outside, "do not read me").unwrap();
+        let escaped_reference = format!("../{}", outside.file_name().unwrap().to_string_lossy());
+        let manifest = json!({
+            "console": [{
+                "package": {
+                    "bundleUrl": escaped_reference,
+                    "export": "crmConsoleModule",
+                    "name": "@vendor/crm-console"
+                }
+            }],
+            "name": "local-crm"
+        });
+        let provenance = ManifestProvenance::Local {
+            root: fs::canonicalize(&root).unwrap(),
+        };
+
+        let error =
+            remote_module_console_bundle_specs(Path::new("/tmp/host"), &manifest, &provenance)
+                .expect_err("local assets must remain below the manifest root");
+
+        assert!(error.to_string().contains("local manifest"));
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_file(outside).unwrap();
+    }
+
+    #[test]
     fn runtime_console_bundle_registry_upserts_by_package_export() {
         let registry_path = Path::new("/tmp/missing-console-registry.json");
         let specs = vec![ConsoleBundleSpec {
-            bundle_url: "https://module.example.test/entry.js".to_owned(),
+            bundle_reference: ResolvedBundleReference::Http(
+                reqwest::Url::parse("https://module.example.test/entry.js").unwrap(),
+            ),
             entry: "/console/extensions/crm/entry.js".to_owned(),
             export_name: "crmConsoleModule".to_owned(),
             host_api: "1".to_owned(),
@@ -15019,7 +15326,9 @@ mod tests {
             required_capabilities: vec!["crm.read".to_owned()],
             styles: vec![ConsoleBundleStyleSpec {
                 entry: "/console/extensions/crm/entry.css".to_owned(),
-                source_url: "https://module.example.test/entry.css".to_owned(),
+                source_reference: ResolvedBundleReference::Http(
+                    reqwest::Url::parse("https://module.example.test/entry.css").unwrap(),
+                ),
                 target_path: PathBuf::from("/tmp/host/.lenso/console/extensions/crm/entry.css"),
             }],
             target_path: PathBuf::from("/tmp/host/.lenso/console/extensions/crm/entry.js"),
