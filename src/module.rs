@@ -11431,6 +11431,14 @@ fn builtin_linked_module_descriptor(reference: &str) -> Option<Value> {
                 "call": "builtins::auth_password()"
             }
         })),
+        "auth-phone" => Some(json!({
+            "name": "auth-phone",
+            "source": "linked",
+            "dependencies": ["auth", "auth-password"],
+            "linked": {
+                "call": "builtins::auth_phone()"
+            }
+        })),
         "auth-github" => Some(json!({
             "name": "auth-github",
             "source": "linked",
@@ -11487,7 +11495,7 @@ fn builtin_linked_module_descriptor(reference: &str) -> Option<Value> {
                 "call": "organization::module::linked_module()",
                 "cargo": {
                     "package": "lenso-module-organization",
-                    "version": "0.1.0"
+                    "version": "0.1.1"
                 }
             }
         })),
@@ -11513,6 +11521,7 @@ fn builtin_linked_module_names() -> &'static [&'static str] {
         "auth-oauth",
         "auth-anonymous",
         "auth-password",
+        "auth-phone",
         "auth-github",
         "auth-google",
         "auth-oidc",
@@ -13267,6 +13276,47 @@ mod tests {
     }
 
     #[test]
+    fn builtin_auth_phone_descriptor_declares_facade_linked_source() {
+        let descriptor =
+            builtin_linked_module_descriptor("auth-phone").expect("auth-phone descriptor");
+
+        assert_eq!(descriptor["source"], "linked");
+        assert_eq!(descriptor["dependencies"], json!(["auth", "auth-password"]));
+        assert_eq!(descriptor["linked"]["call"], "builtins::auth_phone()");
+        assert!(descriptor["linked"].get("cargo").is_none());
+    }
+
+    #[test]
+    fn catalog_auth_phone_entry_resolves_builtin_descriptor() {
+        let catalog = json!({
+            "version": 1,
+            "modules": [{
+                "name": "auth-phone",
+                "version": "0.1.1",
+                "source": "linked",
+                "manifestReference": "builtin:auth-phone",
+                "dependencies": ["auth", "auth-password"]
+            }]
+        });
+
+        let target = catalog_install_target_for_module(&catalog, "auth-phone")
+            .unwrap()
+            .expect("catalog target");
+        let CatalogInstallTarget::Descriptor {
+            descriptor,
+            descriptor_reference,
+            provenance: _,
+        } = target
+        else {
+            panic!("expected linked descriptor target");
+        };
+
+        assert_eq!(descriptor_reference, "builtin:auth-phone");
+        assert_eq!(descriptor["dependencies"], json!(["auth", "auth-password"]));
+        assert_eq!(descriptor["linked"]["call"], "builtins::auth_phone()");
+    }
+
+    #[test]
     fn catalog_linked_entry_resolves_builtin_descriptor_and_console_metadata() {
         let catalog = json!({
             "version": 1,
@@ -13415,7 +13465,7 @@ mod tests {
             descriptor["linked"]["cargo"],
             json!({
                 "package": "lenso-module-organization",
-                "version": "0.1.0"
+                "version": "0.1.1"
             })
         );
     }
@@ -14226,6 +14276,73 @@ mod tests {
             .unwrap();
         assert_eq!(entry["manifestReference"], json!("builtin:auth-github"));
         assert_eq!(entry["dependencies"], json!(["auth", "auth-oauth"]));
+        fs::remove_dir_all(repo_root).ok();
+    }
+
+    #[tokio::test]
+    async fn auth_phone_install_orders_dependencies_and_is_idempotent() {
+        let repo_root = std::env::temp_dir().join(format!(
+            "lenso-auth-phone-catalog-install-{}",
+            uuid::Uuid::now_v7()
+        ));
+        fs::create_dir_all(repo_root.join("src")).unwrap();
+        write_file(
+            &repo_root.join("Cargo.toml"),
+            b"[package]\nname = \"host\"\n\n[dependencies]\nlenso = { version = \"0.3.18\", features = [\"host\"] }\n",
+        )
+        .unwrap();
+        write_file(
+            &repo_root.join("src/lib.rs"),
+            b"mod modules;\n\nuse lenso::host::prelude::*;\n\npub fn host_composition() -> HostComposition {\n    HostBuilder::new()\n        .linked_module(modules::app::linked_module())\n        .build()\n}\n",
+        )
+        .unwrap();
+        let catalog_path = repo_root.join("official-catalog.json");
+        write_json(
+            &catalog_path,
+            &json!({
+                "version": 1,
+                "modules": [{
+                    "name": "auth-phone",
+                    "version": "0.1.1",
+                    "source": "linked",
+                    "manifestReference": "builtin:auth-phone",
+                    "dependencies": ["auth", "auth-password"]
+                }]
+            }),
+        )
+        .unwrap();
+
+        for _ in 0..2 {
+            install_module(
+                "auth-phone",
+                RemoteModuleInstallOptions {
+                    allow_incompatible: false,
+                    base_url: None,
+                    catalog_url: Some(catalog_path.to_string_lossy().to_string()),
+                    console_plan: false,
+                    dry_run: false,
+                    env_file: None,
+                    install_profiles: Vec::new(),
+                    module_services_file: None,
+                    repo_root: Some(repo_root.clone()),
+                    run_install_commands: false,
+                    source: "remote".to_owned(),
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let host_lib = read_text(&repo_root.join("src/lib.rs")).unwrap();
+        let auth = ".linked_module(builtins::auth())";
+        let password = ".linked_module(builtins::auth_password())";
+        let phone = ".linked_module(builtins::auth_phone())";
+        assert_eq!(host_lib.matches(auth).count(), 1);
+        assert_eq!(host_lib.matches(password).count(), 1);
+        assert_eq!(host_lib.matches(phone).count(), 1);
+        assert!(host_lib.find(auth) < host_lib.find(password));
+        assert!(host_lib.find(password) < host_lib.find(phone));
+
         fs::remove_dir_all(repo_root).ok();
     }
 
