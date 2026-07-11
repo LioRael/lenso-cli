@@ -41,7 +41,7 @@ jobs:
           rustup toolchain install 1.94.0 --profile minimal
           rustup default 1.94.0
           if test -n "${{ matrix.rust-target }}"; then rustup target add "${{ matrix.rust-target }}"; fi
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
       - name: Verify reviewed fixed group
         env:
           PACKAGES_JSON: ${{ inputs.packages_json }}
@@ -64,7 +64,7 @@ jobs:
           test -f "$tmpdir/app/Cargo.toml"
           node bin/lenso.js console update --repo-root "$tmpdir/app" --artifact console/dist
           test -f "$tmpdir/app/.lenso/console/dist/index.html"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: lenso-cli-${{ matrix.tag }}
           path: vendor
@@ -101,7 +101,7 @@ jobs:
           LENSO_SHADOW_GITHUB_API_URL: ${{ vars.LENSO_SHADOW_GITHUB_API_URL }}
           LENSO_SHADOW_ATTESTATION_URL: ${{ vars.LENSO_SHADOW_ATTESTATION_URL }}
         run: node scripts/release-mode.mjs >> "$GITHUB_ENV"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           pattern: lenso-cli-*
           path: vendor
