@@ -6,6 +6,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
+use lenso_service::check_contract_artifact_value;
 use serde_json::{Map, Value, json};
 
 #[derive(Debug, Clone)]
@@ -3132,6 +3133,14 @@ pub async fn check_service_manifest_reference(
             .await?
             .1
     };
+    let contract_check = match check_contract_artifact_value(&manifest) {
+        Ok(check) => check,
+        Err(error) if options.json => {
+            println!("{}", serde_json::to_string_pretty(&error)?);
+            bail!("contract check failed");
+        }
+        Err(error) => return Err(error.into()),
+    };
     let name = string_field(&manifest, "name")?.trim();
     let version = string_field(&manifest, "version")?.trim();
     let modules = manifest
@@ -3194,6 +3203,10 @@ pub async fn check_service_manifest_reference(
                 "manifestUrl": manifest_url,
                 "modules": module_names,
                 "config": config,
+                "detectedProtocol": contract_check.detected_protocol,
+                "artifactKind": contract_check.artifact_kind,
+                "semanticKind": contract_check.semantic_kind,
+                "providerSemantics": contract_check.provider_semantics,
                 "operations": operations,
                 "probes": probes,
                 "readyUrl": ready_url,
@@ -3205,6 +3218,11 @@ pub async fn check_service_manifest_reference(
         );
     } else {
         println!("Service manifest ok: {name} {version}");
+        println!(
+            "Contract: {} ({})",
+            contract_check.detected_protocol,
+            contract_check.semantic_kind.as_str()
+        );
         println!("Provided modules: {}", module_names.join(", "));
         println!(
             "Declared operations: routes={} actions={} runtime={} events={}",
@@ -14804,6 +14822,7 @@ mod tests {
                     { "name": "support-ticket" }
                 ],
                 "name": "support-suite-provider",
+                "protocol": "lenso.service.v1",
                 "version": "0.1.0"
             }),
         )
