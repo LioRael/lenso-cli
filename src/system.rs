@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use lenso_service::{ContractSemanticKind, ProviderSemantics, check_contract_artifact_value};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -268,6 +269,9 @@ struct SystemIssue {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SystemPlan {
+    detected_protocol: String,
+    semantic_kind: ContractSemanticKind,
+    provider_semantics: ProviderSemantics,
     system_file: String,
     name: String,
     status: String,
@@ -446,15 +450,31 @@ pub(crate) fn add_system_module(options: SystemAddModuleOptions) -> Result<()> {
 
 pub(crate) fn plan_system(options: SystemPlanOptions) -> Result<()> {
     let path = system_read_path(options.system_file.as_deref())?;
-    let system = read_system(&path)?;
+    let artifact: Value = serde_json::from_str(
+        &fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?,
+    )
+    .with_context(|| format!("parse {}", path.display()))?;
+    let contract_check = match check_contract_artifact_value(&artifact) {
+        Ok(check) => check,
+        Err(error) if options.json => {
+            println!("{}", serde_json::to_string_pretty(&error)?);
+            bail!("contract check failed");
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let system: ServiceSystem =
+        serde_json::from_value(artifact).with_context(|| format!("parse {}", path.display()))?;
     let graph = system_graph(&system);
     let commands = system_commands(&system);
     let plan = SystemPlan {
         commands,
+        detected_protocol: contract_check.detected_protocol,
         dependencies: graph.dependencies.len(),
         issues: graph.issues.clone(),
         modules: graph.modules.len(),
         name: system.name.clone(),
+        provider_semantics: contract_check.provider_semantics,
+        semantic_kind: contract_check.semantic_kind,
         services: graph.services.len(),
         status: if graph.issues.is_empty() {
             "ready".to_owned()
@@ -1677,6 +1697,11 @@ fn current_time_millis() -> Result<u64> {
 
 fn print_system_plan(plan: &SystemPlan) {
     println!("Service system: {} ({})", plan.name, plan.status);
+    println!(
+        "contract: {} ({})",
+        plan.detected_protocol,
+        plan.semantic_kind.as_str()
+    );
     println!("file: {}", plan.system_file);
     println!(
         "services: {} / modules: {} / dependencies: {}",
