@@ -102,6 +102,8 @@ async function verifyReviewedComponents(cwd, plan) {
     }
 }
 export async function preflight(environment) {
+    if (process.env.LENSO_RELEASE_MODE !== "shadow" && process.env.LENSO_RELEASE_MODE !== "production")
+        fail("LENSO_RELEASE_MODE must be shadow or production");
     if (!/^sha256:[0-9a-f]{64}$/u.test(environment.eventId) || !/^[0-9a-f-]{16,64}$/u.test(environment.nonce))
         fail("invalid event ID or nonce");
     if (!OID.test(environment.releaseCommit) || environment.githubSha !== environment.releaseCommit)
@@ -450,7 +452,7 @@ async function packedArtifact(cwd, item) {
 }
 async function publishOnce(environment, item, artifact) {
     if (item.id.startsWith("npm:")) {
-        await execFile("npm", ["publish", artifact.path, "--provenance", "--access", "public", "--ignore-scripts"], { cwd: environment.cwd });
+        await execFile("npm", ["publish", artifact.path, ...(process.env.LENSO_RELEASE_MODE === "production" ? ["--provenance"] : []), "--access", "public", "--ignore-scripts"], { cwd: environment.cwd });
     }
     else if (item.id.startsWith("cargo:")) {
         if (!process.env.CARGO_REGISTRY_TOKEN || process.env.CARGO_TOKEN)
@@ -513,6 +515,18 @@ export async function uploadCargoArtifact(item, bytes, upload) {
         fail(`crates exact archive upload ${response.status}`);
 }
 async function createAttestation(artifactPath, artifactBytes, environment) {
+    if (process.env.LENSO_RELEASE_MODE === "shadow") {
+        const endpoint = process.env.LENSO_SHADOW_ATTESTATION_URL;
+        if (!endpoint)
+            fail("shadow attestation adapter is required");
+        const response = await fetch(endpoint, { method: "POST", redirect: "error", headers: { authorization: `Bearer ${environment.githubToken}`, "content-type": "application/json" }, body: JSON.stringify({ repository: environment.repository, releaseCommit: environment.releaseCommit, artifactSha256: hash(artifactBytes), artifactName: basename(artifactPath) }) });
+        if (!response.ok)
+            fail(`shadow attestation adapter ${response.status}`);
+        const result = await response.json();
+        if (!result.url || !result.url.startsWith("https://"))
+            fail("shadow attestation URL is invalid");
+        return result.url;
+    }
     let cleanup;
     if (!artifactPath) {
         cleanup = await mkdtemp(join(tmpdir(), "lenso-recovery-"));
@@ -544,7 +558,7 @@ function receiptFor(plan, item, observation, provenanceUrl, environment, tagName
     const componentName = item.id.startsWith("npm:@lenso/") ? item.id.slice("npm:@lenso/".length) : item.id.slice(item.id.indexOf(":") + 1);
     const artifactName = item.id.startsWith("artifact:") ? `${componentName}.tar.gz` : `${componentName}-${item.version}.${item.id.startsWith("npm:") ? "tgz" : "crate"}`;
     const identity = {
-        schema: "lenso.component-receipt.v1",
+        schema: "lenso.component-receipt.v1", environment: process.env.LENSO_RELEASE_MODE,
         planId: plan.planId, packageId: item.id, version: item.version,
         repository: plan.repository, sourceCommit: environment.releaseCommit,
         packedSha256: hash(observation.bytes), registryIntegrity: observation.integrity, registryUrl: observation.url,
