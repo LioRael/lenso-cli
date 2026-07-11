@@ -1,0 +1,7 @@
+{
+  "schema": "lenso.hosted-artifact-lock.v1",
+  "packageId": "artifact:lenso-runtime-console",
+  "version": "0.1.1",
+  "url": "https://github.com/LioRael/lenso-runtime-console/releases/download/v0.1.1/lenso-runtime-console.tar.gz",
+  "sha256": "sha256:cb5818550f423f6c6cf2c271efba4358b7e686fa321213498dd395c66c34e724"
+}
