@@ -18,14 +18,23 @@
   "scripts": {
     "check:npm-publish": "node scripts/check-npm-publish.mjs",
     "check:npm-shim": "node scripts/check-npm-shim.mjs",
+    "check:release-versions": "node scripts/check-release-versions.mjs",
+    "install:hosted-console": "node scripts/install-hosted-console.mjs",
     "package:npm": "node scripts/package-npm.mjs",
     "prepack": "node scripts/package-npm.mjs",
-    "prepublishOnly": "node scripts/check-npm-publish.mjs"
+    "prepublishOnly": "node scripts/check-npm-publish.mjs",
+    "release:intent-check": "node scripts/release-plan.mjs --check-intent",
+    "release:plan": "node scripts/release-plan.mjs",
+    "release:verify": "npm run check:release-versions && node scripts/release-plan.mjs --verify"
+  },
+  "devDependencies": {
+    "tegami": "1.2.5"
   },
   "publishConfig": {
     "access": "public"
   },
   "engines": {
     "node": ">=18"
-  }
+  },
+  "packageManager": "pnpm@11.7.0"
 }

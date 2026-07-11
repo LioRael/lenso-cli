@@ -1,7 +1,6 @@
 name: npm release
 
-on:
-  workflow_dispatch:
+on: []
 
 permissions:
   contents: read

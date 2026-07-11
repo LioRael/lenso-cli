@@ -16,6 +16,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: npm run check:npm-shim
+      - run: npm run check:release-versions
       - run: cargo fmt --all -- --check
       - run: cargo test --locked
       - run: cargo package --locked --allow-dirty

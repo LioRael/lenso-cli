@@ -2,4 +2,5 @@
 /console/dist
 /console/extensions
 /vendor
+/.lenso-release/downloads
 /*.tgz

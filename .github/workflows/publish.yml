@@ -1,0 +1,162 @@
+name: Publish reviewed CLI release
+run-name: lenso-publish-requested:${{ inputs.event_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      event_id: { required: true, type: string }
+      plan_id: { required: true, type: string }
+      plan_sha256: { required: true, type: string }
+      release_commit: { required: true, type: string }
+      packages_json: { required: true, type: string }
+      nonce: { required: true, type: string }
+permissions: {}
+concurrency:
+  group: lenso-publish-${{ inputs.plan_id }}
+  cancel-in-progress: false
+jobs:
+  build:
+    name: Build ${{ matrix.tag }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { tag: darwin-arm64, os: macos-14, rust-target: '', smoke: true }
+          - { tag: darwin-x64, os: macos-14, rust-target: x86_64-apple-darwin, smoke: false }
+          - { tag: linux-x64, os: ubuntu-24.04, rust-target: '', smoke: true }
+          - { tag: win32-x64, os: windows-2025, rust-target: '', smoke: true }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.release_commit }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with: { node-version: 24.18.0 }
+      - name: Install reviewed Rust toolchain
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal
+          rustup default 1.94.0
+          if test -n "${{ matrix.rust-target }}"; then rustup target add "${{ matrix.rust-target }}"; fi
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify reviewed fixed group
+        env:
+          PACKAGES_JSON: ${{ inputs.packages_json }}
+        run: |
+          npm run check:release-versions
+          node -e "const p=JSON.parse(process.env.PACKAGES_JSON); const expected=['cargo:lenso-cli','npm:@lenso/cli']; if (p.length !== 2 || !expected.every(id => p.some(x => x.id === id)) || new Set(p.map(x => x.version)).size !== 1) process.exit(1)"
+      - name: Install exact reviewed hosted Console
+        run: npm run install:hosted-console
+      - name: Build npm distribution binary
+        env:
+          LENSO_NPM_TAG: ${{ matrix.tag }}
+          LENSO_CARGO_TARGET: ${{ matrix.rust-target }}
+        run: npm run package:npm
+      - name: Smoke bundled binary and hosted Console
+        if: matrix.smoke
+        run: |
+          node bin/lenso.js --version
+          tmpdir="$(mktemp -d)"
+          node bin/lenso.js host init "$tmpdir/app"
+          test -f "$tmpdir/app/Cargo.toml"
+          node bin/lenso.js console update --repo-root "$tmpdir/app" --artifact console/dist
+          test -f "$tmpdir/app/.lenso/console/dist/index.html"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lenso-cli-${{ matrix.tag }}
+          path: vendor
+          if-no-files-found: error
+
+  publish:
+    runs-on: ubuntu-24.04
+    needs: build
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/create-github-app-token@a8d616148505b5069dccd32f177bb87d7f39123b
+        id: app
+        with:
+          app-id: ${{ vars.LENSO_RELEASE_APP_ID }}
+          private-key: ${{ secrets.LENSO_RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-metadata: read
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.release_commit }}
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: lenso-cli-*
+          path: vendor
+          merge-multiple: true
+      - uses: pnpm/action-setup@f2b2b233b538f500472c7274c7012f57857d8ce0
+        with:
+          run_install: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+      - name: Install reviewed publishing toolchains
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+          npm install --global npm@11.7.0
+          rustup toolchain install 1.94.0 --profile minimal
+          rustup default 1.94.0
+      - name: Verify exact CLI payloads
+        run: |
+          chmod +x vendor/darwin-arm64/lenso vendor/darwin-x64/lenso vendor/linux-x64/lenso
+          npm run check:release-versions
+          npm run check:npm-shim
+          npm run check:npm-publish
+          npm run install:hosted-console
+          cargo test --locked
+      - name: Complete fail-closed preflight before any registry OIDC
+        env:
+          INPUT_EVENT_ID: ${{ inputs.event_id }}
+          INPUT_PLAN_ID: ${{ inputs.plan_id }}
+          INPUT_PLAN_SHA256: ${{ inputs.plan_sha256 }}
+          INPUT_RELEASE_COMMIT: ${{ inputs.release_commit }}
+          INPUT_PACKAGES_JSON: ${{ inputs.packages_json }}
+          INPUT_NONCE: ${{ inputs.nonce }}
+          LENSO_APP_TOKEN: ${{ steps.app.outputs.token }}
+          LENSO_COORDINATOR_PREFLIGHT_URL: ${{ vars.LENSO_COORDINATOR_PREFLIGHT_URL }}
+          RUNNER_IMAGE: ubuntu-24.04
+        run: node .lenso-release/runtime/lib/repository/cli.js preflight
+      - name: Atomically consume proof and seal exact Cargo/npm archives
+        env:
+          INPUT_EVENT_ID: ${{ inputs.event_id }}
+          INPUT_PLAN_ID: ${{ inputs.plan_id }}
+          INPUT_PLAN_SHA256: ${{ inputs.plan_sha256 }}
+          INPUT_RELEASE_COMMIT: ${{ inputs.release_commit }}
+          INPUT_PACKAGES_JSON: ${{ inputs.packages_json }}
+          INPUT_NONCE: ${{ inputs.nonce }}
+          LENSO_APP_TOKEN: ${{ steps.app.outputs.token }}
+          LENSO_COORDINATOR_PREFLIGHT_CONSUME_URL: ${{ vars.LENSO_COORDINATOR_PREFLIGHT_CONSUME_URL }}
+          LENSO_PREFLIGHT_AUTHORITY_PUBLIC_KEY: ${{ vars.LENSO_PREFLIGHT_AUTHORITY_PUBLIC_KEY }}
+          RUNNER_IMAGE: ubuntu-24.04
+        run: node .lenso-release/runtime/lib/repository/cli.js consume-preflight
+      - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18
+        id: crates-auth
+      - name: Publish both members and confirm fixed-group receipts
+        env:
+          INPUT_EVENT_ID: ${{ inputs.event_id }}
+          INPUT_PLAN_ID: ${{ inputs.plan_id }}
+          INPUT_PLAN_SHA256: ${{ inputs.plan_sha256 }}
+          INPUT_RELEASE_COMMIT: ${{ inputs.release_commit }}
+          INPUT_PACKAGES_JSON: ${{ inputs.packages_json }}
+          INPUT_NONCE: ${{ inputs.nonce }}
+          LENSO_APP_ID: ${{ vars.LENSO_RELEASE_APP_ID }}
+          LENSO_APP_TOKEN: ${{ steps.app.outputs.token }}
+          LENSO_ATTESTATION_TOKEN: ${{ github.token }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
+          LENSO_COORDINATOR_RECEIPT_URL: ${{ vars.LENSO_COORDINATOR_RECEIPT_URL }}
+          LENSO_COORDINATOR_PREFLIGHT_CONSUME_URL: ${{ vars.LENSO_COORDINATOR_PREFLIGHT_CONSUME_URL }}
+          LENSO_PREFLIGHT_AUTHORITY_PUBLIC_KEY: ${{ vars.LENSO_PREFLIGHT_AUTHORITY_PUBLIC_KEY }}
+          RUNNER_IMAGE: ubuntu-24.04
+        run: node .lenso-release/runtime/lib/repository/cli.js publish

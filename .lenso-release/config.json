@@ -1,0 +1,10 @@
+{
+  "schema": "lenso.repository-config.v1",
+  "repository": "LioRael/lenso-cli",
+  "fixedGroups": {
+    "lenso-cli": [
+      "cargo:lenso-cli",
+      "npm:@lenso/cli"
+    ]
+  }
+}
