@@ -54,10 +54,13 @@ jobs:
             -H "Authorization: Bearer $GH_TOKEN" -H 'Content-Type: application/json' \
             --data-binary @/tmp/ready.json "$READY_URL"
       - name: Draft and apply Tegami plan
+        id: draft
         if: ${{ hashFiles('.lenso-release/plan.json') == '' && hashFiles('.tegami/*.md') != '' }}
-        run: node .lenso-release/runtime/lib/repository/cli.js plan
+        run: |
+          node .lenso-release/runtime/lib/repository/cli.js plan
+          echo 'created=true' >> "$GITHUB_OUTPUT"
       - name: Create or update the single release PR
-        if: ${{ hashFiles('.lenso-release/plan.json') == '' && hashFiles('.tegami/*.md') != '' }}
+        if: ${{ steps.draft.outputs.created == 'true' }}
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           BRANCH: release/${{ github.event.repository.name }}
