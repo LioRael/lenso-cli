@@ -9,6 +9,34 @@ use anyhow::{Context, Result, anyhow, bail};
 use lenso_service::check_contract_artifact_value;
 use serde_json::{Map, Value, json};
 
+const SERVICE_CHECK_ARTIFACT_VERSION: &str = "lenso.service-check.v1";
+const SERVICE_DIFF_ARTIFACT_VERSION: &str = "lenso.service-diff.v1";
+const SERVICE_DOCTOR_ARTIFACT_VERSION: &str = "lenso.service-doctor.v1";
+
+fn machine_result<T>(
+    result: Result<T>,
+    json_output: bool,
+    code: &str,
+    next_action: &str,
+) -> Result<T> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) if json_output => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "artifactVersion": "lenso.command-error.v1",
+                    "code": code,
+                    "message": error.to_string(),
+                    "nextAction": next_action,
+                }))?
+            );
+            Err(error)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RemoteModuleInstallOptions {
     pub allow_incompatible: bool,
@@ -103,6 +131,7 @@ pub struct ServiceUpgradeOptions {
     pub base_url: Option<String>,
     pub dry_run: bool,
     pub env_file: Option<PathBuf>,
+    pub json: bool,
     pub manifest_reference: String,
     pub module_services_file: Option<PathBuf>,
     pub repo_root: Option<PathBuf>,
@@ -454,11 +483,13 @@ impl RemoteModuleServiceDoctorStatus {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ModuleDoctorReport {
+    artifact_version: String,
     issue_count: usize,
     sources_checked: usize,
     services_checked: usize,
     sources: Vec<ModuleDoctorSourceReport>,
     services: Vec<ModuleDoctorServiceReport>,
+    next_actions: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -2558,8 +2589,17 @@ async fn build_module_doctor_report(
         }
     }
 
+    let next_actions = sources
+        .iter()
+        .filter_map(|source| source.fix.clone())
+        .chain(services.iter().filter_map(|service| service.fix.clone()))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
     Ok(ModuleDoctorReport {
+        artifact_version: SERVICE_DOCTOR_ARTIFACT_VERSION.to_owned(),
         issue_count,
+        next_actions,
         sources_checked: sources.len(),
         services_checked: services.len(),
         sources,
@@ -3147,10 +3187,12 @@ pub async fn check_service_manifest_reference(
         .get("modules")
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow!("Service manifest modules must be an array"))?;
-    let module_names = modules
+    let mut module_names = modules
         .iter()
         .filter_map(|module| module.get("name").and_then(Value::as_str))
         .collect::<Vec<_>>();
+    module_names.sort_unstable();
+    module_names.dedup();
     let operations = service_manifest_operations(&manifest, options.operation.as_deref());
     if let Some(operation) = options.operation.as_deref()
         && operations.is_empty()
@@ -3198,6 +3240,7 @@ pub async fn check_service_manifest_reference(
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({
+                "artifactVersion": SERVICE_CHECK_ARTIFACT_VERSION,
                 "declarations": declarations,
                 "manifestReference": manifest_reference,
                 "manifestUrl": manifest_url,
@@ -3212,6 +3255,7 @@ pub async fn check_service_manifest_reference(
                 "readyUrl": ready_url,
                 "service": name,
                 "status": "ok",
+                "nextActions": [],
                 "version": version,
             }))
             .context("serialize service manifest check")?
@@ -3719,31 +3763,108 @@ fn service_check_declaration_summary(manifest: &Value) -> Value {
 }
 
 pub async fn diff_service(options: ServiceDiffOptions) -> Result<()> {
-    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
-    let receipt = installed_service_receipt(&repo_root, &options.service_name)?;
-    let current = receipt
+    let repo_root = machine_result(
+        resolve_repo_root(options.repo_root.as_deref()),
+        options.json,
+        "service_repo_invalid",
+        "Provide a valid Lenso host repository root and rerun the command.",
+    )?;
+    let receipt = machine_result(
+        installed_service_receipt(&repo_root, &options.service_name),
+        options.json,
+        "service_not_installed",
+        "Install the Service or repair its install receipt before diffing.",
+    )?;
+    let current = machine_result(
+        receipt
         .get("serviceManifestSnapshot")
         .ok_or_else(|| {
             anyhow!(
                 "Service `{}` has no manifest snapshot; reinstall or upgrade it once before diff",
                 options.service_name
             )
-        })?
-        .clone();
-    let (_, candidate, _, _) =
-        read_service_or_package_manifest(&options.manifest_reference).await?;
-    ensure_service_name_matches(&candidate, &options.service_name)?;
+        })
+        .cloned(),
+        options.json,
+        "service_snapshot_missing",
+        "Reinstall or upgrade the Service once to record a manifest snapshot.",
+    )?;
+    let (_, candidate, _, _) = machine_result(
+        read_service_or_package_manifest(&options.manifest_reference).await,
+        options.json,
+        "service_candidate_invalid",
+        "Fix the candidate Service artifact and rerun the diff.",
+    )?;
+    machine_result(
+        ensure_service_name_matches(&candidate, &options.service_name),
+        options.json,
+        "service_identity_mismatch",
+        "Use a candidate artifact with the installed Service name.",
+    )?;
     let diff = service_manifest_diff(&current, &candidate);
+    let report = json!({
+        "artifactVersion": SERVICE_DIFF_ARTIFACT_VERSION,
+        "approvalBoundaries": [{
+            "id": "apply-service-upgrade",
+            "category": "production_impacting",
+            "action": format!("lenso service upgrade {} {}", options.service_name, options.manifest_reference),
+            "required": true,
+            "executed": false,
+            "nextAction": "Obtain explicit operator approval before applying this upgrade."
+        }],
+        "diff": diff,
+        "nextActions": ["Review the deterministic diff before planning or applying an upgrade."],
+        "service": options.service_name,
+    });
 
     if options.json {
-        println!("{}", serde_json::to_string_pretty(&diff)?);
+        println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
-        print_service_manifest_diff(&options.service_name, &diff);
+        print_service_manifest_diff(&options.service_name, &report["diff"]);
     }
     Ok(())
 }
 
 pub async fn upgrade_service(options: ServiceUpgradeOptions) -> Result<()> {
+    if options.dry_run && options.json {
+        let (_, candidate, _, package_context) = machine_result(
+            read_service_or_package_manifest(&options.manifest_reference).await,
+            true,
+            "service_candidate_invalid",
+            "Fix the candidate Service artifact and rerun the dry-run.",
+        )?;
+        machine_result(
+            ensure_service_name_matches(&candidate, &options.service_name),
+            true,
+            "service_identity_mismatch",
+            "Use a candidate artifact with the installed Service name.",
+        )?;
+        if let Some(issue) = remote_module_manifest_compatibility_issue(&candidate)
+            && !options.allow_incompatible
+        {
+            return machine_result(
+                Err(anyhow!(issue)),
+                true,
+                "service_compatibility_blocked",
+                "Resolve the compatibility issue or explicitly pass `--allow-incompatible` after approval.",
+            );
+        }
+        if let Some(package) = package_context.as_ref() {
+            machine_result(
+                ensure_service_package_matches_manifest(&package.manifest, &candidate),
+                true,
+                "service_package_mismatch",
+                "Regenerate the Service package so its identity and modules match the candidate manifest.",
+            )?;
+        }
+        return diff_service(ServiceDiffOptions {
+            json: true,
+            manifest_reference: options.manifest_reference,
+            repo_root: options.repo_root,
+            service_name: options.service_name,
+        })
+        .await;
+    }
     let (manifest_reference, candidate, provenance, package_context) =
         read_service_or_package_manifest(&options.manifest_reference).await?;
     ensure_service_name_matches(&candidate, &options.service_name)?;
@@ -5702,6 +5823,7 @@ pub async fn apply_service_release_plan(options: ServiceReleaseApplyOptions) -> 
         base_url: options.base_url,
         dry_run: options.dry_run,
         env_file: options.env_file,
+        json: false,
         manifest_reference,
         module_services_file: options.module_services_file,
         repo_root: Some(repo_root.clone()),
@@ -5843,8 +5965,16 @@ async fn build_service_release_plan(
         .map(|package| package.manifest.clone())
         .unwrap_or(Value::Null);
     let mut plan = json!({
+        "artifactVersion": "lenso.service-release-plan.v1",
         "protocol": "lenso.service-release-plan.v1",
-        "createdAtUnixMs": current_time_millis()?,
+        "approvalBoundaries": [{
+            "id": "apply-service-release",
+            "category": "production_impacting",
+            "action": format!("lenso service release apply <plan.json>"),
+            "required": true,
+            "executed": false,
+            "nextAction": "Obtain explicit operator approval before applying this release."
+        }],
         "service": {
             "name": service_name,
         },

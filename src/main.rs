@@ -1745,6 +1745,10 @@ struct ServiceUpgradeArgs {
     /// Allow upgrade when compatibility metadata does not match this host.
     #[arg(long)]
     allow_incompatible: bool,
+
+    /// Print the dry-run proposal as machine-readable JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -2490,6 +2494,7 @@ impl From<&ServiceUpgradeArgs> for module::ServiceUpgradeOptions {
             base_url: args.base_url.clone(),
             dry_run: args.dry_run,
             env_file: args.env_file.clone(),
+            json: args.json,
             manifest_reference: args.manifest_reference.clone(),
             module_services_file: args.module_services_file.clone(),
             repo_root: args.repo_root.clone(),
