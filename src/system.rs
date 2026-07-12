@@ -3,7 +3,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use lenso_service::{ContractSemanticKind, ProviderSemantics, check_contract_artifact_value};
+use lenso_service::{
+    ContractSemanticKind, ProviderSemantics, SystemV2Graph, check_contract_artifact_value,
+    system_v2_graph,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -225,6 +228,8 @@ struct SystemDependency {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SystemGraph {
+    artifact_protocol: String,
+    semantic_kind: ContractSemanticKind,
     name: String,
     environments: Vec<String>,
     services: Vec<SystemGraphService>,
@@ -271,13 +276,16 @@ struct SystemIssue {
 struct SystemPlan {
     detected_protocol: String,
     semantic_kind: ContractSemanticKind,
-    provider_semantics: ProviderSemantics,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider_semantics: Option<ProviderSemantics>,
     system_file: String,
     name: String,
     status: String,
     services: usize,
     modules: usize,
     dependencies: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    kinds: Vec<String>,
     issues: Vec<SystemIssue>,
     commands: Vec<String>,
 }
@@ -462,6 +470,48 @@ pub(crate) fn plan_system(options: SystemPlanOptions) -> Result<()> {
         }
         Err(error) => return Err(error.into()),
     };
+    if contract_check.semantic_kind == ContractSemanticKind::MixedSystem {
+        let graph = system_v2_graph(&artifact).map_err(|issues| anyhow::anyhow!("{issues:?}"))?;
+        let kinds = graph
+            .nodes
+            .iter()
+            .map(|node| node.kind.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let plan = SystemPlan {
+            commands: Vec::new(),
+            dependencies: graph
+                .relationships
+                .iter()
+                .filter(|relationship| relationship.kind == "consumes")
+                .count(),
+            detected_protocol: contract_check.detected_protocol,
+            issues: Vec::new(),
+            kinds,
+            modules: graph
+                .nodes
+                .iter()
+                .filter(|node| node.kind == "module")
+                .count(),
+            name: graph.system_id,
+            provider_semantics: None,
+            semantic_kind: contract_check.semantic_kind,
+            services: graph
+                .nodes
+                .iter()
+                .filter(|node| matches!(node.kind.as_str(), "provider" | "autonomous_service"))
+                .count(),
+            status: "ready".to_owned(),
+            system_file: path_string(&path),
+        };
+        if options.json {
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+        } else {
+            print_system_plan(&plan);
+        }
+        return Ok(());
+    }
     let system: ServiceSystem =
         serde_json::from_value(artifact).with_context(|| format!("parse {}", path.display()))?;
     let graph = system_graph(&system);
@@ -471,6 +521,7 @@ pub(crate) fn plan_system(options: SystemPlanOptions) -> Result<()> {
         detected_protocol: contract_check.detected_protocol,
         dependencies: graph.dependencies.len(),
         issues: graph.issues.clone(),
+        kinds: Vec::new(),
         modules: graph.modules.len(),
         name: system.name.clone(),
         provider_semantics: contract_check.provider_semantics,
@@ -496,12 +547,27 @@ pub(crate) fn plan_system(options: SystemPlanOptions) -> Result<()> {
 
 pub(crate) fn graph_system(options: SystemGraphOptions) -> Result<()> {
     let path = system_read_path(options.system_file.as_deref())?;
-    let system = read_system(&path)?;
-    let graph = system_graph(&system);
-    if options.json {
-        println!("{}", serde_json::to_string_pretty(&graph)?);
+    let artifact: Value = serde_json::from_str(
+        &fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?,
+    )
+    .with_context(|| format!("parse {}", path.display()))?;
+    let check = check_contract_artifact_value(&artifact)?;
+    if check.semantic_kind == ContractSemanticKind::MixedSystem {
+        let graph = system_v2_graph(&artifact).map_err(|issues| anyhow::anyhow!("{issues:?}"))?;
+        if options.json {
+            println!("{}", serde_json::to_string_pretty(&graph)?);
+        } else {
+            print_system_v2_graph(&graph);
+        }
     } else {
-        print_system_graph(&graph);
+        let system: ServiceSystem = serde_json::from_value(artifact)
+            .with_context(|| format!("parse {}", path.display()))?;
+        let graph = system_graph(&system);
+        if options.json {
+            println!("{}", serde_json::to_string_pretty(&graph)?);
+        } else {
+            print_system_graph(&graph);
+        }
     }
     Ok(())
 }
@@ -916,6 +982,7 @@ fn system_graph(system: &ServiceSystem) -> SystemGraph {
     }
 
     SystemGraph {
+        artifact_protocol: system.protocol.clone(),
         dependencies,
         environments: system.environments.clone(),
         issues,
@@ -930,6 +997,7 @@ fn system_graph(system: &ServiceSystem) -> SystemGraph {
             })
             .collect(),
         name: system.name.clone(),
+        semantic_kind: ContractSemanticKind::ProviderSystem,
         services: system
             .services
             .iter()
@@ -1707,6 +1775,9 @@ fn print_system_plan(plan: &SystemPlan) {
         "services: {} / modules: {} / dependencies: {}",
         plan.services, plan.modules, plan.dependencies
     );
+    if !plan.kinds.is_empty() {
+        println!("kinds: {}", plan.kinds.join(", "));
+    }
     if plan.issues.is_empty() {
         println!("issues: none");
     } else {
@@ -1725,6 +1796,11 @@ fn print_system_plan(plan: &SystemPlan) {
 
 fn print_system_graph(graph: &SystemGraph) {
     println!("Service system graph: {}", graph.name);
+    println!(
+        "contract: {} ({})",
+        graph.artifact_protocol,
+        graph.semantic_kind.as_str()
+    );
     if !graph.environments.is_empty() {
         println!("environments: {}", graph.environments.join(", "));
     }
@@ -1761,6 +1837,34 @@ fn print_system_graph(graph: &SystemGraph) {
         for issue in &graph.issues {
             println!("  - {}: {}", issue.code, issue.message);
         }
+    }
+}
+
+fn print_system_v2_graph(graph: &SystemV2Graph) {
+    println!("Service system graph: {}", graph.system_id);
+    println!(
+        "contract: {} ({})",
+        graph.artifact_protocol,
+        graph.semantic_kind.as_str()
+    );
+    println!("nodes:");
+    for node in &graph.nodes {
+        println!(
+            "  {} [{}] owner={}",
+            node.id,
+            node.kind,
+            node.owner.as_deref().unwrap_or("-")
+        );
+    }
+    println!("relationships:");
+    for relationship in &graph.relationships {
+        println!(
+            "  {} -> {} [{}] contract={}",
+            relationship.from,
+            relationship.to,
+            relationship.kind,
+            relationship.contract_id.as_deref().unwrap_or("-")
+        );
     }
 }
 
@@ -2040,6 +2144,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mixed_system_v2_graph_exposes_protocol_and_all_explicit_kinds() {
+        let artifact: Value =
+            serde_json::from_str(lenso_service::MIXED_SYSTEM_V2_FIXTURE_JSON).unwrap();
+        let check = check_contract_artifact_value(&artifact).unwrap();
+        let graph = system_v2_graph(&artifact).unwrap();
+
+        assert_eq!(check.detected_protocol, "lenso.system.v2");
+        assert_eq!(check.semantic_kind, ContractSemanticKind::MixedSystem);
+        assert_eq!(graph.artifact_protocol, "lenso.system.v2");
+        for kind in [
+            "host",
+            "provider",
+            "autonomous_service",
+            "module",
+            "workload",
+            "producer",
+            "consumer",
+        ] {
+            assert!(graph.nodes.iter().any(|node| node.kind == kind));
+        }
+    }
+
+    #[test]
     fn graph_resolves_module_dependencies_by_capability() {
         let system = ServiceSystem {
             dependencies: Vec::new(),
@@ -2086,6 +2213,8 @@ mod tests {
 
         let graph = system_graph(&system);
 
+        assert_eq!(graph.artifact_protocol, "lenso.system.v1");
+        assert_eq!(graph.semantic_kind, ContractSemanticKind::ProviderSystem);
         assert_eq!(graph.dependencies[0].state, "resolved");
         assert_eq!(graph.dependencies[0].to.as_deref(), Some("billing"));
         assert!(graph.issues.is_empty());

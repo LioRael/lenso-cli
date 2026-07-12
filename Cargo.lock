@@ -1142,9 +1142,9 @@ dependencies = [
 
 [[package]]
 name = "lenso-service"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16c19904a40c52f41c2e1b7ba1391d8f424f86b6d444b225e4b650fe88676722"
+checksum = "71a0e912844ec51d283a171a9032a92dfa6aad19fedbddc5c60ddfc1ace26ecc"
 dependencies = [
  "axum",
  "lenso-contracts",
