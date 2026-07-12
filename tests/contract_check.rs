@@ -1,6 +1,8 @@
 use std::{fs, path::PathBuf, process::Command, time::SystemTime};
 
-use lenso_service::{LEGACY_SERVICE_V1_FIXTURE_JSON, LEGACY_SYSTEM_V1_FIXTURE_JSON};
+use lenso_service::{
+    LEGACY_SERVICE_V1_FIXTURE_JSON, LEGACY_SYSTEM_V1_FIXTURE_JSON, MIXED_SYSTEM_V2_FIXTURE_JSON,
+};
 use serde_json::Value;
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -83,6 +85,64 @@ fn system_check_reports_shared_provider_system_semantics() {
     assert_eq!(report["detectedProtocol"], "lenso.system.v1");
     assert_eq!(report["semanticKind"], "provider_system");
     assert_eq!(report["providerSemantics"]["runtimeQueueOwner"], "host");
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn system_v2_check_and_graph_report_explicit_mixed_topology_kinds() {
+    let path = fixture_path("mixed-system-v2");
+    fs::write(&path, MIXED_SYSTEM_V2_FIXTURE_JSON).unwrap();
+
+    let check = run_json(&[
+        "system",
+        "check",
+        "--system-file",
+        path.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(check["detectedProtocol"], "lenso.system.v2");
+    assert_eq!(check["semanticKind"], "mixed_system");
+    assert_eq!(
+        check["kinds"],
+        serde_json::json!([
+            "autonomous_service",
+            "consumer",
+            "host",
+            "module",
+            "producer",
+            "provider",
+            "workload"
+        ])
+    );
+
+    let graph = run_json(&[
+        "system",
+        "graph",
+        "--system-file",
+        path.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(graph["artifactProtocol"], "lenso.system.v2");
+    let kinds = graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| node["kind"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        kinds,
+        [
+            "autonomous_service",
+            "consumer",
+            "host",
+            "module",
+            "producer",
+            "provider",
+            "workload",
+        ]
+        .into_iter()
+        .collect()
+    );
     fs::remove_file(path).unwrap();
 }
 
