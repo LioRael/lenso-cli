@@ -14,6 +14,9 @@ const DEFAULT_SYSTEM_FILE: &str = "lenso.system.json";
 const SERVICE_SYSTEM_PROTOCOL: &str = "lenso.system.v1";
 const SYSTEM_RELEASE_PROTOCOL: &str = "lenso.system-release.v1";
 const SYSTEM_RUNBOOK_PROTOCOL: &str = "lenso.system-runbook.v1";
+const SYSTEM_PLAN_ARTIFACT_VERSION: &str = "lenso.system-plan.v1";
+const SYSTEM_GRAPH_ARTIFACT_VERSION: &str = "lenso.system-graph.v1";
+const SYSTEM_DRIFT_ARTIFACT_VERSION: &str = "lenso.system-drift.v1";
 const MODULE_INSTALLS_PATH: &str = ".lenso/module-installs.json";
 const MODULE_SERVICES_PATH: &str = ".lenso/module-services.json";
 const SERVICE_ENVIRONMENTS_PATH: &str = ".lenso/service-environments.json";
@@ -21,6 +24,64 @@ const SERVICE_DEPLOYMENTS_PATH: &str = ".lenso/service-deployments.json";
 const SERVICE_RELEASES_PATH: &str = ".lenso/service-releases.json";
 const SYSTEM_RELEASES_PATH: &str = ".lenso/system-releases.json";
 const SYSTEM_RUNBOOKS_PATH: &str = ".lenso/system-runbooks.json";
+
+fn machine_result<T>(
+    result: Result<T>,
+    json_output: bool,
+    code: &str,
+    next_action: &str,
+) -> Result<T> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) if json_output => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "artifactVersion": "lenso.command-error.v1",
+                    "code": code,
+                    "message": error.to_string(),
+                    "nextAction": next_action,
+                }))?
+            );
+            Err(error)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn checked_system_v2_graph(artifact: &Value, json_output: bool) -> Result<SystemV2Graph> {
+    machine_result(
+        system_v2_graph(artifact).map_err(|issues| anyhow::anyhow!("{issues:?}")),
+        json_output,
+        "system_validation_failed",
+        "Fix the reported System validation issues and rerun the command.",
+    )
+}
+
+fn preflight_system(path: &Path, json_output: bool) -> Result<Value> {
+    let artifact: Value = machine_result(
+        fs::read_to_string(path)
+            .with_context(|| format!("read {}", path.display()))
+            .and_then(|source| {
+                serde_json::from_str(&source).with_context(|| format!("parse {}", path.display()))
+            }),
+        json_output,
+        "system_artifact_invalid",
+        "Fix the System artifact JSON and rerun the command.",
+    )?;
+    let check = match check_contract_artifact_value(&artifact) {
+        Ok(check) => check,
+        Err(error) if json_output => {
+            println!("{}", serde_json::to_string_pretty(&error)?);
+            return Err(error.into());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if check.semantic_kind == ContractSemanticKind::MixedSystem {
+        checked_system_v2_graph(&artifact, json_output)?;
+    }
+    Ok(artifact)
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct SystemInitOptions {
@@ -228,6 +289,7 @@ struct SystemDependency {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SystemGraph {
+    artifact_version: String,
     artifact_protocol: String,
     semantic_kind: ContractSemanticKind,
     name: String,
@@ -269,11 +331,47 @@ struct SystemGraphDependency {
 struct SystemIssue {
     code: String,
     message: String,
+    next_action: String,
+}
+
+impl SystemIssue {
+    fn new(code: &str, message: impl Into<String>, next_action: &str) -> Self {
+        Self {
+            code: code.to_owned(),
+            message: message.into(),
+            next_action: next_action.to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApprovalBoundary {
+    id: String,
+    category: String,
+    action: String,
+    required: bool,
+    executed: bool,
+    next_action: String,
+}
+
+impl ApprovalBoundary {
+    fn production_change(id: &str, action: &str) -> Self {
+        Self {
+            id: id.to_owned(),
+            category: "production_impacting".to_owned(),
+            action: action.to_owned(),
+            required: true,
+            executed: false,
+            next_action: "Obtain explicit operator approval before running this action.".to_owned(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SystemPlan {
+    artifact_version: String,
     detected_protocol: String,
     semantic_kind: ContractSemanticKind,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -288,12 +386,14 @@ struct SystemPlan {
     kinds: Vec<String>,
     issues: Vec<SystemIssue>,
     commands: Vec<String>,
+    next_actions: Vec<String>,
+    approval_boundaries: Vec<ApprovalBoundary>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SystemDriftReport {
-    version: u8,
+    artifact_version: String,
     system_file: String,
     repo_root: String,
     name: String,
@@ -302,6 +402,8 @@ struct SystemDriftReport {
     drifts: Vec<SystemDrift>,
     commands: Vec<String>,
     applied: Vec<String>,
+    next_actions: Vec<String>,
+    approval_boundaries: Vec<ApprovalBoundary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -313,6 +415,7 @@ struct SystemDrift {
     name: String,
     message: String,
     command: Option<String>,
+    next_action: String,
 }
 
 #[derive(Debug, Default)]
@@ -458,10 +561,7 @@ pub(crate) fn add_system_module(options: SystemAddModuleOptions) -> Result<()> {
 
 pub(crate) fn plan_system(options: SystemPlanOptions) -> Result<()> {
     let path = system_read_path(options.system_file.as_deref())?;
-    let artifact: Value = serde_json::from_str(
-        &fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?,
-    )
-    .with_context(|| format!("parse {}", path.display()))?;
+    let artifact = preflight_system(&path, options.json)?;
     let contract_check = match check_contract_artifact_value(&artifact) {
         Ok(check) => check,
         Err(error) if options.json => {
@@ -471,7 +571,7 @@ pub(crate) fn plan_system(options: SystemPlanOptions) -> Result<()> {
         Err(error) => return Err(error.into()),
     };
     if contract_check.semantic_kind == ContractSemanticKind::MixedSystem {
-        let graph = system_v2_graph(&artifact).map_err(|issues| anyhow::anyhow!("{issues:?}"))?;
+        let graph = checked_system_v2_graph(&artifact, options.json)?;
         let kinds = graph
             .nodes
             .iter()
@@ -480,6 +580,11 @@ pub(crate) fn plan_system(options: SystemPlanOptions) -> Result<()> {
             .into_iter()
             .collect();
         let plan = SystemPlan {
+            approval_boundaries: vec![ApprovalBoundary::production_change(
+                "apply-system-state",
+                &format!("lenso system apply --system-file {}", path_string(&path)),
+            )],
+            artifact_version: SYSTEM_PLAN_ARTIFACT_VERSION.to_owned(),
             commands: Vec::new(),
             dependencies: graph
                 .relationships
@@ -495,6 +600,7 @@ pub(crate) fn plan_system(options: SystemPlanOptions) -> Result<()> {
                 .filter(|node| node.kind == "module")
                 .count(),
             name: graph.system_id,
+            next_actions: Vec::new(),
             provider_semantics: None,
             semantic_kind: contract_check.semantic_kind,
             services: graph
@@ -517,6 +623,11 @@ pub(crate) fn plan_system(options: SystemPlanOptions) -> Result<()> {
     let graph = system_graph(&system);
     let commands = system_commands(&system);
     let plan = SystemPlan {
+        approval_boundaries: vec![ApprovalBoundary::production_change(
+            "apply-system-state",
+            &format!("lenso system apply --system-file {}", path_string(&path)),
+        )],
+        artifact_version: SYSTEM_PLAN_ARTIFACT_VERSION.to_owned(),
         commands,
         detected_protocol: contract_check.detected_protocol,
         dependencies: graph.dependencies.len(),
@@ -524,6 +635,13 @@ pub(crate) fn plan_system(options: SystemPlanOptions) -> Result<()> {
         kinds: Vec::new(),
         modules: graph.modules.len(),
         name: system.name.clone(),
+        next_actions: graph
+            .issues
+            .iter()
+            .map(|issue| issue.next_action.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
         provider_semantics: contract_check.provider_semantics,
         semantic_kind: contract_check.semantic_kind,
         services: graph.services.len(),
@@ -547,21 +665,29 @@ pub(crate) fn plan_system(options: SystemPlanOptions) -> Result<()> {
 
 pub(crate) fn graph_system(options: SystemGraphOptions) -> Result<()> {
     let path = system_read_path(options.system_file.as_deref())?;
-    let artifact: Value = serde_json::from_str(
-        &fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?,
-    )
-    .with_context(|| format!("parse {}", path.display()))?;
-    let check = check_contract_artifact_value(&artifact)?;
+    let artifact = preflight_system(&path, options.json)?;
+    let check = machine_result(
+        check_contract_artifact_value(&artifact).map_err(Into::into),
+        options.json,
+        "system_contract_invalid",
+        "Use a supported System protocol and fix the reported contract fields.",
+    )?;
     if check.semantic_kind == ContractSemanticKind::MixedSystem {
-        let graph = system_v2_graph(&artifact).map_err(|issues| anyhow::anyhow!("{issues:?}"))?;
+        let graph = checked_system_v2_graph(&artifact, options.json)?;
         if options.json {
-            println!("{}", serde_json::to_string_pretty(&graph)?);
+            let mut output = serde_json::to_value(&graph)?;
+            output["artifactVersion"] = json!(SYSTEM_GRAPH_ARTIFACT_VERSION);
+            println!("{}", serde_json::to_string_pretty(&output)?);
         } else {
             print_system_v2_graph(&graph);
         }
     } else {
-        let system: ServiceSystem = serde_json::from_value(artifact)
-            .with_context(|| format!("parse {}", path.display()))?;
+        let system: ServiceSystem = machine_result(
+            serde_json::from_value(artifact).with_context(|| format!("parse {}", path.display())),
+            options.json,
+            "system_shape_invalid",
+            "Fix the System fields and rerun `lenso system graph`.",
+        )?;
         let graph = system_graph(&system);
         if options.json {
             println!("{}", serde_json::to_string_pretty(&graph)?);
@@ -573,6 +699,8 @@ pub(crate) fn graph_system(options: SystemGraphOptions) -> Result<()> {
 }
 
 pub(crate) fn diff_system(options: SystemDiffOptions) -> Result<()> {
+    let path = system_read_path(options.system_file.as_deref())?;
+    preflight_system(&path, options.json)?;
     let report = system_drift_report(
         options.system_file.as_deref(),
         options.repo_root.as_deref(),
@@ -592,6 +720,17 @@ pub(crate) fn diff_system(options: SystemDiffOptions) -> Result<()> {
 pub(crate) fn apply_system(options: SystemApplyOptions) -> Result<()> {
     let path = system_read_path(options.system_file.as_deref())?;
     let repo_root = repo_root_path(options.repo_root.as_deref())?;
+    let artifact = preflight_system(&path, options.json)?;
+    let contract_check = check_contract_artifact_value(&artifact)?;
+    if contract_check.semantic_kind == ContractSemanticKind::MixedSystem {
+        let report = system_drift_report(Some(&path), Some(&repo_root), Vec::new())?;
+        if options.json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            print_system_drift_report(&report, "Service system apply preview");
+        }
+        return Ok(());
+    }
     let system = read_system(&path)?;
     let mut applied = Vec::new();
     applied.extend(apply_module_services(&repo_root, &system, options.dry_run)?);
@@ -617,6 +756,8 @@ pub(crate) fn apply_system(options: SystemApplyOptions) -> Result<()> {
 }
 
 pub(crate) fn doctor_system(options: SystemDoctorOptions) -> Result<()> {
+    let path = system_read_path(options.system_file.as_deref())?;
+    preflight_system(&path, options.json)?;
     let report = system_drift_report(
         options.system_file.as_deref(),
         options.repo_root.as_deref(),
@@ -886,23 +1027,25 @@ fn system_graph(system: &ServiceSystem) -> SystemGraph {
     for service in &system.services {
         for module_name in &service.modules {
             if !modules_by_name.contains_key(module_name.as_str()) {
-                issues.push(SystemIssue {
-                    code: "module_not_declared".to_owned(),
-                    message: format!(
+                issues.push(SystemIssue::new(
+                    "module_not_declared",
+                    format!(
                         "Service `{}` references undeclared module `{module_name}`.",
                         service.name
                     ),
-                });
+                    "Declare the module and rerun `lenso system check`.",
+                ));
             }
             if let Some(existing) = module_owner.insert(module_name.as_str(), service.name.as_str())
             {
-                issues.push(SystemIssue {
-                    code: "module_owned_twice".to_owned(),
-                    message: format!(
+                issues.push(SystemIssue::new(
+                    "module_owned_twice",
+                    format!(
                         "Module `{module_name}` is assigned to both `{existing}` and `{}`.",
                         service.name
                     ),
-                });
+                    "Assign the module to exactly one owner and rerun `lenso system check`.",
+                ));
             }
         }
     }
@@ -913,13 +1056,14 @@ fn system_graph(system: &ServiceSystem) -> SystemGraph {
             .and_then(|install_to| install_to.strip_prefix("service:"))
             && !services_by_name.contains_key(service_name)
         {
-            issues.push(SystemIssue {
-                code: "install_target_missing".to_owned(),
-                message: format!(
+            issues.push(SystemIssue::new(
+                "install_target_missing",
+                format!(
                     "Module `{}` installs to missing service `{service_name}`.",
                     module.name
                 ),
-            });
+                "Declare the target service or choose an existing install target.",
+            ));
         }
     }
 
@@ -971,42 +1115,67 @@ fn system_graph(system: &ServiceSystem) -> SystemGraph {
     }
     for dependency in &dependencies {
         if dependency.state != "resolved" {
-            issues.push(SystemIssue {
-                code: format!("dependency_{}", dependency.state),
-                message: format!(
+            issues.push(SystemIssue::new(
+                &format!("dependency_{}", dependency.state),
+                format!(
                     "`{}` depends on `{}`, but it is {}.",
                     dependency.from, dependency.capability, dependency.state
                 ),
-            });
+                "Declare exactly one matching capability provider and rerun `lenso system check`.",
+            ));
         }
     }
-
-    SystemGraph {
-        artifact_protocol: system.protocol.clone(),
-        dependencies,
-        environments: system.environments.clone(),
-        issues,
-        modules: system
-            .modules
-            .iter()
-            .map(|module| SystemGraphModule {
-                capabilities: module.capabilities.clone(),
-                dependencies: module.dependencies.clone(),
+    dependencies
+        .sort_by(|a, b| (&a.from, &a.capability, &a.to).cmp(&(&b.from, &b.capability, &b.to)));
+    issues.sort_by(|a, b| (&a.code, &a.message).cmp(&(&b.code, &b.message)));
+    let mut environments = system.environments.clone();
+    environments.sort();
+    environments.dedup();
+    let mut modules = system
+        .modules
+        .iter()
+        .map(|module| {
+            let mut capabilities = module.capabilities.clone();
+            capabilities.sort();
+            capabilities.dedup();
+            let mut dependencies = module.dependencies.clone();
+            dependencies.sort();
+            dependencies.dedup();
+            SystemGraphModule {
+                capabilities,
+                dependencies,
                 name: module.name.clone(),
                 owner: module_owner_name(module, &module_owner).to_owned(),
-            })
-            .collect(),
-        name: system.name.clone(),
-        semantic_kind: ContractSemanticKind::ProviderSystem,
-        services: system
-            .services
-            .iter()
-            .map(|service| SystemGraphService {
-                modules: service.modules.clone(),
+            }
+        })
+        .collect::<Vec<_>>();
+    modules.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut services = system
+        .services
+        .iter()
+        .map(|service| {
+            let mut modules = service.modules.clone();
+            modules.sort();
+            modules.dedup();
+            SystemGraphService {
+                modules,
                 name: service.name.clone(),
                 target: service.target.clone(),
-            })
-            .collect(),
+            }
+        })
+        .collect::<Vec<_>>();
+    services.sort_by(|a, b| a.name.cmp(&b.name));
+
+    SystemGraph {
+        artifact_version: SYSTEM_GRAPH_ARTIFACT_VERSION.to_owned(),
+        artifact_protocol: system.protocol.clone(),
+        dependencies,
+        environments,
+        issues,
+        modules,
+        name: system.name.clone(),
+        semantic_kind: ContractSemanticKind::ProviderSystem,
+        services,
     }
 }
 
@@ -1088,6 +1257,8 @@ fn system_commands(system: &ServiceSystem) -> Vec<String> {
             }
         }
     }
+    commands.sort();
+    commands.dedup();
     commands
 }
 
@@ -1098,10 +1269,35 @@ fn system_drift_report(
 ) -> Result<SystemDriftReport> {
     let path = system_read_path(system_file)?;
     let repo_root = repo_root_path(repo_root)?;
+    let artifact: Value = serde_json::from_str(
+        &fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?,
+    )
+    .with_context(|| format!("parse {}", path.display()))?;
+    let contract_check = check_contract_artifact_value(&artifact)?;
+    if contract_check.semantic_kind == ContractSemanticKind::MixedSystem {
+        let graph = system_v2_graph(&artifact).map_err(|issues| anyhow::anyhow!("{issues:?}"))?;
+        return Ok(SystemDriftReport {
+            approval_boundaries: vec![ApprovalBoundary::production_change(
+                "apply-system-state",
+                &format!("lenso system apply --system-file {}", path_string(&path)),
+            )],
+            applied,
+            artifact_version: SYSTEM_DRIFT_ARTIFACT_VERSION.to_owned(),
+            commands: Vec::new(),
+            drifts: Vec::new(),
+            graph_issues: Vec::new(),
+            name: graph.system_id,
+            next_actions: Vec::new(),
+            repo_root: path_string(&repo_root),
+            status: "ready".to_owned(),
+            system_file: path_string(&path),
+        });
+    }
     let system = read_system(&path)?;
     let graph = system_graph(&system);
     let state = read_host_system_state(&repo_root)?;
-    let drifts = system_drifts(&system, &graph, &state);
+    let mut drifts = system_drifts(&system, &graph, &state);
+    drifts.sort_by(|a, b| (&a.resource, &a.name, &a.code).cmp(&(&b.resource, &b.name, &b.code)));
     let commands = drifts
         .iter()
         .filter_map(|drift| drift.command.clone())
@@ -1113,8 +1309,20 @@ fn system_drift_report(
     } else {
         "ready"
     };
+    let next_actions = graph
+        .issues
+        .iter()
+        .map(|issue| issue.next_action.clone())
+        .chain(drifts.iter().map(|drift| drift.next_action.clone()))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
     Ok(SystemDriftReport {
-        version: 1,
+        approval_boundaries: vec![ApprovalBoundary::production_change(
+            "apply-system-state",
+            &format!("lenso system apply --system-file {}", path_string(&path)),
+        )],
+        artifact_version: SYSTEM_DRIFT_ARTIFACT_VERSION.to_owned(),
         system_file: path_string(&path),
         repo_root: path_string(&repo_root),
         name: system.name,
@@ -1123,6 +1331,7 @@ fn system_drift_report(
         drifts,
         commands,
         applied,
+        next_actions,
     })
 }
 
@@ -1141,6 +1350,8 @@ fn system_drifts(
                 name: service.name.clone(),
                 message: format!("Service `{}` is declared but not configured.", service.name),
                 command: service_workspace_command(service),
+                next_action: "Configure the service locally, then rerun `lenso system doctor`."
+                    .to_owned(),
             });
         }
         if matches!(service.target.as_str(), "kubernetes" | "operator") {
@@ -1162,6 +1373,7 @@ fn system_drifts(
                             shell_word(&service.name),
                             shell_word(&service.target)
                         )),
+                        next_action: "Create the declared environment configuration, then rerun `lenso system doctor`.".to_owned(),
                     });
                 } else if !state.deployments.contains(&key) {
                     drifts.push(SystemDrift {
@@ -1179,6 +1391,7 @@ fn system_drifts(
                             shell_word(environment),
                             shell_word(&service.target)
                         )),
+                        next_action: "Record a deployment observation, then rerun `lenso system doctor`.".to_owned(),
                     });
                 }
                 if !state.releases.contains(&key) {
@@ -1196,6 +1409,7 @@ fn system_drifts(
                             shell_word(&service.name),
                             shell_word(environment)
                         )),
+                        next_action: "Create and review a release plan before recording a release.".to_owned(),
                     });
                 }
             }
@@ -1210,6 +1424,9 @@ fn system_drifts(
                 name: module.name.clone(),
                 message: format!("Module `{}` is declared but not installed.", module.name),
                 command: Some(format!("lenso module install {}", shell_word(&module.name))),
+                next_action:
+                    "Review and install the declared module, then rerun `lenso system doctor`."
+                        .to_owned(),
             });
         }
     }
@@ -2142,6 +2359,84 @@ fn string_field(value: &Value, field: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_plan_serializes_version_next_actions_and_approval_boundaries() {
+        let plan = SystemPlan {
+            approval_boundaries: vec![ApprovalBoundary::production_change(
+                "apply-system-state",
+                "lenso system apply --system-file lenso.system.json",
+            )],
+            artifact_version: SYSTEM_PLAN_ARTIFACT_VERSION.to_owned(),
+            commands: vec!["lenso system apply --system-file lenso.system.json".to_owned()],
+            dependencies: 0,
+            detected_protocol: "lenso.system.v1".to_owned(),
+            issues: vec![SystemIssue::new(
+                "module_not_declared",
+                "A module is missing.",
+                "Declare the module and rerun `lenso system plan --check`.",
+            )],
+            kinds: Vec::new(),
+            modules: 0,
+            name: "support".to_owned(),
+            next_actions: vec![
+                "Declare the module and rerun `lenso system plan --check`.".to_owned(),
+            ],
+            provider_semantics: None,
+            semantic_kind: ContractSemanticKind::ProviderSystem,
+            services: 0,
+            status: "needs_attention".to_owned(),
+            system_file: "lenso.system.json".to_owned(),
+        };
+
+        let output = serde_json::to_value(plan).unwrap();
+
+        assert_eq!(output["artifactVersion"], SYSTEM_PLAN_ARTIFACT_VERSION);
+        assert_eq!(output["issues"][0]["code"], "module_not_declared");
+        assert_eq!(
+            output["issues"][0]["nextAction"],
+            "Declare the module and rerun `lenso system plan --check`."
+        );
+        assert_eq!(output["approvalBoundaries"][0]["required"], true);
+        assert_eq!(output["approvalBoundaries"][0]["executed"], false);
+    }
+
+    #[test]
+    fn logically_reordered_v1_systems_produce_identical_machine_graphs() {
+        let first: ServiceSystem = serde_json::from_value(json!({
+            "protocol": "lenso.system.v1",
+            "name": "support",
+            "environments": ["prod", "local"],
+            "services": [
+                {"name": "web", "target": "local", "modules": ["tickets", "auth"]},
+                {"name": "worker", "target": "local", "modules": []}
+            ],
+            "modules": [
+                {"name": "tickets", "capabilities": ["tickets.write", "tickets.read"]},
+                {"name": "auth", "capabilities": ["auth.read"]}
+            ]
+        }))
+        .unwrap();
+        let second: ServiceSystem = serde_json::from_value(json!({
+            "name": "support",
+            "protocol": "lenso.system.v1",
+            "modules": [
+                {"capabilities": ["auth.read"], "name": "auth"},
+                {"capabilities": ["tickets.read", "tickets.write"], "name": "tickets"}
+            ],
+            "services": [
+                {"modules": [], "target": "local", "name": "worker"},
+                {"modules": ["auth", "tickets"], "target": "local", "name": "web"}
+            ],
+            "environments": ["local", "prod"]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            serde_json::to_string(&system_graph(&first)).unwrap(),
+            serde_json::to_string(&system_graph(&second)).unwrap()
+        );
+    }
 
     #[test]
     fn mixed_system_v2_graph_exposes_protocol_and_all_explicit_kinds() {
