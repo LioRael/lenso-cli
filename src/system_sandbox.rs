@@ -1194,7 +1194,7 @@ async fn cleanup_recorded(root: &Path) -> std::result::Result<(), SandboxError> 
 
 fn owned_process_ids(token: &str) -> std::result::Result<Vec<u32>, SandboxError> {
     let output = std::process::Command::new("ps")
-        .args(["eww", "-ax", "-o", "pid=,command="])
+        .args(process_listing_args())
         .output()
         .map_err(|error| {
             SandboxError::new(
@@ -1216,6 +1216,16 @@ fn owned_process_ids(token: &str) -> std::result::Result<Vec<u32>, SandboxError>
         .filter(|line| line.contains(&marker))
         .filter_map(|line| line.split_whitespace().next()?.parse().ok())
         .collect())
+}
+
+#[cfg(target_os = "linux")]
+fn process_listing_args() -> &'static [&'static str] {
+    &["axeww", "-o", "pid=,command="]
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_listing_args() -> &'static [&'static str] {
+    &["eww", "-ax", "-o", "pid=,command="]
 }
 
 fn recorded_process_owned(pid: u32, token: &str) -> std::result::Result<bool, String> {
