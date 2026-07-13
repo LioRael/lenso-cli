@@ -546,6 +546,10 @@ struct SystemDevArgs {
     #[arg(long)]
     sandbox_file: Option<std::path::PathBuf>,
 
+    /// Run one declared Failure Scenario and exit after deterministic cleanup.
+    #[arg(long, value_name = "SCENARIO_ID")]
+    scenario: Option<String>,
+
     /// Validate and print the exact plan without allocating or starting anything.
     #[arg(long)]
     dry_run: bool,
@@ -3182,6 +3186,7 @@ async fn main() -> anyhow::Result<()> {
                     dry_run: args.dry_run,
                     json: args.json,
                     sandbox_file: args.sandbox_file,
+                    scenario: args.scenario,
                     system_file: args.system_file,
                 })
                 .await?;
@@ -4945,6 +4950,8 @@ mod tests {
             "system.json",
             "--sandbox-file",
             "sandbox.json",
+            "--scenario",
+            "deadline-timeout",
             "--dry-run",
             "--json",
         ]);
@@ -4962,6 +4969,7 @@ mod tests {
             args.sandbox_file.as_deref(),
             Some(std::path::Path::new("sandbox.json"))
         );
+        assert_eq!(args.scenario.as_deref(), Some("deadline-timeout"));
         assert!(args.dry_run);
         assert!(args.json);
         assert!(!args.cleanup);

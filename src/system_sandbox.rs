@@ -28,6 +28,8 @@ use tokio::{
 };
 use uuid::Uuid;
 
+mod scenario;
+
 const DEFAULT_SYSTEM_FILE: &str = "lenso.system.json";
 const DEFAULT_SANDBOX_FILE: &str = "lenso.system-sandbox.json";
 const SANDBOX_PROTOCOL: &str = "lenso.system-sandbox.v1";
@@ -41,6 +43,7 @@ pub(crate) struct SystemDevOptions {
     pub(crate) dry_run: bool,
     pub(crate) json: bool,
     pub(crate) sandbox_file: Option<PathBuf>,
+    pub(crate) scenario: Option<String>,
     pub(crate) system_file: Option<PathBuf>,
 }
 
@@ -49,6 +52,8 @@ pub(crate) struct SystemDevOptions {
 struct SandboxDefinition {
     protocol: String,
     services: Vec<SandboxService>,
+    #[serde(default)]
+    scenarios: Vec<scenario::FailureScenario>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -63,6 +68,8 @@ struct SandboxService {
 struct SandboxWorkload {
     workload_id: String,
     command: Vec<String>,
+    #[serde(default)]
+    scenario_command: Vec<String>,
     #[serde(default)]
     cwd: Option<PathBuf>,
     #[serde(default)]
@@ -106,6 +113,7 @@ struct PlannedWorkload {
     role: WorkloadRole,
     identity: String,
     command: Vec<String>,
+    scenario_command: Vec<String>,
     cwd: PathBuf,
     env: BTreeMap<String, String>,
     endpoint: Option<String>,
@@ -230,16 +238,7 @@ pub(crate) async fn dev_system(options: SystemDevOptions) -> Result<()> {
             options.json,
         )
     })?;
-    if options.cleanup && options.dry_run {
-        return Err(command_error(
-            SandboxError::new(
-                "conflicting_options",
-                "cleanup and dry-run cannot be used together.",
-                "Choose either validation or cleanup.",
-            ),
-            options.json,
-        ));
-    }
+    validate_options(&options).map_err(|error| command_error(error, options.json))?;
     let system_id = validate_system(&system).map_err(|error| command_error(error, options.json))?;
     let owned_root = system_dir.join(".lenso/system-sandbox").join(system_id);
 
@@ -260,6 +259,10 @@ pub(crate) async fn dev_system(options: SystemDevOptions) -> Result<()> {
         })?;
     let plan = build_plan(&system, &definition, &system_file, &sandbox_file)
         .map_err(|error| command_error(error, options.json))?;
+    if let Some(scenario_id) = options.scenario.as_deref() {
+        scenario::ensure_declared(&definition.scenarios, scenario_id)
+            .map_err(|error| command_error(error, options.json))?;
+    }
     if options.dry_run {
         println!("{}", serde_json::to_string_pretty(&plan)?);
         return Ok(());
@@ -268,6 +271,20 @@ pub(crate) async fn dev_system(options: SystemDevOptions) -> Result<()> {
     let mut running = launch(plan, options.json)
         .await
         .map_err(|error| command_error(error, options.json))?;
+    if let Some(scenario_id) = options.scenario.as_deref() {
+        let result = scenario::run(&mut running, &definition.scenarios, scenario_id)
+            .await
+            .map_err(|error| command_error(error, options.json))?;
+        if options.json {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        } else {
+            println!(
+                "Failure Scenario {}: {}",
+                result.scenario_id, result.outcome
+            );
+        }
+        return Ok(());
+    }
     if options.json {
         println!("{}", serde_json::to_string_pretty(&running.state)?);
     } else {
@@ -283,6 +300,24 @@ pub(crate) async fn dev_system(options: SystemDevOptions) -> Result<()> {
         .shutdown()
         .await
         .map_err(|error| command_error(error, options.json))
+}
+
+fn validate_options(options: &SystemDevOptions) -> std::result::Result<(), SandboxError> {
+    if options.cleanup && options.dry_run {
+        return Err(SandboxError::new(
+            "conflicting_options",
+            "cleanup and dry-run cannot be used together.",
+            "Choose either validation or cleanup.",
+        ));
+    }
+    if options.scenario.is_some() && (options.cleanup || options.dry_run) {
+        return Err(SandboxError::new(
+            "conflicting_options",
+            "scenario cannot be combined with cleanup or dry-run.",
+            "Run the scenario by itself; it performs deterministic cleanup automatically.",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_system(system: &Value) -> std::result::Result<&str, SandboxError> {
@@ -359,6 +394,7 @@ fn build_plan(
     }
 
     let configured = configured_workloads(definition)?;
+    scenario::validate(&definition.scenarios, &configured, &declared)?;
     let declared_keys = declared.keys().collect::<BTreeSet<_>>();
     let configured_keys = configured.keys().collect::<BTreeSet<_>>();
     if declared_keys != configured_keys {
@@ -424,6 +460,7 @@ fn build_plan(
                 role: role.clone(),
                 identity,
                 command: config.command.clone(),
+                scenario_command: config.scenario_command.clone(),
                 cwd,
                 env,
                 endpoint: config.endpoint.clone(),
@@ -583,6 +620,18 @@ fn validate_workload(
                 workload.workload_id, workload.command[0]
             ),
             "Install the executable or correct command, then rerun the dry-run.",
+        ));
+    }
+    if let Some(command) = workload.scenario_command.first()
+        && !command_exists(command, &cwd, &workload.env)
+    {
+        return Err(SandboxError::new(
+            "scenario_command_missing",
+            format!(
+                "Workload {} scenario executable was not found: {command}",
+                workload.workload_id
+            ),
+            "Install the executable or correct scenarioCommand, then rerun the dry-run.",
         ));
     }
     for (field, value) in [
@@ -1713,6 +1762,7 @@ mod tests {
         };
         SandboxDefinition {
             protocol: SANDBOX_PROTOCOL.to_owned(),
+            scenarios: Vec::new(),
             services: ["notifications", "support"]
                 .into_iter()
                 .map(|service| SandboxService {
@@ -1726,6 +1776,7 @@ mod tests {
                     .map(|(suffix, role)| SandboxWorkload {
                         workload_id: format!("{service}-{suffix}"),
                         command: command(service, role),
+                        scenario_command: Vec::new(),
                         cwd: None,
                         env: BTreeMap::new(),
                         endpoint: (role == "api").then(|| format!("http://127.0.0.1/{service}")),

@@ -100,6 +100,7 @@ clusterless System Sandbox on macOS or Linux:
 ```sh
 lenso system dev --dry-run --json
 lenso system dev
+lenso system dev --scenario deadline-timeout --json
 lenso system dev --cleanup
 ```
 
@@ -117,15 +118,54 @@ live beside it in `lenso.system-sandbox.json`:
     }, {
       "workloadId": "support-api",
       "command": ["cargo", "run", "--bin", "support-api"],
+      "scenarioCommand": ["cargo", "run", "--bin", "support-scenario-driver"],
       "endpoint": "http://127.0.0.1:4110",
       "healthUrl": "http://127.0.0.1:4110/health/ready"
     }, {
       "workloadId": "support-worker",
       "command": ["cargo", "run", "--bin", "support-worker"]
     }]
+  }],
+  "scenarios": [{
+    "scenarioId": "deadline-timeout",
+    "fault": {
+      "kind": "timeout",
+      "serviceId": "support",
+      "workloadId": "support-api",
+      "delayMs": 100
+    },
+    "callPolicy": {
+      "deadlineMs": 100,
+      "maxAttempts": 2,
+      "idempotent": true
+    }
   }]
 }
 ```
+
+Failure controls are inert during ordinary startup and dry-run. They are read
+only from the local System Sandbox definition and activated only when an
+explicit `--scenario <scenarioId>` is supplied. Supported fault kinds are
+`timeout`, `slow_dependency`, `workload_crash`, `overload`, and
+`partial_unavailability`. Timeout and slow-dependency decisions use controlled
+scenario time; overload uses declared `capacity` and `demand`, never machine
+pressure.
+
+Timeout, slow-dependency, and overload scenarios require the affected
+Workload's `scenarioCommand`. The Sandbox invokes that Workload-owned adapter
+only for an explicit scenario, supplies `LENSO_SANDBOX_*` controlled-time,
+fault, capacity, and Call Policy inputs, and accepts one
+`lenso.sandbox-workload-observation.v1` JSON result. The adapter exercises the
+Service's real local call or dependency path; normal Workload startup never
+receives those failure-control inputs.
+
+Each run emits `lenso.failure-scenario-result.v1` JSON, performs Sandbox-owned
+process and state cleanup, and writes the equivalent durable Story Segment to
+`.lenso/system-sandbox-results/<systemId>/<scenarioId>/story-segment.json`.
+Results include the injected fault, affected Service and Workload, attempt and
+retry evidence, Call Policy and health transitions, outcome, cleanup, and next
+actions. Repeating the same declared scenario overwrites that evidence with an
+equivalent result.
 
 Dry-run performs the same definition, cwd, executable, URL, graph, and
 dependency validation as launch without creating Store directories, state, or
