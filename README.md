@@ -93,6 +93,54 @@ lenso service dev
 installed services from `.lenso/module-services.json`, then runs the host.
 Workspace reads prefer `lenso.workspace.json` and also accept the older
 `.lenso/services.json` path for compatibility.
+
+For a System v2 graph containing multiple Autonomous Services, use the
+clusterless System Sandbox on macOS or Linux:
+
+```sh
+lenso system dev --dry-run --json
+lenso system dev
+lenso system dev --cleanup
+```
+
+The System graph remains in `lenso.system.json`. Local-only executable details
+live beside it in `lenso.system-sandbox.json`:
+
+```json
+{
+  "protocol": "lenso.system-sandbox.v1",
+  "services": [{
+    "serviceId": "support",
+    "workloads": [{
+      "workloadId": "support-migrate",
+      "command": ["cargo", "run", "--bin", "support-migrate"]
+    }, {
+      "workloadId": "support-api",
+      "command": ["cargo", "run", "--bin", "support-api"],
+      "endpoint": "http://127.0.0.1:4110",
+      "healthUrl": "http://127.0.0.1:4110/health/ready"
+    }, {
+      "workloadId": "support-worker",
+      "command": ["cargo", "run", "--bin", "support-worker"]
+    }]
+  }]
+}
+```
+
+Dry-run performs the same definition, cwd, executable, URL, graph, and
+dependency validation as launch without creating Store directories, state, or
+processes. Launch assigns each Workload an explicit `local-dev://` identity,
+allocates one sandbox-owned Store path per Service, waits for declared health,
+and records correlated endpoint and process state under
+`.lenso/system-sandbox/<systemId>`. This identity is development-only and
+does not claim production authentication. Ctrl-C and `--cleanup` terminate
+only token-proven sandbox processes or their process groups, and remove state
+only when its ownership marker
+matches; Kubernetes, a Host, service mesh, external broker, System Plane, and a
+production identity provider are not required.
+Host and Provider declarations may remain in the System graph for topology
+validation, but the sandbox neither starts nor contacts them.
+
 Generated TS and Rust services also support `--check-release` to print the
 development module release descriptor before packaging.
 Before handing a service to another app or deployment pipeline, package-check

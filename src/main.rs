@@ -6,6 +6,7 @@ mod module;
 mod operator;
 mod service;
 mod system;
+mod system_sandbox;
 
 use clap::{Args, Parser, Subcommand};
 
@@ -503,6 +504,8 @@ struct CapabilityFitArgs {
 
 #[derive(Debug, Subcommand)]
 enum SystemCommand {
+    /// Launch a clusterless local multi-Service System Sandbox.
+    Dev(SystemDevArgs),
     /// Create a lenso.system.json file.
     Init(SystemInitArgs),
     /// Add or update a service in lenso.system.json.
@@ -531,6 +534,29 @@ enum SystemCommand {
     Graph(SystemGraphArgs),
     /// Validate the service system graph.
     Check(SystemCheckArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+struct SystemDevArgs {
+    /// Service System v2 definition.
+    #[arg(long)]
+    system_file: Option<std::path::PathBuf>,
+
+    /// Local Workload launch declarations.
+    #[arg(long)]
+    sandbox_file: Option<std::path::PathBuf>,
+
+    /// Validate and print the exact plan without allocating or starting anything.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Stop the recorded sandbox and remove only its owned resources.
+    #[arg(long)]
+    cleanup: bool,
+
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -3150,6 +3176,16 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Command::System { command } => match command {
+            SystemCommand::Dev(args) => {
+                system_sandbox::dev_system(system_sandbox::SystemDevOptions {
+                    cleanup: args.cleanup,
+                    dry_run: args.dry_run,
+                    json: args.json,
+                    sandbox_file: args.sandbox_file,
+                    system_file: args.system_file,
+                })
+                .await?;
+            }
             SystemCommand::Init(args) => {
                 system::init_system(system::SystemInitOptions {
                     environments: args.environments,
@@ -4897,5 +4933,46 @@ mod tests {
         assert_eq!(args.module_name, "support-ticket");
         assert_eq!(args.service_name, "api");
         assert_eq!(args.tail, 100);
+    }
+
+    #[test]
+    fn parses_system_dev_dry_run_and_cleanup_surfaces() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "system",
+            "dev",
+            "--system-file",
+            "system.json",
+            "--sandbox-file",
+            "sandbox.json",
+            "--dry-run",
+            "--json",
+        ]);
+        let Command::System {
+            command: SystemCommand::Dev(args),
+        } = cli.command
+        else {
+            panic!("expected system dev");
+        };
+        assert_eq!(
+            args.system_file.as_deref(),
+            Some(std::path::Path::new("system.json"))
+        );
+        assert_eq!(
+            args.sandbox_file.as_deref(),
+            Some(std::path::Path::new("sandbox.json"))
+        );
+        assert!(args.dry_run);
+        assert!(args.json);
+        assert!(!args.cleanup);
+
+        let cleanup = Cli::parse_from(["lenso", "system", "dev", "--cleanup"]);
+        let Command::System {
+            command: SystemCommand::Dev(args),
+        } = cleanup.command
+        else {
+            panic!("expected system dev cleanup");
+        };
+        assert!(args.cleanup);
     }
 }
