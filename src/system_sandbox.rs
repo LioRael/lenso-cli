@@ -721,17 +721,15 @@ fn service_dependency_order(
     }
     let mut ordered = Vec::new();
     while !remaining.is_empty() {
-        let ready = remaining
+        let service = remaining
             .iter()
             .find(|(_, dependencies)| dependencies.iter().all(|item| ordered.contains(item)))
-            .map(|(service, _)| service.clone());
-        let Some(service) = ready else {
-            return Err(SandboxError::new(
-                "dependency_cycle",
-                "Autonomous Service contract dependencies contain a cycle.",
-                "Remove the contract cycle and rerun the dry-run.",
-            ));
-        };
+            .map(|(service, _)| service.clone())
+            // Service APIs do not make business calls during Sandbox startup. A contract
+            // cycle therefore needs a stable bootstrap order, not a false deployment
+            // rejection; established calls remain governed by readiness and Call Policy.
+            .or_else(|| remaining.keys().next().cloned())
+            .expect("remaining Services are not empty");
         remaining.remove(&service);
         ordered.push(service);
     }
@@ -1511,6 +1509,60 @@ mod tests {
             "local-dev://support-platform/support/support-migrate"
         );
         assert!(!first.owned_root.exists());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn plan_starts_cyclic_service_contracts_in_deterministic_order() {
+        let root = test_root("cyclic-plan");
+        fs::create_dir_all(&root).unwrap();
+        let system_file = root.join(DEFAULT_SYSTEM_FILE);
+        let sandbox_file = root.join(DEFAULT_SANDBOX_FILE);
+        let mut system = system_fixture();
+        system["contracts"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "contractId": "notifications-event.v1",
+                "version": "v1",
+                "producerKind": "autonomous_service",
+                "producerId": "notifications",
+                "artifact": { "format": "json_schema", "path": "notifications.v1.json" },
+                "tenancyMode": "none"
+            }));
+        system["consumers"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "consumerId": "support-notifications",
+                "ownerKind": "autonomous_service",
+                "ownerId": "support",
+                "contractId": "notifications-event.v1",
+                "tenancyMode": "none"
+            }));
+
+        let plan = build_plan(
+            &system,
+            &sandbox_fixture(false),
+            &system_file,
+            &sandbox_file,
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.workloads
+                .iter()
+                .map(|item| item.service_id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "notifications",
+                "notifications",
+                "notifications",
+                "support",
+                "support",
+                "support",
+            ]
+        );
         fs::remove_dir_all(root).ok();
     }
 
