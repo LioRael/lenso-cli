@@ -181,6 +181,31 @@ production identity provider are not required.
 Host and Provider declarations may remain in the System graph for topology
 validation, but the sandbox neither starts nor contacts them.
 
+## Assess linked Module extraction
+
+Report whether one Host-owned linked Module is ready to move behind an
+Autonomous Service boundary:
+
+```sh
+lenso module extraction readiness support-ticket \
+  --module-manifest modules/support-ticket/lenso.module.json \
+  --system-file lenso.system.json \
+  --evidence-file support-ticket.extraction-evidence.json \
+  --json
+```
+
+The CLI scans Rust Module Cargo dependencies, imports, and fully qualified
+in-process calls under `modules/`. The evidence file supplies authoritative
+Service/Event Contract mappings and active Consumer compatibility results;
+omitting or supplying ambiguous evidence produces a blocked report. Human and
+JSON output come from the same `lenso.extraction-readiness-report.v1` artifact.
+Blocked reports exit non-zero so the command can gate CI.
+
+Readiness analysis is read-only: it does not write repository files, start
+Workloads, move data, or change authority. Use `--repo-root` and
+`--modules-root` when the Module sources are not under the current repository's
+default `modules/` directory.
+
 Generated TS and Rust services also support `--check-release` to print the
 development module release descriptor before packaging.
 Before handing a service to another app or deployment pipeline, package-check

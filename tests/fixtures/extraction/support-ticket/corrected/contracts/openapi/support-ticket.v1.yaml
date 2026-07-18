@@ -1,0 +1,11 @@
+openapi: 3.1.0
+info:
+  title: support-ticket-http.v1
+  version: v1
+paths:
+  /tickets/{id}:
+    get:
+      operationId: getTicket
+      responses:
+        "200":
+          description: Ticket

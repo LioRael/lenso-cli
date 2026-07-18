@@ -1,0 +1,45 @@
+{
+  "contracts": [
+    {
+      "subject": "http:GET /tickets/{id}",
+      "kind": "service",
+      "direction": "provides",
+      "status": "present",
+      "contractId": "support-ticket-http.v1",
+      "evidenceReferences": [
+        "contracts/openapi/support-ticket.v1.yaml"
+      ]
+    },
+    {
+      "subject": "event-handler:apply_sla_update",
+      "kind": "event",
+      "direction": "consumes",
+      "status": "present",
+      "contractId": "support.sla-updated.v1",
+      "evidenceReferences": [
+        "contracts/events/support.sla-updated.v1.schema.json"
+      ]
+    },
+    {
+      "subject": "event-handler:record_audit",
+      "kind": "event",
+      "direction": "consumes",
+      "status": "present",
+      "contractId": "support.audit-recorded.v1",
+      "evidenceReferences": [
+        "contracts/events/support.audit-recorded.v1.schema.json"
+      ]
+    }
+  ],
+  "activeConsumers": [
+    {
+      "consumerId": "support-ticket-sla-updates",
+      "contractId": "support.sla-updated.v1",
+      "classification": "safe",
+      "evidenceReferences": [
+        "system:consumer/support-ticket-sla-updates"
+      ],
+      "nextAction": "No action needed."
+    }
+  ]
+}
