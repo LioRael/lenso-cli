@@ -1,5 +1,6 @@
 mod capability;
 mod console_dev;
+mod extraction;
 mod host;
 mod launchpad;
 mod module;
@@ -1096,6 +1097,11 @@ enum ModuleCommand {
     Disable(RemoteModuleUninstallArgs),
     /// Diagnose installed services.
     Doctor(ModuleDoctorArgs),
+    /// Analyze extraction readiness for a linked Module.
+    Extraction {
+        #[command(subcommand)]
+        command: ModuleExtractionCommand,
+    },
     /// Inspect and validate module release artifacts.
     Release {
         #[command(subcommand)]
@@ -1111,6 +1117,42 @@ enum ModuleCommand {
         #[command(subcommand)]
         command: ModuleMarketplaceCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum ModuleExtractionCommand {
+    /// Report whether one linked Module is ready for extraction.
+    Readiness(ModuleExtractionReadinessArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+struct ModuleExtractionReadinessArgs {
+    /// Stable target Module name.
+    module_name: String,
+
+    /// Module manifest JSON. Defaults to modules/<MODULE>/lenso.module.json.
+    #[arg(long)]
+    module_manifest: Option<std::path::PathBuf>,
+
+    /// System v2 definition. Defaults to lenso.system.json.
+    #[arg(long)]
+    system_file: Option<std::path::PathBuf>,
+
+    /// Structured Contract and active Consumer evidence JSON.
+    #[arg(long)]
+    evidence_file: Option<std::path::PathBuf>,
+
+    /// Lenso repository root. Defaults to the current directory.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Rust Modules directory. Defaults to <repo-root>/modules.
+    #[arg(long)]
+    modules_root: Option<std::path::PathBuf>,
+
+    /// Print the stable versioned JSON report.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -3390,6 +3432,21 @@ async fn main() -> anyhow::Result<()> {
             ModuleCommand::Doctor(args) => {
                 module::doctor_module((&args).into()).await?;
             }
+            ModuleCommand::Extraction { command } => match command {
+                ModuleExtractionCommand::Readiness(args) => {
+                    extraction::report_module_extraction_readiness(
+                        extraction::ModuleExtractionReadinessOptions {
+                            evidence_file: args.evidence_file,
+                            json: args.json,
+                            module_manifest: args.module_manifest,
+                            module_name: args.module_name,
+                            modules_root: args.modules_root,
+                            repo_root: args.repo_root,
+                            system_file: args.system_file,
+                        },
+                    )?;
+                }
+            },
             ModuleCommand::Release { command } => match command {
                 ModuleReleaseCommand::Inspect(args) => {
                     module::inspect_module_release(&args.release_reference, (&args).into()).await?;

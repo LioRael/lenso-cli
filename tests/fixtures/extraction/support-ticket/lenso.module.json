@@ -1,0 +1,112 @@
+{
+  "name": "support-ticket",
+  "story_display": [
+    {
+      "source": {
+        "kind": "execution_name",
+        "name": "support-ticket.reindex.v1"
+      },
+      "display_name": "Reindex support tickets",
+      "story_title": "Support ticket maintenance"
+    }
+  ],
+  "admin": {
+    "kind": "schema",
+    "entities": [
+      {
+        "name": "tickets",
+        "label": "Tickets",
+        "fields": [
+          {
+            "name": "id",
+            "label": "ID",
+            "field_type": {
+              "kind": "string"
+            },
+            "nullable": false
+          }
+        ],
+        "read_capability": "support.tickets.read"
+      }
+    ]
+  },
+  "http_routes": [
+    {
+      "method": "GET",
+      "path": "/tickets/{id}",
+      "capability": "support.tickets.read",
+      "display_name": "Get ticket",
+      "story_title": "Support ticket opened"
+    }
+  ],
+  "runtime": {
+    "functions": [
+      {
+        "name": "support-ticket.reindex.v1",
+        "version": 1,
+        "queue": "support-ticket",
+        "input_schema": "support-ticket.reindex.v1"
+      }
+    ],
+    "schedules": [
+      {
+        "name": "support-ticket-reindex",
+        "function_name": "support-ticket.reindex.v1",
+        "cron": "0 * * * *",
+        "input": {}
+      }
+    ],
+    "workflows": [
+      {
+        "protocol": "lenso.workflow-definition.v1",
+        "owner": "support-ticket",
+        "name": "ticket_triage",
+        "version": "v1",
+        "inputContract": {
+          "contractId": "support.ticket-triage-input",
+          "version": "v1"
+        },
+        "resultContract": {
+          "contractId": "support.ticket-triage-result",
+          "version": "v1"
+        },
+        "steps": [
+          {
+            "name": "classify"
+          }
+        ]
+      }
+    ]
+  },
+  "events": {
+    "handlers": [
+      {
+        "name": "apply_sla_update",
+        "event_name": "support.sla-updated.v1"
+      },
+      {
+        "name": "record_audit",
+        "event_name": "support.audit-recorded.v1"
+      }
+    ]
+  },
+  "console": [
+    {
+      "name": "support-tickets",
+      "label": "Support tickets",
+      "area": "data",
+      "route": "/support/tickets",
+      "package": {
+        "name": "@lenso/support-ticket-console",
+        "export": "supportTicketConsoleModule"
+      },
+      "required_capabilities": [
+        "support.tickets.read"
+      ]
+    }
+  ],
+  "capabilities": [
+    "support.tickets.read"
+  ],
+  "dependencies": []
+}
