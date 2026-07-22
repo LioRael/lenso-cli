@@ -1,5 +1,5 @@
 core:changelogs:
-  - content: "---\npackages:\n  lenso-cli:\n    type: patch\n  \"@lenso/cli\":\n    type: patch\n---\n\n### Fixes\n\nPublish the M6 CLI distribution with diagnosable fail-closed coordinator\npreflight rejections.\n"
+  - content: "---\npackages:\n  lenso-cli:\n    type: patch\n  \"@lenso/cli\":\n    type: patch\n---\n\n### Fixes\n\nPublish the M6 CLI distribution with publisher authentication scoped to both\nthe component repository and release coordinator.\n"
     filename: release.md
     v: 0.0.0
 core:packages:
