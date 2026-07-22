@@ -1,3 +1,10 @@
+## lenso-cli@0.2.4
+
+### Fixes
+
+Publish the M6 CLI distribution with its current `lenso-service` dependency
+recorded in the reviewed release graph.
+
 ## lenso-cli@0.2.3
 
 ### Fixes
