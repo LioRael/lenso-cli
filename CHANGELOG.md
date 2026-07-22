@@ -1,3 +1,10 @@
+## lenso-cli@0.2.2
+
+### Fixes
+
+Publish the M6 CLI distribution after scoping the shadow npm registry to the
+sealed publish command instead of the publishing toolchain bootstrap.
+
 ## lenso-cli@0.2.1
 
 ### Fixes
