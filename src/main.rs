@@ -1,5 +1,6 @@
 mod capability;
 mod console_dev;
+mod delivery;
 mod extraction;
 mod host;
 mod launchpad;
@@ -1241,6 +1242,11 @@ enum ServiceCommand {
         #[command(subcommand)]
         command: ServicePolicyCommand,
     },
+    /// Assemble and inspect Autonomous Service production delivery artifacts.
+    Delivery {
+        #[command(subcommand)]
+        command: ServiceDeliveryCommand,
+    },
     /// Diagnose installed services and their provided modules.
     Doctor(ModuleDoctorArgs),
     /// Check a service manifest or configured service state.
@@ -1863,6 +1869,96 @@ enum ServiceReleaseCommand {
 enum ServicePolicyCommand {
     /// Check a service release plan against built-in delivery policy.
     Check(ServicePolicyCheckArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum ServiceDeliveryCommand {
+    /// Assemble one immutable environment-independent Service Release.
+    Assemble(ServiceDeliveryAssembleArgs),
+    /// Validate and render one Service Release.
+    Check(ServiceDeliveryArtifactArgs),
+    /// Diff two immutable Service Releases.
+    Diff(ServiceDeliveryDiffArgs),
+    /// Evaluate canonical Policy source inputs without trusting precomputed decisions.
+    Policy(ServiceDeliveryArtifactArgs),
+    /// Evaluate production eligibility evidence without mutation.
+    CanIDeploy(ServiceDeliveryArtifactArgs),
+    /// Validate and render a shared Deployment Adapter plan.
+    DeploymentPlan(ServiceDeliveryArtifactArgs),
+    /// Dry-run an Autonomous Service Operator resource and reviewable diff.
+    OperatorExport(ServiceDeliveryOperatorExportArgs),
+    /// Authorize an exact production Operator resource at the human Approval Boundary.
+    PromotionApply(ServiceDeliveryPromotionApplyArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceDeliveryAssembleArgs {
+    /// Service Release input JSON produced from existing CI artifacts.
+    input: std::path::PathBuf,
+
+    /// Write stable JSON to this path instead of stdout.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceDeliveryArtifactArgs {
+    /// Versioned delivery artifact JSON.
+    artifact: std::path::PathBuf,
+
+    /// Write normalized stable JSON to this path instead of stdout.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceDeliveryDiffArgs {
+    /// Previous Service Release JSON.
+    from: std::path::PathBuf,
+
+    /// Candidate Service Release JSON.
+    to: std::path::PathBuf,
+
+    /// Write stable diff JSON to this path instead of stdout.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceDeliveryOperatorExportArgs {
+    /// Shared Kubernetes Deployment Adapter plan JSON.
+    deployment_plan: std::path::PathBuf,
+
+    /// Previous dry-run export JSON for a deterministic review diff.
+    #[arg(long)]
+    previous: Option<std::path::PathBuf>,
+
+    /// Write stable export JSON to this path instead of stdout.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ServiceDeliveryPromotionApplyArgs {
+    /// Content-addressed Promotion plan JSON.
+    promotion_plan: std::path::PathBuf,
+    /// Provider-authorized human approval JSON.
+    approval: std::path::PathBuf,
+    /// Current protected evidence JSON.
+    protected_evidence: std::path::PathBuf,
+    /// Exact source Environment Verification JSON.
+    environment_verification: std::path::PathBuf,
+    /// Fresh credential-free source Operator observation JSON.
+    source_observation: std::path::PathBuf,
+    /// Fresh approval-challenge-bound source Gateway observation JSON.
+    source_gateway_observation: std::path::PathBuf,
+    /// Fresh credential-free target Operator observation JSON with Kubernetes CAS identity.
+    target_observation: std::path::PathBuf,
+    /// Dry-run target Operator export JSON.
+    operator_export: std::path::PathBuf,
+    /// Write the authorized resource envelope to this path instead of stdout.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -3617,6 +3713,46 @@ async fn main() -> anyhow::Result<()> {
                     module::policy_check_service_release_plan((&args).into())?;
                 }
             },
+            ServiceCommand::Delivery { command } => match command {
+                ServiceDeliveryCommand::Assemble(args) => {
+                    delivery::assemble_release(&args.input, args.output.as_deref())?;
+                }
+                ServiceDeliveryCommand::Check(args) => {
+                    delivery::check_release(&args.artifact, args.output.as_deref())?;
+                }
+                ServiceDeliveryCommand::Diff(args) => {
+                    delivery::diff_releases(&args.from, &args.to, args.output.as_deref())?;
+                }
+                ServiceDeliveryCommand::Policy(args) => {
+                    delivery::check_policy_evidence(&args.artifact, args.output.as_deref())?;
+                }
+                ServiceDeliveryCommand::CanIDeploy(args) => {
+                    delivery::can_i_deploy(&args.artifact, args.output.as_deref())?;
+                }
+                ServiceDeliveryCommand::DeploymentPlan(args) => {
+                    delivery::check_deployment_plan(&args.artifact, args.output.as_deref())?;
+                }
+                ServiceDeliveryCommand::OperatorExport(args) => {
+                    delivery::export_operator_resource(
+                        &args.deployment_plan,
+                        args.previous.as_deref(),
+                        args.output.as_deref(),
+                    )?;
+                }
+                ServiceDeliveryCommand::PromotionApply(args) => {
+                    delivery::authorize_promotion_apply(
+                        &args.promotion_plan,
+                        &args.approval,
+                        &args.protected_evidence,
+                        &args.environment_verification,
+                        &args.source_observation,
+                        &args.source_gateway_observation,
+                        &args.target_observation,
+                        &args.operator_export,
+                        args.output.as_deref(),
+                    )?;
+                }
+            },
             ServiceCommand::Doctor(args) => {
                 module::doctor_module((&args).into()).await?;
             }
@@ -4972,6 +5108,103 @@ mod tests {
             panic!("expected service policy check");
         };
         assert!(policy_args.json);
+    }
+
+    #[test]
+    fn parses_autonomous_service_delivery_commands() {
+        let assemble = Cli::parse_from([
+            "lenso",
+            "service",
+            "delivery",
+            "assemble",
+            "release-input.json",
+            "--output",
+            "release.json",
+        ]);
+        let Command::Service {
+            command:
+                ServiceCommand::Delivery {
+                    command: ServiceDeliveryCommand::Assemble(args),
+                },
+        } = assemble.command
+        else {
+            panic!("expected service delivery assemble");
+        };
+        assert_eq!(args.input, std::path::PathBuf::from("release-input.json"));
+        assert_eq!(args.output, Some(std::path::PathBuf::from("release.json")));
+
+        let export = Cli::parse_from([
+            "lenso",
+            "service",
+            "delivery",
+            "operator-export",
+            "production.deployment-plan.json",
+            "--previous",
+            "previous-export.json",
+        ]);
+        let Command::Service {
+            command:
+                ServiceCommand::Delivery {
+                    command: ServiceDeliveryCommand::OperatorExport(args),
+                },
+        } = export.command
+        else {
+            panic!("expected service delivery operator export");
+        };
+        assert_eq!(
+            args.deployment_plan,
+            std::path::PathBuf::from("production.deployment-plan.json")
+        );
+        assert_eq!(
+            args.previous,
+            Some(std::path::PathBuf::from("previous-export.json"))
+        );
+
+        let promotion_apply = Cli::parse_from([
+            "lenso",
+            "service",
+            "delivery",
+            "promotion-apply",
+            "promotion-plan.json",
+            "approval.json",
+            "protected-evidence.json",
+            "environment-verification.json",
+            "source-observation.json",
+            "source-gateway-observation.json",
+            "target-observation.json",
+            "operator-export.json",
+            "--output",
+            "authorization.json",
+        ]);
+        let Command::Service {
+            command:
+                ServiceCommand::Delivery {
+                    command: ServiceDeliveryCommand::PromotionApply(args),
+                },
+        } = promotion_apply.command
+        else {
+            panic!("expected service delivery promotion apply");
+        };
+        assert_eq!(
+            args.promotion_plan,
+            std::path::PathBuf::from("promotion-plan.json")
+        );
+        assert_eq!(
+            args.source_observation,
+            std::path::PathBuf::from("source-observation.json")
+        );
+        assert_eq!(
+            args.source_gateway_observation,
+            std::path::PathBuf::from("source-gateway-observation.json")
+        );
+        assert_eq!(
+            args.target_observation,
+            std::path::PathBuf::from("target-observation.json")
+        );
+        assert_eq!(
+            args.output,
+            Some(std::path::PathBuf::from("authorization.json"))
+        );
     }
 
     #[test]
