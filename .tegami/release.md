@@ -2,6 +2,8 @@
 packages:
   lenso-cli:
     type: minor
+  "@lenso/cli":
+    type: minor
 ---
 
 ### Features
