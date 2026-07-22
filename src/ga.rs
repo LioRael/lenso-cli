@@ -71,7 +71,7 @@ pub(crate) fn support_check(
             && combination.state_version == state_version
     });
     let (decision, combination_id, issues, next_actions) = match found {
-        Some(combination) if combination.status != "unsupported" => (
+        Some(combination) if combination.status == "general_availability" => (
             "supported",
             Some(combination.combination_id.clone()),
             Vec::new(),
@@ -82,8 +82,11 @@ pub(crate) fn support_check(
             Some(combination.combination_id.clone()),
             vec![issue(
                 "ga_combination_unsupported",
-                "The exact combination is explicitly unsupported.",
-                "Select a supported combination from the GA Support Manifest.",
+                format!(
+                    "The exact combination has '{}' status and is not supported for GA.",
+                    combination.status
+                ),
+                "Select a General Availability combination from the GA Support Manifest.",
                 "Inspect the support status and migration guidance.",
             )],
             vec!["Select a supported manifest combination.".to_owned()],
@@ -180,16 +183,31 @@ pub(crate) fn manifest_migrate(
     let plan_digest = digest(&plan_content);
     let mut plan = plan_content;
     plan["planId"] = json!(format!("manifest-migration:{}", &plan_digest[7..23]));
-    plan["planDigest"] = json!(plan_digest);
+    plan["planDigest"] = json!(plan_digest.clone());
     if !dry_run {
         let target = target_path.context("--target is required unless --dry-run is used")?;
         if target.exists() {
-            bail!(
-                "manifest_target_collision: {} already exists",
-                target.display()
-            )
+            let committed = read_json(target)?;
+            if committed != plan["migrated"] {
+                bail!(
+                    "manifest_target_collision: {} contains different content",
+                    target.display()
+                )
+            }
+        } else {
+            write_json(target, &plan["migrated"])?;
         }
-        write_json(target, &plan["migrated"])?;
+        let receipt = json!({
+            "protocol":"lenso.manifest-migration-receipt.v1",
+            "receiptId":format!("manifest-migration-receipt:{}", &plan_digest[7..23]),
+            "planDigest":plan_digest,
+            "sourceDigest":source_digest,
+            "migratedDigest":migrated_digest,
+            "migrated":plan["migrated"].clone(),
+            "target":target,
+            "committed":true
+        });
+        return print_value(&receipt, json_output);
     }
     print_value(&plan, json_output)
 }

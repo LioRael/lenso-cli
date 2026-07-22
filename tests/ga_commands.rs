@@ -63,13 +63,10 @@ fn support_check_requires_an_exact_declared_combination() {
         "service-store.v2",
         "--json",
     ]);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(!output.status.success());
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["decision"], "supported");
+    assert_eq!(report["decision"], "unsupported");
+    assert_eq!(report["issues"][0]["code"], "ga_combination_unsupported");
 
     let unknown = run(&[
         "ga",
@@ -122,6 +119,30 @@ fn migration_upgrade_retirement_and_failure_commands_emit_stable_plans() {
     let migration: Value = serde_json::from_slice(&migration.stdout).unwrap();
     assert_eq!(migration["protocol"], "lenso.manifest-migration-plan.v1");
     assert_eq!(migration["effects"]["mutatesSource"], false);
+
+    let target = root.join("system-v2.json");
+    let apply_args = [
+        "ga",
+        "manifest-migrate",
+        "--manifest",
+        manifest.to_str().unwrap(),
+        "--source",
+        source.to_str().unwrap(),
+        "--target-format",
+        "lenso.system.v2",
+        "--identity-pointer",
+        "/systemId",
+        "--target",
+        target.to_str().unwrap(),
+        "--json",
+    ];
+    let first = run(&apply_args);
+    assert!(first.status.success());
+    let repeated = run(&apply_args);
+    assert!(repeated.status.success());
+    assert_eq!(first.stdout, repeated.stdout);
+    let receipt: Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(receipt["protocol"], "lenso.manifest-migration-receipt.v1");
 
     let upgrade_input = write_json(
         &root,
