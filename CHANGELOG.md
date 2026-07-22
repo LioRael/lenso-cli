@@ -1,3 +1,10 @@
+## lenso-cli@0.2.6
+
+### Fixes
+
+Publish the M6 CLI distribution with publisher authentication scoped to both
+the component repository and release coordinator.
+
 ## @lenso/cli@0.2.5
 
 ### Fixes
@@ -39,3 +46,4 @@ after replacing the stale publisher contract.
 
 Add the M6 GA support manifest, environment verification, migration, rollback,
 retirement, recovery, and coordination-outage command surfaces.
+
