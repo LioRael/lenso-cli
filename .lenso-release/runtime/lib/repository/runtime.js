@@ -209,6 +209,7 @@ export async function consumePreflightProof(environment) {
     const artifactDirectory = join(environment.cwd, ".lenso-release/preflight-artifacts", proof.proofId.slice(7));
     await mkdir(artifactDirectory, { recursive: true, mode: 0o700 });
     const artifacts = [];
+    await stageCargoArchives(environment.cwd, plan, environment.packages);
     for (const item of environment.packages) {
         const packed = await packedArtifact(environment.cwd, item);
         const destination = join(artifactDirectory, basename(packed.path));
@@ -219,8 +220,6 @@ export async function consumePreflightProof(environment) {
             fail("sealed artifact is not an isolated regular file");
         if (item.id.startsWith("npm:"))
             await execFile("npm", ["publish", destination, "--dry-run", "--ignore-scripts"], { cwd: environment.cwd });
-        else if (item.id.startsWith("cargo:"))
-            await execFile("cargo", ["publish", "--dry-run", "--locked", "-p", item.id.slice(6)], { cwd: environment.cwd });
         const name = item.id.startsWith("npm:@lenso/") ? item.id.slice("npm:@lenso/".length) : item.id.slice(item.id.indexOf(":") + 1);
         const kind = item.id.startsWith("npm:") ? "npm" : item.id.startsWith("cargo:") ? "cargo" : "artifact";
         const cargoMetadata = kind === "cargo" ? await cargoWireMetadataFromCrate(destination, name, item.version) : null;
@@ -241,6 +240,68 @@ export async function consumePreflightProof(environment) {
     await writeSealedMarker(environment.cwd, marker);
     await rm(join(environment.cwd, ".lenso-release/preflight-proof.json"), { force: true });
     return marker;
+}
+export async function stageCargoArchives(cwd, plan, selected) {
+    const cargoPackages = publicationOrder(plan, selected).filter(({ id }) => id.startsWith("cargo:"));
+    if (cargoPackages.length === 0)
+        return;
+    const materializationPackages = publicationOrder(plan, plan.packages
+        .filter(({ id }) => id.startsWith("cargo:"))
+        .map(({ id, nextVersion }) => ({ id, version: nextVersion })));
+    const planArgs = materializationPackages.flatMap(({ id }) => ["-p", id.slice(6)]);
+    // One Cargo invocation creates a temporary local registry containing all
+    // planned packages, so same-plan dependencies and workspace dev-dependencies
+    // can be verified without weakening the no-write preflight boundary.
+    await execFile("cargo", ["publish", "--dry-run", "--locked", ...planArgs], { cwd });
+    // Cargo removes archives produced by `publish --dry-run`. Materialize the
+    // already-verified source in one dependency-aware invocation as well. Use
+    // every Cargo package in the plan because `cargo package` also resolves
+    // workspace dev-dependencies that are intentionally absent from the
+    // publication DAG and may exist only in the shadow registry.
+    for (const item of cargoPackages) {
+        const name = item.id.slice(6);
+        const path = join(cwd, "target/package", `${name}-${item.version}.crate`);
+        await rm(path, { force: true });
+    }
+    await execFile("cargo", ["package", "--locked", "--no-verify", ...planArgs], { cwd });
+    for (const item of cargoPackages) {
+        const name = item.id.slice(6);
+        const path = join(cwd, "target/package", `${name}-${item.version}.crate`);
+        const info = await lstat(path).catch((error) => { if (error.code === "ENOENT")
+            fail(`Cargo did not materialize archive: ${name} ${item.version}`); throw error; });
+        if (!info.isFile() || info.nlink !== 1)
+            fail(`Cargo archive is not an isolated regular file: ${name} ${item.version}`);
+    }
+}
+export function cargoVerificationOrder(plan, selected) {
+    const packagesById = new Map(plan.packages.map((item) => [item.id, item]));
+    const visiting = new Set();
+    const visited = new Set();
+    const ordered = [];
+    const visit = (item) => {
+        if (visited.has(item.id))
+            return;
+        if (visiting.has(item.id))
+            fail(`selected package dependency cycle: ${item.id}`);
+        const planned = packagesById.get(item.id);
+        if (!planned)
+            fail(`selected package missing from plan: ${item.id}`);
+        visiting.add(item.id);
+        for (const dependency of planned.dependencies) {
+            if (dependency.source !== "plan" || !dependency.id.startsWith("cargo:"))
+                continue;
+            const plannedDependency = packagesById.get(dependency.id);
+            if (!plannedDependency || plannedDependency.nextVersion !== dependency.resolvedVersion)
+                fail(`planned Cargo dependency is missing or inconsistent: ${dependency.id}`);
+            visit({ id: plannedDependency.id, version: plannedDependency.nextVersion });
+        }
+        visiting.delete(item.id);
+        visited.add(item.id);
+        ordered.push(item);
+    };
+    for (const item of selected)
+        visit(item);
+    return ordered;
 }
 async function writeSealedMarker(cwd, marker) {
     const path = join(cwd, ".lenso-release/preflight-marker.json");
@@ -446,9 +507,36 @@ async function packedArtifact(cwd, item) {
         return { path, bytes };
     }
     const name = item.id.slice(6);
-    await execFile("cargo", ["package", "--locked", "-p", name], { cwd });
     const path = join(cwd, "target/package", `${name}-${item.version}.crate`);
     return { path, bytes: await readFile(path) };
+}
+export function publicationOrder(plan, selected) {
+    const selectedById = new Map(selected.map((item) => [item.id, item]));
+    const packagesById = new Map(plan.packages.map((item) => [item.id, item]));
+    const visiting = new Set();
+    const visited = new Set();
+    const ordered = [];
+    const visit = (item) => {
+        if (visited.has(item.id))
+            return;
+        if (visiting.has(item.id))
+            fail(`selected package dependency cycle: ${item.id}`);
+        visiting.add(item.id);
+        const planned = packagesById.get(item.id);
+        if (!planned)
+            fail(`selected package missing from plan: ${item.id}`);
+        for (const dependency of planned.dependencies) {
+            const selectedDependency = selectedById.get(dependency.id);
+            if (selectedDependency)
+                visit(selectedDependency);
+        }
+        visiting.delete(item.id);
+        visited.add(item.id);
+        ordered.push(item);
+    };
+    for (const item of selected)
+        visit(item);
+    return ordered;
 }
 async function publishOnce(environment, item, artifact) {
     if (item.id.startsWith("npm:")) {
@@ -608,7 +696,7 @@ export async function publishSelected(environment) {
     const config = parseJson(await safeRead(environment.cwd, ".lenso-release/config.json"), "repository config");
     const fixedGroup = selectedFixedGroup(config, environment.packages);
     const receipts = [];
-    for (const item of environment.packages) {
+    for (const item of publicationOrder(plan, environment.packages)) {
         const name = item.id.slice(item.id.indexOf(":") + 1);
         const observe = () => item.id.startsWith("npm:")
             ? npmObservation(name, item.version)
