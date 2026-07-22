@@ -1,5 +1,6 @@
-use std::{fs, path::PathBuf, process::Command};
+use std::{collections::BTreeMap, fs, path::PathBuf, process::Command};
 
+use serde::Serialize;
 use serde_json::{Value, json};
 
 fn temp_root(name: &str) -> PathBuf {
@@ -16,27 +17,122 @@ fn write_json(root: &std::path::Path, name: &str, value: &Value) -> PathBuf {
 }
 
 fn manifest() -> Value {
-    json!({
-        "protocol": "lenso.ga-support-manifest.v1",
-        "manifestId": "ga-support:test",
-        "manifestDigest": format!("sha256:{}", "a".repeat(64)),
-        "status": "candidate",
-        "manifestFormats": [
-            {"kind":"system", "version":"lenso.system.v1"},
-            {"kind":"system", "version":"lenso.system.v2"}
+    let input = TestSupportManifestInput {
+        status: "candidate",
+        components: vec![
+            TestComponent {
+                kind: "cli",
+                component_id: "@lenso/cli",
+                version: "0.1.30",
+                digest: format!("sha256:{}", "a".repeat(64)),
+            },
+            TestComponent {
+                kind: "runtime",
+                component_id: "lenso-service",
+                version: "0.1.4",
+                digest: format!("sha256:{}", "b".repeat(64)),
+            },
         ],
-        "stateVersions": ["service-store.v1", "service-store.v2"],
-        "combinations": [{
-            "combinationId": "candidate-1",
-            "componentReferences": ["cli:@lenso/cli@0.1.30", "runtime:lenso-service@0.1.4"],
-            "stateVersion": "service-store.v2",
-            "status": "candidate"
+        manifest_formats: vec![
+            TestManifestFormat {
+                kind: "system",
+                version: "lenso.system.v1",
+            },
+            TestManifestFormat {
+                kind: "system",
+                version: "lenso.system.v2",
+            },
+        ],
+        state_versions: vec!["service-store.v1", "service-store.v2"],
+        adapter_versions: BTreeMap::new(),
+        documentation: TestDocumentation {
+            version: "m6-candidate",
+            digest: format!("sha256:{}", "c".repeat(64)),
+        },
+        combinations: vec![TestCombination {
+            combination_id: "candidate-1",
+            component_references: vec!["cli:@lenso/cli@0.1.30", "runtime:lenso-service@0.1.4"],
+            state_version: "service-store.v2",
+            status: "candidate",
         }],
-        "upgradeEdges": [
-            {"edgeId":"system-v1-v2", "sourceFormat":"lenso.system.v1", "targetFormat":"lenso.system.v2", "mixedVersionReferences":[], "rollbackSafe":true},
-            {"edgeId":"store-v1-v2", "sourceFormat":"service-store.v1", "targetFormat":"service-store.v2", "mixedVersionReferences":["runtime:lenso-service@0.1.4"], "rollbackSafe":false}
-        ]
-    })
+        upgrade_edges: vec![
+            TestUpgradeEdge {
+                edge_id: "store-v1-v2",
+                source_format: "service-store.v1",
+                target_format: "service-store.v2",
+                mixed_version_references: vec!["runtime:lenso-service@0.1.4"],
+                rollback_safe: false,
+            },
+            TestUpgradeEdge {
+                edge_id: "system-v1-v2",
+                source_format: "lenso.system.v1",
+                target_format: "lenso.system.v2",
+                mixed_version_references: Vec::new(),
+                rollback_safe: true,
+            },
+        ],
+    };
+    let digest = lenso_service::extraction_input_digest(&serde_json::to_vec(&input).unwrap());
+    let mut manifest = serde_json::to_value(input).unwrap();
+    manifest["protocol"] = json!("lenso.ga-support-manifest.v1");
+    manifest["manifestId"] = json!(format!("ga-support:{}", &digest[7..23]));
+    manifest["manifestDigest"] = json!(digest);
+    manifest
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TestSupportManifestInput {
+    status: &'static str,
+    components: Vec<TestComponent>,
+    manifest_formats: Vec<TestManifestFormat>,
+    state_versions: Vec<&'static str>,
+    adapter_versions: BTreeMap<String, String>,
+    documentation: TestDocumentation,
+    combinations: Vec<TestCombination>,
+    upgrade_edges: Vec<TestUpgradeEdge>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TestComponent {
+    kind: &'static str,
+    component_id: &'static str,
+    version: &'static str,
+    digest: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TestManifestFormat {
+    kind: &'static str,
+    version: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TestDocumentation {
+    version: &'static str,
+    digest: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TestCombination {
+    combination_id: &'static str,
+    component_references: Vec<&'static str>,
+    state_version: &'static str,
+    status: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TestUpgradeEdge {
+    edge_id: &'static str,
+    source_format: &'static str,
+    target_format: &'static str,
+    mixed_version_references: Vec<&'static str>,
+    rollback_safe: bool,
 }
 
 fn run(args: &[&str]) -> std::process::Output {
@@ -49,7 +145,8 @@ fn run(args: &[&str]) -> std::process::Output {
 #[test]
 fn support_check_requires_an_exact_declared_combination() {
     let root = temp_root("support");
-    let manifest = write_json(&root, "support.json", &manifest());
+    let manifest_value = manifest();
+    let manifest = write_json(&root, "support.json", &manifest_value);
     let output = run(&[
         "ga",
         "support-check",
@@ -83,6 +180,29 @@ fn support_check_requires_an_exact_declared_combination() {
     let report: Value = serde_json::from_slice(&unknown.stdout).unwrap();
     assert_eq!(report["decision"], "unknown");
     assert_eq!(report["issues"][0]["code"], "ga_combination_unknown");
+
+    let mut tampered = manifest_value;
+    tampered["combinations"][0]["stateVersion"] = json!("service-store.v1");
+    let tampered = write_json(&root, "tampered-support.json", &tampered);
+    let rejected = run(&[
+        "ga",
+        "support-check",
+        "--manifest",
+        tampered.to_str().unwrap(),
+        "--component",
+        "runtime:lenso-service@0.1.4",
+        "--component",
+        "cli:@lenso/cli@0.1.30",
+        "--state-version",
+        "service-store.v1",
+        "--json",
+    ]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("ga_manifest_invalid"),
+        "{}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
 }
 
 #[test]

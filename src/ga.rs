@@ -1,4 +1,8 @@
-use std::{collections::BTreeSet, fs, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::Path,
+};
 
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -6,34 +10,126 @@ use serde_json::{Value, json};
 
 const SUPPORT_PROTOCOL: &str = "lenso.ga-support-manifest.v1";
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SupportManifest {
     protocol: String,
     manifest_id: String,
     manifest_digest: String,
+    status: SupportStatus,
+    components: Vec<SupportComponent>,
     combinations: Vec<SupportCombination>,
     manifest_formats: Vec<ManifestFormat>,
+    state_versions: Vec<String>,
+    adapter_versions: BTreeMap<String, String>,
+    documentation: DocumentationIdentity,
     upgrade_edges: Vec<UpgradeEdge>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SupportManifestInput {
+    status: SupportStatus,
+    components: Vec<SupportComponent>,
+    manifest_formats: Vec<ManifestFormat>,
+    state_versions: Vec<String>,
+    adapter_versions: BTreeMap<String, String>,
+    documentation: DocumentationIdentity,
+    combinations: Vec<SupportCombination>,
+    upgrade_edges: Vec<UpgradeEdge>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SupportStatus {
+    Candidate,
+    GeneralAvailability,
+    Deprecated,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ComponentKind {
+    Cli,
+    Runtime,
+    Contracts,
+    Provider,
+    Operator,
+    RuntimeConsole,
+    FirstPartyModule,
+    Skill,
+}
+
+impl ComponentKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cli => "cli",
+            Self::Runtime => "runtime",
+            Self::Contracts => "contracts",
+            Self::Provider => "provider",
+            Self::Operator => "operator",
+            Self::RuntimeConsole => "runtime_console",
+            Self::FirstPartyModule => "first_party_module",
+            Self::Skill => "skill",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SupportComponent {
+    kind: ComponentKind,
+    component_id: String,
+    version: String,
+    digest: String,
+}
+
+impl SupportComponent {
+    fn reference(&self) -> String {
+        format!(
+            "{}:{}@{}",
+            self.kind.as_str(),
+            self.component_id,
+            self.version
+        )
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SupportCombination {
     combination_id: String,
     component_references: Vec<String>,
     state_version: String,
-    status: String,
+    status: SupportStatus,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ManifestKind {
+    Provider,
+    Service,
+    System,
+    Module,
+    Backup,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ManifestFormat {
-    kind: String,
+    kind: ManifestKind,
     version: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DocumentationIdentity {
+    version: String,
+    digest: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UpgradeEdge {
     edge_id: String,
@@ -71,7 +167,7 @@ pub(crate) fn support_check(
             && combination.state_version == state_version
     });
     let (decision, combination_id, issues, next_actions) = match found {
-        Some(combination) if combination.status == "general_availability" => (
+        Some(combination) if combination.status == SupportStatus::GeneralAvailability => (
             "supported",
             Some(combination.combination_id.clone()),
             Vec::new(),
@@ -84,7 +180,7 @@ pub(crate) fn support_check(
                 "ga_combination_unsupported",
                 format!(
                     "The exact combination has '{}' status and is not supported for GA.",
-                    combination.status
+                    format!("{:?}", combination.status).to_lowercase()
                 ),
                 "Select a General Availability combination from the GA Support Manifest.",
                 "Inspect the support status and migration guidance.",
@@ -138,16 +234,16 @@ pub(crate) fn manifest_migrate(
         .and_then(Value::as_str)
         .context("source manifest must declare protocol")?;
     let kind = if source_format.contains("system") {
-        "system"
+        ManifestKind::System
     } else if source_format.contains("service") {
-        "service"
+        ManifestKind::Service
     } else {
         bail!("unsupported manifest source protocol {source_format}")
     };
     let formats = manifest
         .manifest_formats
         .iter()
-        .map(|format| (format.kind.as_str(), format.version.as_str()))
+        .map(|format| (format.kind, format.version.as_str()))
         .collect::<BTreeSet<_>>();
     if !formats.contains(&(kind, source_format)) || !formats.contains(&(kind, target_format)) {
         bail!("manifest_format_unsupported: requested edge is absent from support manifest")
@@ -483,11 +579,60 @@ pub(crate) fn failure_evaluate(input_path: &Path, json_output: bool) -> Result<(
 
 fn read_manifest(path: &Path) -> Result<SupportManifest> {
     let manifest: SupportManifest = read_typed(path)?;
+    let mut input = SupportManifestInput {
+        status: manifest.status,
+        components: manifest.components.clone(),
+        manifest_formats: manifest.manifest_formats.clone(),
+        state_versions: manifest.state_versions.clone(),
+        adapter_versions: manifest.adapter_versions.clone(),
+        documentation: manifest.documentation.clone(),
+        combinations: manifest.combinations.clone(),
+        upgrade_edges: manifest.upgrade_edges.clone(),
+    };
+    input.components.sort();
+    input.manifest_formats.sort();
+    input.state_versions.sort();
+    input.state_versions.dedup();
+    input
+        .combinations
+        .sort_by(|left, right| left.combination_id.cmp(&right.combination_id));
+    for combination in &mut input.combinations {
+        combination.component_references.sort();
+        combination.component_references.dedup();
+    }
+    input
+        .upgrade_edges
+        .sort_by(|left, right| left.edge_id.cmp(&right.edge_id));
+    for edge in &mut input.upgrade_edges {
+        edge.mixed_version_references.sort();
+        edge.mixed_version_references.dedup();
+    }
+    let component_references = input
+        .components
+        .iter()
+        .map(SupportComponent::reference)
+        .collect::<BTreeSet<_>>();
+    let calculated_digest = digest(&input);
     if manifest.protocol != SUPPORT_PROTOCOL
-        || manifest.manifest_id.trim().is_empty()
-        || !valid_digest(&manifest.manifest_digest)
+        || manifest.manifest_digest != calculated_digest
+        || manifest.manifest_id != format!("ga-support:{}", &calculated_digest[7..23])
+        || input.components.is_empty()
+        || input.components.iter().any(|component| {
+            component.component_id.trim().is_empty()
+                || component.version.trim().is_empty()
+                || !valid_digest(&component.digest)
+        })
+        || !valid_digest(&input.documentation.digest)
+        || input.combinations.iter().any(|combination| {
+            combination.component_references.is_empty()
+                || combination
+                    .component_references
+                    .iter()
+                    .any(|reference| !component_references.contains(reference))
+                || !input.state_versions.contains(&combination.state_version)
+        })
     {
-        bail!("ga_manifest_invalid: invalid protocol, identity, or digest")
+        bail!("ga_manifest_invalid: invalid protocol, structure, identity, or digest")
     }
     Ok(manifest)
 }
