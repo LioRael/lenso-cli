@@ -1,0 +1,15 @@
+core:changelogs:
+  - content: "---\npackages:\n  lenso-cli:\n    type: minor\n  \"@lenso/cli\":\n    type: minor\n---\n\n### Features\n\nAdd the M6 GA support manifest, environment verification, migration, rollback,\nretirement, recovery, and coordination-outage command surfaces.\n"
+    filename: release.md
+    v: 0.0.0
+core:packages:
+  - changelogIds:
+      - release.md
+    id: npm:@lenso/cli
+    updated: true
+  - changelogIds:
+      - release.md
+    id: cargo:lenso-cli
+    updated: true
+npm:packages:
+  - id: npm:@lenso/cli
