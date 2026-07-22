@@ -4,7 +4,7 @@
   "files": [
     {
       "path": ".github/workflows/publish.yml",
-      "sha256": "sha256:682c11a4a2cdeffe5d680a124dac1ce42cb5d074adc30d22644b2f0ebbdb50e8"
+      "sha256": "sha256:25786f3216e32f78a099e9a51ff3a9d770317075cde9aed1686dca0a4a89bc43"
     },
     {
       "path": ".github/workflows/release-plan.yml",
