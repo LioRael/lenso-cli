@@ -1,7 +1,7 @@
 {
   "schema": "lenso.release-plan.v1",
   "repository": "LioRael/lenso-cli",
-  "sourceCommit": "3111a4b28606670253d138bcfa787b4a4ab94849",
+  "sourceCommit": "d84d59328ff02ddcefcf24283abde1000665f592",
   "tegamiVersion": "1.2.5",
   "publisher": {
     "workflow": ".github/workflows/publish.yml",
@@ -16,23 +16,23 @@
   "generatedFiles": [
     {
       "path": ".tegami/publish-lock.yaml",
-      "sha256": "sha256:6f295fb67da4b5b4c837e25639a4774b122e955ed079c32ab9e3dcd3843bcee0"
+      "sha256": "sha256:b559f4eb80aa6a02fd76d27605604d3183fa13fa3002742e9e16b98637d86c9b"
     },
     {
       "path": "CHANGELOG.md",
-      "sha256": "sha256:e41477270dd9714f51885d23c5899546226f03ff805296c5ba2c40a927a25d6d"
+      "sha256": "sha256:5ec2472ab28ac99d2552f9c8b499685ab2ac505794b1010ee2d6c0781ac4f25c"
     },
     {
       "path": "Cargo.lock",
-      "sha256": "sha256:172de0d5108704d46f58d8fa160bc97b8f8d8d8f52a89c277fa2fb50a6895130"
+      "sha256": "sha256:f6439b11141c1820cc7efb8a628db3c09343e0bc9164bbe4ec6f51d935f30d82"
     },
     {
       "path": "Cargo.toml",
-      "sha256": "sha256:69da489630db29eb2356ea23815f9cf2c336a7765900fa40275d16d79f2406d4"
+      "sha256": "sha256:73ffa978d5ed832377d3a95da14e3c5f3b34a38097eb9b4e216b928dba141c7d"
     },
     {
       "path": "package.json",
-      "sha256": "sha256:1c4f809a028023737b8dbb6d1896db7d705564d009092dc31df55ee0adfc1690"
+      "sha256": "sha256:81fb74d1dc985c51f547f2877e6c17c83d13d3e1f755a9901f4f5361b0b1090f"
     },
     {
       "path": "pnpm-lock.yaml",
@@ -42,8 +42,8 @@
   "packages": [
     {
       "id": "cargo:lenso-cli",
-      "previousVersion": "0.2.5",
-      "nextVersion": "0.2.6",
+      "previousVersion": "0.2.6",
+      "nextVersion": "0.2.7",
       "bump": "patch",
       "releaseGroup": "distribution",
       "userFacing": true,
@@ -58,13 +58,13 @@
     },
     {
       "id": "npm:@lenso/cli",
-      "previousVersion": "0.2.5",
-      "nextVersion": "0.2.6",
+      "previousVersion": "0.2.6",
+      "nextVersion": "0.2.7",
       "bump": "patch",
       "releaseGroup": "distribution",
       "userFacing": true,
       "dependencies": []
     }
   ],
-  "planId": "sha256:dfcdfd44d6151a4365b2c3d7dc9c9cd440b912ab1bb2497cbf8ba3ee32e321c1"
+  "planId": "sha256:59a239f5aa4a27284cf9a580a2e086c4d9fbcd57a3e03a0cff11eee71eb4f10c"
 }

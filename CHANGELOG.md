@@ -1,3 +1,10 @@
+## lenso-cli@0.2.7
+
+### Fixes
+
+Publish the M6 CLI distribution with deterministic publisher dependencies
+excluded from Cargo workspace dirtiness checks.
+
 ## lenso-cli@0.2.6
 
 ### Fixes
