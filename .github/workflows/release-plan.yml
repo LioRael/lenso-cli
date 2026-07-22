@@ -46,7 +46,7 @@ jobs:
           rustup toolchain install 1.94.0 --profile minimal
           rustup default 1.94.0
       - name: Emit ready event for an approved merged plan
-        if: ${{ hashFiles('.lenso-release/plan.json') != '' }}
+        if: ${{ hashFiles('.lenso-release/plan.json') != '' && hashFiles('.tegami/*.md') == '' }}
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           READY_URL: ${{ vars.LENSO_COORDINATOR_READY_URL }}
@@ -58,7 +58,7 @@ jobs:
             --data-binary @/tmp/ready.json "$READY_URL"
       - name: Draft and apply Tegami plan
         id: draft
-        if: ${{ hashFiles('.lenso-release/plan.json') == '' && hashFiles('.tegami/*.md') != '' }}
+        if: ${{ hashFiles('.tegami/*.md') != '' }}
         run: |
           node .lenso-release/runtime/lib/repository/cli.js plan
           echo 'created=true' >> "$GITHUB_OUTPUT"
