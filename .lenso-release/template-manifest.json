@@ -8,7 +8,7 @@
     },
     {
       "path": ".github/workflows/release-plan.yml",
-      "sha256": "sha256:2b8b935955dafb0a954788476b84f595a34fe563923b56596b845ad01b9e186b"
+      "sha256": "sha256:0da27a80b350c16e7cd5dd4b13ad26f9cad111966d8a9e0e80451ae9740790a5"
     },
     {
       "path": ".lenso-release/runtime/components.yaml",
