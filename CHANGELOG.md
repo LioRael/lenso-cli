@@ -1,3 +1,10 @@
+## @lenso/cli@0.2.5
+
+### Fixes
+
+Publish the M6 CLI distribution with diagnosable fail-closed coordinator
+preflight rejections.
+
 ## lenso-cli@0.2.4
 
 ### Fixes
@@ -32,4 +39,3 @@ after replacing the stale publisher contract.
 
 Add the M6 GA support manifest, environment verification, migration, rollback,
 retirement, recovery, and coordination-outage command surfaces.
-
