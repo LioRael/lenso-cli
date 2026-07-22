@@ -1,3 +1,10 @@
+## lenso-cli@0.2.3
+
+### Fixes
+
+Publish the M6 CLI distribution with full Git history available to the
+fail-closed source-ancestry verification.
+
 ## lenso-cli@0.2.2
 
 ### Fixes
