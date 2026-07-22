@@ -19,6 +19,10 @@ const SUPPORTED_BUMPS = new Set(["patch", "minor", "major"]);
 function fail(message) {
     throw new TypeError(`cannot export Tegami release plan: ${message}`);
 }
+function copiesCargoWorkspaceSource(cwd, source) {
+    const path = relative(cwd, source);
+    return !path.split(/[\\/]/u).some((segment) => segment === ".git" || segment === "node_modules" || segment === "target");
+}
 function sourceId(options, planId) {
     return options.aliases?.[planId] ?? planId;
 }
@@ -114,7 +118,7 @@ async function assertSupportedCargoSources(cwd) {
     }
     const temp = await mkdtemp(join(tmpdir(), "lenso-cargo-source-check-"));
     try {
-        await cp(cwd, temp, { recursive: true, filter: (source) => !source.includes(`${join(cwd, ".git")}`) });
+        await cp(cwd, temp, { recursive: true, filter: (source) => copiesCargoWorkspaceSource(cwd, source) });
         const { stdout } = await execFileAsync("cargo", ["metadata", "--no-deps", "--offline", "--format-version", "1"], { cwd: temp, maxBuffer: CARGO_METADATA_BUFFER });
         const metadata = JSON.parse(stdout);
         for (const owner of metadata.packages) {
@@ -134,7 +138,7 @@ async function cargoObservations(cwd, pkg, components, planned, locked = true) {
     let cleanup;
     if (!locked) {
         cleanup = await mkdtemp(join(tmpdir(), "lenso-cargo-observe-"));
-        await cp(cwd, cleanup, { recursive: true, filter: (source) => !source.includes(`${join(cwd, ".git")}`) });
+        await cp(cwd, cleanup, { recursive: true, filter: (source) => copiesCargoWorkspaceSource(cwd, source) });
         metadataCwd = cleanup;
     }
     let stdout;
@@ -170,8 +174,15 @@ async function cargoObservations(cwd, pkg, components, planned, locked = true) {
         if (dependency.source && !isCratesIoSource(dependency.source))
             fail(`${id} has unsupported Cargo dependency source ${dependency.source}`);
         const matches = node.deps.filter((entry) => metadata.packages.some((candidate) => candidate.id === entry.pkg && candidate.name === dependency.name));
-        if (matches.length === 0 && dependency.optional)
-            return [];
+        if (matches.length === 0 && dependency.optional) {
+            if (!localVersion)
+                return [];
+            return {
+                id,
+                requirement: normalizeRequirement(dependency.req, id),
+                resolvedVersion: localVersion,
+            };
+        }
         if (matches.length !== 1)
             fail(`ambiguous cargo lock resolution for ${id}`);
         const resolved = metadata.packages.find((item) => item.id === matches[0].pkg);
@@ -525,20 +536,20 @@ export async function exportReleasePlan(options) {
         await verifyExisting(options, existing, captured);
         return existing;
     }
-    const observations = new Map();
     const planned = new Map(pending.map((item) => [item.id, item.nextVersion]));
-    for (const item of pending) {
-        const pkg = captured.get(sourceId(options, item.id));
-        if (!pkg)
-            fail(`Tegami package ${sourceId(options, item.id)} was not captured`);
-        observations.set(item.id, item.id.startsWith("artifact:")
-            ? []
-            : await observeDependencies(options.cwd, pkg, options.components, planned));
-    }
-    const releasePackages = buildPackages(options, pending, observations);
     const snapshot = await snapshotWorkspace(options.cwd, captured.values());
     try {
         await draft.apply();
+        const observations = new Map();
+        for (const item of pending) {
+            const pkg = captured.get(sourceId(options, item.id));
+            if (!pkg)
+                fail(`Tegami package ${sourceId(options, item.id)} was not captured`);
+            observations.set(item.id, item.id.startsWith("artifact:")
+                ? []
+                : await observeDependencies(options.cwd, pkg, options.components, planned));
+        }
+        const releasePackages = buildPackages(options, pending, observations);
         await verifyApplied(options, releasePackages, captured);
         const generatedFiles = await collectGeneratedFiles(options.cwd, await expectedGeneratedPaths(options, releasePackages, captured));
         const plan = buildPlan(options, releasePackages, generatedFiles);

@@ -1,18 +1,18 @@
 {
   "schema": "lenso.repository-template.v1",
-  "sourceRevision": "6ef78ef4a1a89870ae278e57594fe86cdfa8a696",
+  "sourceRevision": "b9a28e6005c10a85516df0d86a391429ee3f0d03",
   "files": [
     {
       "path": ".github/workflows/publish.yml",
-      "sha256": "sha256:0c316b2d18758ac3ea77574dca14ca8607e41a3c3f0404f41512435b3aa4cf43"
+      "sha256": "sha256:db3b3d3e1560fc4d50a865bc43a64ecad9a296644c92bfab3d3afa437730951e"
     },
     {
       "path": ".github/workflows/release-plan.yml",
-      "sha256": "sha256:5aaaa1e5695aabcd67e369998f977967b42511fb62f9ff626d53a6e73bbd8e04"
+      "sha256": "sha256:7f9143eaaee834f0d43d21aaa4076266dcf93e9c4c0c68b57f8a97f106657265"
     },
     {
       "path": ".lenso-release/runtime/components.yaml",
-      "sha256": "sha256:be3160bdda8219fd3fb0001bf583a9f938f6ac5e7bad647c7ec527cfd0d0f257"
+      "sha256": "sha256:618dab85fdaa53dbc61ae0b3b0b8aecf0891b08b131bb670732116d8ef412ad9"
     },
     {
       "path": ".lenso-release/runtime/lib/config/components.js",
@@ -28,7 +28,7 @@
     },
     {
       "path": ".lenso-release/runtime/lib/contracts/validate.js",
-      "sha256": "sha256:b724eab7fe01c1b76af4b06d11f0f350926811c72ee29cfa32e20abb65caec8c"
+      "sha256": "sha256:a59e08e111a302ceb521a4b38b91feb95a6f1cf7f7850a531138e9af1b93da86"
     },
     {
       "path": ".lenso-release/runtime/lib/core/canonical.js",
@@ -56,7 +56,7 @@
     },
     {
       "path": ".lenso-release/runtime/lib/repository/runtime.js",
-      "sha256": "sha256:3421f06b532c3f67cde5bff33eaeabd38524a08b0b98aec95b39f90a380cc356"
+      "sha256": "sha256:1848e324a0db41c9d10f7fb504fa10163e1bcc8668b695ee88a6424440d97cb1"
     },
     {
       "path": ".lenso-release/runtime/lib/tegami/capture-plugin.js",
@@ -72,11 +72,11 @@
     },
     {
       "path": ".lenso-release/runtime/lib/tegami/export-plan.js",
-      "sha256": "sha256:e046eb6563c6f39804a9eb321b32f53a6eb7adfbd1bf24551235f2d052ca94c6"
+      "sha256": "sha256:984c3b986cb7560acca7da18bc93ab56cd547ddb614d3b5d3646ed071b293405"
     },
     {
       "path": ".lenso-release/runtime/manifest.json",
-      "sha256": "sha256:ef15c5467392a34ea4da7488e46cfc5a3cda37a2751a94a26a481c8a8b0f54e3"
+      "sha256": "sha256:1bac08748139db5d6c0fb9c11654f8b6c87a909141b18df0ad24ea1beb9d9657"
     },
     {
       "path": ".lenso-release/runtime/node_modules/@clack/core/LICENSE",
