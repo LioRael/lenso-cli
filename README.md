@@ -477,3 +477,31 @@ descriptors with a `source` field for new installs.
 lenso module install auth --source linked
 lenso module uninstall auth --source linked
 ```
+
+## M6 GA support operations
+
+The GA commands consume exact versioned evidence and never infer compatibility
+from nearby semantic versions:
+
+```sh
+lenso ga support-check --manifest lenso.ga-support-manifest.v1.json \
+  --component cli:@lenso/cli@0.1.30 \
+  --component runtime:lenso-service@0.1.4 \
+  --state-version service-store.v1 --json
+
+lenso ga manifest-migrate --manifest lenso.ga-support-manifest.v1.json \
+  --source lenso.system.json --target-format lenso.system.v2 \
+  --identity-pointer /systemId --dry-run --json
+
+lenso ga service-upgrade --manifest lenso.ga-support-manifest.v1.json \
+  --input service-upgrade-input.json --json
+
+lenso ga contract-retire --input contract-retirement-input.json --json
+lenso ga failure-evaluate --input failure-scenario.json --json
+```
+
+Manifest migration and Service upgrade are non-mutating plans by default.
+Contract Retirement does not apply without an exact human approval bound to
+the current plan digest. Unknown combinations, stale inputs, active Consumers,
+incomplete deprecation windows, incompatible state, and unexpected failure
+behavior stop with stable issue codes and next actions.

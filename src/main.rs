@@ -2,6 +2,7 @@ mod capability;
 mod console_dev;
 mod delivery;
 mod extraction;
+mod ga;
 mod host;
 mod launchpad;
 mod module;
@@ -79,6 +80,85 @@ enum Command {
         #[command(subcommand)]
         command: ConsoleCommand,
     },
+    /// Evaluate and operate the bounded M6 General Availability support surface.
+    Ga {
+        #[command(subcommand)]
+        command: GaCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum GaCommand {
+    /// Evaluate an exact installed or proposed component set against the support manifest.
+    SupportCheck(GaSupportCheckArgs),
+    /// Dry-run or apply an identity-preserving Service or System manifest migration.
+    ManifestMigrate(GaManifestMigrateArgs),
+    /// Produce the migration-first multi-Workload Service upgrade plan.
+    ServiceUpgrade(GaServiceUpgradeArgs),
+    /// Plan or apply stale-safe Contract Retirement.
+    ContractRetire(GaContractRetireArgs),
+    /// Evaluate one versioned Failure Scenario evidence input.
+    FailureEvaluate(GaFailureEvaluateArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+struct GaSupportCheckArgs {
+    #[arg(long)]
+    manifest: std::path::PathBuf,
+    #[arg(long = "component", required = true)]
+    components: Vec<String>,
+    #[arg(long)]
+    state_version: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct GaManifestMigrateArgs {
+    #[arg(long)]
+    manifest: std::path::PathBuf,
+    #[arg(long)]
+    source: std::path::PathBuf,
+    #[arg(long)]
+    target_format: String,
+    #[arg(long = "identity-pointer")]
+    identity_pointers: Vec<String>,
+    #[arg(long)]
+    target: Option<std::path::PathBuf>,
+    #[arg(long)]
+    dry_run: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct GaServiceUpgradeArgs {
+    #[arg(long)]
+    manifest: std::path::PathBuf,
+    #[arg(long)]
+    input: std::path::PathBuf,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct GaContractRetireArgs {
+    #[arg(long)]
+    input: std::path::PathBuf,
+    #[arg(long)]
+    approval: Option<std::path::PathBuf>,
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct GaFailureEvaluateArgs {
+    #[arg(long)]
+    input: std::path::PathBuf,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -3311,6 +3391,33 @@ async fn main() -> anyhow::Result<()> {
                     module::apply_console_package_install_plan((&args).into()).await?;
                 }
             },
+        },
+        Command::Ga { command } => match command {
+            GaCommand::SupportCheck(args) => ga::support_check(
+                &args.manifest,
+                &args.components,
+                &args.state_version,
+                args.json,
+            )?,
+            GaCommand::ManifestMigrate(args) => ga::manifest_migrate(
+                &args.manifest,
+                &args.source,
+                &args.target_format,
+                &args.identity_pointers,
+                args.target.as_deref(),
+                args.dry_run,
+                args.json,
+            )?,
+            GaCommand::ServiceUpgrade(args) => {
+                ga::service_upgrade(&args.manifest, &args.input, args.json)?;
+            }
+            GaCommand::ContractRetire(args) => ga::contract_retire(
+                &args.input,
+                args.approval.as_deref(),
+                args.output.as_deref(),
+                args.json,
+            )?,
+            GaCommand::FailureEvaluate(args) => ga::failure_evaluate(&args.input, args.json)?,
         },
         Command::Operator { command } => match command {
             OperatorCommand::ExportCrd(args) => {
