@@ -1,3 +1,10 @@
+## lenso-cli@0.2.8
+
+### Fixes
+
+Publish the M6 CLI distribution with Cargo packaging staged from the reviewed
+publisher workspace.
+
 ## lenso-cli@0.2.7
 
 ### Fixes
