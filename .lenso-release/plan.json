@@ -1,13 +1,13 @@
 {
   "schema": "lenso.release-plan.v1",
   "repository": "LioRael/lenso-cli",
-  "sourceCommit": "5814639b45a76bafd67e83ee305fdbde1c052aa0",
+  "sourceCommit": "62a64071722b3ef9d281b81d042ac72f0ccea73e",
   "tegamiVersion": "1.2.5",
   "publisher": {
     "workflow": ".github/workflows/publish.yml",
-    "workflowSha256": "sha256:87587fa088db97da02ccad5045dc9755df49527b25d1c7feb01d400c194008ab",
-    "sharedRevision": "ea9e8d2ab636a005ecf6ac07306b8fb3eef33f52",
-    "sharedBundleSha256": "sha256:30a02b6f1cd869d86d5c527d7120735ac3c2ffd735719ea5d8947e8518d79f96",
+    "workflowSha256": "sha256:682c11a4a2cdeffe5d680a124dac1ce42cb5d074adc30d22644b2f0ebbdb50e8",
+    "sharedRevision": "e25e3e1b6d2ddd67bf2e9423c32423c1c889e91a",
+    "sharedBundleSha256": "sha256:41b0c720668aa58e350c0809d35fa64f86f3bdca02f62810f9af93ab5e6655ed",
     "runner": "ubuntu-24.04",
     "node": "24.18.0",
     "npm": "11.7.0",
@@ -16,23 +16,23 @@
   "generatedFiles": [
     {
       "path": ".tegami/publish-lock.yaml",
-      "sha256": "sha256:660f7db3d0f5942d3314e5340a1f51f491e88e377d6ad67f50d020b9528a983c"
+      "sha256": "sha256:96bc2d44729f557a71fcfc53700552b618f8042f1b362f6a595c594c8169b7d0"
     },
     {
       "path": "CHANGELOG.md",
-      "sha256": "sha256:c8395f07b904dfdc07c99824134d31307ef3bc55ea44dbbab8a0c80ea575bffc"
+      "sha256": "sha256:7df11867bc86b21357c4c6126d3a49ff76415e5f30c19791d6a294c5c873e120"
     },
     {
       "path": "Cargo.lock",
-      "sha256": "sha256:acba02f2df2b987f81d5034eef26559ad834ccce6222b43760046a1aa07908a9"
+      "sha256": "sha256:323c5ea1f2bd12e769cbd8097548ee5f6d9db4bc3ab1351ba9e03f4e8d3d094e"
     },
     {
       "path": "Cargo.toml",
-      "sha256": "sha256:7f658c90444e71195400ffd0a3d63093e75fbab1b42060503be4e7020663a839"
+      "sha256": "sha256:378f3576cbc29ef09061ea5ae1f3c9a43ba1fea2b9d71f29a45734833b625f4f"
     },
     {
       "path": "package.json",
-      "sha256": "sha256:e874e5c5321ab2c050b7b5fd66c1b62c9aac2bfa51ee08bd5c13707bbc6e6496"
+      "sha256": "sha256:c043524bfbb61cb3478086a5b958e8de11cf3babefd213a1402c980f4b4b7e38"
     },
     {
       "path": "pnpm-lock.yaml",
@@ -42,8 +42,8 @@
   "packages": [
     {
       "id": "cargo:lenso-cli",
-      "previousVersion": "0.2.1",
-      "nextVersion": "0.2.2",
+      "previousVersion": "0.2.2",
+      "nextVersion": "0.2.3",
       "bump": "patch",
       "releaseGroup": "distribution",
       "userFacing": true,
@@ -58,13 +58,13 @@
     },
     {
       "id": "npm:@lenso/cli",
-      "previousVersion": "0.2.1",
-      "nextVersion": "0.2.2",
+      "previousVersion": "0.2.2",
+      "nextVersion": "0.2.3",
       "bump": "patch",
       "releaseGroup": "distribution",
       "userFacing": true,
       "dependencies": []
     }
   ],
-  "planId": "sha256:cba31db735b8f25e561db61d3e3bda31b82fa18e249b247e4514fe98837df39e"
+  "planId": "sha256:e38147090f5a04f1bcdc949d4aa5615ba8837d736f9ff043c8fabddf4e75a639"
 }
