@@ -614,48 +614,6 @@ struct PolicyEvidenceContent<'a> {
     issues: &'a [PolicyDeliveryIssue],
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct EnvironmentVerificationDigestInput<'a> {
-    protocol: &'a str,
-    environment: &'a str,
-    environment_revision: u64,
-    release_id: &'a str,
-    release_digest: &'a str,
-    workload_digests: &'a Value,
-    workload_health: &'a Value,
-    config_revision_id: &'a str,
-    trust_evidence_digest: &'a str,
-    policy_evidence_id: &'a str,
-    policy_evidence_digest: &'a str,
-    deployment_plan_id: &'a str,
-    deployment_plan_digest: &'a str,
-    deployment_receipt_id: &'a str,
-    deployment_observation_id: &'a str,
-    operator_observation_id: &'a str,
-    operator_observation_digest: &'a str,
-    operator_observation_authority_id: &'a str,
-    operator_observation_authority_proof: &'a str,
-    operator_observation_claims: &'a Value,
-    gateway_plan_id: &'a str,
-    gateway_plan_digest: &'a str,
-    gateway_observation_id: &'a str,
-    gateway_resource_uid: &'a str,
-    gateway_resource_version: &'a str,
-    gateway_authority_context: &'a str,
-    gateway_configuration_identity: &'a str,
-    gateway_observation_revision: u64,
-    gateway_observation_observed_after: &'a str,
-    gateway_observation_fresh: bool,
-    gateway_observation_provider_id: &'a str,
-    gateway_observation_provider_proof: &'a str,
-    topology_digest: &'a str,
-    evidence_references: &'a Value,
-    freshness_horizon_revision: u64,
-    decision: &'a Value,
-    issues: &'a Value,
-}
-
 pub(crate) fn assemble_release(input: &Path, output: Option<&Path>) -> Result<()> {
     let input: lenso_service::ServiceReleaseInput = read_json(input)?;
     let release = lenso_service::assemble_service_release(input).map_err(|issues| {
@@ -2160,78 +2118,7 @@ fn validate_environment_verification(
     trusted_operator_authorities: &BTreeMap<String, String>,
     trusted_gateway_authorities: &BTreeMap<String, String>,
 ) -> Result<()> {
-    check_protocol(verification, "lenso.environment-verification.v1")?;
-    let digest = digest_json(&EnvironmentVerificationDigestInput {
-        protocol: "lenso.environment-verification.v1",
-        environment: required_text(verification, "environment")?,
-        environment_revision: verification["environmentRevision"]
-            .as_u64()
-            .context("promotion_input_invalid: environment revision must be an integer")?,
-        release_id: required_text(verification, "releaseId")?,
-        release_digest: required_text(verification, "releaseDigest")?,
-        workload_digests: &verification["workloadDigests"],
-        workload_health: &verification["workloadHealth"],
-        config_revision_id: required_text(verification, "configRevisionId")?,
-        trust_evidence_digest: required_text(verification, "trustEvidenceDigest")?,
-        policy_evidence_id: required_text(verification, "policyEvidenceId")?,
-        policy_evidence_digest: required_text(verification, "policyEvidenceDigest")?,
-        deployment_plan_id: required_text(verification, "deploymentPlanId")?,
-        deployment_plan_digest: required_text(verification, "deploymentPlanDigest")?,
-        deployment_receipt_id: required_text(verification, "deploymentReceiptId")?,
-        deployment_observation_id: required_text(verification, "deploymentObservationId")?,
-        operator_observation_id: required_text(verification, "operatorObservationId")?,
-        operator_observation_digest: required_text(verification, "operatorObservationDigest")?,
-        operator_observation_authority_id: required_text(
-            verification,
-            "operatorObservationAuthorityId",
-        )?,
-        operator_observation_authority_proof: required_text(
-            verification,
-            "operatorObservationAuthorityProof",
-        )?,
-        operator_observation_claims: &verification["operatorObservationClaims"],
-        gateway_plan_id: required_text(verification, "gatewayPlanId")?,
-        gateway_plan_digest: required_text(verification, "gatewayPlanDigest")?,
-        gateway_observation_id: required_text(verification, "gatewayObservationId")?,
-        gateway_resource_uid: required_text(verification, "gatewayResourceUid")?,
-        gateway_resource_version: required_text(verification, "gatewayResourceVersion")?,
-        gateway_authority_context: required_text(verification, "gatewayAuthorityContext")?,
-        gateway_configuration_identity: required_text(
-            verification,
-            "gatewayConfigurationIdentity",
-        )?,
-        gateway_observation_revision: verification["gatewayObservationRevision"]
-            .as_u64()
-            .context("promotion_input_invalid: gateway observation revision must be an integer")?,
-        gateway_observation_observed_after: required_text(
-            verification,
-            "gatewayObservationObservedAfter",
-        )?,
-        gateway_observation_fresh: verification["gatewayObservationFresh"]
-            .as_bool()
-            .context("promotion_input_invalid: gateway observation freshness must be a boolean")?,
-        gateway_observation_provider_id: required_text(
-            verification,
-            "gatewayObservationProviderId",
-        )?,
-        gateway_observation_provider_proof: required_text(
-            verification,
-            "gatewayObservationProviderProof",
-        )?,
-        topology_digest: required_text(verification, "topologyDigest")?,
-        evidence_references: &verification["evidenceReferences"],
-        freshness_horizon_revision: verification["freshnessHorizonRevision"]
-            .as_u64()
-            .context("promotion_input_invalid: freshness horizon must be an integer")?,
-        decision: &verification["decision"],
-        issues: &verification["issues"],
-    });
-    if required_text(verification, "verificationDigest")? != digest
-        || required_text(verification, "verificationId")?
-            != format!("environment-verification:{digest}")
-    {
-        bail!("promotion_input_invalid: Environment Verification identity is invalid")
-    }
+    validate_environment_verification_identity(verification)?;
     let operator_digest = required_text(verification, "operatorObservationDigest")?;
     let operator_id = required_text(verification, "operatorObservationId")?;
     let operator_authority = required_text(verification, "operatorObservationAuthorityId")?;
@@ -2329,6 +2216,17 @@ fn validate_environment_verification(
         || required_text(verification, "gatewayObservationObservedAfter")? != operator_id
     {
         bail!("promotion_input_invalid: Gateway observation authority proof is invalid")
+    }
+    Ok(())
+}
+
+fn validate_environment_verification_identity(verification: &Value) -> Result<()> {
+    let verification: lenso_service::EnvironmentVerification = serde_json::from_value(
+        verification.clone(),
+    )
+    .context("promotion_input_invalid: Environment Verification is not the shared contract")?;
+    if !lenso_service::environment_verification_integrity_is_valid(&verification) {
+        bail!("promotion_input_invalid: Environment Verification identity is invalid")
     }
     Ok(())
 }
@@ -2777,6 +2675,96 @@ fn write_json(value: &impl Serialize, output: Option<&Path>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn environment_verification_uses_the_shared_canonical_identity() {
+        let mut verification: lenso_service::EnvironmentVerification = serde_json::from_str(
+            r#"{
+                "protocol": "lenso.environment-verification.v1",
+                "verificationId": "",
+                "verificationDigest": "",
+                "environment": "staging",
+                "environmentRevision": 2,
+                "releaseId": "service-release:test",
+                "releaseDigest": "sha256:release",
+                "workloadDigests": {"support-api": "sha256:workload"},
+                "workloadHealth": {"support-api": true},
+                "configRevisionId": "config:test",
+                "trustEvidenceDigest": "sha256:trust",
+                "policyEvidenceId": "policy:test",
+                "policyEvidenceDigest": "sha256:policy",
+                "deploymentPlanId": "deployment-plan:test",
+                "deploymentPlanDigest": "sha256:deployment-plan",
+                "deploymentReceiptId": "deployment-receipt:test",
+                "deploymentObservationId": "deployment-observation:test",
+                "operatorObservationId": "operator-observation:test",
+                "operatorObservationDigest": "sha256:operator",
+                "operatorObservationAuthorityId": "operator:test",
+                "operatorObservationAuthorityProof": "proof",
+                "operatorObservationClaims": {
+                    "protocol": "lenso.operator-observation-claims.v1",
+                    "serviceId": "service:support",
+                    "environment": "staging",
+                    "deploymentPlanId": "deployment-plan:test",
+                    "deploymentPlanDigest": "sha256:deployment-plan",
+                    "expectedEnvironmentRevision": 1,
+                    "environmentRevision": 2,
+                    "authorityContext": "deployment-plan:test",
+                    "resourceUid": "uid",
+                    "resourceVersion": "2",
+                    "desiredReleaseId": "service-release:test",
+                    "desiredReleaseDigest": "sha256:release",
+                    "observedReleaseId": "service-release:test",
+                    "observedReleaseDigest": "sha256:release",
+                    "desiredWorkloadDigests": {"support-api": "sha256:workload"},
+                    "observedWorkloadDigests": {"support-api": "sha256:workload"},
+                    "workloadHealth": {"support-api": true},
+                    "configRevisionId": "config:test",
+                    "state": "ready",
+                    "rolloutPhase": "ready",
+                    "rollbackState": "idle",
+                    "drifted": false,
+                    "fresh": true,
+                    "decision": "passed"
+                },
+                "gatewayPlanId": "gateway-plan:test",
+                "gatewayPlanDigest": "sha256:gateway-plan",
+                "gatewayObservationId": "gateway-observation:test",
+                "gatewayResourceUid": "gateway-uid",
+                "gatewayResourceVersion": "2",
+                "gatewayAuthorityContext": "gateway-plan:test",
+                "gatewayConfigurationIdentity": "gateway-config:test",
+                "gatewayObservationRevision": 2,
+                "gatewayObservationObservedAfter": "operator-observation:test",
+                "gatewayObservationFresh": true,
+                "gatewayObservationProviderId": "gateway:test",
+                "gatewayObservationProviderProof": "proof",
+                "topologyDigest": "sha256:topology",
+                "evidenceReferences": ["operator-observation:test"],
+                "freshnessHorizonRevision": 3,
+                "decision": "passed",
+                "issues": [],
+                "effects": {
+                    "mutatesEnvironment": false,
+                    "mutatesConfiguration": false,
+                    "mutatesGateway": false,
+                    "mutatesDeployment": false,
+                    "appendsLedger": false
+                }
+            }"#,
+        )
+        .expect("fixture must match the shared Environment Verification contract");
+        verification.verification_digest =
+            lenso_service::environment_verification_digest(&verification);
+        verification.verification_id = format!(
+            "environment-verification:{}",
+            verification.verification_digest
+        );
+
+        let serialized = serde_json::to_value(&verification).unwrap();
+        validate_environment_verification_identity(&serialized)
+            .expect("shared canonical identity must validate after JSON deserialization");
+    }
 
     #[test]
     fn release_assembly_is_canonical_and_environment_independent() {
