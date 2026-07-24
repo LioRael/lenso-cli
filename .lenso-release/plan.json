@@ -1,11 +1,11 @@
 {
   "schema": "lenso.release-plan.v1",
   "repository": "LioRael/lenso-cli",
-  "sourceCommit": "3c01fed20484930a7e2d70182d196d768c9504c3",
+  "sourceCommit": "7d62da62035dee5c9a8afe7b4734f93323efc7ed",
   "tegamiVersion": "1.2.5",
   "publisher": {
     "workflow": ".github/workflows/publish.yml",
-    "workflowSha256": "sha256:25786f3216e32f78a099e9a51ff3a9d770317075cde9aed1686dca0a4a89bc43",
+    "workflowSha256": "sha256:8928379190a3cf6abc783dd07f709f56464859d6636b350aafff4936a63afb78",
     "sharedRevision": "41128c56cdebd350f8a02fcc4907f030be14ca2b",
     "sharedBundleSha256": "sha256:bfcfa3ca99c2ab74051d3fca5206f433c7499e7b49cc33980e3149a68e359f59",
     "runner": "ubuntu-24.04",
@@ -16,23 +16,23 @@
   "generatedFiles": [
     {
       "path": ".tegami/publish-lock.yaml",
-      "sha256": "sha256:6fdcbfa46d0e7847a6e3fc995bf407b78ca445c62459c67ac27b8eec6d9f4d9a"
+      "sha256": "sha256:4e7bf2aaf27eb1705caaedb0fd7c44233651f273447a4f49f9d3c1ffd30ded0c"
     },
     {
       "path": "CHANGELOG.md",
-      "sha256": "sha256:71213130b1886cdacf1020b0cc798dc0cc294d7c31b4137c0be70133658703ef"
+      "sha256": "sha256:d090ad36215e2b1d2de020c859f9b071f239410e0797e67dfb1fd62f0cc0b56b"
     },
     {
       "path": "Cargo.lock",
-      "sha256": "sha256:7b9cc2568c69599a603651b38821c502b1a1f80a1a1c3862baa62599a12030d5"
+      "sha256": "sha256:0c5dd8d694712fb1b331971a7baa34e353625542d1787e160d4de3f1d704919a"
     },
     {
       "path": "Cargo.toml",
-      "sha256": "sha256:9bdd580ffae2df50a370e7ac28dbffc7ed957fe911b8db70fdc59deda550d905"
+      "sha256": "sha256:4fbb0cc4f56613a112203002dad4e36a031900e29b011bbf569c664c8e279cbb"
     },
     {
       "path": "package.json",
-      "sha256": "sha256:d34441da0720823346a04c4ff0b5e0aeced922ac0bacaeb710af2f43a5cd22e5"
+      "sha256": "sha256:14bdde9f0cb7f2787f0193af0ea598c55fe54d1bfd6a8bed824eff62079560bc"
     },
     {
       "path": "pnpm-lock.yaml",
@@ -42,8 +42,8 @@
   "packages": [
     {
       "id": "cargo:lenso-cli",
-      "previousVersion": "0.2.9",
-      "nextVersion": "0.2.10",
+      "previousVersion": "0.2.10",
+      "nextVersion": "0.2.11",
       "bump": "patch",
       "releaseGroup": "distribution",
       "userFacing": true,
@@ -58,13 +58,13 @@
     },
     {
       "id": "npm:@lenso/cli",
-      "previousVersion": "0.2.9",
-      "nextVersion": "0.2.10",
+      "previousVersion": "0.2.10",
+      "nextVersion": "0.2.11",
       "bump": "patch",
       "releaseGroup": "distribution",
       "userFacing": true,
       "dependencies": []
     }
   ],
-  "planId": "sha256:87a2e4ebef509835d75307f3b88895b4eeab83c5a3ccde4e8e020c49aeb82ce0"
+  "planId": "sha256:def12e6a40ffd36e0459e3f5fac46b0a5652f5b04c47b6f56fabc59a30a60150"
 }
