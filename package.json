@@ -17,6 +17,7 @@
   ],
   "scripts": {
     "check:npm-publish": "node scripts/check-npm-publish.mjs",
+    "check:reviewed-publisher": "node scripts/check-reviewed-publisher.mjs",
     "check:npm-shim": "node scripts/check-npm-shim.mjs",
     "check:release-versions": "node scripts/check-release-versions.mjs",
     "install:hosted-console": "node scripts/install-hosted-console.mjs",
