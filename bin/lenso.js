@@ -22,6 +22,25 @@ function binaryPath(baseDir = path.join(__dirname, '..'), platform = process.pla
   return path.join(baseDir, 'vendor', tag, exe);
 }
 
+function forwardTerminationSignals(parent, child, signals = ['SIGINT', 'SIGTERM']) {
+  const handlers = new Map(signals.map((signal) => [
+    signal,
+    () => {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill(signal);
+      }
+    },
+  ]));
+  for (const [signal, handler] of handlers) {
+    parent.on(signal, handler);
+  }
+  return () => {
+    for (const [signal, handler] of handlers) {
+      parent.off(signal, handler);
+    }
+  };
+}
+
 function run() {
   const exe = binaryPath();
   if (!exe) {
@@ -30,6 +49,7 @@ function run() {
   }
 
   const child = spawn(exe, process.argv.slice(2), { stdio: 'inherit' });
+  const stopForwardingSignals = forwardTerminationSignals(process, child);
   child.on('error', (error) => {
     if (error.code === 'ENOENT') {
       console.error(`lenso: bundled binary is missing for ${process.platform}/${process.arch}`);
@@ -39,6 +59,7 @@ function run() {
     process.exit(1);
   });
   child.on('exit', (code, signal) => {
+    stopForwardingSignals();
     if (signal) {
       process.kill(process.pid, signal);
       return;
@@ -51,4 +72,4 @@ if (require.main === module) {
   run();
 }
 
-module.exports = { binaryPath, platformTag };
+module.exports = { binaryPath, forwardTerminationSignals, platformTag };
