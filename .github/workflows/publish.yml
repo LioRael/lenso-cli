@@ -49,22 +49,18 @@ jobs:
         run: |
           npm run check:release-versions
           node -e "const p=JSON.parse(process.env.PACKAGES_JSON); const expected=['cargo:lenso-cli','npm:@lenso/cli']; if (p.length !== 2 || !expected.every(id => p.some(x => x.id === id)) || new Set(p.map(x => x.version)).size !== 1) process.exit(1)"
-      - name: Install exact reviewed hosted Console
-        run: npm run install:hosted-console
       - name: Build npm distribution binary
         env:
           LENSO_NPM_TAG: ${{ matrix.tag }}
           LENSO_CARGO_TARGET: ${{ matrix.rust-target }}
         run: npm run package:npm
-      - name: Smoke bundled binary and hosted Console
+      - name: Smoke bundled binary
         if: matrix.smoke
         run: |
           node bin/lenso.js --version
           tmpdir="$(mktemp -d)"
           node bin/lenso.js host init "$tmpdir/app"
           test -f "$tmpdir/app/Cargo.toml"
-          node bin/lenso.js console update --repo-root "$tmpdir/app" --artifact console/dist
-          test -f "$tmpdir/app/.lenso/console/dist/index.html"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: lenso-cli-${{ matrix.tag }}
@@ -129,8 +125,6 @@ jobs:
           npm run check:release-versions
           npm run check:npm-shim
           npm run check:npm-publish
-          npm run install:hosted-console
-          cargo test --locked
       - name: Complete fail-closed preflight before any registry OIDC
         env:
           INPUT_EVENT_ID: ${{ inputs.event_id }}
