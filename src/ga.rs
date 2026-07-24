@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 const SUPPORT_PROTOCOL: &str = "lenso.ga-support-manifest.v1";
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SupportManifest {
     protocol: String,
@@ -18,12 +18,16 @@ struct SupportManifest {
     manifest_digest: String,
     status: SupportStatus,
     components: Vec<SupportComponent>,
-    combinations: Vec<SupportCombination>,
     manifest_formats: Vec<ManifestFormat>,
     state_versions: Vec<String>,
     adapter_versions: BTreeMap<String, String>,
     documentation: DocumentationIdentity,
+    combinations: Vec<SupportCombination>,
     upgrade_edges: Vec<UpgradeEdge>,
+    #[serde(default)]
+    evidence_receipt_authorities: BTreeMap<String, String>,
+    #[serde(default)]
+    receipt_authority_public_keys: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -394,6 +398,21 @@ struct RetirementApproval {
     reason: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ContractRetirementReceipt {
+    protocol: String,
+    receipt_id: String,
+    receipt_digest: String,
+    plan_digest: String,
+    contract_id: String,
+    retired_version: String,
+    replacement_version: String,
+    approver: String,
+    approval_reason: String,
+    retired: bool,
+}
+
 pub(crate) fn contract_retire(
     input_path: &Path,
     approval_path: Option<&Path>,
@@ -487,16 +506,24 @@ pub(crate) fn contract_retire(
     {
         bail!("retirement_approval_invalid: approval must bind the exact plan digest")
     }
-    let receipt = json!({
-        "protocol":"lenso.contract-retirement-receipt.v1",
-        "receiptId":format!("contract-retirement-receipt:{}", &plan_digest[7..23]),
-        "planDigest":plan_digest,
-        "contractId":input.contract_id,
-        "retiredVersion":input.retiring_version,
-        "replacementVersion":input.replacement_version,
-        "approver":approval.approver,
-        "retired":true
-    });
+    let mut receipt = ContractRetirementReceipt {
+        protocol: "lenso.contract-retirement-receipt.v2".into(),
+        receipt_id: String::new(),
+        receipt_digest: String::new(),
+        plan_digest,
+        contract_id: input.contract_id,
+        retired_version: input.retiring_version,
+        replacement_version: input.replacement_version,
+        approver: approval.approver,
+        approval_reason: approval.reason,
+        retired: true,
+    };
+    receipt.receipt_digest = digest(&receipt);
+    receipt.receipt_id = format!(
+        "contract-retirement-receipt:{}",
+        &receipt.receipt_digest[7..23]
+    );
+    let receipt = serde_json::to_value(receipt)?;
     if let Some(path) = output_path {
         write_json(path, &receipt)?;
     }
@@ -612,7 +639,22 @@ fn read_manifest(path: &Path) -> Result<SupportManifest> {
         .iter()
         .map(SupportComponent::reference)
         .collect::<BTreeSet<_>>();
-    let calculated_digest = digest(&input);
+    let calculated_digest = if manifest.evidence_receipt_authorities.is_empty()
+        && manifest.receipt_authority_public_keys.is_empty()
+    {
+        digest(&input)
+    } else {
+        let mut canonical = manifest.clone();
+        canonical.protocol.clear();
+        canonical.manifest_id.clear();
+        canonical.manifest_digest.clear();
+        canonical.components = input.components.clone();
+        canonical.manifest_formats = input.manifest_formats.clone();
+        canonical.state_versions = input.state_versions.clone();
+        canonical.combinations = input.combinations.clone();
+        canonical.upgrade_edges = input.upgrade_edges.clone();
+        digest(&canonical)
+    };
     if manifest.protocol != SUPPORT_PROTOCOL
         || manifest.manifest_digest != calculated_digest
         || manifest.manifest_id != format!("ga-support:{}", &calculated_digest[7..23])
