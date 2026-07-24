@@ -1,3 +1,10 @@
+## lenso-cli@0.2.11
+
+### Fixes
+
+Publish universal platform binaries through the reviewed coordinator flow so
+the exact staged CLI package is consumable by the M6 fresh-starter proof.
+
 ## lenso-cli@0.2.10
 
 ### Fixes
