@@ -1,6 +1,7 @@
 name: npm release
 
-on: []
+on:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -29,11 +30,13 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: LioRael/lenso-runtime-console
+          ref: 134bcc0eabcbd242aa0adaf7a84400ad40abeb60
           token: ${{ secrets.LENSO_RUNTIME_CONSOLE_TOKEN }}
           path: lenso-runtime-console
       - uses: actions/checkout@v6
         with:
           repository: LioRael/lenso-auth-module
+          ref: bf9e490afdf70cb8d69a32019da981547e2a6a0b
           path: lenso-auth-module
       - uses: actions/setup-node@v6
         with:
@@ -96,6 +99,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: 10653d045b6ecd6ce86442db7a010d9a62e7fa20
           path: lenso-cli
       - uses: actions/setup-node@v6
         with:
@@ -156,6 +160,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: 10653d045b6ecd6ce86442db7a010d9a62e7fa20
           path: lenso-cli
       - uses: actions/setup-node@v6
         with:
