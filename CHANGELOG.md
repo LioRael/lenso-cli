@@ -1,3 +1,10 @@
+## @lenso/cli@0.2.9
+
+### Fixes
+
+Publish the M6 General Availability CLI with canonical Environment
+Verification evidence.
+
 ## lenso-cli@0.2.8
 
 ### Fixes
@@ -60,4 +67,3 @@ after replacing the stale publisher contract.
 
 Add the M6 GA support manifest, environment verification, migration, rollback,
 retirement, recovery, and coordination-outage command surfaces.
-
