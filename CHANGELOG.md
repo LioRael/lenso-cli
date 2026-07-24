@@ -1,3 +1,10 @@
+## lenso-cli@0.2.10
+
+### Fixes
+
+Publish the completed M6 candidate tracer against the exact reviewed support
+manifest and accepted release evidence.
+
 ## @lenso/cli@0.2.9
 
 ### Fixes
@@ -67,3 +74,4 @@ after replacing the stale publisher contract.
 
 Add the M6 GA support manifest, environment verification, migration, rollback,
 retirement, recovery, and coordination-outage command surfaces.
+
