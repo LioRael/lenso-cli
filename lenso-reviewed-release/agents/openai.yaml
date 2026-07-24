@@ -1,0 +1,4 @@
+interface:
+  display_name: "Lenso Reviewed Release"
+  short_description: "Prepare bounded reviewed releases"
+  default_prompt: "Use $lenso-reviewed-release to prepare or diagnose a Lenso release without crossing production approval boundaries."

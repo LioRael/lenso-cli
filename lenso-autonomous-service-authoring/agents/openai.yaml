@@ -1,0 +1,4 @@
+interface:
+  display_name: "Lenso Autonomous Service Authoring"
+  short_description: "Author supported Autonomous Services"
+  default_prompt: "Use $lenso-autonomous-service-authoring to create or change a Lenso Autonomous Service from public packages."

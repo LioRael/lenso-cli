@@ -1,0 +1,4 @@
+interface:
+  display_name: "Lenso Incident Recovery"
+  short_description: "Diagnose and plan safe recovery"
+  default_prompt: "Use $lenso-incident-recovery to diagnose a Lenso incident from stable evidence and issue codes."

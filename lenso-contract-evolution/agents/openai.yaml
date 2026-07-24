@@ -1,0 +1,4 @@
+interface:
+  display_name: "Lenso Contract Evolution"
+  short_description: "Evolve and retire Contracts safely"
+  default_prompt: "Use $lenso-contract-evolution to change a Lenso Contract with compatibility and Consumer evidence."

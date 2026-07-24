@@ -1,0 +1,4 @@
+interface:
+  display_name: "Lenso Module Extraction"
+  short_description: "Plan safe Module extraction"
+  default_prompt: "Use $lenso-module-extraction to evaluate or advance a linked Module extraction without crossing authority boundaries."

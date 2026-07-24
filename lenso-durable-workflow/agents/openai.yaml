@@ -1,0 +1,4 @@
+interface:
+  display_name: "Lenso Durable Workflow"
+  short_description: "Design safe Durable Workflows"
+  default_prompt: "Use $lenso-durable-workflow to design or evolve a versioned Lenso Durable Workflow."
