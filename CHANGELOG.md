@@ -1,3 +1,10 @@
+## lenso-cli@0.2.13
+
+### Fixes
+
+Forward termination signals from the npm shim to the bundled CLI so long-running
+commands stop their Workloads and clean owned state.
+
 ## lenso-cli@0.2.12
 
 ### Fixes
