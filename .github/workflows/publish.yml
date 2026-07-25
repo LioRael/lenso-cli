@@ -236,8 +236,9 @@ jobs:
           else
             npm publish --access public --ignore-scripts --provenance
           fi
+          cp lenso-cli-0.2.13.tgz cli-0.2.13.tgz
       - uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6
         with:
           subject-path: |
             target/package/lenso-cli-0.2.13.crate
-            lenso-cli-0.2.13.tgz
+            cli-0.2.13.tgz
