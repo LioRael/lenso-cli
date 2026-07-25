@@ -221,9 +221,20 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
         run: |
-          cargo publish --locked --allow-dirty
+          cargo package --locked --allow-dirty
+          if curl --fail --silent --show-error \
+            https://crates.io/api/v1/crates/lenso-cli/0.2.13 >/dev/null; then
+            echo "lenso-cli 0.2.13 is already public; skipping Cargo publish"
+          else
+            cargo publish --locked --allow-dirty
+          fi
           npm pack --ignore-scripts
-          npm publish --access public --ignore-scripts --provenance
+          if npm view @lenso/cli@0.2.13 version --registry=https://registry.npmjs.org \
+            >/dev/null 2>&1; then
+            echo "@lenso/cli 0.2.13 is already public; skipping npm publish"
+          else
+            npm publish --access public --ignore-scripts --provenance
+          fi
       - uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6
         with:
           subject-path: |
