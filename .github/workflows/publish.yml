@@ -222,7 +222,8 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
         run: |
           cargo package --locked --allow-dirty
-          if curl --fail --silent --show-error \
+          if curl --user-agent lenso-release-publish --fail --silent --show-error \
+            --connect-timeout 10 --max-time 30 --retry 2 --retry-delay 2 \
             https://crates.io/api/v1/crates/lenso-cli/0.2.13 >/dev/null; then
             echo "lenso-cli 0.2.13 is already public; skipping Cargo publish"
           else
