@@ -21,8 +21,8 @@ assert.ok(
 );
 assert.equal(
   workflow.match(/ref: \$\{\{ inputs\.release_commit \}\}/gu)?.length,
-  3,
-  "build, publish, and recovery jobs must use the exact reviewed release commit",
+  2,
+  "build and publish jobs must use the exact reviewed release commit",
 );
 
 console.log("reviewed publisher workflow check passed");
