@@ -27,6 +27,8 @@ const RECONCILIATION_PLAN_SCHEMA: &str = "lenso.console-reconciliation-plan.v1";
 const RECONCILIATION_EVIDENCE_SCHEMA: &str = "lenso.console-reconciliation-evidence.v1";
 const ACTIVATION_PLAN_SCHEMA: &str = "lenso.console-activation-plan.v1";
 const ACTIVATION_EVIDENCE_SCHEMA: &str = "lenso.console-activation-evidence.v1";
+const ACTIVATION_RECOVERY_PLAN_SCHEMA: &str = "lenso.console-activation-recovery-plan.v1";
+const ACTIVATION_RECOVERY_EVIDENCE_SCHEMA: &str = "lenso.console-activation-recovery-evidence.v1";
 const DOCTOR_SCHEMA: &str = "lenso.console-doctor.v1";
 const TRUSTED_RELEASE_REPOSITORY: &str = "LioRael/lenso-runtime-console";
 const TRUSTED_SIGNER_WORKFLOW: &str = "LioRael/lenso-runtime-console/.github/workflows/publish.yml";
@@ -41,6 +43,8 @@ const RECOVERY_STORE_FILE: &str = "store.dump.age";
 const RECOVERY_STATE_FILE: &str = "recovery-state.json";
 const RECONCILIATION_EVIDENCE_FILE: &str = "reconciliation-evidence.json";
 const ACTIVATION_EVIDENCE_FILE: &str = "activation-evidence.json";
+const ACTIVATION_RECOVERY_EVIDENCE_FILE: &str = "activation-recovery-evidence.json";
+const RECOVERY_EVIDENCE_DIRECTORY: &str = "recovery-evidence";
 const RECOVERY_PG_DUMP_ARGS: &[&str] = &[
     "--format=custom",
     "--no-owner",
@@ -106,6 +110,17 @@ pub struct ActivateOptions {
     pub apply: bool,
     pub approve_plan_digest: Option<String>,
     pub approve_authority_transfer: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RecoverActivationOptions {
+    pub root: PathBuf,
+    pub recovery_env_file: PathBuf,
+    pub active_env_file: PathBuf,
+    pub output: Option<PathBuf>,
+    pub apply: bool,
+    pub approve_plan_digest: Option<String>,
+    pub approve_authority_reset: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -287,6 +302,8 @@ enum RecoveryStatus {
     Activating,
     ActivationFailed,
     Activated,
+    RecoveringActivation,
+    ActivationRecoveryFailed,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -306,6 +323,8 @@ struct RecoveryState {
     activation_plan_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     activation_evidence_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    activation_recovery_evidence_digest: Option<String>,
     started_at_unix_ms: u64,
     updated_at_unix_ms: u64,
 }
@@ -394,6 +413,8 @@ struct ReconciliationPlan {
     target_store_identity_digest: String,
     store_observation_digest: String,
     reconciliation_input_digest: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    activation_recovery_evidence_digest: Option<String>,
     observed_at_unix_ms: u64,
     steps: Vec<String>,
     approval_boundaries: Vec<String>,
@@ -414,6 +435,8 @@ struct ReconciliationEvidence {
     target_store_identity_digest: String,
     store_observation_digest: String,
     reconciliation_input_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    activation_recovery_evidence_digest: Option<String>,
     observed_at_unix_ms: u64,
     reviewed_by: String,
     authority_evidence_ref: String,
@@ -460,6 +483,47 @@ struct ActivationEvidence {
     authority_transfer_approved: bool,
     workload_mode: String,
     activated_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ActivationRecoveryPlan {
+    schema: &'static str,
+    action: &'static str,
+    plan_digest: String,
+    recovery_set_id: String,
+    recovery_set_digest: String,
+    restore_plan_digest: String,
+    reconciliation_evidence_digest: String,
+    failed_activation_plan_digest: String,
+    release_id: String,
+    target_store_identity_digest: String,
+    prior_status: RecoveryStatus,
+    prior_phase: String,
+    steps: Vec<String>,
+    approval_boundaries: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ActivationRecoveryEvidence {
+    schema: String,
+    evidence_id: String,
+    evidence_digest: String,
+    activation_recovery_plan_digest: String,
+    recovery_set_id: String,
+    recovery_set_digest: String,
+    restore_plan_digest: String,
+    reconciliation_evidence_digest: String,
+    failed_activation_plan_digest: String,
+    release_id: String,
+    target_store_identity_digest: String,
+    prior_status: RecoveryStatus,
+    prior_phase: String,
+    recovery_mode_restored: bool,
+    store_observation_digest: String,
+    store: StoreRecoveryObservation,
+    restored_at_unix_ms: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -738,6 +802,10 @@ pub fn activate(options: ActivateOptions) -> Result<()> {
     activate_with(&ProductionActivationAdapter, options)
 }
 
+pub fn recover_activation(options: RecoverActivationOptions) -> Result<()> {
+    recover_activation_with(&ProductionActivationAdapter, options)
+}
+
 trait ReconciliationAdapter {
     fn observe_store(
         &self,
@@ -819,6 +887,7 @@ trait ActivationAdapter {
         database_url: &str,
         recovery_started_at_unix_ms: u64,
     ) -> Result<StoreRecoveryObservation>;
+    fn stop_normal(&self, root: &Path, env_file: &Path, compose_file: &Path) -> Result<()>;
     fn start_normal(&self, root: &Path, env_file: &Path, compose_file: &Path) -> Result<()>;
     fn restore_recovery(&self, root: &Path, env_file: &Path, compose_file: &Path) -> Result<()>;
 }
@@ -833,6 +902,15 @@ impl ActivationAdapter for ProductionActivationAdapter {
         recovery_started_at_unix_ms: u64,
     ) -> Result<StoreRecoveryObservation> {
         PostgresReconciliationAdapter.observe_store(database_url, recovery_started_at_unix_ms)
+    }
+
+    fn stop_normal(&self, root: &Path, env_file: &Path, compose_file: &Path) -> Result<()> {
+        DockerComposeAdapter.run(
+            root,
+            env_file,
+            compose_file,
+            &["stop", "--timeout", "30", "console"],
+        )
     }
 
     fn start_normal(&self, root: &Path, env_file: &Path, compose_file: &Path) -> Result<()> {
@@ -940,6 +1018,7 @@ fn reconcile_with(adapter: &impl ReconciliationAdapter, options: ReconcileOption
     let recovery = read_recovery_state_optional(&root)?
         .context("no Console restore is awaiting reconciliation")?;
     validate_recovery_for_reconciliation(&recovery, &installed)?;
+    validate_activation_recovery_lineage(&root, &recovery)?;
     let env_file = absolute_existing_file(&options.env_file, "recovery Console environment file")?;
     if console_env_value(&env_file, "CONSOLE_RECOVERY_MODE")? != "restore" {
         bail!("reconciliation environment must set CONSOLE_RECOVERY_MODE=restore");
@@ -1079,6 +1158,325 @@ fn activate_with(adapter: &impl ActivationAdapter, options: ActivateOptions) -> 
         recovery.recovery_set_id
     );
     Ok(())
+}
+
+fn recover_activation_with(
+    adapter: &impl ActivationAdapter,
+    options: RecoverActivationOptions,
+) -> Result<()> {
+    let root = absolute_path(&options.root)?;
+    validate_installation_root(&root)?;
+    let mut lock = options
+        .apply
+        .then(|| InstallationLock::acquire(&root))
+        .transpose()?;
+    let installed = read_state_optional(&root)?
+        .context("Lenso Console is not installed; activation recovery is unavailable")?;
+    validate_installed_evidence(&root, &installed).context(
+        "installed Console evidence is drifted; run `lenso console doctor` before intervention",
+    )?;
+    verify_attestation(&root.join(MANIFEST_FILE))
+        .context("verify installed Console Release Manifest attestation")?;
+    let recovery = read_recovery_state_optional(&root)?
+        .context("no interrupted or failed Console activation requires recovery")?;
+    validate_recovery_for_activation_intervention(&recovery, &installed)?;
+    let reconciliation = read_reconciliation_evidence_optional(&root)?
+        .context("prior reconciliation evidence is required for activation recovery")?;
+    if recovery.reconciliation_evidence_digest.as_deref()
+        != Some(reconciliation.evidence_digest.as_str())
+    {
+        bail!("prior reconciliation evidence does not match activation recovery state");
+    }
+
+    let recovery_env_file = absolute_existing_file(
+        &options.recovery_env_file,
+        "recovery Console environment file",
+    )?;
+    let active_env_file =
+        absolute_existing_file(&options.active_env_file, "active Console environment file")?;
+    validate_activation_environments(
+        &recovery_env_file,
+        &active_env_file,
+        &recovery.target_store_identity_digest,
+    )?;
+    validate_plan_output_path(
+        options.output.as_deref(),
+        &[recovery_env_file.clone(), active_env_file.clone()],
+        std::slice::from_ref(&root),
+    )?;
+
+    let mut plan = build_activation_recovery_plan(&recovery)?;
+    plan.plan_digest = activation_recovery_plan_digest(&plan)?;
+    print_or_write_activation_recovery_plan(&plan, options.output.as_deref())?;
+    if !options.apply {
+        eprintln!(
+            "Plan only. Re-run with --apply --approve-plan-digest {} --approve-authority-reset.",
+            plan.plan_digest
+        );
+        return Ok(());
+    }
+    if options.approve_plan_digest.as_deref() != Some(plan.plan_digest.as_str()) {
+        bail!("--approve-plan-digest must exactly match the activation recovery plan digest");
+    }
+    if !options.approve_authority_reset {
+        bail!("--approve-authority-reset is required to re-establish the recovery fence");
+    }
+
+    apply_activation_recovery_with(
+        adapter,
+        &root,
+        &recovery_env_file,
+        &active_env_file,
+        &recovery,
+        &plan,
+    )?;
+    if let Some(installation_lock) = lock.take() {
+        installation_lock.release()?;
+    }
+    eprintln!(
+        "Re-established recovery mode for {}. Reconciliation is required before another activation.",
+        recovery.recovery_set_id
+    );
+    Ok(())
+}
+
+fn validate_recovery_for_activation_intervention(
+    recovery: &RecoveryState,
+    installed: &InstallationState,
+) -> Result<()> {
+    if !matches!(
+        recovery.status,
+        RecoveryStatus::Activating
+            | RecoveryStatus::ActivationFailed
+            | RecoveryStatus::RecoveringActivation
+            | RecoveryStatus::ActivationRecoveryFailed
+    ) || recovery.release_id != installed.release_id
+        || recovery.reconciliation_evidence_digest.is_none()
+        || recovery.activation_plan_digest.is_none()
+    {
+        bail!("Console recovery is not in an activation state eligible for intervention");
+    }
+    Ok(())
+}
+
+fn build_activation_recovery_plan(recovery: &RecoveryState) -> Result<ActivationRecoveryPlan> {
+    Ok(ActivationRecoveryPlan {
+        schema: ACTIVATION_RECOVERY_PLAN_SCHEMA,
+        action: "recover_activation",
+        plan_digest: String::new(),
+        recovery_set_id: recovery.recovery_set_id.clone(),
+        recovery_set_digest: recovery.recovery_set_digest.clone(),
+        restore_plan_digest: recovery.plan_digest.clone(),
+        reconciliation_evidence_digest: recovery
+            .reconciliation_evidence_digest
+            .clone()
+            .context("activation recovery is missing reconciliation evidence")?,
+        failed_activation_plan_digest: recovery
+            .activation_plan_digest
+            .clone()
+            .context("activation recovery is missing its activation plan")?,
+        release_id: recovery.release_id.clone(),
+        target_store_identity_digest: recovery.target_store_identity_digest.clone(),
+        prior_status: recovery.status,
+        prior_phase: recovery.phase.clone(),
+        steps: vec![
+            "verify_interrupted_or_failed_activation".to_owned(),
+            "stop_possible_normal_mode_writer".to_owned(),
+            "start_recovery_mode_fence".to_owned(),
+            "observe_fenced_store".to_owned(),
+            "record_reconciliation_required".to_owned(),
+        ],
+        approval_boundaries: vec!["recovery_authority_reset".to_owned()],
+    })
+}
+
+fn activation_recovery_plan_digest(plan: &ActivationRecoveryPlan) -> Result<String> {
+    let mut value = serde_json::to_value(plan).context("encode activation recovery plan")?;
+    value["planDigest"] = Value::String(String::new());
+    Ok(sha256(&serde_json::to_vec(&value)?))
+}
+
+fn print_or_write_activation_recovery_plan(
+    plan: &ActivationRecoveryPlan,
+    output: Option<&Path>,
+) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(plan).context("encode activation recovery plan")?;
+    if let Some(path) = output {
+        atomic_write(path, &bytes)?;
+        eprintln!(
+            "Wrote Console activation recovery plan to {}.",
+            path.display()
+        );
+    } else {
+        println!(
+            "{}",
+            String::from_utf8(bytes).context("render activation recovery plan")?
+        );
+    }
+    Ok(())
+}
+
+fn apply_activation_recovery_with(
+    adapter: &impl ActivationAdapter,
+    root: &Path,
+    recovery_env_file: &Path,
+    active_env_file: &Path,
+    recovery: &RecoveryState,
+    plan: &ActivationRecoveryPlan,
+) -> Result<()> {
+    let mut phase = "activation_recovery_stop";
+    write_activation_intervention_state(
+        root,
+        recovery,
+        RecoveryStatus::RecoveringActivation,
+        phase,
+        None,
+    )?;
+    let result = (|| -> Result<()> {
+        adapter.stop_normal(root, active_env_file, &root.join(COMPOSE_FILE))?;
+        phase = "activation_recovery_start";
+        write_activation_intervention_state(
+            root,
+            recovery,
+            RecoveryStatus::RecoveringActivation,
+            phase,
+            None,
+        )?;
+        adapter.restore_recovery(root, recovery_env_file, &root.join(COMPOSE_FILE))?;
+        phase = "activation_recovery_observe";
+        write_activation_intervention_state(
+            root,
+            recovery,
+            RecoveryStatus::RecoveringActivation,
+            phase,
+            None,
+        )?;
+        let database_url = console_database_url(recovery_env_file)?;
+        let store = adapter.observe_store(&database_url, recovery.started_at_unix_ms)?;
+        validate_store_observation(&store)?;
+        let evidence = build_activation_recovery_evidence(recovery, plan, store)?;
+        phase = "activation_recovery_commit";
+        write_activation_intervention_state(
+            root,
+            recovery,
+            RecoveryStatus::RecoveringActivation,
+            phase,
+            None,
+        )?;
+        publish_activation_recovery_evidence(root, &evidence)?;
+        write_activation_intervention_state(
+            root,
+            recovery,
+            RecoveryStatus::AwaitingReconciliation,
+            "reconciliation_after_activation_recovery",
+            Some(&evidence.evidence_digest),
+        )
+    })();
+    if result.is_err() {
+        let _ = write_activation_intervention_state(
+            root,
+            recovery,
+            RecoveryStatus::ActivationRecoveryFailed,
+            phase,
+            None,
+        );
+    }
+    result
+}
+
+fn build_activation_recovery_evidence(
+    recovery: &RecoveryState,
+    plan: &ActivationRecoveryPlan,
+    store: StoreRecoveryObservation,
+) -> Result<ActivationRecoveryEvidence> {
+    let store_observation_digest = sha256(&serde_json::to_vec(&store)?);
+    let mut evidence = ActivationRecoveryEvidence {
+        schema: ACTIVATION_RECOVERY_EVIDENCE_SCHEMA.to_owned(),
+        evidence_id: String::new(),
+        evidence_digest: String::new(),
+        activation_recovery_plan_digest: plan.plan_digest.clone(),
+        recovery_set_id: recovery.recovery_set_id.clone(),
+        recovery_set_digest: recovery.recovery_set_digest.clone(),
+        restore_plan_digest: recovery.plan_digest.clone(),
+        reconciliation_evidence_digest: recovery
+            .reconciliation_evidence_digest
+            .clone()
+            .context("activation recovery is missing reconciliation evidence")?,
+        failed_activation_plan_digest: recovery
+            .activation_plan_digest
+            .clone()
+            .context("activation recovery is missing its activation plan")?,
+        release_id: recovery.release_id.clone(),
+        target_store_identity_digest: recovery.target_store_identity_digest.clone(),
+        prior_status: plan.prior_status,
+        prior_phase: plan.prior_phase.clone(),
+        recovery_mode_restored: true,
+        store_observation_digest,
+        store,
+        restored_at_unix_ms: unix_time_ms()?,
+    };
+    evidence.evidence_digest = activation_recovery_evidence_digest(&evidence)?;
+    evidence.evidence_id = format!("arec_{}", &evidence.evidence_digest[7..23]);
+    Ok(evidence)
+}
+
+fn activation_recovery_evidence_digest(evidence: &ActivationRecoveryEvidence) -> Result<String> {
+    let mut value =
+        serde_json::to_value(evidence).context("encode activation recovery evidence")?;
+    value["evidenceId"] = Value::String(String::new());
+    value["evidenceDigest"] = Value::String(String::new());
+    Ok(sha256(&serde_json::to_vec(&value)?))
+}
+
+fn publish_activation_recovery_evidence(
+    root: &Path,
+    evidence: &ActivationRecoveryEvidence,
+) -> Result<()> {
+    let bytes =
+        serde_json::to_vec_pretty(evidence).context("encode activation recovery evidence")?;
+    publish_recovery_evidence(
+        root,
+        ACTIVATION_RECOVERY_EVIDENCE_FILE,
+        &format!("{}.json", evidence.evidence_id),
+        "Console activation recovery evidence",
+        &bytes,
+    )
+}
+
+fn write_activation_intervention_state(
+    root: &Path,
+    recovery: &RecoveryState,
+    status: RecoveryStatus,
+    phase: &str,
+    activation_recovery_evidence_digest: Option<&str>,
+) -> Result<()> {
+    let awaiting_reconciliation = status == RecoveryStatus::AwaitingReconciliation;
+    let state = RecoveryState {
+        schema: RECOVERY_STATE_SCHEMA.to_owned(),
+        recovery_set_id: recovery.recovery_set_id.clone(),
+        recovery_set_digest: recovery.recovery_set_digest.clone(),
+        plan_digest: recovery.plan_digest.clone(),
+        release_id: recovery.release_id.clone(),
+        target_store_identity_digest: recovery.target_store_identity_digest.clone(),
+        status,
+        phase: phase.to_owned(),
+        reconciliation_evidence_digest: (!awaiting_reconciliation)
+            .then(|| recovery.reconciliation_evidence_digest.clone())
+            .flatten(),
+        activation_plan_digest: (!awaiting_reconciliation)
+            .then(|| recovery.activation_plan_digest.clone())
+            .flatten(),
+        activation_evidence_digest: (!awaiting_reconciliation)
+            .then(|| recovery.activation_evidence_digest.clone())
+            .flatten(),
+        activation_recovery_evidence_digest: activation_recovery_evidence_digest.map(str::to_owned),
+        started_at_unix_ms: recovery.started_at_unix_ms,
+        updated_at_unix_ms: unix_time_ms()?,
+    };
+    atomic_write(
+        &root.join(RECOVERY_STATE_FILE),
+        &serde_json::to_vec_pretty(&state).context("encode Console recovery state")?,
+    )
 }
 
 fn validate_recovery_for_activation(
@@ -1274,15 +1672,14 @@ fn activation_evidence_digest(evidence: &ActivationEvidence) -> Result<String> {
 }
 
 fn publish_activation_evidence(root: &Path, evidence: &ActivationEvidence) -> Result<()> {
-    let path = root.join(ACTIVATION_EVIDENCE_FILE);
     let bytes = serde_json::to_vec_pretty(evidence).context("encode activation evidence")?;
-    if let Some(existing) = read_optional_regular_file(&path, "Console activation evidence")? {
-        if existing != bytes {
-            bail!("different Console activation evidence already exists");
-        }
-        return Ok(());
-    }
-    atomic_write(&path, &bytes)
+    publish_recovery_evidence(
+        root,
+        ACTIVATION_EVIDENCE_FILE,
+        &format!("{}.json", evidence.evidence_id),
+        "Console activation evidence",
+        &bytes,
+    )
 }
 
 fn write_activation_recovery_state(
@@ -1305,6 +1702,7 @@ fn write_activation_recovery_state(
         reconciliation_evidence_digest: recovery.reconciliation_evidence_digest.clone(),
         activation_plan_digest: Some(activation_plan_digest.to_owned()),
         activation_evidence_digest: activation_evidence_digest.map(str::to_owned),
+        activation_recovery_evidence_digest: recovery.activation_recovery_evidence_digest.clone(),
         started_at_unix_ms: recovery.started_at_unix_ms,
         updated_at_unix_ms: unix_time_ms()?,
     };
@@ -1356,6 +1754,27 @@ fn validate_recovery_for_reconciliation(
     }
     if recovery.status != RecoveryStatus::AwaitingReconciliation {
         bail!("Console restore is not in a reconcilable state");
+    }
+    Ok(())
+}
+
+fn validate_activation_recovery_lineage(root: &Path, recovery: &RecoveryState) -> Result<()> {
+    let Some(intervention_digest) = recovery.activation_recovery_evidence_digest.as_deref() else {
+        return Ok(());
+    };
+    let intervention = read_activation_recovery_evidence_optional(root)?
+        .context("activation recovery evidence is required before re-reconciliation")?;
+    if intervention.evidence_digest != intervention_digest
+        || intervention.recovery_set_id != recovery.recovery_set_id
+        || intervention.restore_plan_digest != recovery.plan_digest
+        || intervention.target_store_identity_digest != recovery.target_store_identity_digest
+    {
+        bail!("activation recovery evidence does not match recovery state");
+    }
+    let prior = read_reconciliation_evidence_optional(root)?
+        .context("prior reconciliation evidence is required for retry lineage")?;
+    if prior.evidence_digest != intervention.reconciliation_evidence_digest {
+        bail!("prior reconciliation evidence does not match activation recovery lineage");
     }
     Ok(())
 }
@@ -1488,6 +1907,9 @@ fn build_reconciliation_plan(
         target_store_identity_digest: recovery.target_store_identity_digest.clone(),
         store_observation_digest: store_observation_digest.to_owned(),
         reconciliation_input_digest: reconciliation_input_digest.to_owned(),
+        activation_recovery_evidence_digest: recovery
+            .activation_recovery_evidence_digest
+            .clone(),
         observed_at_unix_ms,
         steps: vec![
             "verify_recovery_state_and_release".to_owned(),
@@ -1591,6 +2013,7 @@ fn build_reconciliation_evidence(
         target_store_identity_digest: recovery.target_store_identity_digest.clone(),
         store_observation_digest,
         reconciliation_input_digest,
+        activation_recovery_evidence_digest: recovery.activation_recovery_evidence_digest.clone(),
         observed_at_unix_ms: input.observed_at_unix_ms,
         reviewed_by: input.reviewed_by.clone(),
         authority_evidence_ref: input.authority_evidence_ref.clone(),
@@ -1616,15 +2039,83 @@ fn reconciliation_evidence_digest(evidence: &ReconciliationEvidence) -> Result<S
 }
 
 fn publish_reconciliation_evidence(root: &Path, evidence: &ReconciliationEvidence) -> Result<()> {
-    let path = root.join(RECONCILIATION_EVIDENCE_FILE);
     let bytes = serde_json::to_vec_pretty(evidence).context("encode reconciliation evidence")?;
-    if let Some(existing) = read_optional_regular_file(&path, "Console reconciliation evidence")? {
+    publish_recovery_evidence(
+        root,
+        RECONCILIATION_EVIDENCE_FILE,
+        &format!("{}.json", evidence.evidence_id),
+        "Console reconciliation evidence",
+        &bytes,
+    )
+}
+
+fn publish_recovery_evidence(
+    root: &Path,
+    canonical_file: &str,
+    archive_file: &str,
+    label: &str,
+    bytes: &[u8],
+) -> Result<()> {
+    let archive = recovery_evidence_directory(root)?;
+    let canonical = root.join(canonical_file);
+    if let Some(existing) = read_optional_regular_file(&canonical, label)? {
+        let existing_name = recovery_evidence_archive_name(&existing)?;
+        write_immutable_evidence(&archive.join(existing_name), &existing, label)?;
+        if existing == bytes {
+            write_immutable_evidence(&archive.join(archive_file), bytes, label)?;
+            return Ok(());
+        }
+    }
+    write_immutable_evidence(&archive.join(archive_file), bytes, label)?;
+    atomic_write(&canonical, bytes)
+}
+
+fn recovery_evidence_directory(root: &Path) -> Result<PathBuf> {
+    let path = root.join(RECOVERY_EVIDENCE_DIRECTORY);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            bail!("Console recovery evidence history must be a directory and not a symbolic link")
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(&path).with_context(|| {
+                format!(
+                    "create Console recovery evidence history {}",
+                    path.display()
+                )
+            })?;
+            restrict_directory_permissions(&path)?;
+        }
+        Err(error) => return Err(error).context("inspect Console recovery evidence history"),
+    }
+    Ok(path)
+}
+
+fn recovery_evidence_archive_name(bytes: &[u8]) -> Result<String> {
+    let value: Value = serde_json::from_slice(bytes).context("decode prior recovery evidence")?;
+    let evidence_id = value
+        .get("evidenceId")
+        .and_then(Value::as_str)
+        .context("prior recovery evidence is missing evidenceId")?;
+    if evidence_id.is_empty()
+        || evidence_id.len() > 64
+        || !evidence_id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        bail!("prior recovery evidence has an unsafe evidenceId");
+    }
+    Ok(format!("{evidence_id}.json"))
+}
+
+fn write_immutable_evidence(path: &Path, bytes: &[u8], label: &str) -> Result<()> {
+    if let Some(existing) = read_optional_regular_file(path, label)? {
         if existing != bytes {
-            bail!("different Console reconciliation evidence already exists");
+            bail!("content-addressed recovery evidence history is inconsistent");
         }
         return Ok(());
     }
-    atomic_write(&path, &bytes)
+    atomic_write(path, bytes)
 }
 
 fn write_reconciled_recovery_state(
@@ -1644,6 +2135,7 @@ fn write_reconciled_recovery_state(
         reconciliation_evidence_digest: Some(evidence.evidence_digest.clone()),
         activation_plan_digest: None,
         activation_evidence_digest: None,
+        activation_recovery_evidence_digest: recovery.activation_recovery_evidence_digest.clone(),
         started_at_unix_ms: recovery.started_at_unix_ms,
         updated_at_unix_ms: unix_time_ms()?,
     };
@@ -2223,6 +2715,7 @@ fn write_recovery_state(
         reconciliation_evidence_digest: None,
         activation_plan_digest: None,
         activation_evidence_digest: None,
+        activation_recovery_evidence_digest: None,
         started_at_unix_ms,
         updated_at_unix_ms: unix_time_ms()?,
     };
@@ -3018,6 +3511,37 @@ fn check_recovery_state(root: &Path, checks: &mut Vec<DoctorCheck>) {
                         state.phase
                     ),
                 )),
+                RecoveryStatus::AwaitingReconciliation
+                    if state.activation_recovery_evidence_digest.is_some() =>
+                {
+                    let detail = match read_activation_recovery_evidence_optional(root) {
+                        Ok(Some(evidence))
+                            if state.activation_recovery_evidence_digest.as_deref()
+                                == Some(evidence.evidence_digest.as_str())
+                                && state.recovery_set_id == evidence.recovery_set_id
+                                && state.plan_digest == evidence.restore_plan_digest
+                                && state.target_store_identity_digest
+                                    == evidence.target_store_identity_digest =>
+                        {
+                            "Recovery mode authority was re-established after activation failure; repeat reconciliation before activation"
+                        }
+                        _ => {
+                            "Activation recovery evidence is missing, invalid, or drifted; keep all writers fenced"
+                        }
+                    };
+                    checks.push(fail("recovery", detail));
+                }
+                RecoveryStatus::RecoveringActivation => checks.push(fail(
+                    "recovery",
+                    "Activation recovery was interrupted; writer authority remains ambiguous",
+                )),
+                RecoveryStatus::ActivationRecoveryFailed => checks.push(fail(
+                    "recovery",
+                    &format!(
+                        "Activation recovery failed at {}; keep all writers fenced and retry intervention",
+                        state.phase
+                    ),
+                )),
                 _ => checks.push(fail(
                     "recovery",
                     &format!(
@@ -3130,7 +3654,10 @@ fn read_recovery_state_optional(root: &Path) -> Result<Option<RecoveryState>> {
                 | "restore_store"
                 | "start_recovery_mode"
         ),
-        RecoveryStatus::AwaitingReconciliation => state.phase == "reconciliation",
+        RecoveryStatus::AwaitingReconciliation => matches!(
+            state.phase.as_str(),
+            "reconciliation" | "reconciliation_after_activation_recovery"
+        ),
         RecoveryStatus::ReadyForActivation => state.phase == "activation_approval",
         RecoveryStatus::Activating => state.phase == "authority_transfer",
         RecoveryStatus::ActivationFailed => matches!(
@@ -3138,6 +3665,15 @@ fn read_recovery_state_optional(root: &Path) -> Result<Option<RecoveryState>> {
             "activation_rollback" | "activation_rollback_failed"
         ),
         RecoveryStatus::Activated => state.phase == "activated",
+        RecoveryStatus::RecoveringActivation | RecoveryStatus::ActivationRecoveryFailed => {
+            matches!(
+                state.phase.as_str(),
+                "activation_recovery_stop"
+                    | "activation_recovery_start"
+                    | "activation_recovery_observe"
+                    | "activation_recovery_commit"
+            )
+        }
     };
     if state.schema != RECOVERY_STATE_SCHEMA
         || state
@@ -3158,11 +3694,16 @@ fn read_recovery_state_optional(root: &Path) -> Result<Option<RecoveryState>> {
                 | "restore_store"
                 | "start_recovery_mode"
                 | "reconciliation"
+                | "reconciliation_after_activation_recovery"
                 | "activation_approval"
                 | "authority_transfer"
                 | "activation_rollback"
                 | "activation_rollback_failed"
                 | "activated"
+                | "activation_recovery_stop"
+                | "activation_recovery_start"
+                | "activation_recovery_observe"
+                | "activation_recovery_commit"
         )
         || (matches!(
             state.status,
@@ -3170,12 +3711,16 @@ fn read_recovery_state_optional(root: &Path) -> Result<Option<RecoveryState>> {
                 | RecoveryStatus::Activating
                 | RecoveryStatus::ActivationFailed
                 | RecoveryStatus::Activated
+                | RecoveryStatus::RecoveringActivation
+                | RecoveryStatus::ActivationRecoveryFailed
         ) != state.reconciliation_evidence_digest.is_some())
         || (matches!(
             state.status,
             RecoveryStatus::Activating
                 | RecoveryStatus::ActivationFailed
                 | RecoveryStatus::Activated
+                | RecoveryStatus::RecoveringActivation
+                | RecoveryStatus::ActivationRecoveryFailed
         ) != state.activation_plan_digest.is_some())
         || ((state.status == RecoveryStatus::Activated)
             != state.activation_evidence_digest.is_some())
@@ -3191,6 +3736,17 @@ fn read_recovery_state_optional(root: &Path) -> Result<Option<RecoveryState>> {
             .activation_evidence_digest
             .as_deref()
             .is_some_and(|digest| !is_sha256(digest))
+        || state
+            .activation_recovery_evidence_digest
+            .as_deref()
+            .is_some_and(|digest| !is_sha256(digest))
+        || ((state.status == RecoveryStatus::AwaitingReconciliation
+            && state.phase == "reconciliation_after_activation_recovery")
+            != state.activation_recovery_evidence_digest.is_some())
+        || (matches!(
+            state.status,
+            RecoveryStatus::Applying | RecoveryStatus::Failed
+        ) && state.activation_recovery_evidence_digest.is_some())
         || state.started_at_unix_ms == 0
         || state.updated_at_unix_ms < state.started_at_unix_ms
     {
@@ -3223,6 +3779,10 @@ fn read_reconciliation_evidence_optional(root: &Path) -> Result<Option<Reconcili
         || !is_sha256(&evidence.target_store_identity_digest)
         || !is_sha256(&evidence.store_observation_digest)
         || !is_sha256(&evidence.reconciliation_input_digest)
+        || evidence
+            .activation_recovery_evidence_digest
+            .as_deref()
+            .is_some_and(|digest| !is_sha256(digest))
         || evidence.observed_at_unix_ms == 0
         || !valid_evidence_reference(&evidence.reviewed_by)
         || !valid_evidence_reference(&evidence.authority_evidence_ref)
@@ -3270,6 +3830,63 @@ fn read_activation_evidence_optional(root: &Path) -> Result<Option<ActivationEvi
         bail!("Console activation evidence is invalid");
     }
     Ok(Some(evidence))
+}
+
+fn read_activation_recovery_evidence_optional(
+    root: &Path,
+) -> Result<Option<ActivationRecoveryEvidence>> {
+    let path = root.join(ACTIVATION_RECOVERY_EVIDENCE_FILE);
+    let Some(bytes) = read_optional_regular_file(&path, "Console activation recovery evidence")?
+    else {
+        return Ok(None);
+    };
+    let evidence: ActivationRecoveryEvidence =
+        serde_json::from_slice(&bytes).context("decode Console activation recovery evidence")?;
+    if evidence.schema != ACTIVATION_RECOVERY_EVIDENCE_SCHEMA
+        || !is_sha256(&evidence.evidence_digest)
+        || evidence.evidence_digest != activation_recovery_evidence_digest(&evidence)?
+        || evidence.evidence_id != format!("arec_{}", &evidence.evidence_digest[7..23])
+        || !is_sha256(&evidence.activation_recovery_plan_digest)
+        || evidence
+            .recovery_set_id
+            .strip_prefix("rcv_")
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .is_none()
+        || !is_sha256(&evidence.recovery_set_digest)
+        || !is_sha256(&evidence.restore_plan_digest)
+        || !is_sha256(&evidence.reconciliation_evidence_digest)
+        || !is_sha256(&evidence.failed_activation_plan_digest)
+        || release_version(&evidence.release_id).is_none()
+        || !is_sha256(&evidence.target_store_identity_digest)
+        || !valid_activation_recovery_origin(evidence.prior_status, &evidence.prior_phase)
+        || !evidence.recovery_mode_restored
+        || !is_sha256(&evidence.store_observation_digest)
+        || evidence.store_observation_digest != sha256(&serde_json::to_vec(&evidence.store)?)
+        || validate_store_observation(&evidence.store).is_err()
+        || evidence.restored_at_unix_ms == 0
+    {
+        bail!("Console activation recovery evidence is invalid");
+    }
+    Ok(Some(evidence))
+}
+
+fn valid_activation_recovery_origin(status: RecoveryStatus, phase: &str) -> bool {
+    match status {
+        RecoveryStatus::Activating => phase == "authority_transfer",
+        RecoveryStatus::ActivationFailed => {
+            matches!(phase, "activation_rollback" | "activation_rollback_failed")
+        }
+        RecoveryStatus::RecoveringActivation | RecoveryStatus::ActivationRecoveryFailed => {
+            matches!(
+                phase,
+                "activation_recovery_stop"
+                    | "activation_recovery_start"
+                    | "activation_recovery_observe"
+                    | "activation_recovery_commit"
+            )
+        }
+        _ => false,
+    }
 }
 
 fn read_optional_regular_file(path: &Path, label: &str) -> Result<Option<Vec<u8>>> {
@@ -3526,6 +4143,11 @@ mod tests {
             Ok(self.observation.clone())
         }
 
+        fn stop_normal(&self, _root: &Path, _env_file: &Path, _compose_file: &Path) -> Result<()> {
+            self.calls.borrow_mut().push("stop");
+            Ok(())
+        }
+
         fn start_normal(&self, _root: &Path, _env_file: &Path, _compose_file: &Path) -> Result<()> {
             self.calls.borrow_mut().push("normal");
             if self.fail_start {
@@ -3689,6 +4311,7 @@ mod tests {
             reconciliation_evidence_digest: None,
             activation_plan_digest: None,
             activation_evidence_digest: None,
+            activation_recovery_evidence_digest: None,
             started_at_unix_ms: 1,
             updated_at_unix_ms: 2,
         }
@@ -4401,6 +5024,154 @@ mod tests {
         let mut checks = Vec::new();
         check_recovery_state(&root, &mut checks);
         assert!(matches!(checks[0].status, CheckStatus::Fail));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn activation_recovery_plan_binds_failed_authority_attempt() {
+        let (mut recovery, reconciliation) = reconciled_recovery();
+        recovery.status = RecoveryStatus::ActivationFailed;
+        recovery.phase = "activation_rollback".to_owned();
+        recovery.activation_plan_digest = Some(digest('c'));
+        let mut plan = build_activation_recovery_plan(&recovery).unwrap();
+        plan.plan_digest = activation_recovery_plan_digest(&plan).unwrap();
+
+        assert_eq!(
+            plan.reconciliation_evidence_digest,
+            reconciliation.evidence_digest
+        );
+        assert_eq!(plan.failed_activation_plan_digest, digest('c'));
+        assert_eq!(plan.prior_status, RecoveryStatus::ActivationFailed);
+        assert_eq!(plan.approval_boundaries, ["recovery_authority_reset"]);
+
+        recovery.status = RecoveryStatus::ActivationRecoveryFailed;
+        recovery.phase = "activation_recovery_start".to_owned();
+        validate_recovery_for_activation_intervention(&recovery, &state()).unwrap();
+    }
+
+    #[test]
+    fn activation_recovery_refences_then_requires_reconciliation() {
+        let root = test_root("activation-recovery");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(COMPOSE_FILE), "services: {}\n").unwrap();
+        let recovery_env = root.join("recovery.env");
+        fs::write(
+            &recovery_env,
+            "CONSOLE_DATABASE_URL=postgres://console:secret@restore/console\nCONSOLE_RECOVERY_MODE=restore\n",
+        )
+        .unwrap();
+        let (mut recovery, reconciliation) = reconciled_recovery();
+        recovery.status = RecoveryStatus::Activating;
+        recovery.phase = "authority_transfer".to_owned();
+        recovery.activation_plan_digest = Some(digest('c'));
+        let mut plan = build_activation_recovery_plan(&recovery).unwrap();
+        plan.plan_digest = activation_recovery_plan_digest(&plan).unwrap();
+        let adapter = RecordingActivationAdapter {
+            observation: reconciliation.store,
+            calls: RefCell::new(Vec::new()),
+            fail_start: false,
+            fail_rollback: false,
+        };
+
+        apply_activation_recovery_with(
+            &adapter,
+            &root,
+            &recovery_env,
+            Path::new("active.env"),
+            &recovery,
+            &plan,
+        )
+        .unwrap();
+
+        assert_eq!(*adapter.calls.borrow(), ["stop", "rollback", "observe"]);
+        let state = read_recovery_state_optional(&root).unwrap().unwrap();
+        assert_eq!(state.status, RecoveryStatus::AwaitingReconciliation);
+        assert_eq!(state.phase, "reconciliation_after_activation_recovery");
+        assert!(state.activation_recovery_evidence_digest.is_some());
+        assert!(state.reconciliation_evidence_digest.is_none());
+        assert!(root.join(ACTIVATION_RECOVERY_EVIDENCE_FILE).is_file());
+        let mut checks = Vec::new();
+        check_recovery_state(&root, &mut checks);
+        assert!(matches!(checks[0].status, CheckStatus::Fail));
+        assert!(checks[0].detail.contains("repeat reconciliation"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn activation_recovery_failure_remains_intervention_required() {
+        let root = test_root("activation-recovery-failure");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(COMPOSE_FILE), "services: {}\n").unwrap();
+        let (mut recovery, reconciliation) = reconciled_recovery();
+        recovery.status = RecoveryStatus::ActivationFailed;
+        recovery.phase = "activation_rollback_failed".to_owned();
+        recovery.activation_plan_digest = Some(digest('c'));
+        let mut plan = build_activation_recovery_plan(&recovery).unwrap();
+        plan.plan_digest = activation_recovery_plan_digest(&plan).unwrap();
+        let adapter = RecordingActivationAdapter {
+            observation: reconciliation.store,
+            calls: RefCell::new(Vec::new()),
+            fail_start: false,
+            fail_rollback: true,
+        };
+
+        assert!(
+            apply_activation_recovery_with(
+                &adapter,
+                &root,
+                Path::new("recovery.env"),
+                Path::new("active.env"),
+                &recovery,
+                &plan,
+            )
+            .is_err()
+        );
+
+        assert_eq!(*adapter.calls.borrow(), ["stop", "rollback"]);
+        let state = read_recovery_state_optional(&root).unwrap().unwrap();
+        assert_eq!(state.status, RecoveryStatus::ActivationRecoveryFailed);
+        assert_eq!(state.phase, "activation_recovery_start");
+        assert!(!root.join(ACTIVATION_RECOVERY_EVIDENCE_FILE).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recovery_evidence_history_preserves_replaced_canonical_receipts() {
+        let root = test_root("recovery-evidence-history");
+        fs::create_dir_all(&root).unwrap();
+        let (mut recovery, reconciliation) = reconciled_recovery();
+        recovery.status = RecoveryStatus::Activating;
+        recovery.phase = "authority_transfer".to_owned();
+        recovery.activation_plan_digest = Some(digest('c'));
+        let mut plan = build_activation_recovery_plan(&recovery).unwrap();
+        plan.plan_digest = activation_recovery_plan_digest(&plan).unwrap();
+        let first =
+            build_activation_recovery_evidence(&recovery, &plan, reconciliation.store.clone())
+                .unwrap();
+        publish_activation_recovery_evidence(&root, &first).unwrap();
+        let mut second = first.clone();
+        second.restored_at_unix_ms += 1;
+        second.evidence_id.clear();
+        second.evidence_digest.clear();
+        second.evidence_digest = activation_recovery_evidence_digest(&second).unwrap();
+        second.evidence_id = format!("arec_{}", &second.evidence_digest[7..23]);
+        publish_activation_recovery_evidence(&root, &second).unwrap();
+
+        let history = root.join(RECOVERY_EVIDENCE_DIRECTORY);
+        assert!(
+            history
+                .join(format!("{}.json", first.evidence_id))
+                .is_file()
+        );
+        assert!(
+            history
+                .join(format!("{}.json", second.evidence_id))
+                .is_file()
+        );
+        let current = read_activation_recovery_evidence_optional(&root)
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.evidence_digest, second.evidence_digest);
         fs::remove_dir_all(root).unwrap();
     }
 

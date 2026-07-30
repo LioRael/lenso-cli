@@ -1131,6 +1131,8 @@ enum ConsoleRecoveryCommand {
     Reconcile(ConsoleReconcileArgs),
     /// Activate a reconciled Console recovery with explicit authority transfer.
     Activate(ConsoleActivateArgs),
+    /// Re-establish recovery-mode authority after an interrupted activation.
+    RecoverActivation(ConsoleRecoverActivationArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -1278,6 +1280,37 @@ struct ConsoleActivateArgs {
     /// Explicitly approve transfer to the normal-mode authoritative writer.
     #[arg(long, requires = "apply")]
     approve_authority_transfer: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ConsoleRecoverActivationArgs {
+    /// External Console installation root.
+    #[arg(long, default_value = ".lenso-console")]
+    root: std::path::PathBuf,
+
+    /// Recovery-mode environment used to re-establish the fence.
+    #[arg(long)]
+    recovery_env_file: std::path::PathBuf,
+
+    /// Normal-mode environment used to stop any possible writer.
+    #[arg(long)]
+    active_env_file: std::path::PathBuf,
+
+    /// Write the deterministic activation recovery plan to this path.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+
+    /// Apply the reviewed activation recovery plan.
+    #[arg(long)]
+    apply: bool,
+
+    /// Exact activation recovery plan digest approved by the operator.
+    #[arg(long, requires = "apply")]
+    approve_plan_digest: Option<String>,
+
+    /// Explicitly approve resetting authority to recovery mode.
+    #[arg(long, requires = "apply")]
+    approve_authority_reset: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -3312,6 +3345,20 @@ impl From<&ConsoleActivateArgs> for console_installation::ActivateOptions {
     }
 }
 
+impl From<&ConsoleRecoverActivationArgs> for console_installation::RecoverActivationOptions {
+    fn from(args: &ConsoleRecoverActivationArgs) -> Self {
+        Self {
+            root: args.root.clone(),
+            recovery_env_file: args.recovery_env_file.clone(),
+            active_env_file: args.active_env_file.clone(),
+            output: args.output.clone(),
+            apply: args.apply,
+            approve_plan_digest: args.approve_plan_digest.clone(),
+            approve_authority_reset: args.approve_authority_reset,
+        }
+    }
+}
+
 impl From<&ModuleCreateArgs> for module::ModuleCreateOptions {
     fn from(args: &ModuleCreateArgs) -> Self {
         Self {
@@ -3644,6 +3691,9 @@ async fn main() -> anyhow::Result<()> {
                 }
                 ConsoleRecoveryCommand::Activate(args) => {
                     console_installation::activate((&args).into())?;
+                }
+                ConsoleRecoveryCommand::RecoverActivation(args) => {
+                    console_installation::recover_activation((&args).into())?;
                 }
             },
             ConsoleCommand::Doctor(args) => console_installation::doctor((&args).into()).await?,
@@ -4773,6 +4823,35 @@ mod tests {
         assert!(args.apply);
         assert!(args.approve_authority_transfer);
         assert_eq!(args.active_env_file, std::path::Path::new("active.env"));
+
+        let recover_activation = Cli::parse_from([
+            "lenso",
+            "console",
+            "recovery",
+            "recover-activation",
+            "--root",
+            "/srv/lenso-console",
+            "--recovery-env-file",
+            "recovery.env",
+            "--active-env-file",
+            "active.env",
+            "--apply",
+            "--approve-plan-digest",
+            "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "--approve-authority-reset",
+        ]);
+        let Command::Console {
+            command:
+                ConsoleCommand::Recovery {
+                    command: ConsoleRecoveryCommand::RecoverActivation(args),
+                },
+        } = recover_activation.command
+        else {
+            panic!("expected Console activation recovery");
+        };
+        assert!(args.apply);
+        assert!(args.approve_authority_reset);
+        assert_eq!(args.recovery_env_file, std::path::Path::new("recovery.env"));
 
         let backup = Cli::parse_from([
             "lenso",
