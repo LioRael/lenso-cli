@@ -1131,6 +1131,8 @@ enum ConsoleCommand {
     Install(ConsoleChangeArgs),
     /// Plan or apply an immutable Lenso Console Release upgrade.
     Upgrade(ConsoleChangeArgs),
+    /// Create an encrypted Console Recovery Set.
+    Backup(ConsoleBackupArgs),
     /// Validate exact Console installation evidence and optional readiness.
     Doctor(ConsoleDoctorArgs),
     /// Manage operators in the independent Lenso Console Service.
@@ -1145,6 +1147,29 @@ enum ConsoleCommand {
         #[command(subcommand)]
         command: ConsolePackageCommand,
     },
+}
+
+#[derive(Debug, Args, Clone)]
+struct ConsoleBackupArgs {
+    /// External Console installation root.
+    #[arg(long, default_value = ".lenso-console")]
+    root: std::path::PathBuf,
+
+    /// Secret-bearing environment file containing CONSOLE_DATABASE_URL.
+    #[arg(long)]
+    env_file: std::path::PathBuf,
+
+    /// New directory that will contain the encrypted Recovery Set.
+    #[arg(long)]
+    output: std::path::PathBuf,
+
+    /// age recipient that can decrypt the Store payload.
+    #[arg(long)]
+    recipient: String,
+
+    /// Emit the Recovery Set manifest as JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -3125,6 +3150,18 @@ impl From<&ConsoleDoctorArgs> for console_installation::DoctorOptions {
     }
 }
 
+impl From<&ConsoleBackupArgs> for console_installation::BackupOptions {
+    fn from(args: &ConsoleBackupArgs) -> Self {
+        Self {
+            root: args.root.clone(),
+            env_file: args.env_file.clone(),
+            output: args.output.clone(),
+            recipient: args.recipient.clone(),
+            json: args.json,
+        }
+    }
+}
+
 impl From<&ModuleCreateArgs> for module::ModuleCreateOptions {
     fn from(args: &ModuleCreateArgs) -> Self {
         Self {
@@ -3449,6 +3486,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Console { command } => match command {
             ConsoleCommand::Install(args) => console_installation::install((&args).into())?,
             ConsoleCommand::Upgrade(args) => console_installation::upgrade((&args).into())?,
+            ConsoleCommand::Backup(args) => console_installation::backup((&args).into())?,
             ConsoleCommand::Doctor(args) => console_installation::doctor((&args).into()).await?,
             ConsoleCommand::Operator { command } => match command {
                 ConsoleOperatorCommand::Bootstrap(args) => {
@@ -4485,6 +4523,30 @@ mod tests {
             args.live_url.as_deref(),
             Some("https://console.example.com")
         );
+        assert!(args.json);
+
+        let backup = Cli::parse_from([
+            "lenso",
+            "console",
+            "backup",
+            "--root",
+            "/srv/lenso-console",
+            "--env-file",
+            "console.env",
+            "--output",
+            "recovery-set",
+            "--recipient",
+            "age1example",
+            "--json",
+        ]);
+        let Command::Console {
+            command: ConsoleCommand::Backup(args),
+        } = backup.command
+        else {
+            panic!("expected Console backup");
+        };
+        assert_eq!(args.output, std::path::Path::new("recovery-set"));
+        assert_eq!(args.recipient, "age1example");
         assert!(args.json);
 
         assert!(

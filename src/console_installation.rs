@@ -19,6 +19,7 @@ const PLAN_SCHEMA: &str = "lenso.console-installation-plan.v1";
 const STATE_SCHEMA: &str = "lenso.console-installation-state.v1";
 const ATTEMPT_SCHEMA: &str = "lenso.console-installation-attempt.v1";
 const LOCK_SCHEMA: &str = "lenso.console-installation-lock.v1";
+const RECOVERY_SET_SCHEMA: &str = "lenso.console-recovery-set.v1";
 const DOCTOR_SCHEMA: &str = "lenso.console-doctor.v1";
 const TRUSTED_RELEASE_REPOSITORY: &str = "LioRael/lenso-runtime-console";
 const TRUSTED_SIGNER_WORKFLOW: &str = "LioRael/lenso-runtime-console/.github/workflows/publish.yml";
@@ -28,6 +29,14 @@ const ATTEMPT_FILE: &str = "installation-attempt.json";
 const LOCK_FILE: &str = "installation.lock";
 const MANIFEST_FILE: &str = "release-manifest.json";
 const COMPOSE_FILE: &str = "compose.yaml";
+const RECOVERY_MANIFEST_FILE: &str = "recovery-set.json";
+const RECOVERY_STORE_FILE: &str = "store.dump.age";
+const RECOVERY_PG_DUMP_ARGS: &[&str] = &[
+    "--format=custom",
+    "--no-owner",
+    "--no-privileges",
+    "--exclude-table-data=auth.sessions",
+];
 
 #[derive(Debug, Clone)]
 pub struct ChangeOptions {
@@ -44,6 +53,15 @@ pub struct ChangeOptions {
 pub struct DoctorOptions {
     pub root: PathBuf,
     pub live_url: Option<String>,
+    pub json: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct BackupOptions {
+    pub root: PathBuf,
+    pub env_file: PathBuf,
+    pub output: PathBuf,
+    pub recipient: String,
     pub json: bool,
 }
 
@@ -163,6 +181,37 @@ struct InstallationLock {
     path: PathBuf,
     record: InstallationLockRecord,
     released: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RecoverySetManifest {
+    schema: String,
+    recovery_set_id: String,
+    recovery_set_digest: String,
+    created_at_unix_ms: u64,
+    release_id: String,
+    release_digest: String,
+    image_reference: String,
+    schema_digest: String,
+    composition_digest: String,
+    contract_digest: String,
+    configuration_digest: String,
+    store: RecoveryStore,
+    secret_references: Vec<String>,
+    restore_preconditions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RecoveryStore {
+    format: String,
+    encrypted: bool,
+    encryption: String,
+    payload: String,
+    payload_digest: String,
+    recipient: String,
+    excluded_data: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -312,6 +361,225 @@ pub fn install(options: ChangeOptions) -> Result<()> {
 
 pub fn upgrade(options: ChangeOptions) -> Result<()> {
     change(ChangeAction::Upgrade, options)
+}
+
+pub fn backup(options: BackupOptions) -> Result<()> {
+    let root = absolute_path(&options.root)?;
+    validate_installation_root(&root)?;
+    let lock = InstallationLock::acquire(&root)?;
+    let state = read_state_optional(&root)?.context(
+        "Lenso Console is not installed; create a Recovery Set only from an installed Service",
+    )?;
+    validate_installed_evidence(&root, &state).context(
+        "installed Console evidence is drifted; run `lenso console doctor` before backup",
+    )?;
+    verify_attestation(&root.join(MANIFEST_FILE))
+        .context("verify installed Console Release Manifest attestation")?;
+    let env_file = absolute_existing_file(&options.env_file, "Console environment file")?;
+    let database_url = console_database_url(&env_file)?;
+    let output = absolute_path(&options.output)?;
+    let manifest = backup_with(
+        &PostgresAgeBackupAdapter,
+        &state,
+        &database_url,
+        options.recipient.trim(),
+        &output,
+    )?;
+    lock.release()?;
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&manifest)?);
+    } else {
+        eprintln!(
+            "Created encrypted Lenso Console Recovery Set {} at {}.",
+            manifest.recovery_set_id,
+            output.display()
+        );
+    }
+    Ok(())
+}
+
+trait StoreBackupAdapter {
+    fn export_encrypted(&self, database_url: &str, recipient: &str, output: &Path) -> Result<()>;
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PostgresAgeBackupAdapter;
+
+impl StoreBackupAdapter for PostgresAgeBackupAdapter {
+    fn export_encrypted(&self, database_url: &str, recipient: &str, output: &Path) -> Result<()> {
+        let mut dump = Command::new("pg_dump")
+            .args(RECOVERY_PG_DUMP_ARGS)
+            .env("PGDATABASE", database_url)
+            .stdout(Stdio::piped())
+            .spawn()
+            .context("start pg_dump for Console Recovery Set")?;
+        let dump_stdout = dump
+            .stdout
+            .take()
+            .context("capture pg_dump output for Console Recovery Set")?;
+        let mut encrypt = match Command::new("age")
+            .args(["--encrypt", "--recipient", recipient, "--output"])
+            .arg(output)
+            .stdin(Stdio::from(dump_stdout))
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = dump.kill();
+                let _ = dump.wait();
+                return Err(error).context("start age encryption for Console Recovery Set");
+            }
+        };
+        let dump_status = dump.wait().context("wait for Console Store export")?;
+        let encrypt_status = encrypt
+            .wait()
+            .context("wait for Console Store encryption")?;
+        if !dump_status.success() {
+            bail!("pg_dump failed while creating the Console Recovery Set");
+        }
+        if !encrypt_status.success() {
+            bail!("age failed while encrypting the Console Recovery Set");
+        }
+        Ok(())
+    }
+}
+
+fn backup_with(
+    adapter: &impl StoreBackupAdapter,
+    state: &InstallationState,
+    database_url: &str,
+    recipient: &str,
+    output: &Path,
+) -> Result<RecoverySetManifest> {
+    if recipient.is_empty() || recipient.chars().any(char::is_whitespace) {
+        bail!("--recipient must be one non-empty age recipient");
+    }
+    if output.exists() {
+        bail!(
+            "Console Recovery Set output already exists: {}",
+            output.display()
+        );
+    }
+    let parent = output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .context("Console Recovery Set output has no parent directory")?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("create Recovery Set parent {}", parent.display()))?;
+    let name = output
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("Console Recovery Set output has no valid directory name")?;
+    let staging = parent.join(format!(".{name}.tmp-{}", Uuid::now_v7()));
+    fs::create_dir(&staging).with_context(|| {
+        format!(
+            "create Recovery Set staging directory {}",
+            staging.display()
+        )
+    })?;
+    restrict_directory_permissions(&staging)?;
+    let result = (|| -> Result<RecoverySetManifest> {
+        let payload = staging.join(RECOVERY_STORE_FILE);
+        adapter.export_encrypted(database_url, recipient, &payload)?;
+        let payload_bytes = fs::read(&payload)
+            .with_context(|| format!("read encrypted Store payload {}", payload.display()))?;
+        if payload_bytes.is_empty() {
+            bail!("encrypted Console Store payload is empty");
+        }
+        let mut manifest = RecoverySetManifest {
+            schema: RECOVERY_SET_SCHEMA.to_owned(),
+            recovery_set_id: format!("rcv_{}", Uuid::now_v7()),
+            recovery_set_digest: String::new(),
+            created_at_unix_ms: unix_time_ms()?,
+            release_id: state.release_id.clone(),
+            release_digest: state.release_digest.clone(),
+            image_reference: state.image_reference.clone(),
+            schema_digest: state.schema_digest.clone(),
+            composition_digest: state.composition_digest.clone(),
+            contract_digest: state.contract_digest.clone(),
+            configuration_digest: state.configuration_digest.clone(),
+            store: RecoveryStore {
+                format: "postgresql-custom".to_owned(),
+                encrypted: true,
+                encryption: "age-v1".to_owned(),
+                payload: RECOVERY_STORE_FILE.to_owned(),
+                payload_digest: sha256(&payload_bytes),
+                recipient: recipient.to_owned(),
+                excluded_data: vec!["auth.sessions".to_owned()],
+            },
+            secret_references: vec!["CONSOLE_DATABASE_URL".to_owned()],
+            restore_preconditions: vec![
+                "clean_store".to_owned(),
+                "exact_release_and_composition".to_owned(),
+                "external_secret_resolution".to_owned(),
+                "outbound_mutations_disabled".to_owned(),
+                "single_authoritative_deployment".to_owned(),
+                "identity_and_enrollment_continuity_validation".to_owned(),
+            ],
+        };
+        manifest.recovery_set_digest = recovery_set_digest(&manifest)?;
+        atomic_write(
+            &staging.join(RECOVERY_MANIFEST_FILE),
+            &serde_json::to_vec_pretty(&manifest).context("encode Recovery Set manifest")?,
+        )?;
+        fs::rename(&staging, output)
+            .with_context(|| format!("commit Console Recovery Set {}", output.display()))?;
+        Ok(manifest)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    result
+}
+
+fn recovery_set_digest(manifest: &RecoverySetManifest) -> Result<String> {
+    let mut value = serde_json::to_value(manifest).context("encode Recovery Set manifest")?;
+    value["recoverySetDigest"] = Value::String(String::new());
+    Ok(sha256(&serde_json::to_vec(&value)?))
+}
+
+fn console_database_url(env_file: &Path) -> Result<String> {
+    let source = fs::read_to_string(env_file)
+        .with_context(|| format!("read Console environment file {}", env_file.display()))?;
+    let mut values = source.lines().filter_map(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return None;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let (key, value) = line.split_once('=')?;
+        (key.trim() == "CONSOLE_DATABASE_URL").then(|| value.trim())
+    });
+    let value = values
+        .next()
+        .context("CONSOLE_DATABASE_URL is missing from the Console environment file")?;
+    if values.next().is_some() {
+        bail!("CONSOLE_DATABASE_URL is duplicated in the Console environment file");
+    }
+    let value = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| {
+            value
+                .strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+        })
+        .unwrap_or(value);
+    let url = Url::parse(value).context("parse CONSOLE_DATABASE_URL")?;
+    if !matches!(url.scheme(), "postgres" | "postgresql") || url.host_str().is_none() {
+        bail!("CONSOLE_DATABASE_URL must be a PostgreSQL URL with a host");
+    }
+    Ok(value.to_owned())
+}
+
+fn restrict_directory_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("restrict permissions on {}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn change(action: ChangeAction, options: ChangeOptions) -> Result<()> {
@@ -1254,6 +1522,28 @@ mod tests {
         fail_on: Option<usize>,
     }
 
+    #[derive(Debug)]
+    struct RecordingStoreBackupAdapter {
+        payload: &'static [u8],
+        fail: bool,
+    }
+
+    impl StoreBackupAdapter for RecordingStoreBackupAdapter {
+        fn export_encrypted(
+            &self,
+            database_url: &str,
+            recipient: &str,
+            output: &Path,
+        ) -> Result<()> {
+            assert_eq!(database_url, "postgres://console:secret@db/console");
+            assert_eq!(recipient, "age1recipient");
+            if self.fail {
+                bail!("simulated Store export failure");
+            }
+            fs::write(output, self.payload).context("write fake encrypted payload")
+        }
+    }
+
     impl ComposeAdapter for RecordingComposeAdapter {
         fn run(
             &self,
@@ -1518,6 +1808,122 @@ mod tests {
         checks.clear();
         check_installation_lock(&root, &mut checks);
         assert!(matches!(checks[0].status, CheckStatus::Pass));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn backup_atomically_binds_encrypted_store_to_installed_evidence() {
+        assert!(RECOVERY_PG_DUMP_ARGS.contains(&"--exclude-table-data=auth.sessions"));
+        let root = test_root("recovery-set");
+        let output = root.join("backup");
+        fs::create_dir_all(&root).unwrap();
+        let installed = state();
+        let manifest = backup_with(
+            &RecordingStoreBackupAdapter {
+                payload: b"age-encrypted-store",
+                fail: false,
+            },
+            &installed,
+            "postgres://console:secret@db/console",
+            "age1recipient",
+            &output,
+        )
+        .unwrap();
+
+        assert_eq!(manifest.schema, RECOVERY_SET_SCHEMA);
+        assert_eq!(manifest.release_digest, installed.release_digest);
+        assert_eq!(
+            manifest.store.payload_digest,
+            sha256(b"age-encrypted-store")
+        );
+        assert!(manifest.store.encrypted);
+        assert_eq!(manifest.store.excluded_data, ["auth.sessions"]);
+        assert_eq!(
+            manifest.recovery_set_digest,
+            recovery_set_digest(&manifest).unwrap()
+        );
+        assert_eq!(
+            fs::read(output.join(RECOVERY_STORE_FILE)).unwrap(),
+            b"age-encrypted-store"
+        );
+        let recorded: RecoverySetManifest =
+            serde_json::from_slice(&fs::read(output.join(RECOVERY_MANIFEST_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(recorded.recovery_set_digest, manifest.recovery_set_digest);
+        assert!(
+            recorded
+                .restore_preconditions
+                .contains(&"clean_store".to_owned())
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn backup_refuses_overwrite_and_cleans_failed_staging() {
+        let root = test_root("recovery-set-failure");
+        let output = root.join("backup");
+        fs::create_dir_all(&output).unwrap();
+        let adapter = RecordingStoreBackupAdapter {
+            payload: b"unused",
+            fail: false,
+        };
+        assert!(
+            backup_with(
+                &adapter,
+                &state(),
+                "postgres://console:secret@db/console",
+                "age1recipient",
+                &output,
+            )
+            .is_err()
+        );
+        fs::remove_dir(&output).unwrap();
+
+        let failing = RecordingStoreBackupAdapter {
+            payload: b"unused",
+            fail: true,
+        };
+        assert!(
+            backup_with(
+                &failing,
+                &state(),
+                "postgres://console:secret@db/console",
+                "age1recipient",
+                &output,
+            )
+            .is_err()
+        );
+        assert!(!output.exists());
+        assert!(fs::read_dir(&root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".tmp-")
+        }));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn console_database_url_is_read_without_logging_or_ambiguity() {
+        let root = test_root("backup-env");
+        fs::create_dir_all(&root).unwrap();
+        let env = root.join("console.env");
+        fs::write(
+            &env,
+            "# operator secrets\nexport CONSOLE_DATABASE_URL='postgresql://console:secret@db/console'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            console_database_url(&env).unwrap(),
+            "postgresql://console:secret@db/console"
+        );
+        fs::write(
+            &env,
+            "CONSOLE_DATABASE_URL=postgres://console:a@db/console\nCONSOLE_DATABASE_URL=postgres://console:b@db/console\n",
+        )
+        .unwrap();
+        assert!(console_database_url(&env).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 

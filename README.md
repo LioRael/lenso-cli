@@ -69,6 +69,25 @@ without mutation. If the process exits without releasing the lock, the operating
 system releases ownership while the active record remains as crash evidence;
 doctor reports it as recoverable and the next apply safely claims the same lock.
 
+Create a Recovery Set without ever writing plaintext Store bytes to disk. The
+CLI verifies the installed release evidence and attestation, holds the same
+installation lock used by upgrade, streams PostgreSQL custom-format output
+directly into `age`, and atomically publishes a new output directory:
+
+```sh
+lenso console backup --root /srv/lenso-console \
+  --env-file /secure/console.env --output ./console-recovery-2026-07-30 \
+  --recipient age1example
+```
+
+The host must provide `pg_dump` and `age`. The secret database URL is read from
+`CONSOLE_DATABASE_URL` in the environment file and is passed only through the
+child-process environment. `recovery-set.json` binds the encrypted payload to
+the exact release, image, Store schema, composition, contract, and configuration
+digests. Live session rows under `auth.sessions` are explicitly excluded and the
+exclusion is recorded in the protected manifest. Existing output is never overwritten. Restore remains unavailable
+until clean-Store restore fencing and outbound-mutation isolation are enforced.
+
 After installing and starting the independent Lenso Console Service, create its
 first password user and bootstrap that user as the first Console Operator from
 outside the Service. Keep the password out of shell history:
