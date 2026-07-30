@@ -1131,7 +1131,7 @@ enum ConsoleCommand {
     Install(ConsoleChangeArgs),
     /// Plan or apply an immutable Lenso Console Release upgrade.
     Upgrade(ConsoleChangeArgs),
-    /// Validate persisted Console installation state and optional readiness.
+    /// Validate exact Console installation evidence and optional readiness.
     Doctor(ConsoleDoctorArgs),
     /// Manage operators in the independent Lenso Console Service.
     Operator {

@@ -17,11 +17,13 @@ use uuid::Uuid;
 const RELEASE_SCHEMA: &str = "lenso.console-service-release.v1";
 const PLAN_SCHEMA: &str = "lenso.console-installation-plan.v1";
 const STATE_SCHEMA: &str = "lenso.console-installation-state.v1";
+const ATTEMPT_SCHEMA: &str = "lenso.console-installation-attempt.v1";
 const DOCTOR_SCHEMA: &str = "lenso.console-doctor.v1";
 const TRUSTED_RELEASE_REPOSITORY: &str = "LioRael/lenso-runtime-console";
 const TRUSTED_SIGNER_WORKFLOW: &str = "LioRael/lenso-runtime-console/.github/workflows/publish.yml";
 const TRUSTED_IMAGE_REPOSITORY: &str = "ghcr.io/liorael/lenso-console";
 const STATE_FILE: &str = "installation-state.json";
+const ATTEMPT_FILE: &str = "installation-attempt.json";
 const MANIFEST_FILE: &str = "release-manifest.json";
 const COMPOSE_FILE: &str = "compose.yaml";
 
@@ -114,6 +116,27 @@ struct InstallationState {
     applied_at_unix_ms: u64,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AttemptStatus {
+    Applying,
+    Failed,
+    Committed,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InstallationAttempt {
+    schema: String,
+    release_id: String,
+    release_digest: String,
+    plan_digest: String,
+    status: AttemptStatus,
+    phase: String,
+    started_at_unix_ms: u64,
+    updated_at_unix_ms: u64,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DoctorReport {
@@ -167,7 +190,19 @@ fn change(action: ChangeAction, options: ChangeOptions) -> Result<()> {
     verify_attestation(&manifest_path)?;
     let release_digest = sha256(&manifest_bytes);
     let current = read_state_optional(&root)?;
-    validate_action(action, current.as_ref(), &manifest)?;
+    if matches!(action, ChangeAction::Install) {
+        validate_action(action, current.as_ref(), &manifest)?;
+    }
+    if let Some(state) = current.as_ref() {
+        validate_installed_evidence(&root, state).context(
+            "installed Console evidence is drifted; run `lenso console doctor` before changing releases",
+        )?;
+        verify_attestation(&root.join(MANIFEST_FILE))
+            .context("verify installed Console Release Manifest attestation")?;
+    }
+    if matches!(action, ChangeAction::Upgrade) {
+        validate_action(action, current.as_ref(), &manifest)?;
+    }
     let mut plan = build_plan(action, &root, &manifest, &release_digest, current.as_ref())?;
     plan.plan_digest = plan_digest(&plan)?;
     print_or_write_plan(&plan, options.output.as_deref())?;
@@ -303,8 +338,15 @@ fn validate_action(
             bail!("Lenso Console is not installed; use `lenso console install`")
         }
         (ChangeAction::Upgrade, Some(state)) => {
-            if state.release_id == manifest.release_id {
-                bail!("the requested Console Release is already installed");
+            let current_version = release_version(&state.release_id)
+                .context("installed Console releaseId is invalid")?;
+            let target_version = canonical_version(&manifest.version)
+                .context("target Console version is invalid")?;
+            if target_version <= current_version {
+                bail!(
+                    "Console upgrades require a newer version than the installed release {}",
+                    state.release_id
+                );
             }
             if !manifest
                 .compatible_from_schema_digests
@@ -368,7 +410,7 @@ fn build_plan(
             PlanStep {
                 order: 4,
                 workload: "evidence",
-                effect: "record exact applied release state",
+                effect: "record the attempt and exact applied release state",
             },
         ],
     })
@@ -429,16 +471,49 @@ fn apply_change_with(
     let candidate_id = Uuid::now_v7();
     let candidate_compose = root.join(format!(".{COMPOSE_FILE}.candidate-{candidate_id}"));
     let candidate_manifest = root.join(format!(".{MANIFEST_FILE}.candidate-{candidate_id}"));
+    let started_at_unix_ms = unix_time_ms()?;
+    let mut phase = "staging";
+    write_attempt(
+        root,
+        plan,
+        AttemptStatus::Applying,
+        phase,
+        started_at_unix_ms,
+    )?;
     let result = (|| -> Result<()> {
         atomic_write(&candidate_compose, compose.as_bytes())?;
         atomic_write(&candidate_manifest, manifest_bytes)?;
 
+        phase = "pull";
+        write_attempt(
+            root,
+            plan,
+            AttemptStatus::Applying,
+            phase,
+            started_at_unix_ms,
+        )?;
         adapter.run(root, env_file, &candidate_compose, &["pull"])?;
+        phase = "migration";
+        write_attempt(
+            root,
+            plan,
+            AttemptStatus::Applying,
+            phase,
+            started_at_unix_ms,
+        )?;
         adapter.run(
             root,
             env_file,
             &candidate_compose,
             &["run", "--rm", "migrate"],
+        )?;
+        phase = "readiness";
+        write_attempt(
+            root,
+            plan,
+            AttemptStatus::Applying,
+            phase,
+            started_at_unix_ms,
         )?;
         adapter.run(
             root,
@@ -457,6 +532,14 @@ fn apply_change_with(
             "candidate Console workload did not become healthy; canonical installation state was not changed",
         )?;
 
+        phase = "commit";
+        write_attempt(
+            root,
+            plan,
+            AttemptStatus::Applying,
+            phase,
+            started_at_unix_ms,
+        )?;
         atomic_write(&root.join(COMPOSE_FILE), compose.as_bytes())?;
         atomic_write(&root.join(MANIFEST_FILE), manifest_bytes)?;
         let state = InstallationState {
@@ -474,11 +557,44 @@ fn apply_change_with(
         atomic_write(
             &root.join(STATE_FILE),
             &serde_json::to_vec_pretty(&state).context("encode Console installation state")?,
+        )?;
+        write_attempt(
+            root,
+            plan,
+            AttemptStatus::Committed,
+            phase,
+            started_at_unix_ms,
         )
     })();
     let _ = fs::remove_file(candidate_compose);
     let _ = fs::remove_file(candidate_manifest);
+    if result.is_err() {
+        let _ = write_attempt(root, plan, AttemptStatus::Failed, phase, started_at_unix_ms);
+    }
     result
+}
+
+fn write_attempt(
+    root: &Path,
+    plan: &InstallationPlan,
+    status: AttemptStatus,
+    phase: &str,
+    started_at_unix_ms: u64,
+) -> Result<()> {
+    let attempt = InstallationAttempt {
+        schema: ATTEMPT_SCHEMA.to_owned(),
+        release_id: plan.release_id.clone(),
+        release_digest: plan.release_digest.clone(),
+        plan_digest: plan.plan_digest.clone(),
+        status,
+        phase: phase.to_owned(),
+        started_at_unix_ms,
+        updated_at_unix_ms: unix_time_ms()?,
+    };
+    atomic_write(
+        &root.join(ATTEMPT_FILE),
+        &serde_json::to_vec_pretty(&attempt).context("encode Console installation attempt")?,
+    )
 }
 
 fn compose_document(image: &str) -> String {
@@ -495,7 +611,7 @@ pub async fn doctor(options: DoctorOptions) -> Result<()> {
     let mut release_id = None;
     let mut release_digest = None;
 
-    if let Some(state) = state {
+    if let Some(state) = state.as_ref() {
         release_id = Some(state.release_id.clone());
         release_digest = Some(state.release_digest.clone());
         checks.push(pass("state", "installation state is present and valid"));
@@ -504,6 +620,7 @@ pub async fn doctor(options: DoctorOptions) -> Result<()> {
     } else {
         checks.push(fail("state", "installation state is missing"));
     }
+    check_installation_attempt(&root, state.as_ref(), &mut checks);
     if let Some(url) = options.live_url.as_deref() {
         checks.push(live_check(url).await);
     }
@@ -550,53 +667,103 @@ pub async fn doctor(options: DoctorOptions) -> Result<()> {
     Ok(())
 }
 
+fn validate_installed_evidence(root: &Path, state: &InstallationState) -> Result<()> {
+    validate_installed_manifest(root, state)?;
+    validate_installed_compose(root, state)
+}
+
+fn validate_installed_manifest(root: &Path, state: &InstallationState) -> Result<()> {
+    let path = absolute_existing_file(
+        &root.join(MANIFEST_FILE),
+        "installed Console Release Manifest",
+    )?;
+    let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    let manifest: ConsoleReleaseManifest =
+        serde_json::from_slice(&bytes).context("decode installed Console Release Manifest")?;
+    validate_manifest(&manifest).context("validate installed Console Release Manifest")?;
+    if sha256(&bytes) != state.release_digest
+        || manifest.release_id != state.release_id
+        || manifest.schema_digest != state.schema_digest
+        || manifest.image.reference != state.image_reference
+        || manifest.composition_digest != state.composition_digest
+        || manifest.contract_digest != state.contract_digest
+        || manifest.configuration_digest != state.configuration_digest
+    {
+        bail!("installed Console Release Manifest does not match applied state");
+    }
+    Ok(())
+}
+
+fn validate_installed_compose(root: &Path, state: &InstallationState) -> Result<()> {
+    let path = absolute_existing_file(&root.join(COMPOSE_FILE), "installed Console deployment")?;
+    let compose = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    if compose != compose_document(&state.image_reference) {
+        bail!("installed Console deployment does not match applied state");
+    }
+    Ok(())
+}
+
 fn check_installed_manifest(root: &Path, state: &InstallationState, checks: &mut Vec<DoctorCheck>) {
-    let path = root.join(MANIFEST_FILE);
-    match fs::read(&path) {
-        Ok(bytes) => match serde_json::from_slice::<ConsoleReleaseManifest>(&bytes) {
-            Ok(manifest)
-                if validate_manifest(&manifest).is_ok()
-                    && sha256(&bytes) == state.release_digest
-                    && manifest.release_id == state.release_id
-                    && manifest.schema_digest == state.schema_digest
-                    && manifest.image.reference == state.image_reference
-                    && manifest.composition_digest == state.composition_digest
-                    && manifest.contract_digest == state.contract_digest
-                    && manifest.configuration_digest == state.configuration_digest =>
-            {
-                checks.push(pass(
-                    "release_manifest",
-                    "installed manifest matches applied state",
-                ));
-            }
-            Ok(_) | Err(_) => checks.push(fail(
-                "release_manifest",
-                "installed manifest is invalid or drifted",
-            )),
-        },
+    match validate_installed_manifest(root, state) {
+        Ok(()) => checks.push(pass(
+            "release_manifest",
+            "installed manifest matches applied state",
+        )),
         Err(_) => checks.push(fail(
             "release_manifest",
-            "installed release manifest is missing",
+            "installed manifest is missing, invalid, or drifted",
         )),
     }
 }
 
 fn check_compose(root: &Path, state: &InstallationState, checks: &mut Vec<DoctorCheck>) {
-    match fs::read_to_string(root.join(COMPOSE_FILE)) {
-        Ok(compose)
-            if compose.matches(&state.image_reference).count() == 2
-                && !compose.contains(":latest") =>
+    match validate_installed_compose(root, state) {
+        Ok(()) => checks.push(pass(
+            "deployment",
+            "Compose deployment exactly matches applied state",
+        )),
+        Err(_) => checks.push(fail(
+            "deployment",
+            "Compose deployment is missing, invalid, or drifted",
+        )),
+    }
+}
+
+fn check_installation_attempt(
+    root: &Path,
+    state: Option<&InstallationState>,
+    checks: &mut Vec<DoctorCheck>,
+) {
+    match read_attempt_optional(root) {
+        Ok(Some(attempt))
+            if attempt.status == AttemptStatus::Committed
+                && state.is_some_and(|state| {
+                    attempt.release_id == state.release_id
+                        && attempt.release_digest == state.release_digest
+                        && attempt.plan_digest == state.applied_plan_digest
+                }) =>
         {
             checks.push(pass(
-                "deployment",
-                "Compose deployment pins the applied OCI image",
+                "last_change",
+                "last installation change is committed and matches applied state",
             ));
         }
-        Ok(_) => checks.push(fail(
-            "deployment",
-            "Compose deployment does not match applied image state",
+        Ok(Some(attempt)) => checks.push(fail(
+            "last_change",
+            &format!(
+                "last installation change for {} is {:?} at phase {}",
+                attempt.release_id, attempt.status, attempt.phase
+            )
+            .to_lowercase(),
         )),
-        Err(_) => checks.push(fail("deployment", "Compose deployment is missing")),
+        Ok(None) => checks.push(pass(
+            "last_change",
+            "no interrupted installation change is recorded",
+        )),
+        Err(_) => checks.push(fail(
+            "last_change",
+            "installation attempt evidence is invalid",
+        )),
     }
 }
 
@@ -639,18 +806,13 @@ fn secure_live_url(value: &str) -> Result<Url> {
 
 fn read_state_optional(root: &Path) -> Result<Option<InstallationState>> {
     let path = root.join(STATE_FILE);
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    let Some(bytes) = read_optional_regular_file(&path, "Console installation state")? else {
+        return Ok(None);
     };
     let state: InstallationState =
         serde_json::from_slice(&bytes).context("decode Console installation state")?;
     if state.schema != STATE_SCHEMA
-        || !state
-            .release_id
-            .strip_prefix("lenso-console@")
-            .is_some_and(is_canonical_version)
+        || release_version(&state.release_id).is_none()
         || !is_sha256(&state.release_digest)
         || !is_sha256(&state.schema_digest)
         || !is_sha256(&state.composition_digest)
@@ -662,6 +824,43 @@ fn read_state_optional(root: &Path) -> Result<Option<InstallationState>> {
         bail!("Console installation state is invalid");
     }
     Ok(Some(state))
+}
+
+fn read_attempt_optional(root: &Path) -> Result<Option<InstallationAttempt>> {
+    let path = root.join(ATTEMPT_FILE);
+    let Some(bytes) = read_optional_regular_file(&path, "Console installation attempt")? else {
+        return Ok(None);
+    };
+    let attempt: InstallationAttempt =
+        serde_json::from_slice(&bytes).context("decode Console installation attempt")?;
+    if attempt.schema != ATTEMPT_SCHEMA
+        || release_version(&attempt.release_id).is_none()
+        || !is_sha256(&attempt.release_digest)
+        || !is_sha256(&attempt.plan_digest)
+        || !matches!(
+            attempt.phase.as_str(),
+            "staging" | "pull" | "migration" | "readiness" | "commit"
+        )
+        || attempt.started_at_unix_ms == 0
+        || attempt.updated_at_unix_ms < attempt.started_at_unix_ms
+    {
+        bail!("Console installation attempt is invalid");
+    }
+    Ok(Some(attempt))
+}
+
+fn read_optional_regular_file(path: &Path, label: &str) -> Result<Option<Vec<u8>>> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("{label} must be a regular file and not a symbolic link");
+    }
+    fs::read(path)
+        .with_context(|| format!("read {}", path.display()))
+        .map(Some)
 }
 
 fn print_or_write_plan(plan: &InstallationPlan, output: Option<&Path>) -> Result<()> {
@@ -781,14 +980,31 @@ fn trusted_image_reference(value: &str) -> bool {
 }
 
 fn is_canonical_version(value: &str) -> bool {
-    let parts = value.split('.').collect::<Vec<_>>();
-    parts.len() == 3
-        && parts.iter().all(|part| {
-            !part.is_empty()
-                && part.bytes().all(|byte| byte.is_ascii_digit())
-                && (part.len() == 1 || !part.starts_with('0'))
-                && part.parse::<u64>().is_ok()
-        })
+    canonical_version(value).is_some()
+}
+
+fn canonical_version(value: &str) -> Option<(u64, u64, u64)> {
+    fn component(value: &str) -> Option<u64> {
+        if value.is_empty()
+            || !value.bytes().all(|byte| byte.is_ascii_digit())
+            || (value.len() > 1 && value.starts_with('0'))
+        {
+            return None;
+        }
+        value.parse().ok()
+    }
+
+    let mut parts = value.split('.');
+    let version = (
+        component(parts.next()?)?,
+        component(parts.next()?)?,
+        component(parts.next()?)?,
+    );
+    parts.next().is_none().then_some(version)
+}
+
+fn release_version(release_id: &str) -> Option<(u64, u64, u64)> {
+    canonical_version(release_id.strip_prefix("lenso-console@")?)
 }
 
 fn all_unique(values: &[String]) -> bool {
@@ -889,8 +1105,26 @@ mod tests {
         }
     }
 
+    fn state_for_manifest(
+        release: &ConsoleReleaseManifest,
+        manifest_bytes: &[u8],
+    ) -> InstallationState {
+        InstallationState {
+            schema: STATE_SCHEMA.to_owned(),
+            release_id: release.release_id.clone(),
+            release_digest: sha256(manifest_bytes),
+            image_reference: release.image.reference.clone(),
+            schema_digest: release.schema_digest.clone(),
+            composition_digest: release.composition_digest.clone(),
+            contract_digest: release.contract_digest.clone(),
+            configuration_digest: release.configuration_digest.clone(),
+            applied_plan_digest: digest('5'),
+            applied_at_unix_ms: 1,
+        }
+    }
+
     fn installation_plan(root: &Path, release: &ConsoleReleaseManifest) -> InstallationPlan {
-        let manifest_bytes = serde_json::to_vec(release).unwrap();
+        let manifest_bytes = serde_json::to_vec_pretty(release).unwrap();
         let mut plan = build_plan(
             ChangeAction::Install,
             root,
@@ -987,6 +1221,55 @@ mod tests {
     }
 
     #[test]
+    fn upgrade_requires_a_strictly_newer_release_version() {
+        let mut current = state();
+        current.release_id = "lenso-console@0.2.0".to_owned();
+        assert!(validate_action(ChangeAction::Upgrade, Some(&current), &manifest()).is_err());
+
+        current.release_id = "lenso-console@0.3.0".to_owned();
+        assert!(validate_action(ChangeAction::Upgrade, Some(&current), &manifest()).is_err());
+
+        current.release_id = "lenso-console@0.1.9".to_owned();
+        assert!(validate_action(ChangeAction::Upgrade, Some(&current), &manifest()).is_ok());
+    }
+
+    #[test]
+    fn installed_evidence_must_exactly_match_the_applied_state() {
+        let root = test_root("installed-evidence");
+        fs::create_dir_all(&root).unwrap();
+        let release = manifest();
+        let manifest_bytes = serde_json::to_vec_pretty(&release).unwrap();
+        let installed = state_for_manifest(&release, &manifest_bytes);
+        fs::write(root.join(MANIFEST_FILE), &manifest_bytes).unwrap();
+        fs::write(
+            root.join(COMPOSE_FILE),
+            compose_document(&release.image.reference),
+        )
+        .unwrap();
+        assert!(validate_installed_evidence(&root, &installed).is_ok());
+
+        fs::write(
+            root.join(COMPOSE_FILE),
+            format!(
+                "{}# local drift\n",
+                compose_document(&release.image.reference)
+            ),
+        )
+        .unwrap();
+        assert!(validate_installed_evidence(&root, &installed).is_err());
+
+        fs::write(
+            root.join(COMPOSE_FILE),
+            compose_document(&release.image.reference),
+        )
+        .unwrap();
+        let mut drifted_state = installed;
+        drifted_state.contract_digest = digest('9');
+        assert!(validate_installed_evidence(&root, &drifted_state).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn plan_digest_changes_with_target_or_release() {
         let current = state();
         let mut first = build_plan(
@@ -1079,7 +1362,16 @@ mod tests {
         );
         assert_eq!(fs::read(root.join(MANIFEST_FILE)).unwrap(), manifest_bytes);
         assert!(root.join(COMPOSE_FILE).is_file());
-        assert!(read_state_optional(&root).unwrap().is_some());
+        let installed = read_state_optional(&root).unwrap().unwrap();
+        assert!(validate_installed_evidence(&root, &installed).is_ok());
+        let attempt = read_attempt_optional(&root).unwrap().unwrap();
+        assert_eq!(attempt.status, AttemptStatus::Committed);
+        assert_eq!(attempt.phase, "commit");
+        assert_eq!(attempt.release_id, installed.release_id);
+        assert_eq!(attempt.plan_digest, installed.applied_plan_digest);
+        let mut checks = Vec::new();
+        check_installation_attempt(&root, Some(&installed), &mut checks);
+        assert!(matches!(checks[0].status, CheckStatus::Pass));
         assert!(candidate_files(&root).is_empty());
         fs::remove_dir_all(root).unwrap();
     }
@@ -1112,6 +1404,12 @@ mod tests {
         assert_eq!(fs::read(root.join(COMPOSE_FILE)).unwrap(), old_compose);
         assert_eq!(fs::read(root.join(MANIFEST_FILE)).unwrap(), old_manifest);
         assert_eq!(fs::read(root.join(STATE_FILE)).unwrap(), old_state);
+        let attempt = read_attempt_optional(&root).unwrap().unwrap();
+        assert_eq!(attempt.status, AttemptStatus::Failed);
+        assert_eq!(attempt.phase, "readiness");
+        let mut checks = Vec::new();
+        check_installation_attempt(&root, Some(&state()), &mut checks);
+        assert!(matches!(checks[0].status, CheckStatus::Fail));
         assert!(candidate_files(&root).is_empty());
         fs::remove_dir_all(root).unwrap();
     }

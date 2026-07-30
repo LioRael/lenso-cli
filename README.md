@@ -52,6 +52,17 @@ migrations additionally requires
 `--approve-irreversible`. Secrets remain in the operator-owned environment file
 and are never copied into the plan, manifest, or installation state.
 
+Before producing an upgrade plan, the CLI revalidates the installed manifest's
+GitHub attestation, requires the manifest and generated Compose deployment to
+exactly match the applied state, and requires the target version to be strictly
+newer. Run `lenso console doctor` and resolve any local drift rather than editing
+the CLI-owned installation files.
+
+Every applied change also updates a secret-free `installation-attempt.json` with
+its target release, approved plan digest, current phase, and final status. Doctor
+reports an interrupted or failed attempt until a later change commits cleanly;
+database credentials and other environment values are never included.
+
 After installing and starting the independent Lenso Console Service, create its
 first password user and bootstrap that user as the first Console Operator from
 outside the Service. Keep the password out of shell history:
