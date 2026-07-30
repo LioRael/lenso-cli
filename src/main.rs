@@ -1126,6 +1126,12 @@ enum ConsoleOperatorCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum ConsoleRecoveryCommand {
+    /// Validate and record reviewed post-restore reconciliation evidence.
+    Reconcile(ConsoleReconcileArgs),
+}
+
+#[derive(Debug, Subcommand)]
 enum ConsoleCommand {
     /// Plan or apply an independent Lenso Console installation.
     Install(ConsoleChangeArgs),
@@ -1135,6 +1141,11 @@ enum ConsoleCommand {
     Backup(ConsoleBackupArgs),
     /// Plan or apply a fenced Console Recovery Set restore.
     Restore(ConsoleRestoreArgs),
+    /// Advance an externally fenced Console recovery workflow.
+    Recovery {
+        #[command(subcommand)]
+        command: ConsoleRecoveryCommand,
+    },
     /// Validate exact Console installation evidence and optional readiness.
     Doctor(ConsoleDoctorArgs),
     /// Manage operators in the independent Lenso Console Service.
@@ -1207,6 +1218,33 @@ struct ConsoleRestoreArgs {
     /// Private age identity file used only during apply.
     #[arg(long, requires = "apply")]
     identity_file: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ConsoleReconcileArgs {
+    /// External Console installation root.
+    #[arg(long, default_value = ".lenso-console")]
+    root: std::path::PathBuf,
+
+    /// Recovery environment file containing the restored Store URL.
+    #[arg(long)]
+    env_file: std::path::PathBuf,
+
+    /// Operator-reviewed reconciliation input bound to external evidence.
+    #[arg(long)]
+    evidence: std::path::PathBuf,
+
+    /// Write the deterministic reconciliation plan to this path.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+
+    /// Record the reviewed reconciliation evidence.
+    #[arg(long)]
+    apply: bool,
+
+    /// Exact reconciliation plan digest approved by the operator.
+    #[arg(long, requires = "apply")]
+    approve_plan_digest: Option<String>,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -3214,6 +3252,19 @@ impl From<&ConsoleRestoreArgs> for console_installation::RestoreOptions {
     }
 }
 
+impl From<&ConsoleReconcileArgs> for console_installation::ReconcileOptions {
+    fn from(args: &ConsoleReconcileArgs) -> Self {
+        Self {
+            root: args.root.clone(),
+            env_file: args.env_file.clone(),
+            evidence: args.evidence.clone(),
+            output: args.output.clone(),
+            apply: args.apply,
+            approve_plan_digest: args.approve_plan_digest.clone(),
+        }
+    }
+}
+
 impl From<&ModuleCreateArgs> for module::ModuleCreateOptions {
     fn from(args: &ModuleCreateArgs) -> Self {
         Self {
@@ -3540,6 +3591,11 @@ async fn main() -> anyhow::Result<()> {
             ConsoleCommand::Upgrade(args) => console_installation::upgrade((&args).into())?,
             ConsoleCommand::Backup(args) => console_installation::backup((&args).into())?,
             ConsoleCommand::Restore(args) => console_installation::restore((&args).into())?,
+            ConsoleCommand::Recovery { command } => match command {
+                ConsoleRecoveryCommand::Reconcile(args) => {
+                    console_installation::reconcile((&args).into())?;
+                }
+            },
             ConsoleCommand::Doctor(args) => console_installation::doctor((&args).into()).await?,
             ConsoleCommand::Operator { command } => match command {
                 ConsoleOperatorCommand::Bootstrap(args) => {
@@ -4607,6 +4663,36 @@ mod tests {
         assert_eq!(
             args.identity_file.as_deref(),
             Some(std::path::Path::new("age-key.txt"))
+        );
+
+        let reconcile = Cli::parse_from([
+            "lenso",
+            "console",
+            "recovery",
+            "reconcile",
+            "--root",
+            "/srv/lenso-console",
+            "--env-file",
+            "recovery.env",
+            "--evidence",
+            "reconciliation-input.json",
+            "--apply",
+            "--approve-plan-digest",
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ]);
+        let Command::Console {
+            command:
+                ConsoleCommand::Recovery {
+                    command: ConsoleRecoveryCommand::Reconcile(args),
+                },
+        } = reconcile.command
+        else {
+            panic!("expected Console recovery reconciliation");
+        };
+        assert!(args.apply);
+        assert_eq!(
+            args.evidence,
+            std::path::Path::new("reconciliation-input.json")
         );
 
         let backup = Cli::parse_from([

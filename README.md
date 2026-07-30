@@ -118,6 +118,45 @@ that evidence exists. Successful restore therefore means “awaiting
 reconciliation,” not activation: the CLI never changes recovery mode back to
 normal or declares the restored deployment authoritative.
 
+After restore, reconcile the passive Store with separately collected deployment,
+identity/enrollment, and Outbox evidence. The reviewed input must name every
+managed Service exactly as observed in the restored Store, in `serviceId` order,
+and reference external evidence without embedding credentials:
+
+```json
+{
+  "schema": "lenso.console-reconciliation-input.v1",
+  "recoverySetId": "rcv_<uuid>",
+  "observedAtUnixMs": 1785369600000,
+  "reviewedBy": "operator:alice",
+  "authorityEvidenceRef": "change:console-dr-42",
+  "identityEvidenceRef": "audit:identity-continuity-42",
+  "outboxEvidenceRef": "audit:outbox-reconciliation-42",
+  "singleAuthoritativeDeployment": true,
+  "identityAndEnrollmentContinuityVerified": true,
+  "outboxReconciled": true,
+  "managedServices": []
+}
+```
+
+```sh
+lenso console recovery reconcile --root /srv/lenso-console \
+  --env-file /secure/console-recovery.env \
+  --evidence reconciliation-input.json --output reconciliation-plan.json
+lenso console recovery reconcile --root /srv/lenso-console \
+  --env-file /secure/console-recovery.env \
+  --evidence reconciliation-input.json --apply \
+  --approve-plan-digest sha256:<reviewed-plan-digest>
+```
+
+The command reads the restored Store without mutation, rejects any browser
+session predating recovery while allowing newly authenticated recovery
+operators, binds a streamed digest of exact Outbox rows plus status counts and
+the managed-Service identity set, and writes content-addressed
+`reconciliation-evidence.json`. It advances only to
+`ready_for_activation`; doctor continues to fail and neither the Worker nor
+management mutations are enabled.
+
 Generated deployments set `CONSOLE_RECOVERY_MODE` explicitly. `normal` runs the
 API and Worker; `restore` keeps the inspection API available while the Console
 Service suppresses background work and rejects management mutations. Recovery

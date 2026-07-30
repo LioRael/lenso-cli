@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
@@ -22,6 +22,9 @@ const LOCK_SCHEMA: &str = "lenso.console-installation-lock.v1";
 const RECOVERY_SET_SCHEMA: &str = "lenso.console-recovery-set.v1";
 const RESTORE_PLAN_SCHEMA: &str = "lenso.console-restore-plan.v1";
 const RECOVERY_STATE_SCHEMA: &str = "lenso.console-recovery-state.v1";
+const RECONCILIATION_INPUT_SCHEMA: &str = "lenso.console-reconciliation-input.v1";
+const RECONCILIATION_PLAN_SCHEMA: &str = "lenso.console-reconciliation-plan.v1";
+const RECONCILIATION_EVIDENCE_SCHEMA: &str = "lenso.console-reconciliation-evidence.v1";
 const DOCTOR_SCHEMA: &str = "lenso.console-doctor.v1";
 const TRUSTED_RELEASE_REPOSITORY: &str = "LioRael/lenso-runtime-console";
 const TRUSTED_SIGNER_WORKFLOW: &str = "LioRael/lenso-runtime-console/.github/workflows/publish.yml";
@@ -34,6 +37,7 @@ const COMPOSE_FILE: &str = "compose.yaml";
 const RECOVERY_MANIFEST_FILE: &str = "recovery-set.json";
 const RECOVERY_STORE_FILE: &str = "store.dump.age";
 const RECOVERY_STATE_FILE: &str = "recovery-state.json";
+const RECONCILIATION_EVIDENCE_FILE: &str = "reconciliation-evidence.json";
 const RECOVERY_PG_DUMP_ARGS: &[&str] = &[
     "--format=custom",
     "--no-owner",
@@ -78,6 +82,16 @@ pub struct RestoreOptions {
     pub apply: bool,
     pub approve_plan_digest: Option<String>,
     pub identity_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReconcileOptions {
+    pub root: PathBuf,
+    pub env_file: PathBuf,
+    pub evidence: PathBuf,
+    pub output: Option<PathBuf>,
+    pub apply: bool,
+    pub approve_plan_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -242,6 +256,7 @@ struct RestorePlan {
     release_id: String,
     release_digest: String,
     payload_digest: String,
+    target_store_identity_digest: String,
     steps: Vec<String>,
     approval_boundaries: Vec<String>,
     target_requirements: Vec<String>,
@@ -254,6 +269,7 @@ enum RecoveryStatus {
     Applying,
     Failed,
     AwaitingReconciliation,
+    ReadyForActivation,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -264,10 +280,129 @@ struct RecoveryState {
     recovery_set_digest: String,
     plan_digest: String,
     release_id: String,
+    target_store_identity_digest: String,
     status: RecoveryStatus,
     phase: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reconciliation_evidence_digest: Option<String>,
     started_at_unix_ms: u64,
     updated_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReconciliationInput {
+    schema: String,
+    recovery_set_id: String,
+    observed_at_unix_ms: u64,
+    reviewed_by: String,
+    authority_evidence_ref: String,
+    identity_evidence_ref: String,
+    outbox_evidence_ref: String,
+    single_authoritative_deployment: bool,
+    identity_and_enrollment_continuity_verified: bool,
+    outbox_reconciled: bool,
+    managed_services: Vec<ReconciledManagedService>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReconciledManagedService {
+    service_id: String,
+    service_principal: String,
+    enrollment_receipt_digest: String,
+    authorization_epoch: u64,
+    core_document_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StoreRecoveryObservation {
+    session_count: u64,
+    stale_session_count: u64,
+    outbox_status_counts: BTreeMap<String, u64>,
+    outbox_snapshot_digest: String,
+    managed_services: Vec<ObservedManagedService>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ObservedManagedService {
+    service_id: String,
+    service_principal: String,
+    enrollment_receipt_digest: String,
+    enrollment_grant_revision: u64,
+    authorization_epoch: u64,
+    enrollment_state: String,
+    version: u64,
+    core_document_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawStoreRecoveryObservation {
+    session_count: u64,
+    stale_session_count: u64,
+    outbox_status_counts: BTreeMap<String, u64>,
+    managed_services: Vec<RawObservedManagedService>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawObservedManagedService {
+    service_id: String,
+    service_principal: String,
+    enrollment_receipt_digest: String,
+    enrollment_grant_revision: u64,
+    authorization_epoch: u64,
+    enrollment_state: String,
+    version: u64,
+    core_document: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReconciliationPlan {
+    schema: &'static str,
+    action: &'static str,
+    plan_digest: String,
+    recovery_set_id: String,
+    recovery_set_digest: String,
+    restore_plan_digest: String,
+    release_id: String,
+    target_store_identity_digest: String,
+    store_observation_digest: String,
+    reconciliation_input_digest: String,
+    observed_at_unix_ms: u64,
+    steps: Vec<String>,
+    approval_boundaries: Vec<String>,
+    next_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReconciliationEvidence {
+    schema: String,
+    evidence_id: String,
+    evidence_digest: String,
+    recovery_set_id: String,
+    recovery_set_digest: String,
+    restore_plan_digest: String,
+    reconciliation_plan_digest: String,
+    release_id: String,
+    target_store_identity_digest: String,
+    store_observation_digest: String,
+    reconciliation_input_digest: String,
+    observed_at_unix_ms: u64,
+    reviewed_by: String,
+    authority_evidence_ref: String,
+    identity_evidence_ref: String,
+    outbox_evidence_ref: String,
+    single_authoritative_deployment: bool,
+    identity_and_enrollment_continuity_verified: bool,
+    outbox_reconciled: bool,
+    reconciled_managed_services: Vec<ReconciledManagedService>,
+    store: StoreRecoveryObservation,
 }
 
 #[derive(Debug, Serialize)]
@@ -480,8 +615,24 @@ pub fn restore(options: RestoreOptions) -> Result<()> {
         "recovery Console environment file",
     )?;
     validate_restore_environments(&current_env_file, &recovery_env_file)?;
+    let target_database_url = console_database_url(&recovery_env_file)?;
+    let target_store_identity_digest = database_identity_digest(&target_database_url)?;
+    let mut protected_files = vec![current_env_file.clone(), recovery_env_file.clone()];
+    if let Some(identity_file) = options.identity_file.as_deref() {
+        protected_files.push(absolute_path(identity_file)?);
+    }
+    validate_plan_output_path(
+        options.output.as_deref(),
+        &protected_files,
+        &[root.clone(), recovery_set.clone()],
+    )?;
 
-    let mut plan = build_restore_plan(&root, &recovery_set, &manifest);
+    let mut plan = build_restore_plan(
+        &root,
+        &recovery_set,
+        &manifest,
+        &target_store_identity_digest,
+    );
     plan.plan_digest = restore_plan_digest(&plan)?;
     print_or_write_restore_plan(&plan, options.output.as_deref())?;
     if !options.apply {
@@ -500,13 +651,13 @@ pub fn restore(options: RestoreOptions) -> Result<()> {
             .as_deref()
             .context("--identity-file is required with --apply")?,
     )?;
-    let target_database_url = console_database_url(&recovery_env_file)?;
     apply_restore_with(
         &PostgresComposeRestoreAdapter,
         &root,
         &current_env_file,
         &recovery_env_file,
         &target_database_url,
+        &target_store_identity_digest,
         &identity_file,
         &recovery_set.join(RECOVERY_STORE_FILE),
         &manifest,
@@ -520,6 +671,559 @@ pub fn restore(options: RestoreOptions) -> Result<()> {
         manifest.recovery_set_id
     );
     Ok(())
+}
+
+pub fn reconcile(options: ReconcileOptions) -> Result<()> {
+    reconcile_with(&PostgresReconciliationAdapter, options)
+}
+
+trait ReconciliationAdapter {
+    fn observe_store(
+        &self,
+        database_url: &str,
+        recovery_started_at_unix_ms: u64,
+    ) -> Result<StoreRecoveryObservation>;
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PostgresReconciliationAdapter;
+
+impl ReconciliationAdapter for PostgresReconciliationAdapter {
+    fn observe_store(
+        &self,
+        database_url: &str,
+        recovery_started_at_unix_ms: u64,
+    ) -> Result<StoreRecoveryObservation> {
+        const OBSERVATION_SQL: &str = r#"
+select json_build_object(
+    'sessionCount', (select count(*) from auth.sessions),
+    'staleSessionCount', (
+        select count(*) from auth.sessions
+        where created_at < to_timestamp(__RECOVERY_STARTED_AT_UNIX_MS__ / 1000.0)
+    ),
+    'outboxStatusCounts', (
+        select coalesce(json_object_agg(status, total), '{}'::json)
+        from (
+            select status, count(*) as total
+            from platform.outbox
+            group by status
+            order by status
+        ) counts
+    ),
+    'managedServices', (
+        select coalesce(json_agg(json_build_object(
+            'serviceId', service_id,
+            'servicePrincipal', service_principal,
+            'enrollmentReceiptDigest', enrollment_receipt_digest,
+            'enrollmentGrantRevision', enrollment_grant_revision,
+            'authorizationEpoch', authorization_epoch,
+            'enrollmentState', enrollment_state,
+            'version', version,
+            'coreDocument', core_document
+        ) order by service_id), '[]'::json)
+        from console.managed_services
+    )
+)::text
+"#;
+        let observation_sql = OBSERVATION_SQL.replace(
+            "__RECOVERY_STARTED_AT_UNIX_MS__",
+            &recovery_started_at_unix_ms.to_string(),
+        );
+        let output = Command::new("psql")
+            .args([
+                "--no-psqlrc",
+                "--tuples-only",
+                "--no-align",
+                "--set",
+                "ON_ERROR_STOP=1",
+                "--command",
+                &observation_sql,
+            ])
+            .env("PGDATABASE", database_url)
+            .output()
+            .context("observe restored Console Store for reconciliation")?;
+        if !output.status.success() {
+            bail!("psql failed while observing the restored Console Store");
+        }
+        let raw: RawStoreRecoveryObservation =
+            serde_json::from_slice(output.stdout.trim_ascii())
+                .context("decode restored Console Store observation")?;
+        normalize_store_observation(raw, observe_outbox_snapshot_digest(database_url)?)
+    }
+}
+
+fn observe_outbox_snapshot_digest(database_url: &str) -> Result<String> {
+    const OUTBOX_SNAPSHOT_SQL: &str = r#"
+copy (
+    select row_to_json(outbox_row)::text
+    from (
+        select id, event_name, event_version, source_module, aggregate_type, aggregate_id,
+            correlation_id, causation_id, occurred_at, payload, headers, status, attempts,
+            max_attempts, available_at, locked_at, locked_by, published_at, last_error, created_at
+        from platform.outbox
+        order by id
+    ) outbox_row
+) to stdout
+"#;
+    let mut child = Command::new("psql")
+        .args([
+            "--no-psqlrc",
+            "--set",
+            "ON_ERROR_STOP=1",
+            "--command",
+            OUTBOX_SNAPSHOT_SQL,
+        ])
+        .env("PGDATABASE", database_url)
+        .env("PGTZ", "UTC")
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("start restored Console Outbox observation")?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .context("capture restored Console Outbox observation")?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = stdout
+            .read(&mut buffer)
+            .context("read restored Console Outbox observation")?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let status = child
+        .wait()
+        .context("wait for restored Console Outbox observation")?;
+    if !status.success() {
+        bail!("psql failed while observing the restored Console Outbox");
+    }
+    let mut encoded = String::with_capacity(71);
+    encoded.push_str("sha256:");
+    for byte in hasher.finalize() {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    Ok(encoded)
+}
+
+fn reconcile_with(adapter: &impl ReconciliationAdapter, options: ReconcileOptions) -> Result<()> {
+    let root = absolute_path(&options.root)?;
+    validate_installation_root(&root)?;
+    let mut lock = options
+        .apply
+        .then(|| InstallationLock::acquire(&root))
+        .transpose()?;
+    let installed = read_state_optional(&root)?
+        .context("Lenso Console is not installed; recovery reconciliation is unavailable")?;
+    validate_installed_evidence(&root, &installed).context(
+        "installed Console evidence is drifted; run `lenso console doctor` before reconciliation",
+    )?;
+    verify_attestation(&root.join(MANIFEST_FILE))
+        .context("verify installed Console Release Manifest attestation")?;
+    let recovery = read_recovery_state_optional(&root)?
+        .context("no Console restore is awaiting reconciliation")?;
+    validate_recovery_for_reconciliation(&recovery, &installed)?;
+    let env_file = absolute_existing_file(&options.env_file, "recovery Console environment file")?;
+    if console_env_value(&env_file, "CONSOLE_RECOVERY_MODE")? != "restore" {
+        bail!("reconciliation environment must set CONSOLE_RECOVERY_MODE=restore");
+    }
+    let database_url = console_database_url(&env_file)?;
+    if database_identity_digest(&database_url)? != recovery.target_store_identity_digest {
+        bail!("reconciliation environment does not identify the restored target Store");
+    }
+    let input_path = absolute_existing_file(&options.evidence, "reconciliation input")?;
+    let input: ReconciliationInput = serde_json::from_slice(
+        &fs::read(&input_path)
+            .with_context(|| format!("read reconciliation input {}", input_path.display()))?,
+    )
+    .context("decode Console reconciliation input")?;
+    validate_plan_output_path(
+        options.output.as_deref(),
+        &[env_file.clone(), input_path],
+        std::slice::from_ref(&root),
+    )?;
+    validate_reconciliation_input(&input, &recovery)?;
+    let store = adapter.observe_store(&database_url, recovery.started_at_unix_ms)?;
+    validate_store_observation(&store)?;
+    validate_reconciliation_services(&input, &store)?;
+
+    let store_observation_digest = sha256(&serde_json::to_vec(&store)?);
+    let reconciliation_input_digest = sha256(&serde_json::to_vec(&input)?);
+    let mut plan = build_reconciliation_plan(
+        &recovery,
+        &store_observation_digest,
+        &reconciliation_input_digest,
+        input.observed_at_unix_ms,
+    );
+    plan.plan_digest = reconciliation_plan_digest(&plan)?;
+    print_or_write_reconciliation_plan(&plan, options.output.as_deref())?;
+    if !options.apply {
+        eprintln!(
+            "Plan only. Review the external evidence and re-run with --apply --approve-plan-digest {}.",
+            plan.plan_digest
+        );
+        return Ok(());
+    }
+    if options.approve_plan_digest.as_deref() != Some(plan.plan_digest.as_str()) {
+        bail!("--approve-plan-digest must exactly match the current reconciliation plan digest");
+    }
+
+    let evidence = build_reconciliation_evidence(
+        &recovery,
+        &plan,
+        &input,
+        store,
+        store_observation_digest,
+        reconciliation_input_digest,
+    )?;
+    publish_reconciliation_evidence(&root, &evidence)?;
+    write_reconciled_recovery_state(&root, &recovery, &evidence)?;
+    if let Some(installation_lock) = lock.take() {
+        installation_lock.release()?;
+    }
+    eprintln!(
+        "Recorded reconciliation evidence {}. Console remains fenced pending a separate activation approval.",
+        evidence.evidence_id
+    );
+    Ok(())
+}
+
+fn normalize_store_observation(
+    raw: RawStoreRecoveryObservation,
+    outbox_snapshot_digest: String,
+) -> Result<StoreRecoveryObservation> {
+    let mut managed_services = raw
+        .managed_services
+        .into_iter()
+        .map(|service| {
+            Ok(ObservedManagedService {
+                service_id: service.service_id,
+                service_principal: service.service_principal,
+                enrollment_receipt_digest: service.enrollment_receipt_digest,
+                enrollment_grant_revision: service.enrollment_grant_revision,
+                authorization_epoch: service.authorization_epoch,
+                enrollment_state: service.enrollment_state,
+                version: service.version,
+                core_document_digest: service
+                    .core_document
+                    .map(|document| serde_json::to_vec(&document).map(|bytes| sha256(&bytes)))
+                    .transpose()?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    managed_services.sort_by(|left, right| left.service_id.cmp(&right.service_id));
+    Ok(StoreRecoveryObservation {
+        session_count: raw.session_count,
+        stale_session_count: raw.stale_session_count,
+        outbox_status_counts: raw.outbox_status_counts,
+        outbox_snapshot_digest,
+        managed_services,
+    })
+}
+
+fn validate_recovery_for_reconciliation(
+    recovery: &RecoveryState,
+    installed: &InstallationState,
+) -> Result<()> {
+    if recovery.release_id != installed.release_id {
+        bail!("recovery state does not match the installed Console release");
+    }
+    if recovery.status != RecoveryStatus::AwaitingReconciliation {
+        bail!("Console restore is not in a reconcilable state");
+    }
+    Ok(())
+}
+
+fn validate_reconciliation_input(
+    input: &ReconciliationInput,
+    recovery: &RecoveryState,
+) -> Result<()> {
+    let now = unix_time_ms()?;
+    if input.schema != RECONCILIATION_INPUT_SCHEMA
+        || input.recovery_set_id != recovery.recovery_set_id
+        || input.observed_at_unix_ms < recovery.updated_at_unix_ms
+        || input.observed_at_unix_ms > now.saturating_add(300_000)
+        || !valid_evidence_reference(&input.reviewed_by)
+        || !valid_evidence_reference(&input.authority_evidence_ref)
+        || !valid_evidence_reference(&input.identity_evidence_ref)
+        || !valid_evidence_reference(&input.outbox_evidence_ref)
+        || !input.single_authoritative_deployment
+        || !input.identity_and_enrollment_continuity_verified
+        || !input.outbox_reconciled
+    {
+        bail!("Console reconciliation input is invalid or does not pass every recovery boundary");
+    }
+    let mut previous = None;
+    for service in &input.managed_services {
+        if service.service_id.trim().is_empty()
+            || service.service_principal.trim().is_empty()
+            || !is_sha256(&service.enrollment_receipt_digest)
+            || service
+                .core_document_digest
+                .as_deref()
+                .is_some_and(|digest| !is_sha256(digest))
+            || previous.is_some_and(|value| value >= service.service_id.as_str())
+        {
+            bail!("Console reconciliation managed-Service evidence is invalid or unsorted");
+        }
+        previous = Some(service.service_id.as_str());
+    }
+    Ok(())
+}
+
+fn valid_evidence_reference(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.len() <= 256
+        && value.is_ascii()
+        && !value.bytes().any(|byte| byte.is_ascii_whitespace())
+        && !value.contains("secret=")
+        && !value.contains("BEGIN_")
+}
+
+fn validate_store_observation(store: &StoreRecoveryObservation) -> Result<()> {
+    if store.stale_session_count != 0 || store.stale_session_count > store.session_count {
+        bail!(
+            "restored Store contains pre-recovery browser sessions excluded by the Recovery Set contract"
+        );
+    }
+    if !is_sha256(&store.outbox_snapshot_digest) {
+        bail!("restored Store Outbox snapshot digest is invalid");
+    }
+    let supported_outbox_states = ["failed", "pending", "processing", "published"];
+    if store
+        .outbox_status_counts
+        .iter()
+        .any(|(status, count)| !supported_outbox_states.contains(&status.as_str()) || *count == 0)
+    {
+        bail!("restored Store contains an unsupported Outbox observation");
+    }
+    let mut previous = None;
+    for service in &store.managed_services {
+        if service.service_id.trim().is_empty()
+            || service.service_principal.trim().is_empty()
+            || !is_sha256(&service.enrollment_receipt_digest)
+            || service.enrollment_grant_revision == 0
+            || !matches!(service.enrollment_state.as_str(), "active" | "revoked")
+            || service.version == 0
+            || service
+                .core_document_digest
+                .as_deref()
+                .is_some_and(|digest| !is_sha256(digest))
+            || previous.is_some_and(|value| value >= service.service_id.as_str())
+        {
+            bail!("restored Store managed-Service identity evidence is invalid");
+        }
+        previous = Some(service.service_id.as_str());
+    }
+    Ok(())
+}
+
+fn validate_reconciliation_services(
+    input: &ReconciliationInput,
+    store: &StoreRecoveryObservation,
+) -> Result<()> {
+    if input.managed_services != reconciled_services_from_store(store) {
+        bail!("reviewed managed-Service evidence does not match the restored Store identity set");
+    }
+    Ok(())
+}
+
+fn reconciled_services_from_store(
+    store: &StoreRecoveryObservation,
+) -> Vec<ReconciledManagedService> {
+    store
+        .managed_services
+        .iter()
+        .map(|service| ReconciledManagedService {
+            service_id: service.service_id.clone(),
+            service_principal: service.service_principal.clone(),
+            enrollment_receipt_digest: service.enrollment_receipt_digest.clone(),
+            authorization_epoch: service.authorization_epoch,
+            core_document_digest: service.core_document_digest.clone(),
+        })
+        .collect()
+}
+
+fn build_reconciliation_plan(
+    recovery: &RecoveryState,
+    store_observation_digest: &str,
+    reconciliation_input_digest: &str,
+    observed_at_unix_ms: u64,
+) -> ReconciliationPlan {
+    ReconciliationPlan {
+        schema: RECONCILIATION_PLAN_SCHEMA,
+        action: "reconcile",
+        plan_digest: String::new(),
+        recovery_set_id: recovery.recovery_set_id.clone(),
+        recovery_set_digest: recovery.recovery_set_digest.clone(),
+        restore_plan_digest: recovery.plan_digest.clone(),
+        release_id: recovery.release_id.clone(),
+        target_store_identity_digest: recovery.target_store_identity_digest.clone(),
+        store_observation_digest: store_observation_digest.to_owned(),
+        reconciliation_input_digest: reconciliation_input_digest.to_owned(),
+        observed_at_unix_ms,
+        steps: vec![
+            "verify_recovery_state_and_release".to_owned(),
+            "observe_restored_store_without_mutation".to_owned(),
+            "bind_managed_service_identity_continuity".to_owned(),
+            "bind_single_deployment_and_outbox_reconciliation".to_owned(),
+            "record_ready_for_activation".to_owned(),
+        ],
+        approval_boundaries: vec!["recovery_reconciliation".to_owned()],
+        next_actions: vec![
+            "Keep the Console in restore mode after reconciliation.".to_owned(),
+            "Review a separate activation plan before enabling management mutations or background work."
+                .to_owned(),
+        ],
+    }
+}
+
+fn reconciliation_plan_digest(plan: &ReconciliationPlan) -> Result<String> {
+    let mut value = serde_json::to_value(plan).context("encode Console reconciliation plan")?;
+    value["planDigest"] = Value::String(String::new());
+    Ok(sha256(&serde_json::to_vec(&value)?))
+}
+
+fn print_or_write_reconciliation_plan(
+    plan: &ReconciliationPlan,
+    output: Option<&Path>,
+) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(plan).context("encode Console reconciliation plan")?;
+    if let Some(path) = output {
+        atomic_write(path, &bytes)?;
+        eprintln!("Wrote Console reconciliation plan to {}.", path.display());
+    } else {
+        println!(
+            "{}",
+            String::from_utf8(bytes).context("render Console reconciliation plan")?
+        );
+    }
+    Ok(())
+}
+
+fn validate_plan_output_path(
+    output: Option<&Path>,
+    protected_files: &[PathBuf],
+    protected_directories: &[PathBuf],
+) -> Result<()> {
+    let Some(output) = output else {
+        return Ok(());
+    };
+    let output = normalized_absolute_path(output)?;
+    if protected_files
+        .iter()
+        .map(|path| normalized_absolute_path(path))
+        .collect::<Result<Vec<_>>>()?
+        .contains(&output)
+        || protected_directories
+            .iter()
+            .map(|path| normalized_absolute_path(path))
+            .collect::<Result<Vec<_>>>()?
+            .iter()
+            .any(|directory| output.starts_with(directory))
+    {
+        bail!("plan output must not overwrite Console recovery inputs or owned state");
+    }
+    Ok(())
+}
+
+fn normalized_absolute_path(path: &Path) -> Result<PathBuf> {
+    let path = absolute_path(path)?;
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    bail!("path escapes its filesystem root");
+                }
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    Ok(normalized)
+}
+
+fn build_reconciliation_evidence(
+    recovery: &RecoveryState,
+    plan: &ReconciliationPlan,
+    input: &ReconciliationInput,
+    store: StoreRecoveryObservation,
+    store_observation_digest: String,
+    reconciliation_input_digest: String,
+) -> Result<ReconciliationEvidence> {
+    let mut evidence = ReconciliationEvidence {
+        schema: RECONCILIATION_EVIDENCE_SCHEMA.to_owned(),
+        evidence_id: String::new(),
+        evidence_digest: String::new(),
+        recovery_set_id: recovery.recovery_set_id.clone(),
+        recovery_set_digest: recovery.recovery_set_digest.clone(),
+        restore_plan_digest: recovery.plan_digest.clone(),
+        reconciliation_plan_digest: plan.plan_digest.clone(),
+        release_id: recovery.release_id.clone(),
+        target_store_identity_digest: recovery.target_store_identity_digest.clone(),
+        store_observation_digest,
+        reconciliation_input_digest,
+        observed_at_unix_ms: input.observed_at_unix_ms,
+        reviewed_by: input.reviewed_by.clone(),
+        authority_evidence_ref: input.authority_evidence_ref.clone(),
+        identity_evidence_ref: input.identity_evidence_ref.clone(),
+        outbox_evidence_ref: input.outbox_evidence_ref.clone(),
+        single_authoritative_deployment: input.single_authoritative_deployment,
+        identity_and_enrollment_continuity_verified: input
+            .identity_and_enrollment_continuity_verified,
+        outbox_reconciled: input.outbox_reconciled,
+        reconciled_managed_services: input.managed_services.clone(),
+        store,
+    };
+    evidence.evidence_digest = reconciliation_evidence_digest(&evidence)?;
+    evidence.evidence_id = format!("recon_{}", &evidence.evidence_digest[7..23]);
+    Ok(evidence)
+}
+
+fn reconciliation_evidence_digest(evidence: &ReconciliationEvidence) -> Result<String> {
+    let mut value = serde_json::to_value(evidence).context("encode reconciliation evidence")?;
+    value["evidenceId"] = Value::String(String::new());
+    value["evidenceDigest"] = Value::String(String::new());
+    Ok(sha256(&serde_json::to_vec(&value)?))
+}
+
+fn publish_reconciliation_evidence(root: &Path, evidence: &ReconciliationEvidence) -> Result<()> {
+    let path = root.join(RECONCILIATION_EVIDENCE_FILE);
+    let bytes = serde_json::to_vec_pretty(evidence).context("encode reconciliation evidence")?;
+    if let Some(existing) = read_optional_regular_file(&path, "Console reconciliation evidence")? {
+        if existing != bytes {
+            bail!("different Console reconciliation evidence already exists");
+        }
+        return Ok(());
+    }
+    atomic_write(&path, &bytes)
+}
+
+fn write_reconciled_recovery_state(
+    root: &Path,
+    recovery: &RecoveryState,
+    evidence: &ReconciliationEvidence,
+) -> Result<()> {
+    let state = RecoveryState {
+        schema: RECOVERY_STATE_SCHEMA.to_owned(),
+        recovery_set_id: recovery.recovery_set_id.clone(),
+        recovery_set_digest: recovery.recovery_set_digest.clone(),
+        plan_digest: recovery.plan_digest.clone(),
+        release_id: recovery.release_id.clone(),
+        target_store_identity_digest: recovery.target_store_identity_digest.clone(),
+        status: RecoveryStatus::ReadyForActivation,
+        phase: "activation_approval".to_owned(),
+        reconciliation_evidence_digest: Some(evidence.evidence_digest.clone()),
+        started_at_unix_ms: recovery.started_at_unix_ms,
+        updated_at_unix_ms: unix_time_ms()?,
+    };
+    atomic_write(
+        &root.join(RECOVERY_STATE_FILE),
+        &serde_json::to_vec_pretty(&state).context("encode Console recovery state")?,
+    )
 }
 
 trait RestoreAdapter {
@@ -676,6 +1380,7 @@ fn apply_restore_with(
     current_env_file: &Path,
     recovery_env_file: &Path,
     target_database_url: &str,
+    target_store_identity_digest: &str,
     identity_file: &Path,
     payload: &Path,
     manifest: &RecoverySetManifest,
@@ -689,6 +1394,7 @@ fn apply_restore_with(
         plan,
         RecoveryStatus::Applying,
         phase,
+        target_store_identity_digest,
         started_at_unix_ms,
     )?;
     let result = (|| -> Result<()> {
@@ -700,6 +1406,7 @@ fn apply_restore_with(
             plan,
             RecoveryStatus::Applying,
             phase,
+            target_store_identity_digest,
             started_at_unix_ms,
         )?;
         if !adapter.target_is_clean(target_database_url)? {
@@ -712,6 +1419,7 @@ fn apply_restore_with(
             plan,
             RecoveryStatus::Applying,
             phase,
+            target_store_identity_digest,
             started_at_unix_ms,
         )?;
         adapter.fence(root, current_env_file, &root.join(COMPOSE_FILE))?;
@@ -723,6 +1431,7 @@ fn apply_restore_with(
             plan,
             RecoveryStatus::Applying,
             phase,
+            target_store_identity_digest,
             started_at_unix_ms,
         )?;
         adapter.restore_store(target_database_url, identity_file, payload)?;
@@ -734,6 +1443,7 @@ fn apply_restore_with(
             plan,
             RecoveryStatus::Applying,
             phase,
+            target_store_identity_digest,
             started_at_unix_ms,
         )?;
         adapter.start_recovery(root, recovery_env_file, &root.join(COMPOSE_FILE))?;
@@ -743,6 +1453,7 @@ fn apply_restore_with(
             plan,
             RecoveryStatus::AwaitingReconciliation,
             "reconciliation",
+            target_store_identity_digest,
             started_at_unix_ms,
         )
     })();
@@ -753,6 +1464,7 @@ fn apply_restore_with(
             plan,
             RecoveryStatus::Failed,
             phase,
+            target_store_identity_digest,
             started_at_unix_ms,
         );
     }
@@ -983,6 +1695,7 @@ fn build_restore_plan(
     root: &Path,
     recovery_set: &Path,
     manifest: &RecoverySetManifest,
+    target_store_identity_digest: &str,
 ) -> RestorePlan {
     RestorePlan {
         schema: RESTORE_PLAN_SCHEMA,
@@ -995,6 +1708,7 @@ fn build_restore_plan(
         release_id: manifest.release_id.clone(),
         release_digest: manifest.release_digest.clone(),
         payload_digest: manifest.store.payload_digest.clone(),
+        target_store_identity_digest: target_store_identity_digest.to_owned(),
         steps: vec![
             "verify_decryption_identity_and_archive".to_owned(),
             "verify_clean_isolated_store".to_owned(),
@@ -1057,12 +1771,17 @@ fn database_identity(value: &str) -> Result<(String, u16, String)> {
     ))
 }
 
+fn database_identity_digest(value: &str) -> Result<String> {
+    Ok(sha256(&serde_json::to_vec(&database_identity(value)?)?))
+}
+
 fn write_recovery_state(
     root: &Path,
     manifest: &RecoverySetManifest,
     plan: &RestorePlan,
     status: RecoveryStatus,
     phase: &str,
+    target_store_identity_digest: &str,
     started_at_unix_ms: u64,
 ) -> Result<()> {
     let state = RecoveryState {
@@ -1071,8 +1790,10 @@ fn write_recovery_state(
         recovery_set_digest: manifest.recovery_set_digest.clone(),
         plan_digest: plan.plan_digest.clone(),
         release_id: manifest.release_id.clone(),
+        target_store_identity_digest: target_store_identity_digest.to_owned(),
         status,
         phase: phase.to_owned(),
+        reconciliation_evidence_digest: None,
         started_at_unix_ms,
         updated_at_unix_ms: unix_time_ms()?,
     };
@@ -1823,14 +2544,39 @@ fn check_installation_lock(root: &Path, checks: &mut Vec<DoctorCheck>) {
 fn check_recovery_state(root: &Path, checks: &mut Vec<DoctorCheck>) {
     match read_recovery_state_optional(root) {
         Ok(None) => checks.push(pass("recovery", "no Console recovery is active")),
-        Ok(Some(state)) => checks.push(fail(
-            "recovery",
-            &format!(
-                "Console recovery for {} is {:?} at phase {}; keep recovery mode fenced",
-                state.recovery_set_id, state.status, state.phase
-            )
-            .to_lowercase(),
-        )),
+        Ok(Some(state)) => {
+            let detail = if state.status == RecoveryStatus::ReadyForActivation {
+                match read_reconciliation_evidence_optional(root) {
+                    Ok(Some(evidence))
+                        if state.reconciliation_evidence_digest.as_deref()
+                            == Some(evidence.evidence_digest.as_str()) =>
+                    {
+                        if evidence.recovery_set_id == state.recovery_set_id
+                            && evidence.restore_plan_digest == state.plan_digest
+                            && evidence.target_store_identity_digest
+                                == state.target_store_identity_digest
+                        {
+                            format!(
+                                "Console recovery for {} is ready for a separate activation approval; keep recovery mode fenced",
+                                state.recovery_set_id
+                            )
+                        } else {
+                            "Console reconciliation evidence does not match recovery state; keep recovery mode fenced"
+                                .to_owned()
+                        }
+                    }
+                    _ => "Console reconciliation evidence is missing, invalid, or drifted; keep recovery mode fenced"
+                        .to_owned(),
+                }
+            } else {
+                format!(
+                    "Console recovery for {} is {:?} at phase {}; keep recovery mode fenced",
+                    state.recovery_set_id, state.status, state.phase
+                )
+                .to_lowercase()
+            };
+            checks.push(fail("recovery", &detail));
+        }
         Err(_) => checks.push(fail("recovery", "Console recovery evidence is invalid")),
     }
 }
@@ -1924,6 +2670,18 @@ fn read_recovery_state_optional(root: &Path) -> Result<Option<RecoveryState>> {
     };
     let state: RecoveryState =
         serde_json::from_slice(&bytes).context("decode Console recovery state")?;
+    let status_phase_valid = match state.status {
+        RecoveryStatus::Applying | RecoveryStatus::Failed => matches!(
+            state.phase.as_str(),
+            "verify_recovery_payload"
+                | "clean_store_check"
+                | "fence_previous_deployment"
+                | "restore_store"
+                | "start_recovery_mode"
+        ),
+        RecoveryStatus::AwaitingReconciliation => state.phase == "reconciliation",
+        RecoveryStatus::ReadyForActivation => state.phase == "activation_approval",
+    };
     if state.schema != RECOVERY_STATE_SCHEMA
         || state
             .recovery_set_id
@@ -1933,6 +2691,8 @@ fn read_recovery_state_optional(root: &Path) -> Result<Option<RecoveryState>> {
         || !is_sha256(&state.recovery_set_digest)
         || !is_sha256(&state.plan_digest)
         || release_version(&state.release_id).is_none()
+        || !is_sha256(&state.target_store_identity_digest)
+        || !status_phase_valid
         || !matches!(
             state.phase.as_str(),
             "clean_store_check"
@@ -1941,13 +2701,64 @@ fn read_recovery_state_optional(root: &Path) -> Result<Option<RecoveryState>> {
                 | "restore_store"
                 | "start_recovery_mode"
                 | "reconciliation"
+                | "activation_approval"
         )
+        || (state.status == RecoveryStatus::ReadyForActivation
+            && (state.phase != "activation_approval"
+                || state.reconciliation_evidence_digest.is_none()))
+        || (state.status != RecoveryStatus::ReadyForActivation
+            && state.reconciliation_evidence_digest.is_some())
+        || state
+            .reconciliation_evidence_digest
+            .as_deref()
+            .is_some_and(|digest| !is_sha256(digest))
         || state.started_at_unix_ms == 0
         || state.updated_at_unix_ms < state.started_at_unix_ms
     {
         bail!("Console recovery state is invalid");
     }
     Ok(Some(state))
+}
+
+fn read_reconciliation_evidence_optional(root: &Path) -> Result<Option<ReconciliationEvidence>> {
+    let path = root.join(RECONCILIATION_EVIDENCE_FILE);
+    let Some(bytes) = read_optional_regular_file(&path, "Console reconciliation evidence")? else {
+        return Ok(None);
+    };
+    let evidence: ReconciliationEvidence =
+        serde_json::from_slice(&bytes).context("decode Console reconciliation evidence")?;
+    if evidence.schema != RECONCILIATION_EVIDENCE_SCHEMA
+        || !evidence.evidence_id.starts_with("recon_")
+        || !is_sha256(&evidence.evidence_digest)
+        || evidence.evidence_digest != reconciliation_evidence_digest(&evidence)?
+        || evidence.evidence_id != format!("recon_{}", &evidence.evidence_digest[7..23])
+        || evidence
+            .recovery_set_id
+            .strip_prefix("rcv_")
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .is_none()
+        || !is_sha256(&evidence.recovery_set_digest)
+        || !is_sha256(&evidence.restore_plan_digest)
+        || !is_sha256(&evidence.reconciliation_plan_digest)
+        || release_version(&evidence.release_id).is_none()
+        || !is_sha256(&evidence.target_store_identity_digest)
+        || !is_sha256(&evidence.store_observation_digest)
+        || !is_sha256(&evidence.reconciliation_input_digest)
+        || evidence.observed_at_unix_ms == 0
+        || !valid_evidence_reference(&evidence.reviewed_by)
+        || !valid_evidence_reference(&evidence.authority_evidence_ref)
+        || !valid_evidence_reference(&evidence.identity_evidence_ref)
+        || !valid_evidence_reference(&evidence.outbox_evidence_ref)
+        || !evidence.single_authoritative_deployment
+        || !evidence.identity_and_enrollment_continuity_verified
+        || !evidence.outbox_reconciled
+        || evidence.reconciled_managed_services != reconciled_services_from_store(&evidence.store)
+        || evidence.store_observation_digest != sha256(&serde_json::to_vec(&evidence.store)?)
+        || validate_store_observation(&evidence.store).is_err()
+    {
+        bail!("Console reconciliation evidence is invalid");
+    }
+    Ok(Some(evidence))
 }
 
 fn read_optional_regular_file(path: &Path, label: &str) -> Result<Option<Vec<u8>>> {
@@ -2314,6 +3125,66 @@ mod tests {
         }
     }
 
+    fn recovery_state() -> RecoveryState {
+        RecoveryState {
+            schema: RECOVERY_STATE_SCHEMA.to_owned(),
+            recovery_set_id: "rcv_018f3f6a-7b8c-7def-8123-456789abcdef".to_owned(),
+            recovery_set_digest: digest('6'),
+            plan_digest: digest('7'),
+            release_id: "lenso-console@0.1.0".to_owned(),
+            target_store_identity_digest: digest('a'),
+            status: RecoveryStatus::AwaitingReconciliation,
+            phase: "reconciliation".to_owned(),
+            reconciliation_evidence_digest: None,
+            started_at_unix_ms: 1,
+            updated_at_unix_ms: 2,
+        }
+    }
+
+    fn store_recovery_observation() -> StoreRecoveryObservation {
+        StoreRecoveryObservation {
+            session_count: 0,
+            stale_session_count: 0,
+            outbox_status_counts: BTreeMap::from([
+                ("pending".to_owned(), 2),
+                ("published".to_owned(), 5),
+            ]),
+            outbox_snapshot_digest: digest('b'),
+            managed_services: vec![ObservedManagedService {
+                service_id: "support".to_owned(),
+                service_principal: "service:support".to_owned(),
+                enrollment_receipt_digest: digest('8'),
+                enrollment_grant_revision: 3,
+                authorization_epoch: 4,
+                enrollment_state: "active".to_owned(),
+                version: 6,
+                core_document_digest: Some(digest('9')),
+            }],
+        }
+    }
+
+    fn reconciliation_input() -> ReconciliationInput {
+        ReconciliationInput {
+            schema: RECONCILIATION_INPUT_SCHEMA.to_owned(),
+            recovery_set_id: recovery_state().recovery_set_id,
+            observed_at_unix_ms: 3,
+            reviewed_by: "operator:alice".to_owned(),
+            authority_evidence_ref: "change:console-dr-42".to_owned(),
+            identity_evidence_ref: "audit:identity-continuity-42".to_owned(),
+            outbox_evidence_ref: "audit:outbox-reconciliation-42".to_owned(),
+            single_authoritative_deployment: true,
+            identity_and_enrollment_continuity_verified: true,
+            outbox_reconciled: true,
+            managed_services: vec![ReconciledManagedService {
+                service_id: "support".to_owned(),
+                service_principal: "service:support".to_owned(),
+                enrollment_receipt_digest: digest('8'),
+                authorization_epoch: 4,
+                core_document_digest: Some(digest('9')),
+            }],
+        }
+    }
+
     fn state_for_manifest(
         release: &ConsoleReleaseManifest,
         manifest_bytes: &[u8],
@@ -2635,10 +3506,11 @@ mod tests {
         let verified = read_recovery_set(&recovery_root).unwrap();
         assert_eq!(verified.recovery_set_digest, manifest.recovery_set_digest);
         validate_recovery_set_for_state(&verified, &installed).unwrap();
-        let mut plan = build_restore_plan(&root, &recovery_root, &verified);
+        let mut plan = build_restore_plan(&root, &recovery_root, &verified, &digest('a'));
         plan.plan_digest = restore_plan_digest(&plan).unwrap();
         assert!(is_sha256(&plan.plan_digest));
         assert_eq!(plan.steps[0], "verify_decryption_identity_and_archive");
+        assert_eq!(plan.target_store_identity_digest, digest('a'));
         assert!(
             plan.approval_boundaries
                 .contains(&"disaster_recovery_restore".to_owned())
@@ -2666,6 +3538,10 @@ mod tests {
         )
         .unwrap();
         validate_restore_environments(&current, &recovery).unwrap();
+        assert_eq!(
+            database_identity_digest("postgres://console:old@restore/console").unwrap(),
+            database_identity_digest("postgres://console:new@restore/console").unwrap()
+        );
 
         fs::write(
             &recovery,
@@ -2694,7 +3570,7 @@ mod tests {
             &recovery_root,
         )
         .unwrap();
-        let mut plan = build_restore_plan(&root, &recovery_root, &manifest);
+        let mut plan = build_restore_plan(&root, &recovery_root, &manifest, &digest('a'));
         plan.plan_digest = restore_plan_digest(&plan).unwrap();
         let adapter = RecordingRestoreAdapter {
             calls: RefCell::new(Vec::new()),
@@ -2707,6 +3583,7 @@ mod tests {
             Path::new("current.env"),
             Path::new("recovery.env"),
             "postgres://console:secret@restore/console",
+            &digest('a'),
             Path::new("identity.txt"),
             &recovery_root.join(RECOVERY_STORE_FILE),
             &manifest,
@@ -2733,6 +3610,7 @@ mod tests {
                 Path::new("current.env"),
                 Path::new("recovery.env"),
                 "postgres://console:secret@restore/console",
+                &digest('a'),
                 Path::new("identity.txt"),
                 &recovery_root.join(RECOVERY_STORE_FILE),
                 &manifest,
@@ -2754,6 +3632,7 @@ mod tests {
                 Path::new("current.env"),
                 Path::new("recovery.env"),
                 "postgres://console:secret@restore/console",
+                &digest('a'),
                 Path::new("identity.txt"),
                 &recovery_root.join(RECOVERY_STORE_FILE),
                 &manifest,
@@ -2767,6 +3646,104 @@ mod tests {
             RecoveryStatus::Failed
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reconciliation_binds_store_and_external_evidence_before_activation() {
+        let root = test_root("reconciliation");
+        fs::create_dir_all(&root).unwrap();
+        let recovery = recovery_state();
+        let input = reconciliation_input();
+        let store = store_recovery_observation();
+        validate_reconciliation_input(&input, &recovery).unwrap();
+        validate_store_observation(&store).unwrap();
+        validate_reconciliation_services(&input, &store).unwrap();
+
+        let store_digest = sha256(&serde_json::to_vec(&store).unwrap());
+        let input_digest = sha256(&serde_json::to_vec(&input).unwrap());
+        let mut plan = build_reconciliation_plan(&recovery, &store_digest, &input_digest, 3);
+        plan.plan_digest = reconciliation_plan_digest(&plan).unwrap();
+        assert!(is_sha256(&plan.plan_digest));
+        assert_eq!(plan.approval_boundaries, ["recovery_reconciliation"]);
+
+        let evidence = build_reconciliation_evidence(
+            &recovery,
+            &plan,
+            &input,
+            store,
+            store_digest,
+            input_digest,
+        )
+        .unwrap();
+        publish_reconciliation_evidence(&root, &evidence).unwrap();
+        write_reconciled_recovery_state(&root, &recovery, &evidence).unwrap();
+
+        let recorded = read_reconciliation_evidence_optional(&root)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recorded.evidence_digest, evidence.evidence_digest);
+        let state = read_recovery_state_optional(&root).unwrap().unwrap();
+        assert_eq!(state.status, RecoveryStatus::ReadyForActivation);
+        assert_eq!(state.phase, "activation_approval");
+        assert_eq!(
+            state.reconciliation_evidence_digest.as_deref(),
+            Some(evidence.evidence_digest.as_str())
+        );
+        let mut checks = Vec::new();
+        check_recovery_state(&root, &mut checks);
+        assert!(matches!(checks[0].status, CheckStatus::Fail));
+        assert!(checks[0].detail.contains("separate activation approval"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reconciliation_rejects_sessions_and_managed_service_identity_drift() {
+        let recovery = recovery_state();
+        let mut input = reconciliation_input();
+        let mut store = store_recovery_observation();
+        store.session_count = 1;
+        store.stale_session_count = 1;
+        assert!(validate_store_observation(&store).is_err());
+
+        store.session_count = 0;
+        store.stale_session_count = 0;
+        input.managed_services[0].authorization_epoch += 1;
+        assert!(validate_reconciliation_services(&input, &store).is_err());
+
+        input = reconciliation_input();
+        input.single_authoritative_deployment = false;
+        assert!(validate_reconciliation_input(&input, &recovery).is_err());
+    }
+
+    #[test]
+    fn recovery_plan_output_cannot_overwrite_inputs_or_owned_state() {
+        let root = test_root("protected-plan-output");
+        let recovery_set = root.join("recovery-set");
+        let env_file = root.with_extension("env");
+        assert!(
+            validate_plan_output_path(
+                Some(&root.join("recovery-state.json")),
+                std::slice::from_ref(&env_file),
+                &[root.clone(), recovery_set.clone()],
+            )
+            .is_err()
+        );
+        assert!(
+            validate_plan_output_path(
+                Some(&env_file),
+                std::slice::from_ref(&env_file),
+                &[root.clone(), recovery_set],
+            )
+            .is_err()
+        );
+        assert!(
+            validate_plan_output_path(
+                Some(&root.with_extension("plan.json")),
+                &[env_file],
+                &[root],
+            )
+            .is_ok()
+        );
     }
 
     #[test]
