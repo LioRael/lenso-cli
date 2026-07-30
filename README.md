@@ -160,7 +160,12 @@ management mutations are enabled.
 Generated deployments set `CONSOLE_RECOVERY_MODE` explicitly. `normal` runs the
 API and Worker; `restore` keeps the inspection API available while the Console
 Service suppresses background work and rejects management mutations. Recovery
-mode can only be changed through the external installation authority.
+mode can only be changed through the external installation authority. During
+activation and activation recovery, the CLI reads the running container's
+minimal `/health/authority` response and requires the exact Console Service
+identity plus the expected `normal` or `restore` mode before committing durable
+evidence. A healthy process with the wrong workload mode is treated as a failed
+authority transfer and is fenced again.
 
 After installing and starting the independent Lenso Console Service, create its
 first password user and bootstrap that user as the first Console Operator from

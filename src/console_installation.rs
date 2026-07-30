@@ -29,6 +29,8 @@ const ACTIVATION_PLAN_SCHEMA: &str = "lenso.console-activation-plan.v1";
 const ACTIVATION_EVIDENCE_SCHEMA: &str = "lenso.console-activation-evidence.v1";
 const ACTIVATION_RECOVERY_PLAN_SCHEMA: &str = "lenso.console-activation-recovery-plan.v1";
 const ACTIVATION_RECOVERY_EVIDENCE_SCHEMA: &str = "lenso.console-activation-recovery-evidence.v1";
+const CONSOLE_AUTHORITY_SCHEMA: &str = "lenso.console-authority.v1";
+const CONSOLE_SERVICE_ID: &str = "lenso-console";
 const DOCTOR_SCHEMA: &str = "lenso.console-doctor.v1";
 const TRUSTED_RELEASE_REPOSITORY: &str = "LioRael/lenso-runtime-console";
 const TRUSTED_SIGNER_WORKFLOW: &str = "LioRael/lenso-runtime-console/.github/workflows/publish.yml";
@@ -482,7 +484,24 @@ struct ActivationEvidence {
     target_store_identity_digest: String,
     authority_transfer_approved: bool,
     workload_mode: String,
+    authority_probe: ConsoleAuthorityProbe,
+    authority_probe_digest: String,
     activated_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ConsoleWorkloadMode {
+    Normal,
+    Restore,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ConsoleAuthorityProbe {
+    schema: String,
+    service_id: String,
+    workload_mode: ConsoleWorkloadMode,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -521,6 +540,9 @@ struct ActivationRecoveryEvidence {
     prior_status: RecoveryStatus,
     prior_phase: String,
     recovery_mode_restored: bool,
+    workload_mode: String,
+    authority_probe: ConsoleAuthorityProbe,
+    authority_probe_digest: String,
     store_observation_digest: String,
     store: StoreRecoveryObservation,
     restored_at_unix_ms: u64,
@@ -890,6 +912,13 @@ trait ActivationAdapter {
     fn stop_normal(&self, root: &Path, env_file: &Path, compose_file: &Path) -> Result<()>;
     fn start_normal(&self, root: &Path, env_file: &Path, compose_file: &Path) -> Result<()>;
     fn restore_recovery(&self, root: &Path, env_file: &Path, compose_file: &Path) -> Result<()>;
+    fn verify_authority_mode(
+        &self,
+        root: &Path,
+        env_file: &Path,
+        compose_file: &Path,
+        expected: ConsoleWorkloadMode,
+    ) -> Result<ConsoleAuthorityProbe>;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -944,6 +973,59 @@ impl ActivationAdapter for ProductionActivationAdapter {
             ],
         )
     }
+
+    fn verify_authority_mode(
+        &self,
+        root: &Path,
+        env_file: &Path,
+        compose_file: &Path,
+        expected: ConsoleWorkloadMode,
+    ) -> Result<ConsoleAuthorityProbe> {
+        let output = Command::new("docker")
+            .args(["compose", "--project-name", "lenso-console", "--env-file"])
+            .arg(env_file)
+            .args(["--file"])
+            .arg(compose_file)
+            .args([
+                "exec",
+                "-T",
+                "console",
+                "/usr/bin/curl",
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--max-time",
+                "5",
+                "http://127.0.0.1:3030/health/authority",
+            ])
+            .current_dir(root)
+            .output()
+            .context("read the running Console authority probe")?;
+        if !output.status.success() {
+            bail!("running Console authority probe was unavailable");
+        }
+        let probe: ConsoleAuthorityProbe = serde_json::from_slice(&output.stdout)
+            .context("decode the running Console authority probe")?;
+        validate_authority_probe(&probe, expected)?;
+        Ok(probe)
+    }
+}
+
+fn validate_authority_probe(
+    probe: &ConsoleAuthorityProbe,
+    expected: ConsoleWorkloadMode,
+) -> Result<()> {
+    if probe.schema != CONSOLE_AUTHORITY_SCHEMA
+        || probe.service_id != CONSOLE_SERVICE_ID
+        || probe.workload_mode != expected
+    {
+        bail!("running Console authority probe does not match the expected workload mode");
+    }
+    Ok(())
+}
+
+fn authority_probe_digest(probe: &ConsoleAuthorityProbe) -> Result<String> {
+    Ok(sha256(&serde_json::to_vec(probe)?))
 }
 
 fn observe_outbox_snapshot_digest(database_url: &str) -> Result<String> {
@@ -1283,6 +1365,7 @@ fn build_activation_recovery_plan(recovery: &RecoveryState) -> Result<Activation
             "verify_interrupted_or_failed_activation".to_owned(),
             "stop_possible_normal_mode_writer".to_owned(),
             "start_recovery_mode_fence".to_owned(),
+            "verify_restore_authority_probe".to_owned(),
             "observe_fenced_store".to_owned(),
             "record_reconciliation_required".to_owned(),
         ],
@@ -1343,6 +1426,12 @@ fn apply_activation_recovery_with(
             None,
         )?;
         adapter.restore_recovery(root, recovery_env_file, &root.join(COMPOSE_FILE))?;
+        let authority_probe = adapter.verify_authority_mode(
+            root,
+            recovery_env_file,
+            &root.join(COMPOSE_FILE),
+            ConsoleWorkloadMode::Restore,
+        )?;
         phase = "activation_recovery_observe";
         write_activation_intervention_state(
             root,
@@ -1354,7 +1443,7 @@ fn apply_activation_recovery_with(
         let database_url = console_database_url(recovery_env_file)?;
         let store = adapter.observe_store(&database_url, recovery.started_at_unix_ms)?;
         validate_store_observation(&store)?;
-        let evidence = build_activation_recovery_evidence(recovery, plan, store)?;
+        let evidence = build_activation_recovery_evidence(recovery, plan, &authority_probe, store)?;
         phase = "activation_recovery_commit";
         write_activation_intervention_state(
             root,
@@ -1387,6 +1476,7 @@ fn apply_activation_recovery_with(
 fn build_activation_recovery_evidence(
     recovery: &RecoveryState,
     plan: &ActivationRecoveryPlan,
+    authority_probe: &ConsoleAuthorityProbe,
     store: StoreRecoveryObservation,
 ) -> Result<ActivationRecoveryEvidence> {
     let store_observation_digest = sha256(&serde_json::to_vec(&store)?);
@@ -1411,6 +1501,9 @@ fn build_activation_recovery_evidence(
         prior_status: plan.prior_status,
         prior_phase: plan.prior_phase.clone(),
         recovery_mode_restored: true,
+        workload_mode: "restore".to_owned(),
+        authority_probe: authority_probe.clone(),
+        authority_probe_digest: authority_probe_digest(authority_probe)?,
         store_observation_digest,
         store,
         restored_at_unix_ms: unix_time_ms()?,
@@ -1552,6 +1645,7 @@ fn build_activation_plan(
             "reobserve_store_and_reject_drift".to_owned(),
             "record_authority_transfer_started".to_owned(),
             "start_console_in_normal_mode".to_owned(),
+            "verify_normal_authority_probe".to_owned(),
             "publish_activation_evidence".to_owned(),
         ],
         approval_boundaries: vec![
@@ -1598,35 +1692,57 @@ fn apply_activation_with(
         &plan.plan_digest,
         None,
     )?;
-    if let Err(start_error) = adapter.start_normal(root, active_env_file, &root.join(COMPOSE_FILE))
-    {
-        let rollback = adapter.restore_recovery(root, recovery_env_file, &root.join(COMPOSE_FILE));
-        let (phase, message) = match rollback {
-            Ok(()) => (
-                "activation_rollback",
-                format!(
-                    "normal-mode activation failed and recovery mode was restored: {start_error}"
+    let authority_probe = match adapter
+        .start_normal(root, active_env_file, &root.join(COMPOSE_FILE))
+        .and_then(|()| {
+            adapter.verify_authority_mode(
+                root,
+                active_env_file,
+                &root.join(COMPOSE_FILE),
+                ConsoleWorkloadMode::Normal,
+            )
+        }) {
+        Ok(probe) => probe,
+        Err(start_error) => {
+            let rollback = adapter
+                .restore_recovery(root, recovery_env_file, &root.join(COMPOSE_FILE))
+                .and_then(|()| {
+                    adapter
+                        .verify_authority_mode(
+                            root,
+                            recovery_env_file,
+                            &root.join(COMPOSE_FILE),
+                            ConsoleWorkloadMode::Restore,
+                        )
+                        .map(|_| ())
+                });
+            let (phase, message) = match rollback {
+                Ok(()) => (
+                    "activation_rollback",
+                    format!(
+                        "normal-mode activation failed and recovery mode was restored: {start_error}"
+                    ),
                 ),
-            ),
-            Err(rollback_error) => (
-                "activation_rollback_failed",
-                format!(
-                    "normal-mode activation failed and recovery-mode restoration also failed: {start_error}; rollback: {rollback_error}"
+                Err(rollback_error) => (
+                    "activation_rollback_failed",
+                    format!(
+                        "normal-mode activation failed and recovery-mode restoration also failed: {start_error}; rollback: {rollback_error}"
+                    ),
                 ),
-            ),
-        };
-        write_activation_recovery_state(
-            root,
-            recovery,
-            RecoveryStatus::ActivationFailed,
-            phase,
-            &plan.plan_digest,
-            None,
-        )?;
-        bail!(message);
-    }
+            };
+            write_activation_recovery_state(
+                root,
+                recovery,
+                RecoveryStatus::ActivationFailed,
+                phase,
+                &plan.plan_digest,
+                None,
+            )?;
+            bail!(message);
+        }
+    };
 
-    let evidence = build_activation_evidence(recovery, reconciliation, plan)?;
+    let evidence = build_activation_evidence(recovery, reconciliation, plan, &authority_probe)?;
     publish_activation_evidence(root, &evidence)?;
     write_activation_recovery_state(
         root,
@@ -1642,6 +1758,7 @@ fn build_activation_evidence(
     recovery: &RecoveryState,
     reconciliation: &ReconciliationEvidence,
     plan: &ActivationPlan,
+    authority_probe: &ConsoleAuthorityProbe,
 ) -> Result<ActivationEvidence> {
     let mut evidence = ActivationEvidence {
         schema: ACTIVATION_EVIDENCE_SCHEMA.to_owned(),
@@ -1657,6 +1774,8 @@ fn build_activation_evidence(
         target_store_identity_digest: recovery.target_store_identity_digest.clone(),
         authority_transfer_approved: true,
         workload_mode: "normal".to_owned(),
+        authority_probe: authority_probe.clone(),
+        authority_probe_digest: authority_probe_digest(authority_probe)?,
         activated_at_unix_ms: unix_time_ms()?,
     };
     evidence.evidence_digest = activation_evidence_digest(&evidence)?;
@@ -3825,6 +3944,9 @@ fn read_activation_evidence_optional(root: &Path) -> Result<Option<ActivationEvi
         || !is_sha256(&evidence.target_store_identity_digest)
         || !evidence.authority_transfer_approved
         || evidence.workload_mode != "normal"
+        || !is_sha256(&evidence.authority_probe_digest)
+        || validate_authority_probe(&evidence.authority_probe, ConsoleWorkloadMode::Normal).is_err()
+        || evidence.authority_probe_digest != authority_probe_digest(&evidence.authority_probe)?
         || evidence.activated_at_unix_ms == 0
     {
         bail!("Console activation evidence is invalid");
@@ -3860,6 +3982,11 @@ fn read_activation_recovery_evidence_optional(
         || !is_sha256(&evidence.target_store_identity_digest)
         || !valid_activation_recovery_origin(evidence.prior_status, &evidence.prior_phase)
         || !evidence.recovery_mode_restored
+        || evidence.workload_mode != "restore"
+        || !is_sha256(&evidence.authority_probe_digest)
+        || validate_authority_probe(&evidence.authority_probe, ConsoleWorkloadMode::Restore)
+            .is_err()
+        || evidence.authority_probe_digest != authority_probe_digest(&evidence.authority_probe)?
         || !is_sha256(&evidence.store_observation_digest)
         || evidence.store_observation_digest != sha256(&serde_json::to_vec(&evidence.store)?)
         || validate_store_observation(&evidence.store).is_err()
@@ -4131,6 +4258,7 @@ mod tests {
         calls: RefCell<Vec<&'static str>>,
         fail_start: bool,
         fail_rollback: bool,
+        fail_probe: Option<ConsoleWorkloadMode>,
     }
 
     impl ActivationAdapter for RecordingActivationAdapter {
@@ -4167,6 +4295,24 @@ mod tests {
                 bail!("simulated recovery rollback failure");
             }
             Ok(())
+        }
+
+        fn verify_authority_mode(
+            &self,
+            _root: &Path,
+            _env_file: &Path,
+            _compose_file: &Path,
+            expected: ConsoleWorkloadMode,
+        ) -> Result<ConsoleAuthorityProbe> {
+            let call = match expected {
+                ConsoleWorkloadMode::Normal => "probe_normal",
+                ConsoleWorkloadMode::Restore => "probe_restore",
+            };
+            self.calls.borrow_mut().push(call);
+            if self.fail_probe == Some(expected) {
+                bail!("simulated authority probe mismatch");
+            }
+            Ok(authority_probe(expected))
         }
     }
 
@@ -4261,6 +4407,14 @@ mod tests {
 
     fn digest(character: char) -> String {
         format!("sha256:{}", character.to_string().repeat(64))
+    }
+
+    fn authority_probe(workload_mode: ConsoleWorkloadMode) -> ConsoleAuthorityProbe {
+        ConsoleAuthorityProbe {
+            schema: CONSOLE_AUTHORITY_SCHEMA.to_owned(),
+            service_id: CONSOLE_SERVICE_ID.to_owned(),
+            workload_mode,
+        }
     }
 
     fn manifest() -> ConsoleReleaseManifest {
@@ -4965,6 +5119,7 @@ mod tests {
             calls: RefCell::new(Vec::new()),
             fail_start: false,
             fail_rollback: false,
+            fail_probe: None,
         };
 
         apply_activation_with(
@@ -4978,7 +5133,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(*adapter.calls.borrow(), ["normal"]);
+        assert_eq!(*adapter.calls.borrow(), ["normal", "probe_normal"]);
         let state = read_recovery_state_optional(&root).unwrap().unwrap();
         assert_eq!(state.status, RecoveryStatus::Activated);
         assert!(root.join(ACTIVATION_EVIDENCE_FILE).is_file());
@@ -5001,6 +5156,7 @@ mod tests {
             calls: RefCell::new(Vec::new()),
             fail_start: true,
             fail_rollback: false,
+            fail_probe: None,
         };
 
         assert!(
@@ -5016,7 +5172,10 @@ mod tests {
             .is_err()
         );
 
-        assert_eq!(*adapter.calls.borrow(), ["normal", "rollback"]);
+        assert_eq!(
+            *adapter.calls.borrow(),
+            ["normal", "rollback", "probe_restore"]
+        );
         let state = read_recovery_state_optional(&root).unwrap().unwrap();
         assert_eq!(state.status, RecoveryStatus::ActivationFailed);
         assert_eq!(state.phase, "activation_rollback");
@@ -5024,6 +5183,46 @@ mod tests {
         let mut checks = Vec::new();
         check_recovery_state(&root, &mut checks);
         assert!(matches!(checks[0].status, CheckStatus::Fail));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn healthy_activation_with_wrong_authority_mode_is_refenced() {
+        let root = test_root("activation-authority-mismatch");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(COMPOSE_FILE), "services: {}\n").unwrap();
+        let (recovery, reconciliation) = reconciled_recovery();
+        let mut plan = build_activation_plan(&recovery, &reconciliation);
+        plan.plan_digest = activation_plan_digest(&plan).unwrap();
+        let adapter = RecordingActivationAdapter {
+            observation: reconciliation.store.clone(),
+            calls: RefCell::new(Vec::new()),
+            fail_start: false,
+            fail_rollback: false,
+            fail_probe: Some(ConsoleWorkloadMode::Normal),
+        };
+
+        assert!(
+            apply_activation_with(
+                &adapter,
+                &root,
+                Path::new("recovery.env"),
+                Path::new("active.env"),
+                &recovery,
+                &reconciliation,
+                &plan,
+            )
+            .is_err()
+        );
+
+        assert_eq!(
+            *adapter.calls.borrow(),
+            ["normal", "probe_normal", "rollback", "probe_restore"]
+        );
+        let state = read_recovery_state_optional(&root).unwrap().unwrap();
+        assert_eq!(state.status, RecoveryStatus::ActivationFailed);
+        assert_eq!(state.phase, "activation_rollback");
+        assert!(!root.join(ACTIVATION_EVIDENCE_FILE).exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -5071,6 +5270,7 @@ mod tests {
             calls: RefCell::new(Vec::new()),
             fail_start: false,
             fail_rollback: false,
+            fail_probe: None,
         };
 
         apply_activation_recovery_with(
@@ -5083,7 +5283,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(*adapter.calls.borrow(), ["stop", "rollback", "observe"]);
+        assert_eq!(
+            *adapter.calls.borrow(),
+            ["stop", "rollback", "probe_restore", "observe"]
+        );
         let state = read_recovery_state_optional(&root).unwrap().unwrap();
         assert_eq!(state.status, RecoveryStatus::AwaitingReconciliation);
         assert_eq!(state.phase, "reconciliation_after_activation_recovery");
@@ -5113,6 +5316,7 @@ mod tests {
             calls: RefCell::new(Vec::new()),
             fail_start: false,
             fail_rollback: true,
+            fail_probe: None,
         };
 
         assert!(
@@ -5136,6 +5340,48 @@ mod tests {
     }
 
     #[test]
+    fn activation_recovery_requires_a_verified_restore_authority_probe() {
+        let root = test_root("activation-recovery-authority-mismatch");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(COMPOSE_FILE), "services: {}\n").unwrap();
+        let (mut recovery, reconciliation) = reconciled_recovery();
+        recovery.status = RecoveryStatus::ActivationFailed;
+        recovery.phase = "activation_rollback_failed".to_owned();
+        recovery.activation_plan_digest = Some(digest('c'));
+        let mut plan = build_activation_recovery_plan(&recovery).unwrap();
+        plan.plan_digest = activation_recovery_plan_digest(&plan).unwrap();
+        let adapter = RecordingActivationAdapter {
+            observation: reconciliation.store,
+            calls: RefCell::new(Vec::new()),
+            fail_start: false,
+            fail_rollback: false,
+            fail_probe: Some(ConsoleWorkloadMode::Restore),
+        };
+
+        assert!(
+            apply_activation_recovery_with(
+                &adapter,
+                &root,
+                Path::new("recovery.env"),
+                Path::new("active.env"),
+                &recovery,
+                &plan,
+            )
+            .is_err()
+        );
+
+        assert_eq!(
+            *adapter.calls.borrow(),
+            ["stop", "rollback", "probe_restore"]
+        );
+        let state = read_recovery_state_optional(&root).unwrap().unwrap();
+        assert_eq!(state.status, RecoveryStatus::ActivationRecoveryFailed);
+        assert_eq!(state.phase, "activation_recovery_start");
+        assert!(!root.join(ACTIVATION_RECOVERY_EVIDENCE_FILE).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn recovery_evidence_history_preserves_replaced_canonical_receipts() {
         let root = test_root("recovery-evidence-history");
         fs::create_dir_all(&root).unwrap();
@@ -5145,9 +5391,13 @@ mod tests {
         recovery.activation_plan_digest = Some(digest('c'));
         let mut plan = build_activation_recovery_plan(&recovery).unwrap();
         plan.plan_digest = activation_recovery_plan_digest(&plan).unwrap();
-        let first =
-            build_activation_recovery_evidence(&recovery, &plan, reconciliation.store.clone())
-                .unwrap();
+        let first = build_activation_recovery_evidence(
+            &recovery,
+            &plan,
+            &authority_probe(ConsoleWorkloadMode::Restore),
+            reconciliation.store.clone(),
+        )
+        .unwrap();
         publish_activation_recovery_evidence(&root, &first).unwrap();
         let mut second = first.clone();
         second.restored_at_unix_ms += 1;
