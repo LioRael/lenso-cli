@@ -1129,6 +1129,8 @@ enum ConsoleOperatorCommand {
 enum ConsoleRecoveryCommand {
     /// Validate and record reviewed post-restore reconciliation evidence.
     Reconcile(ConsoleReconcileArgs),
+    /// Activate a reconciled Console recovery with explicit authority transfer.
+    Activate(ConsoleActivateArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -1245,6 +1247,37 @@ struct ConsoleReconcileArgs {
     /// Exact reconciliation plan digest approved by the operator.
     #[arg(long, requires = "apply")]
     approve_plan_digest: Option<String>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ConsoleActivateArgs {
+    /// External Console installation root.
+    #[arg(long, default_value = ".lenso-console")]
+    root: std::path::PathBuf,
+
+    /// Recovery-mode environment used for automatic rollback.
+    #[arg(long)]
+    recovery_env_file: std::path::PathBuf,
+
+    /// Normal-mode environment used for authority transfer.
+    #[arg(long)]
+    active_env_file: std::path::PathBuf,
+
+    /// Write the deterministic activation plan to this path.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+
+    /// Apply the reviewed activation plan.
+    #[arg(long)]
+    apply: bool,
+
+    /// Exact activation plan digest approved by the operator.
+    #[arg(long, requires = "apply")]
+    approve_plan_digest: Option<String>,
+
+    /// Explicitly approve transfer to the normal-mode authoritative writer.
+    #[arg(long, requires = "apply")]
+    approve_authority_transfer: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -3265,6 +3298,20 @@ impl From<&ConsoleReconcileArgs> for console_installation::ReconcileOptions {
     }
 }
 
+impl From<&ConsoleActivateArgs> for console_installation::ActivateOptions {
+    fn from(args: &ConsoleActivateArgs) -> Self {
+        Self {
+            root: args.root.clone(),
+            recovery_env_file: args.recovery_env_file.clone(),
+            active_env_file: args.active_env_file.clone(),
+            output: args.output.clone(),
+            apply: args.apply,
+            approve_plan_digest: args.approve_plan_digest.clone(),
+            approve_authority_transfer: args.approve_authority_transfer,
+        }
+    }
+}
+
 impl From<&ModuleCreateArgs> for module::ModuleCreateOptions {
     fn from(args: &ModuleCreateArgs) -> Self {
         Self {
@@ -3594,6 +3641,9 @@ async fn main() -> anyhow::Result<()> {
             ConsoleCommand::Recovery { command } => match command {
                 ConsoleRecoveryCommand::Reconcile(args) => {
                     console_installation::reconcile((&args).into())?;
+                }
+                ConsoleRecoveryCommand::Activate(args) => {
+                    console_installation::activate((&args).into())?;
                 }
             },
             ConsoleCommand::Doctor(args) => console_installation::doctor((&args).into()).await?,
@@ -4694,6 +4744,35 @@ mod tests {
             args.evidence,
             std::path::Path::new("reconciliation-input.json")
         );
+
+        let activate = Cli::parse_from([
+            "lenso",
+            "console",
+            "recovery",
+            "activate",
+            "--root",
+            "/srv/lenso-console",
+            "--recovery-env-file",
+            "recovery.env",
+            "--active-env-file",
+            "active.env",
+            "--apply",
+            "--approve-plan-digest",
+            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "--approve-authority-transfer",
+        ]);
+        let Command::Console {
+            command:
+                ConsoleCommand::Recovery {
+                    command: ConsoleRecoveryCommand::Activate(args),
+                },
+        } = activate.command
+        else {
+            panic!("expected Console recovery activation");
+        };
+        assert!(args.apply);
+        assert!(args.approve_authority_transfer);
+        assert_eq!(args.active_env_file, std::path::Path::new("active.env"));
 
         let backup = Cli::parse_from([
             "lenso",
