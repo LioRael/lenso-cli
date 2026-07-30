@@ -1133,6 +1133,8 @@ enum ConsoleCommand {
     Upgrade(ConsoleChangeArgs),
     /// Create an encrypted Console Recovery Set.
     Backup(ConsoleBackupArgs),
+    /// Plan or apply a fenced Console Recovery Set restore.
+    Restore(ConsoleRestoreArgs),
     /// Validate exact Console installation evidence and optional readiness.
     Doctor(ConsoleDoctorArgs),
     /// Manage operators in the independent Lenso Console Service.
@@ -1170,6 +1172,41 @@ struct ConsoleBackupArgs {
     /// Emit the Recovery Set manifest as JSON.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ConsoleRestoreArgs {
+    /// External Console installation root.
+    #[arg(long, default_value = ".lenso-console")]
+    root: std::path::PathBuf,
+
+    /// Directory containing recovery-set.json and store.dump.age.
+    #[arg(long)]
+    recovery_set: std::path::PathBuf,
+
+    /// Current deployment environment file used to fence the old workload.
+    #[arg(long)]
+    current_env_file: std::path::PathBuf,
+
+    /// Recovery environment file pointing to a distinct clean Store.
+    #[arg(long)]
+    recovery_env_file: std::path::PathBuf,
+
+    /// Write the deterministic restore plan to this path.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+
+    /// Apply the reviewed restore plan.
+    #[arg(long)]
+    apply: bool,
+
+    /// Exact restore plan digest approved by the operator.
+    #[arg(long, requires = "apply")]
+    approve_plan_digest: Option<String>,
+
+    /// Private age identity file used only during apply.
+    #[arg(long, requires = "apply")]
+    identity_file: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -3162,6 +3199,21 @@ impl From<&ConsoleBackupArgs> for console_installation::BackupOptions {
     }
 }
 
+impl From<&ConsoleRestoreArgs> for console_installation::RestoreOptions {
+    fn from(args: &ConsoleRestoreArgs) -> Self {
+        Self {
+            root: args.root.clone(),
+            recovery_set: args.recovery_set.clone(),
+            current_env_file: args.current_env_file.clone(),
+            recovery_env_file: args.recovery_env_file.clone(),
+            output: args.output.clone(),
+            apply: args.apply,
+            approve_plan_digest: args.approve_plan_digest.clone(),
+            identity_file: args.identity_file.clone(),
+        }
+    }
+}
+
 impl From<&ModuleCreateArgs> for module::ModuleCreateOptions {
     fn from(args: &ModuleCreateArgs) -> Self {
         Self {
@@ -3487,6 +3539,7 @@ async fn main() -> anyhow::Result<()> {
             ConsoleCommand::Install(args) => console_installation::install((&args).into())?,
             ConsoleCommand::Upgrade(args) => console_installation::upgrade((&args).into())?,
             ConsoleCommand::Backup(args) => console_installation::backup((&args).into())?,
+            ConsoleCommand::Restore(args) => console_installation::restore((&args).into())?,
             ConsoleCommand::Doctor(args) => console_installation::doctor((&args).into()).await?,
             ConsoleCommand::Operator { command } => match command {
                 ConsoleOperatorCommand::Bootstrap(args) => {
@@ -4524,6 +4577,37 @@ mod tests {
             Some("https://console.example.com")
         );
         assert!(args.json);
+
+        let restore = Cli::parse_from([
+            "lenso",
+            "console",
+            "restore",
+            "--root",
+            "/srv/lenso-console",
+            "--recovery-set",
+            "recovery-set",
+            "--current-env-file",
+            "current.env",
+            "--recovery-env-file",
+            "recovery.env",
+            "--apply",
+            "--approve-plan-digest",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--identity-file",
+            "age-key.txt",
+        ]);
+        let Command::Console {
+            command: ConsoleCommand::Restore(args),
+        } = restore.command
+        else {
+            panic!("expected Console restore");
+        };
+        assert!(args.apply);
+        assert_eq!(args.recovery_set, std::path::Path::new("recovery-set"));
+        assert_eq!(
+            args.identity_file.as_deref(),
+            Some(std::path::Path::new("age-key.txt"))
+        );
 
         let backup = Cli::parse_from([
             "lenso",

@@ -86,8 +86,37 @@ child-process environment. `recovery-set.json` binds the encrypted payload to
 the exact release, image, Store schema, composition, contract, and configuration
 digests. Live session rows under `auth.sessions` are explicitly excluded and the
 exclusion is recorded in the protected manifest. Existing output is never
-overwritten. Restore remains unavailable until clean-Store restore fencing and
-outbound-mutation isolation are enforced.
+overwritten.
+
+Restore is also a plan-and-approval operation. Use a current environment with
+`CONSOLE_RECOVERY_MODE=normal` and a recovery environment with
+`CONSOLE_RECOVERY_MODE=restore` that points to a distinct, empty PostgreSQL
+database:
+
+```sh
+lenso console restore --root /srv/lenso-console \
+  --recovery-set ./console-recovery-2026-07-30 \
+  --current-env-file /secure/console.env \
+  --recovery-env-file /secure/console-recovery.env \
+  --output restore-plan.json
+lenso console restore --root /srv/lenso-console \
+  --recovery-set ./console-recovery-2026-07-30 \
+  --current-env-file /secure/console.env \
+  --recovery-env-file /secure/console-recovery.env \
+  --apply --approve-plan-digest sha256:<reviewed-plan-digest> \
+  --identity-file /secure/console-recovery-identity.txt
+```
+
+Before fencing the current deployment, apply verifies the Recovery Set content
+digest, proves that the owner-only `age` identity decrypts a readable PostgreSQL
+archive, and confirms that the isolated target Store has no relations. It then
+stops the previous Console, streams decryption directly into a transactional
+`pg_restore`, and starts the Console against the recovery Store. No plaintext
+Store file is written. A failed or completed restore writes durable
+`recovery-state.json` evidence, and `lenso console doctor` remains failed while
+that evidence exists. Successful restore therefore means “awaiting
+reconciliation,” not activation: the CLI never changes recovery mode back to
+normal or declares the restored deployment authoritative.
 
 Generated deployments set `CONSOLE_RECOVERY_MODE` explicitly. `normal` runs the
 API and Worker; `restore` keeps the inspection API available while the Console

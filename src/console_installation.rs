@@ -20,6 +20,8 @@ const STATE_SCHEMA: &str = "lenso.console-installation-state.v1";
 const ATTEMPT_SCHEMA: &str = "lenso.console-installation-attempt.v1";
 const LOCK_SCHEMA: &str = "lenso.console-installation-lock.v1";
 const RECOVERY_SET_SCHEMA: &str = "lenso.console-recovery-set.v1";
+const RESTORE_PLAN_SCHEMA: &str = "lenso.console-restore-plan.v1";
+const RECOVERY_STATE_SCHEMA: &str = "lenso.console-recovery-state.v1";
 const DOCTOR_SCHEMA: &str = "lenso.console-doctor.v1";
 const TRUSTED_RELEASE_REPOSITORY: &str = "LioRael/lenso-runtime-console";
 const TRUSTED_SIGNER_WORKFLOW: &str = "LioRael/lenso-runtime-console/.github/workflows/publish.yml";
@@ -31,6 +33,7 @@ const MANIFEST_FILE: &str = "release-manifest.json";
 const COMPOSE_FILE: &str = "compose.yaml";
 const RECOVERY_MANIFEST_FILE: &str = "recovery-set.json";
 const RECOVERY_STORE_FILE: &str = "store.dump.age";
+const RECOVERY_STATE_FILE: &str = "recovery-state.json";
 const RECOVERY_PG_DUMP_ARGS: &[&str] = &[
     "--format=custom",
     "--no-owner",
@@ -63,6 +66,18 @@ pub struct BackupOptions {
     pub output: PathBuf,
     pub recipient: String,
     pub json: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RestoreOptions {
+    pub root: PathBuf,
+    pub recovery_set: PathBuf,
+    pub current_env_file: PathBuf,
+    pub recovery_env_file: PathBuf,
+    pub output: Option<PathBuf>,
+    pub apply: bool,
+    pub approve_plan_digest: Option<String>,
+    pub identity_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -212,6 +227,47 @@ struct RecoveryStore {
     payload_digest: String,
     recipient: String,
     excluded_data: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RestorePlan {
+    schema: &'static str,
+    action: &'static str,
+    plan_digest: String,
+    installation_root: String,
+    recovery_set_path: String,
+    recovery_set_id: String,
+    recovery_set_digest: String,
+    release_id: String,
+    release_digest: String,
+    payload_digest: String,
+    steps: Vec<String>,
+    approval_boundaries: Vec<String>,
+    target_requirements: Vec<String>,
+    next_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RecoveryStatus {
+    Applying,
+    Failed,
+    AwaitingReconciliation,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RecoveryState {
+    schema: String,
+    recovery_set_id: String,
+    recovery_set_digest: String,
+    plan_digest: String,
+    release_id: String,
+    status: RecoveryStatus,
+    phase: String,
+    started_at_unix_ms: u64,
+    updated_at_unix_ms: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -398,6 +454,311 @@ pub fn backup(options: BackupOptions) -> Result<()> {
     Ok(())
 }
 
+pub fn restore(options: RestoreOptions) -> Result<()> {
+    let root = absolute_path(&options.root)?;
+    validate_installation_root(&root)?;
+    let mut lock = options
+        .apply
+        .then(|| InstallationLock::acquire(&root))
+        .transpose()?;
+    let state = read_state_optional(&root)?
+        .context("Lenso Console is not installed; restore requires the exact installed release")?;
+    validate_installed_evidence(&root, &state).context(
+        "installed Console evidence is drifted; run `lenso console doctor` before restore",
+    )?;
+    verify_attestation(&root.join(MANIFEST_FILE))
+        .context("verify installed Console Release Manifest attestation")?;
+    let recovery_set = absolute_existing_directory(&options.recovery_set, "Console Recovery Set")?;
+    let manifest = read_recovery_set(&recovery_set)?;
+    validate_recovery_set_for_state(&manifest, &state)?;
+    let current_env_file = absolute_existing_file(
+        &options.current_env_file,
+        "current Console environment file",
+    )?;
+    let recovery_env_file = absolute_existing_file(
+        &options.recovery_env_file,
+        "recovery Console environment file",
+    )?;
+    validate_restore_environments(&current_env_file, &recovery_env_file)?;
+
+    let mut plan = build_restore_plan(&root, &recovery_set, &manifest);
+    plan.plan_digest = restore_plan_digest(&plan)?;
+    print_or_write_restore_plan(&plan, options.output.as_deref())?;
+    if !options.apply {
+        eprintln!(
+            "Plan only. Re-run with --apply --approve-plan-digest {} --identity-file <private-age-key>.",
+            plan.plan_digest
+        );
+        return Ok(());
+    }
+    if options.approve_plan_digest.as_deref() != Some(plan.plan_digest.as_str()) {
+        bail!("--approve-plan-digest must exactly match the current restore plan digest");
+    }
+    let identity_file = private_identity_file(
+        options
+            .identity_file
+            .as_deref()
+            .context("--identity-file is required with --apply")?,
+    )?;
+    let target_database_url = console_database_url(&recovery_env_file)?;
+    apply_restore_with(
+        &PostgresComposeRestoreAdapter,
+        &root,
+        &current_env_file,
+        &recovery_env_file,
+        &target_database_url,
+        &identity_file,
+        &recovery_set.join(RECOVERY_STORE_FILE),
+        &manifest,
+        &plan,
+    )?;
+    if let Some(installation_lock) = lock.take() {
+        installation_lock.release()?;
+    }
+    eprintln!(
+        "Restored {} into an isolated Store. Console remains fenced in recovery mode pending reconciliation.",
+        manifest.recovery_set_id
+    );
+    Ok(())
+}
+
+trait RestoreAdapter {
+    fn verify_payload(&self, identity_file: &Path, payload: &Path) -> Result<()>;
+    fn target_is_clean(&self, database_url: &str) -> Result<bool>;
+    fn fence(&self, root: &Path, env_file: &Path, compose_file: &Path) -> Result<()>;
+    fn restore_store(&self, database_url: &str, identity_file: &Path, payload: &Path)
+    -> Result<()>;
+    fn start_recovery(&self, root: &Path, env_file: &Path, compose_file: &Path) -> Result<()>;
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PostgresComposeRestoreAdapter;
+
+impl RestoreAdapter for PostgresComposeRestoreAdapter {
+    fn verify_payload(&self, identity_file: &Path, payload: &Path) -> Result<()> {
+        let mut decrypt = Command::new("age")
+            .args(["--decrypt", "--identity"])
+            .arg(identity_file)
+            .arg(payload)
+            .stdout(Stdio::piped())
+            .spawn()
+            .context("start age preflight for Console Recovery Set")?;
+        let plaintext = decrypt
+            .stdout
+            .take()
+            .context("capture Recovery Set preflight stream")?;
+        let mut inspect = match Command::new("pg_restore")
+            .arg("--list")
+            .stdin(Stdio::from(plaintext))
+            .stdout(Stdio::null())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = decrypt.kill();
+                let _ = decrypt.wait();
+                return Err(error).context("start pg_restore Recovery Set preflight");
+            }
+        };
+        let decrypt_status = decrypt
+            .wait()
+            .context("wait for Recovery Set preflight decryption")?;
+        let inspect_status = inspect
+            .wait()
+            .context("wait for Recovery Set archive preflight")?;
+        if !decrypt_status.success() || !inspect_status.success() {
+            bail!("Recovery Set identity or PostgreSQL archive preflight failed");
+        }
+        Ok(())
+    }
+
+    fn target_is_clean(&self, database_url: &str) -> Result<bool> {
+        const CLEAN_STORE_SQL: &str = "select count(*) from pg_catalog.pg_class c join pg_catalog.pg_namespace n on n.oid = c.relnamespace where c.relkind in ('r','p','v','m','S','f') and n.nspname not in ('pg_catalog','information_schema')";
+        let output = Command::new("psql")
+            .args([
+                "--no-psqlrc",
+                "--tuples-only",
+                "--no-align",
+                "--command",
+                CLEAN_STORE_SQL,
+            ])
+            .env("PGDATABASE", database_url)
+            .output()
+            .context("inspect isolated Console restore Store")?;
+        if !output.status.success() {
+            bail!("psql failed while checking the isolated Console restore Store");
+        }
+        let count = String::from_utf8(output.stdout)
+            .context("decode clean Store observation")?
+            .trim()
+            .parse::<u64>()
+            .context("parse clean Store observation")?;
+        Ok(count == 0)
+    }
+
+    fn fence(&self, root: &Path, env_file: &Path, compose_file: &Path) -> Result<()> {
+        DockerComposeAdapter.run(
+            root,
+            env_file,
+            compose_file,
+            &["stop", "--timeout", "30", "console"],
+        )
+    }
+
+    fn restore_store(
+        &self,
+        database_url: &str,
+        identity_file: &Path,
+        payload: &Path,
+    ) -> Result<()> {
+        let mut decrypt = Command::new("age")
+            .args(["--decrypt", "--identity"])
+            .arg(identity_file)
+            .arg(payload)
+            .stdout(Stdio::piped())
+            .spawn()
+            .context("start age decryption for Console restore")?;
+        let plaintext = decrypt
+            .stdout
+            .take()
+            .context("capture decrypted Console Store stream")?;
+        let mut restore = match Command::new("pg_restore")
+            .args([
+                "--dbname=",
+                "--exit-on-error",
+                "--single-transaction",
+                "--no-owner",
+                "--no-privileges",
+            ])
+            .env("PGDATABASE", database_url)
+            .stdin(Stdio::from(plaintext))
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = decrypt.kill();
+                let _ = decrypt.wait();
+                return Err(error).context("start pg_restore for Console Recovery Set");
+            }
+        };
+        let decrypt_status = decrypt.wait().context("wait for Recovery Set decryption")?;
+        let restore_status = restore.wait().context("wait for Console Store restore")?;
+        if !decrypt_status.success() {
+            bail!("age failed while decrypting the Console Recovery Set");
+        }
+        if !restore_status.success() {
+            bail!("pg_restore failed while restoring the isolated Console Store");
+        }
+        Ok(())
+    }
+
+    fn start_recovery(&self, root: &Path, env_file: &Path, compose_file: &Path) -> Result<()> {
+        DockerComposeAdapter.run(
+            root,
+            env_file,
+            compose_file,
+            &[
+                "up",
+                "--detach",
+                "--wait",
+                "--wait-timeout",
+                "120",
+                "console",
+            ],
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_restore_with(
+    adapter: &impl RestoreAdapter,
+    root: &Path,
+    current_env_file: &Path,
+    recovery_env_file: &Path,
+    target_database_url: &str,
+    identity_file: &Path,
+    payload: &Path,
+    manifest: &RecoverySetManifest,
+    plan: &RestorePlan,
+) -> Result<()> {
+    let started_at_unix_ms = unix_time_ms()?;
+    let mut phase = "verify_recovery_payload";
+    write_recovery_state(
+        root,
+        manifest,
+        plan,
+        RecoveryStatus::Applying,
+        phase,
+        started_at_unix_ms,
+    )?;
+    let result = (|| -> Result<()> {
+        adapter.verify_payload(identity_file, payload)?;
+        phase = "clean_store_check";
+        write_recovery_state(
+            root,
+            manifest,
+            plan,
+            RecoveryStatus::Applying,
+            phase,
+            started_at_unix_ms,
+        )?;
+        if !adapter.target_is_clean(target_database_url)? {
+            bail!("recovery target Store is not clean; restore refused without mutation");
+        }
+        phase = "fence_previous_deployment";
+        write_recovery_state(
+            root,
+            manifest,
+            plan,
+            RecoveryStatus::Applying,
+            phase,
+            started_at_unix_ms,
+        )?;
+        adapter.fence(root, current_env_file, &root.join(COMPOSE_FILE))?;
+
+        phase = "restore_store";
+        write_recovery_state(
+            root,
+            manifest,
+            plan,
+            RecoveryStatus::Applying,
+            phase,
+            started_at_unix_ms,
+        )?;
+        adapter.restore_store(target_database_url, identity_file, payload)?;
+
+        phase = "start_recovery_mode";
+        write_recovery_state(
+            root,
+            manifest,
+            plan,
+            RecoveryStatus::Applying,
+            phase,
+            started_at_unix_ms,
+        )?;
+        adapter.start_recovery(root, recovery_env_file, &root.join(COMPOSE_FILE))?;
+        write_recovery_state(
+            root,
+            manifest,
+            plan,
+            RecoveryStatus::AwaitingReconciliation,
+            "reconciliation",
+            started_at_unix_ms,
+        )
+    })();
+    if result.is_err() {
+        let _ = write_recovery_state(
+            root,
+            manifest,
+            plan,
+            RecoveryStatus::Failed,
+            phase,
+            started_at_unix_ms,
+        );
+    }
+    result
+}
+
 trait StoreBackupAdapter {
     fn export_encrypted(&self, database_url: &str, recipient: &str, output: &Path) -> Result<()>;
 }
@@ -481,9 +842,8 @@ fn backup_with(
     let result = (|| -> Result<RecoverySetManifest> {
         let payload = staging.join(RECOVERY_STORE_FILE);
         adapter.export_encrypted(database_url, recipient, &payload)?;
-        let payload_bytes = fs::read(&payload)
-            .with_context(|| format!("read encrypted Store payload {}", payload.display()))?;
-        if payload_bytes.is_empty() {
+        let (payload_digest, payload_size) = sha256_file(&payload)?;
+        if payload_size == 0 {
             bail!("encrypted Console Store payload is empty");
         }
         let mut manifest = RecoverySetManifest {
@@ -503,7 +863,7 @@ fn backup_with(
                 encrypted: true,
                 encryption: "age-v1".to_owned(),
                 payload: RECOVERY_STORE_FILE.to_owned(),
-                payload_digest: sha256(&payload_bytes),
+                payload_digest,
                 recipient: recipient.to_owned(),
                 excluded_data: vec!["auth.sessions".to_owned()],
             },
@@ -538,7 +898,227 @@ fn recovery_set_digest(manifest: &RecoverySetManifest) -> Result<String> {
     Ok(sha256(&serde_json::to_vec(&value)?))
 }
 
+fn read_recovery_set(root: &Path) -> Result<RecoverySetManifest> {
+    let manifest_path = absolute_existing_file(
+        &root.join(RECOVERY_MANIFEST_FILE),
+        "Console Recovery Set manifest",
+    )?;
+    let payload_path = absolute_existing_file(
+        &root.join(RECOVERY_STORE_FILE),
+        "encrypted Console Store payload",
+    )?;
+    let bytes = fs::read(&manifest_path)
+        .with_context(|| format!("read Recovery Set manifest {}", manifest_path.display()))?;
+    let manifest: RecoverySetManifest =
+        serde_json::from_slice(&bytes).context("decode Recovery Set manifest")?;
+    validate_recovery_set_manifest(&manifest)?;
+    if manifest.recovery_set_digest != recovery_set_digest(&manifest)? {
+        bail!("Console Recovery Set manifest digest does not match its content");
+    }
+    let (payload_digest, payload_size) = sha256_file(&payload_path)?;
+    if payload_size == 0 || manifest.store.payload_digest != payload_digest {
+        bail!("Console Recovery Set payload is empty or does not match its digest");
+    }
+    Ok(manifest)
+}
+
+fn validate_recovery_set_manifest(manifest: &RecoverySetManifest) -> Result<()> {
+    let recovery_id = manifest
+        .recovery_set_id
+        .strip_prefix("rcv_")
+        .and_then(|value| Uuid::parse_str(value).ok());
+    let expected_preconditions = [
+        "clean_store",
+        "exact_release_and_composition",
+        "external_secret_resolution",
+        "outbound_mutations_disabled",
+        "single_authoritative_deployment",
+        "identity_and_enrollment_continuity_validation",
+    ];
+    if manifest.schema != RECOVERY_SET_SCHEMA
+        || recovery_id.is_none()
+        || !is_sha256(&manifest.recovery_set_digest)
+        || manifest.created_at_unix_ms == 0
+        || release_version(&manifest.release_id).is_none()
+        || !is_sha256(&manifest.release_digest)
+        || !trusted_image_reference(&manifest.image_reference)
+        || !is_sha256(&manifest.schema_digest)
+        || !is_sha256(&manifest.composition_digest)
+        || !is_sha256(&manifest.contract_digest)
+        || !is_sha256(&manifest.configuration_digest)
+        || manifest.store.format != "postgresql-custom"
+        || !manifest.store.encrypted
+        || manifest.store.encryption != "age-v1"
+        || manifest.store.payload != RECOVERY_STORE_FILE
+        || !is_sha256(&manifest.store.payload_digest)
+        || manifest.store.recipient.trim().is_empty()
+        || manifest.store.recipient.chars().any(char::is_whitespace)
+        || manifest.store.excluded_data != ["auth.sessions"]
+        || manifest.secret_references != ["CONSOLE_DATABASE_URL"]
+        || manifest.restore_preconditions != expected_preconditions
+    {
+        bail!("Console Recovery Set manifest is invalid or unsupported");
+    }
+    Ok(())
+}
+
+fn validate_recovery_set_for_state(
+    manifest: &RecoverySetManifest,
+    state: &InstallationState,
+) -> Result<()> {
+    if manifest.release_id != state.release_id
+        || manifest.release_digest != state.release_digest
+        || manifest.image_reference != state.image_reference
+        || manifest.schema_digest != state.schema_digest
+        || manifest.composition_digest != state.composition_digest
+        || manifest.contract_digest != state.contract_digest
+        || manifest.configuration_digest != state.configuration_digest
+    {
+        bail!("Console Recovery Set does not match the exact installed release and composition");
+    }
+    Ok(())
+}
+
+fn build_restore_plan(
+    root: &Path,
+    recovery_set: &Path,
+    manifest: &RecoverySetManifest,
+) -> RestorePlan {
+    RestorePlan {
+        schema: RESTORE_PLAN_SCHEMA,
+        action: "restore",
+        plan_digest: String::new(),
+        installation_root: root.display().to_string(),
+        recovery_set_path: recovery_set.display().to_string(),
+        recovery_set_id: manifest.recovery_set_id.clone(),
+        recovery_set_digest: manifest.recovery_set_digest.clone(),
+        release_id: manifest.release_id.clone(),
+        release_digest: manifest.release_digest.clone(),
+        payload_digest: manifest.store.payload_digest.clone(),
+        steps: vec![
+            "verify_decryption_identity_and_archive".to_owned(),
+            "verify_clean_isolated_store".to_owned(),
+            "fence_previous_deployment".to_owned(),
+            "decrypt_and_restore_store".to_owned(),
+            "start_api_in_recovery_mode".to_owned(),
+            "record_awaiting_reconciliation".to_owned(),
+        ],
+        approval_boundaries: vec!["disaster_recovery_restore".to_owned()],
+        target_requirements: manifest.restore_preconditions.clone(),
+        next_actions: vec![
+            "Reconcile managed-Service operations and identity continuity.".to_owned(),
+            "Prove exactly one authoritative Console deployment.".to_owned(),
+            "Keep CONSOLE_RECOVERY_MODE=restore until a separately reviewed activation.".to_owned(),
+        ],
+    }
+}
+
+fn restore_plan_digest(plan: &RestorePlan) -> Result<String> {
+    let mut value = serde_json::to_value(plan).context("encode Console restore plan")?;
+    value["planDigest"] = Value::String(String::new());
+    Ok(sha256(&serde_json::to_vec(&value)?))
+}
+
+fn print_or_write_restore_plan(plan: &RestorePlan, output: Option<&Path>) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(plan).context("encode Console restore plan")?;
+    if let Some(path) = output {
+        atomic_write(path, &bytes)?;
+        eprintln!("Wrote Console restore plan to {}.", path.display());
+    } else {
+        println!(
+            "{}",
+            String::from_utf8(bytes).context("render Console restore plan")?
+        );
+    }
+    Ok(())
+}
+
+fn validate_restore_environments(current: &Path, recovery: &Path) -> Result<()> {
+    if console_env_value(current, "CONSOLE_RECOVERY_MODE")? != "normal" {
+        bail!("current environment must set CONSOLE_RECOVERY_MODE=normal");
+    }
+    if console_env_value(recovery, "CONSOLE_RECOVERY_MODE")? != "restore" {
+        bail!("recovery environment must set CONSOLE_RECOVERY_MODE=restore");
+    }
+    let current_url = console_database_url(current)?;
+    let recovery_url = console_database_url(recovery)?;
+    if database_identity(&current_url)? == database_identity(&recovery_url)? {
+        bail!("recovery environment must target a distinct isolated Console Store");
+    }
+    Ok(())
+}
+
+fn database_identity(value: &str) -> Result<(String, u16, String)> {
+    let url = Url::parse(value).context("parse Console database identity")?;
+    Ok((
+        url.host_str().unwrap_or_default().to_ascii_lowercase(),
+        url.port_or_known_default().unwrap_or(5432),
+        url.path().to_owned(),
+    ))
+}
+
+fn write_recovery_state(
+    root: &Path,
+    manifest: &RecoverySetManifest,
+    plan: &RestorePlan,
+    status: RecoveryStatus,
+    phase: &str,
+    started_at_unix_ms: u64,
+) -> Result<()> {
+    let state = RecoveryState {
+        schema: RECOVERY_STATE_SCHEMA.to_owned(),
+        recovery_set_id: manifest.recovery_set_id.clone(),
+        recovery_set_digest: manifest.recovery_set_digest.clone(),
+        plan_digest: plan.plan_digest.clone(),
+        release_id: manifest.release_id.clone(),
+        status,
+        phase: phase.to_owned(),
+        started_at_unix_ms,
+        updated_at_unix_ms: unix_time_ms()?,
+    };
+    atomic_write(
+        &root.join(RECOVERY_STATE_FILE),
+        &serde_json::to_vec_pretty(&state).context("encode Console recovery state")?,
+    )
+}
+
+fn private_identity_file(path: &Path) -> Result<PathBuf> {
+    let path = absolute_existing_file(path, "age identity file")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if fs::metadata(&path)?.permissions().mode() & 0o077 != 0 {
+            bail!("age identity file must be readable only by its owner");
+        }
+    }
+    Ok(path)
+}
+
+fn absolute_existing_directory(path: &Path, label: &str) -> Result<PathBuf> {
+    let path = absolute_path(path)?;
+    let metadata = fs::symlink_metadata(&path)
+        .with_context(|| format!("inspect {label} {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("{label} must be a directory and not a symbolic link");
+    }
+    Ok(path)
+}
+
 fn console_database_url(env_file: &Path) -> Result<String> {
+    let value = console_env_value(env_file, "CONSOLE_DATABASE_URL")?;
+    let url = Url::parse(&value).context("parse CONSOLE_DATABASE_URL")?;
+    if !matches!(url.scheme(), "postgres" | "postgresql")
+        || url.host_str().is_none()
+        || url.path().trim_matches('/').is_empty()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        bail!("CONSOLE_DATABASE_URL must be an unambiguous PostgreSQL URL with host and database");
+    }
+    Ok(value)
+}
+
+fn console_env_value(env_file: &Path, key: &str) -> Result<String> {
     let source = fs::read_to_string(env_file)
         .with_context(|| format!("read Console environment file {}", env_file.display()))?;
     let mut values = source.lines().filter_map(|line| {
@@ -547,14 +1127,14 @@ fn console_database_url(env_file: &Path) -> Result<String> {
             return None;
         }
         let line = line.strip_prefix("export ").unwrap_or(line);
-        let (key, value) = line.split_once('=')?;
-        (key.trim() == "CONSOLE_DATABASE_URL").then(|| value.trim())
+        let (env_key, value) = line.split_once('=')?;
+        (env_key.trim() == key).then(|| value.trim())
     });
     let value = values
         .next()
-        .context("CONSOLE_DATABASE_URL is missing from the Console environment file")?;
+        .with_context(|| format!("{key} is missing from the Console environment file"))?;
     if values.next().is_some() {
-        bail!("CONSOLE_DATABASE_URL is duplicated in the Console environment file");
+        bail!("{key} is duplicated in the Console environment file");
     }
     let value = value
         .strip_prefix('"')
@@ -565,10 +1145,6 @@ fn console_database_url(env_file: &Path) -> Result<String> {
                 .and_then(|value| value.strip_suffix('\''))
         })
         .unwrap_or(value);
-    let url = Url::parse(value).context("parse CONSOLE_DATABASE_URL")?;
-    if !matches!(url.scheme(), "postgres" | "postgresql") || url.host_str().is_none() {
-        bail!("CONSOLE_DATABASE_URL must be a PostgreSQL URL with a host");
-    }
     Ok(value.to_owned())
 }
 
@@ -1033,6 +1609,7 @@ pub async fn doctor(options: DoctorOptions) -> Result<()> {
     }
     check_installation_attempt(&root, state.as_ref(), &mut checks);
     check_installation_lock(&root, &mut checks);
+    check_recovery_state(&root, &mut checks);
     if let Some(url) = options.live_url.as_deref() {
         checks.push(live_check(url).await);
     }
@@ -1243,6 +1820,21 @@ fn check_installation_lock(root: &Path, checks: &mut Vec<DoctorCheck>) {
     }
 }
 
+fn check_recovery_state(root: &Path, checks: &mut Vec<DoctorCheck>) {
+    match read_recovery_state_optional(root) {
+        Ok(None) => checks.push(pass("recovery", "no Console recovery is active")),
+        Ok(Some(state)) => checks.push(fail(
+            "recovery",
+            &format!(
+                "Console recovery for {} is {:?} at phase {}; keep recovery mode fenced",
+                state.recovery_set_id, state.status, state.phase
+            )
+            .to_lowercase(),
+        )),
+        Err(_) => checks.push(fail("recovery", "Console recovery evidence is invalid")),
+    }
+}
+
 async fn live_check(value: &str) -> DoctorCheck {
     let result = async {
         let url = secure_live_url(value)?;
@@ -1323,6 +1915,39 @@ fn read_attempt_optional(root: &Path) -> Result<Option<InstallationAttempt>> {
         bail!("Console installation attempt is invalid");
     }
     Ok(Some(attempt))
+}
+
+fn read_recovery_state_optional(root: &Path) -> Result<Option<RecoveryState>> {
+    let path = root.join(RECOVERY_STATE_FILE);
+    let Some(bytes) = read_optional_regular_file(&path, "Console recovery state")? else {
+        return Ok(None);
+    };
+    let state: RecoveryState =
+        serde_json::from_slice(&bytes).context("decode Console recovery state")?;
+    if state.schema != RECOVERY_STATE_SCHEMA
+        || state
+            .recovery_set_id
+            .strip_prefix("rcv_")
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .is_none()
+        || !is_sha256(&state.recovery_set_digest)
+        || !is_sha256(&state.plan_digest)
+        || release_version(&state.release_id).is_none()
+        || !matches!(
+            state.phase.as_str(),
+            "clean_store_check"
+                | "verify_recovery_payload"
+                | "fence_previous_deployment"
+                | "restore_store"
+                | "start_recovery_mode"
+                | "reconciliation"
+        )
+        || state.started_at_unix_ms == 0
+        || state.updated_at_unix_ms < state.started_at_unix_ms
+    {
+        bail!("Console recovery state is invalid");
+    }
+    Ok(Some(state))
 }
 
 fn read_optional_regular_file(path: &Path, label: &str) -> Result<Option<Vec<u8>>> {
@@ -1440,6 +2065,32 @@ fn sha256(bytes: &[u8]) -> String {
     encoded
 }
 
+fn sha256_file(path: &Path) -> Result<(String, u64)> {
+    let mut file = File::open(path)
+        .with_context(|| format!("open file for digest calculation {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut size = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("read file for digest calculation {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        size = size
+            .checked_add(u64::try_from(read).context("digest chunk length exceeds u64")?)
+            .context("file length exceeds u64")?;
+    }
+    let mut encoded = String::with_capacity(71);
+    encoded.push_str("sha256:");
+    for byte in hasher.finalize() {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    Ok((encoded, size))
+}
+
 fn is_sha256(value: &str) -> bool {
     value.strip_prefix("sha256:").is_some_and(|digest| {
         digest.len() == 64
@@ -1526,6 +2177,66 @@ mod tests {
     struct RecordingStoreBackupAdapter {
         payload: &'static [u8],
         fail: bool,
+    }
+
+    #[derive(Debug)]
+    struct RecordingRestoreAdapter {
+        calls: RefCell<Vec<&'static str>>,
+        clean: bool,
+        fail_on: Option<&'static str>,
+    }
+
+    impl RestoreAdapter for RecordingRestoreAdapter {
+        fn verify_payload(&self, _identity_file: &Path, payload: &Path) -> Result<()> {
+            assert!(payload.is_file());
+            self.calls.borrow_mut().push("preflight");
+            if self.fail_on == Some("preflight") {
+                bail!("simulated preflight failure");
+            }
+            Ok(())
+        }
+
+        fn target_is_clean(&self, database_url: &str) -> Result<bool> {
+            assert_eq!(database_url, "postgres://console:secret@restore/console");
+            self.calls.borrow_mut().push("clean");
+            Ok(self.clean)
+        }
+
+        fn fence(&self, _root: &Path, _env_file: &Path, _compose_file: &Path) -> Result<()> {
+            self.calls.borrow_mut().push("fence");
+            if self.fail_on == Some("fence") {
+                bail!("simulated fence failure");
+            }
+            Ok(())
+        }
+
+        fn restore_store(
+            &self,
+            database_url: &str,
+            _identity_file: &Path,
+            payload: &Path,
+        ) -> Result<()> {
+            assert_eq!(database_url, "postgres://console:secret@restore/console");
+            assert!(payload.is_file());
+            self.calls.borrow_mut().push("restore");
+            if self.fail_on == Some("restore") {
+                bail!("simulated restore failure");
+            }
+            Ok(())
+        }
+
+        fn start_recovery(
+            &self,
+            _root: &Path,
+            _env_file: &Path,
+            _compose_file: &Path,
+        ) -> Result<()> {
+            self.calls.borrow_mut().push("start");
+            if self.fail_on == Some("start") {
+                bail!("simulated recovery start failure");
+            }
+            Ok(())
+        }
     }
 
     impl StoreBackupAdapter for RecordingStoreBackupAdapter {
@@ -1901,6 +2612,160 @@ mod tests {
                 .to_string_lossy()
                 .contains(".tmp-")
         }));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn restore_plan_binds_verified_recovery_set_and_is_deterministic() {
+        let root = test_root("restore-plan");
+        let recovery_root = root.join("recovery");
+        fs::create_dir_all(&root).unwrap();
+        let installed = state();
+        let manifest = backup_with(
+            &RecordingStoreBackupAdapter {
+                payload: b"age-encrypted-store",
+                fail: false,
+            },
+            &installed,
+            "postgres://console:secret@db/console",
+            "age1recipient",
+            &recovery_root,
+        )
+        .unwrap();
+        let verified = read_recovery_set(&recovery_root).unwrap();
+        assert_eq!(verified.recovery_set_digest, manifest.recovery_set_digest);
+        validate_recovery_set_for_state(&verified, &installed).unwrap();
+        let mut plan = build_restore_plan(&root, &recovery_root, &verified);
+        plan.plan_digest = restore_plan_digest(&plan).unwrap();
+        assert!(is_sha256(&plan.plan_digest));
+        assert_eq!(plan.steps[0], "verify_decryption_identity_and_archive");
+        assert!(
+            plan.approval_boundaries
+                .contains(&"disaster_recovery_restore".to_owned())
+        );
+
+        fs::write(recovery_root.join(RECOVERY_STORE_FILE), b"tampered").unwrap();
+        assert!(read_recovery_set(&recovery_root).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn restore_requires_distinct_store_and_explicit_recovery_modes() {
+        let root = test_root("restore-environments");
+        fs::create_dir_all(&root).unwrap();
+        let current = root.join("current.env");
+        let recovery = root.join("recovery.env");
+        fs::write(
+            &current,
+            "CONSOLE_RECOVERY_MODE=normal\nCONSOLE_DATABASE_URL=postgres://console:old@primary/console\n",
+        )
+        .unwrap();
+        fs::write(
+            &recovery,
+            "CONSOLE_RECOVERY_MODE=restore\nCONSOLE_DATABASE_URL=postgres://console:new@restore/console\n",
+        )
+        .unwrap();
+        validate_restore_environments(&current, &recovery).unwrap();
+
+        fs::write(
+            &recovery,
+            "CONSOLE_RECOVERY_MODE=restore\nCONSOLE_DATABASE_URL=postgres://other:new@primary/console\n",
+        )
+        .unwrap();
+        assert!(validate_restore_environments(&current, &recovery).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn restore_preflights_before_fencing_and_remains_awaiting_reconciliation() {
+        let root = test_root("restore-apply");
+        let recovery_root = root.join("recovery");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(COMPOSE_FILE), "compose").unwrap();
+        let installed = state();
+        let manifest = backup_with(
+            &RecordingStoreBackupAdapter {
+                payload: b"age-encrypted-store",
+                fail: false,
+            },
+            &installed,
+            "postgres://console:secret@db/console",
+            "age1recipient",
+            &recovery_root,
+        )
+        .unwrap();
+        let mut plan = build_restore_plan(&root, &recovery_root, &manifest);
+        plan.plan_digest = restore_plan_digest(&plan).unwrap();
+        let adapter = RecordingRestoreAdapter {
+            calls: RefCell::new(Vec::new()),
+            clean: true,
+            fail_on: None,
+        };
+        apply_restore_with(
+            &adapter,
+            &root,
+            Path::new("current.env"),
+            Path::new("recovery.env"),
+            "postgres://console:secret@restore/console",
+            Path::new("identity.txt"),
+            &recovery_root.join(RECOVERY_STORE_FILE),
+            &manifest,
+            &plan,
+        )
+        .unwrap();
+        assert_eq!(
+            *adapter.calls.borrow(),
+            ["preflight", "clean", "fence", "restore", "start"]
+        );
+        let recovery = read_recovery_state_optional(&root).unwrap().unwrap();
+        assert_eq!(recovery.status, RecoveryStatus::AwaitingReconciliation);
+        assert_eq!(recovery.phase, "reconciliation");
+
+        let invalid_archive = RecordingRestoreAdapter {
+            calls: RefCell::new(Vec::new()),
+            clean: true,
+            fail_on: Some("preflight"),
+        };
+        assert!(
+            apply_restore_with(
+                &invalid_archive,
+                &root,
+                Path::new("current.env"),
+                Path::new("recovery.env"),
+                "postgres://console:secret@restore/console",
+                Path::new("identity.txt"),
+                &recovery_root.join(RECOVERY_STORE_FILE),
+                &manifest,
+                &plan,
+            )
+            .is_err()
+        );
+        assert_eq!(*invalid_archive.calls.borrow(), ["preflight"]);
+
+        let blocked = RecordingRestoreAdapter {
+            calls: RefCell::new(Vec::new()),
+            clean: false,
+            fail_on: None,
+        };
+        assert!(
+            apply_restore_with(
+                &blocked,
+                &root,
+                Path::new("current.env"),
+                Path::new("recovery.env"),
+                "postgres://console:secret@restore/console",
+                Path::new("identity.txt"),
+                &recovery_root.join(RECOVERY_STORE_FILE),
+                &manifest,
+                &plan,
+            )
+            .is_err()
+        );
+        assert_eq!(*blocked.calls.borrow(), ["preflight", "clean"]);
+        assert_eq!(
+            read_recovery_state_optional(&root).unwrap().unwrap().status,
+            RecoveryStatus::Failed
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
