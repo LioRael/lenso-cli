@@ -85,8 +85,14 @@ The host must provide `pg_dump` and `age`. The secret database URL is read from
 child-process environment. `recovery-set.json` binds the encrypted payload to
 the exact release, image, Store schema, composition, contract, and configuration
 digests. Live session rows under `auth.sessions` are explicitly excluded and the
-exclusion is recorded in the protected manifest. Existing output is never overwritten. Restore remains unavailable
-until clean-Store restore fencing and outbound-mutation isolation are enforced.
+exclusion is recorded in the protected manifest. Existing output is never
+overwritten. Restore remains unavailable until clean-Store restore fencing and
+outbound-mutation isolation are enforced.
+
+Generated deployments set `CONSOLE_RECOVERY_MODE` explicitly. `normal` runs the
+API and Worker; `restore` keeps the inspection API available while the Console
+Service suppresses background work and rejects management mutations. Recovery
+mode can only be changed through the external installation authority.
 
 After installing and starting the independent Lenso Console Service, create its
 first password user and bootstrap that user as the first Console Operator from
