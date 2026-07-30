@@ -16,34 +16,26 @@ cargo install lenso-cli
 lenso host init my-app
 cd my-app
 cp .env.example .env
-lenso console update
 lenso serve
 ```
 
 The package name defaults to the target directory name and can be overridden with
 `--name`. Pass `--force` to scaffold into a non-empty directory.
-Install or update the hosted Runtime Console with:
+After installing the independent Lenso Console Service and creating its password
+user, bootstrap the first Console Operator from outside that Service:
 
 ```sh
-lenso console update
-```
-
-The command downloads the latest `lenso-runtime-console` release artifact and
-installs it under `.lenso/console`, so the host API can serve `/console`
-without requiring Node.js or pnpm in the host application. For local builds,
-pass `--artifact <dir-or-tar.gz>`. For a pinned release, pass
-`--console-version vX.Y.Z`.
-
-After creating a password user, grant the first Runtime Console admin:
-
-```sh
-lenso console bootstrap-admin --identifier admin@example.com
+lenso console operator bootstrap --console-root ../lenso-console --identifier admin@example.com
 # or
-lenso console bootstrap-admin --user-id usr_...
+lenso console operator bootstrap --console-root ../lenso-console --user-id usr_...
 ```
 
-`console.admin` is always added. Pass extra `--scope <name>` flags when the
-user should also see scoped module data, then restart the API/worker.
+The command grants only the Console Minimum operator scopes plus explicit
+`--scope <name>` additions, writes append-only audit evidence, and refuses to
+run after an operator grant already exists. It also verifies the mandatory
+System Registry state before writing, so a business Service Store is rejected.
+Restart the Console API and Worker after bootstrapping. Business Service users
+and Auth state are never modified.
 
 The generated host depends on the crates.io `lenso` crate with the `host`
 feature, which is the current narrow host API for booting API, worker, and

@@ -1,5 +1,6 @@
 mod capability;
 mod console_dev;
+mod console_operator;
 mod delivery;
 mod extraction;
 mod ga;
@@ -1083,10 +1084,10 @@ enum HostCommand {
 }
 
 #[derive(Debug, Args, Clone)]
-struct ConsoleBootstrapAdminArgs {
-    /// Lenso host repository root.
+struct ConsoleOperatorBootstrapArgs {
+    /// Lenso Console repository root. Defaults to the current directory.
     #[arg(long)]
-    repo_root: Option<std::path::PathBuf>,
+    console_root: Option<std::path::PathBuf>,
 
     /// Environment file to read for `DATABASE_URL`.
     #[arg(long)]
@@ -1100,17 +1101,24 @@ struct ConsoleBootstrapAdminArgs {
     #[arg(long)]
     identifier: Option<String>,
 
-    /// Extra scope to grant. console.admin is always included.
+    /// Additional scope to grant beyond the Console Minimum operator scopes.
     #[arg(long = "scope")]
     scopes: Vec<String>,
 }
 
 #[derive(Debug, Subcommand)]
+enum ConsoleOperatorCommand {
+    /// Bootstrap the first operator in an independent Lenso Console Service.
+    Bootstrap(ConsoleOperatorBootstrapArgs),
+}
+
+#[derive(Debug, Subcommand)]
 enum ConsoleCommand {
-    /// Refresh the hosted Runtime Console assets in a host project.
-    Update(ConsoleUpdateArgs),
-    /// Grant Runtime Console admin scopes to an auth user.
-    BootstrapAdmin(ConsoleBootstrapAdminArgs),
+    /// Manage operators in the independent Lenso Console Service.
+    Operator {
+        #[command(subcommand)]
+        command: ConsoleOperatorCommand,
+    },
     /// Start a Runtime Console package development shell.
     Dev(ConsoleDevArgs),
     /// Manage Runtime Console package registration.
@@ -1118,21 +1126,6 @@ enum ConsoleCommand {
         #[command(subcommand)]
         command: ConsolePackageCommand,
     },
-}
-
-#[derive(Debug, Args, Clone)]
-struct ConsoleUpdateArgs {
-    /// Lenso host repository root.
-    #[arg(long)]
-    repo_root: Option<std::path::PathBuf>,
-
-    /// Install from a local artifact directory or .tar.gz instead of downloading.
-    #[arg(long = "artifact")]
-    source: Option<std::path::PathBuf>,
-
-    /// Runtime Console GitHub release version to download.
-    #[arg(long = "console-version", default_value = "latest")]
-    console_version: String,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -3028,12 +3021,12 @@ impl From<&ModuleServiceStopArgs> for module::ModuleServiceStopOptions {
     }
 }
 
-impl From<&ConsoleBootstrapAdminArgs> for host::BootstrapAdminOptions {
-    fn from(args: &ConsoleBootstrapAdminArgs) -> Self {
+impl From<&ConsoleOperatorBootstrapArgs> for console_operator::BootstrapOperatorOptions {
+    fn from(args: &ConsoleOperatorBootstrapArgs) -> Self {
         Self {
+            console_root: args.console_root.clone(),
             env_file: args.env_file.clone(),
             identifier: args.identifier.clone(),
-            repo_root: args.repo_root.clone(),
             scopes: args.scopes.clone(),
             user_id: args.user_id.clone(),
         }
@@ -3362,17 +3355,11 @@ async fn main() -> anyhow::Result<()> {
             HostCommand::Init { dir, name, force } => host::init(&dir, name.as_deref(), force)?,
         },
         Command::Console { command } => match command {
-            ConsoleCommand::Update(args) => {
-                host::update_console(host::UpdateConsoleOptions {
-                    repo_root: args.repo_root,
-                    source: args.source,
-                    version: args.console_version,
-                })
-                .await?;
-            }
-            ConsoleCommand::BootstrapAdmin(args) => {
-                host::bootstrap_admin((&args).into()).await?;
-            }
+            ConsoleCommand::Operator { command } => match command {
+                ConsoleOperatorCommand::Bootstrap(args) => {
+                    console_operator::bootstrap_operator((&args).into()).await?;
+                }
+            },
             ConsoleCommand::Dev(args) => {
                 console_dev::run_console_dev(console_dev::ConsoleDevOptions {
                     cwd: None,
@@ -4276,6 +4263,49 @@ mod tests {
             args.runtime_console_root.as_deref(),
             Some(std::path::Path::new("../lenso-runtime-console"))
         );
+    }
+
+    #[test]
+    fn parses_console_operator_bootstrap_without_legacy_alias() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "console",
+            "operator",
+            "bootstrap",
+            "--console-root",
+            "../lenso-console",
+            "--identifier",
+            "admin@example.com",
+            "--scope",
+            "runtime.stories.read",
+        ]);
+        let Command::Console {
+            command:
+                ConsoleCommand::Operator {
+                    command: ConsoleOperatorCommand::Bootstrap(args),
+                },
+        } = cli.command
+        else {
+            panic!("expected Console operator bootstrap");
+        };
+
+        assert_eq!(
+            args.console_root.as_deref(),
+            Some(std::path::Path::new("../lenso-console"))
+        );
+        assert_eq!(args.identifier.as_deref(), Some("admin@example.com"));
+        assert_eq!(args.scopes, ["runtime.stories.read"]);
+        assert!(
+            Cli::try_parse_from([
+                "lenso",
+                "console",
+                "bootstrap-admin",
+                "--identifier",
+                "admin@example.com",
+            ])
+            .is_err()
+        );
+        assert!(Cli::try_parse_from(["lenso", "console", "update"]).is_err());
     }
 
     #[test]
