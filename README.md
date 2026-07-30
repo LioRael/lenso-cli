@@ -63,6 +63,12 @@ its target release, approved plan digest, current phase, and final status. Docto
 reports an interrupted or failed attempt until a later change commits cleanly;
 database credentials and other environment values are never included.
 
+Apply holds an exclusive OS-backed `installation.lock` from the state reread
+through readiness and evidence commit. A concurrent install or upgrade fails
+without mutation. If the process exits without releasing the lock, the operating
+system releases ownership while the active record remains as crash evidence;
+doctor reports it as recoverable and the next apply safely claims the same lock.
+
 After installing and starting the independent Lenso Console Service, create its
 first password user and bootstrap that user as the first Console Operator from
 outside the Service. Keep the password out of shell history:

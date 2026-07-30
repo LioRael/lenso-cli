@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
-use std::fs::{self, OpenOptions};
-use std::io::Write as _;
+use std::fs::{self, File, OpenOptions, TryLockError};
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -18,12 +18,14 @@ const RELEASE_SCHEMA: &str = "lenso.console-service-release.v1";
 const PLAN_SCHEMA: &str = "lenso.console-installation-plan.v1";
 const STATE_SCHEMA: &str = "lenso.console-installation-state.v1";
 const ATTEMPT_SCHEMA: &str = "lenso.console-installation-attempt.v1";
+const LOCK_SCHEMA: &str = "lenso.console-installation-lock.v1";
 const DOCTOR_SCHEMA: &str = "lenso.console-doctor.v1";
 const TRUSTED_RELEASE_REPOSITORY: &str = "LioRael/lenso-runtime-console";
 const TRUSTED_SIGNER_WORKFLOW: &str = "LioRael/lenso-runtime-console/.github/workflows/publish.yml";
 const TRUSTED_IMAGE_REPOSITORY: &str = "ghcr.io/liorael/lenso-console";
 const STATE_FILE: &str = "installation-state.json";
 const ATTEMPT_FILE: &str = "installation-attempt.json";
+const LOCK_FILE: &str = "installation.lock";
 const MANIFEST_FILE: &str = "release-manifest.json";
 const COMPOSE_FILE: &str = "compose.yaml";
 
@@ -137,6 +139,32 @@ struct InstallationAttempt {
     updated_at_unix_ms: u64,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum LockStatus {
+    Active,
+    Released,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InstallationLockRecord {
+    schema: String,
+    owner_token: String,
+    owner_pid: u32,
+    status: LockStatus,
+    acquired_at_unix_ms: u64,
+    updated_at_unix_ms: u64,
+}
+
+#[derive(Debug)]
+struct InstallationLock {
+    file: File,
+    path: PathBuf,
+    record: InstallationLockRecord,
+    released: bool,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DoctorReport {
@@ -170,6 +198,114 @@ enum CheckStatus {
     Fail,
 }
 
+impl InstallationLock {
+    fn acquire(root: &Path) -> Result<Self> {
+        fs::create_dir_all(root)
+            .with_context(|| format!("create Console installation root {}", root.display()))?;
+        let path = root.join(LOCK_FILE);
+        if let Ok(metadata) = fs::symlink_metadata(&path)
+            && (metadata.file_type().is_symlink() || !metadata.is_file())
+        {
+            bail!("Console installation lock must be a regular file and not a symbolic link");
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("open Console installation lock {}", path.display()))?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => {
+                let owner = read_lock_record(&mut file)
+                    .map(|record| format!("{} (pid {})", record.owner_token, record.owner_pid))
+                    .unwrap_or_else(|_| "unknown owner".to_owned());
+                bail!("another Console installation change is active: {owner}");
+            }
+            Err(TryLockError::Error(error)) => {
+                return Err(error).context("acquire Console installation lock");
+            }
+        }
+        let now = unix_time_ms()?;
+        let record = InstallationLockRecord {
+            schema: LOCK_SCHEMA.to_owned(),
+            owner_token: Uuid::now_v7().to_string(),
+            owner_pid: std::process::id(),
+            status: LockStatus::Active,
+            acquired_at_unix_ms: now,
+            updated_at_unix_ms: now,
+        };
+        write_lock_record(&mut file, &record)?;
+        Ok(Self {
+            file,
+            path,
+            record,
+            released: false,
+        })
+    }
+
+    fn release(mut self) -> Result<()> {
+        self.record.status = LockStatus::Released;
+        self.record.updated_at_unix_ms = unix_time_ms()?;
+        write_lock_record(&mut self.file, &self.record)?;
+        self.file.unlock().with_context(|| {
+            format!("release Console installation lock {}", self.path.display())
+        })?;
+        self.released = true;
+        Ok(())
+    }
+}
+
+impl Drop for InstallationLock {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        self.record.status = LockStatus::Released;
+        if let Ok(now) = unix_time_ms() {
+            self.record.updated_at_unix_ms = now;
+        }
+        let _ = write_lock_record(&mut self.file, &self.record);
+        let _ = self.file.unlock();
+    }
+}
+
+fn read_lock_record(file: &mut File) -> Result<InstallationLockRecord> {
+    file.seek(SeekFrom::Start(0))
+        .context("seek Console installation lock")?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .context("read Console installation lock")?;
+    let record: InstallationLockRecord =
+        serde_json::from_slice(&bytes).context("decode Console installation lock")?;
+    validate_lock_record(&record)?;
+    Ok(record)
+}
+
+fn write_lock_record(file: &mut File, record: &InstallationLockRecord) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(record).context("encode Console installation lock")?;
+    file.set_len(0)
+        .context("truncate Console installation lock")?;
+    file.seek(SeekFrom::Start(0))
+        .context("seek Console installation lock")?;
+    file.write_all(&bytes)
+        .context("write Console installation lock")?;
+    file.sync_all().context("sync Console installation lock")
+}
+
+fn validate_lock_record(record: &InstallationLockRecord) -> Result<()> {
+    if record.schema != LOCK_SCHEMA
+        || Uuid::parse_str(&record.owner_token).is_err()
+        || record.owner_pid == 0
+        || record.acquired_at_unix_ms == 0
+        || record.updated_at_unix_ms < record.acquired_at_unix_ms
+    {
+        bail!("Console installation lock is invalid");
+    }
+    Ok(())
+}
+
 pub fn install(options: ChangeOptions) -> Result<()> {
     change(ChangeAction::Install, options)
 }
@@ -181,6 +317,10 @@ pub fn upgrade(options: ChangeOptions) -> Result<()> {
 fn change(action: ChangeAction, options: ChangeOptions) -> Result<()> {
     let root = absolute_path(&options.root)?;
     validate_installation_root(&root)?;
+    let mut installation_lock = options
+        .apply
+        .then(|| InstallationLock::acquire(&root))
+        .transpose()?;
     let manifest_path = absolute_existing_file(&options.manifest, "Console Release Manifest")?;
     let manifest_bytes = fs::read(&manifest_path)
         .with_context(|| format!("read Console Release Manifest {}", manifest_path.display()))?;
@@ -230,6 +370,9 @@ fn change(action: ChangeAction, options: ChangeOptions) -> Result<()> {
         &manifest,
         &plan,
     )?;
+    if let Some(lock) = installation_lock.take() {
+        lock.release()?;
+    }
     eprintln!(
         "Applied Lenso Console {} {}.",
         match action {
@@ -621,6 +764,7 @@ pub async fn doctor(options: DoctorOptions) -> Result<()> {
         checks.push(fail("state", "installation state is missing"));
     }
     check_installation_attempt(&root, state.as_ref(), &mut checks);
+    check_installation_lock(&root, &mut checks);
     if let Some(url) = options.live_url.as_deref() {
         checks.push(live_check(url).await);
     }
@@ -763,6 +907,70 @@ fn check_installation_attempt(
         Err(_) => checks.push(fail(
             "last_change",
             "installation attempt evidence is invalid",
+        )),
+    }
+}
+
+fn check_installation_lock(root: &Path, checks: &mut Vec<DoctorCheck>) {
+    let result = (|| -> Result<Option<(InstallationLockRecord, bool)>> {
+        let path = root.join(LOCK_FILE);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("inspect Console installation lock {}", path.display())
+                });
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!("Console installation lock is not a regular file");
+        }
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("open Console installation lock {}", path.display()))?;
+        match file.try_lock() {
+            Ok(()) => {
+                let record = read_lock_record(&mut file)?;
+                file.unlock().context("release Console doctor lock probe")?;
+                Ok(Some((record, false)))
+            }
+            Err(TryLockError::WouldBlock) => Ok(Some((read_lock_record(&mut file)?, true))),
+            Err(TryLockError::Error(error)) => {
+                Err(error).context("probe Console installation lock")
+            }
+        }
+    })();
+    match result {
+        Ok(None) => checks.push(pass(
+            "change_lock",
+            "no Console installation change lock exists",
+        )),
+        Ok(Some((record, false))) if record.status == LockStatus::Released => checks.push(pass(
+            "change_lock",
+            "Console installation change lock is released",
+        )),
+        Ok(Some((record, false))) => checks.push(fail(
+            "change_lock",
+            &format!(
+                "stale Console installation lock from pid {} is recoverable on the next apply",
+                record.owner_pid
+            ),
+        )),
+        Ok(Some((record, true))) => checks.push(fail(
+            "change_lock",
+            &format!(
+                "Console installation change is active in pid {}",
+                record.owner_pid
+            ),
+        )),
+        Err(_) => checks.push(fail(
+            "change_lock",
+            "Console installation change lock is invalid",
         )),
     }
 }
@@ -1266,6 +1474,50 @@ mod tests {
         let mut drifted_state = installed;
         drifted_state.contract_digest = digest('9');
         assert!(validate_installed_evidence(&root, &drifted_state).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn installation_lock_blocks_concurrent_changes_and_releases_cleanly() {
+        let root = test_root("active-lock");
+        let lock = InstallationLock::acquire(&root).unwrap();
+        assert!(InstallationLock::acquire(&root).is_err());
+        let mut checks = Vec::new();
+        check_installation_lock(&root, &mut checks);
+        assert!(matches!(checks[0].status, CheckStatus::Fail));
+        assert!(checks[0].detail.contains("active"));
+
+        lock.release().unwrap();
+        checks.clear();
+        check_installation_lock(&root, &mut checks);
+        assert!(matches!(checks[0].status, CheckStatus::Pass));
+        InstallationLock::acquire(&root).unwrap().release().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_installation_lock_is_reported_and_recovered_by_the_next_owner() {
+        let root = test_root("stale-lock");
+        let lock = InstallationLock::acquire(&root).unwrap();
+        let mut stale = lock.record.clone();
+        lock.release().unwrap();
+        stale.status = LockStatus::Active;
+        stale.updated_at_unix_ms = unix_time_ms().unwrap();
+        fs::write(
+            root.join(LOCK_FILE),
+            serde_json::to_vec_pretty(&stale).unwrap(),
+        )
+        .unwrap();
+
+        let mut checks = Vec::new();
+        check_installation_lock(&root, &mut checks);
+        assert!(matches!(checks[0].status, CheckStatus::Fail));
+        assert!(checks[0].detail.contains("recoverable"));
+
+        InstallationLock::acquire(&root).unwrap().release().unwrap();
+        checks.clear();
+        check_installation_lock(&root, &mut checks);
+        assert!(matches!(checks[0].status, CheckStatus::Pass));
         fs::remove_dir_all(root).unwrap();
     }
 
