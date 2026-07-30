@@ -41,10 +41,14 @@ lenso console doctor --root /srv/lenso-console \
 The manifest must be attested by the repository's coordinator-only
 `.github/workflows/publish.yml` signer and must pin an OCI image by digest. The
 CLI rejects attestations from any other workflow and from self-hosted runners.
-The apply adapter pulls that image, runs its migration
-workload, starts the Console workload, and records state only after success.
-Upgrade uses `lenso console upgrade` with the same protocol. An upgrade that
-declares irreversible migrations additionally requires
+The apply adapter pulls that image, runs its migration workload, starts the
+Console workload, waits up to two minutes for container health, and records the
+canonical deployment and state only after success. A failed readiness wait
+preserves the previous canonical files and state instead of recording the
+candidate as installed; use `lenso console doctor --live-url <console-url>` to
+assess the workload before retrying or intervening. Upgrade uses the same
+protocol through `lenso console upgrade`. An upgrade that declares irreversible
+migrations additionally requires
 `--approve-irreversible`. Secrets remain in the operator-owned environment file
 and are never copied into the plan, manifest, or installation state.
 

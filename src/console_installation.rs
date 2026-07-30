@@ -20,6 +20,7 @@ const STATE_SCHEMA: &str = "lenso.console-installation-state.v1";
 const DOCTOR_SCHEMA: &str = "lenso.console-doctor.v1";
 const TRUSTED_RELEASE_REPOSITORY: &str = "LioRael/lenso-runtime-console";
 const TRUSTED_SIGNER_WORKFLOW: &str = "LioRael/lenso-runtime-console/.github/workflows/publish.yml";
+const TRUSTED_IMAGE_REPOSITORY: &str = "ghcr.io/liorael/lenso-console";
 const STATE_FILE: &str = "installation-state.json";
 const MANIFEST_FILE: &str = "release-manifest.json";
 const COMPOSE_FILE: &str = "compose.yaml";
@@ -186,7 +187,14 @@ fn change(action: ChangeAction, options: ChangeOptions) -> Result<()> {
             .context("--env-file is required with --apply")?,
         "Console environment file",
     )?;
-    apply_change(&root, &env_file, &manifest_bytes, &manifest, &plan)?;
+    apply_change_with(
+        &DockerComposeAdapter,
+        &root,
+        &env_file,
+        &manifest_bytes,
+        &manifest,
+        &plan,
+    )?;
     eprintln!(
         "Applied Lenso Console {} {}.",
         match action {
@@ -210,6 +218,11 @@ fn validate_manifest(manifest: &ConsoleReleaseManifest) -> Result<()> {
             bail!("Console Release Manifest {name} is empty");
         }
     }
+    if !is_canonical_version(&manifest.version)
+        || manifest.release_id != format!("lenso-console@{}", manifest.version)
+    {
+        bail!("Console Release Manifest releaseId and version are inconsistent");
+    }
     if !is_git_commit(&manifest.source_commit) {
         bail!("Console Release Manifest sourceCommit must be a full Git commit");
     }
@@ -227,12 +240,8 @@ fn validate_manifest(manifest: &ConsoleReleaseManifest) -> Result<()> {
             bail!("Console Release Manifest {name} must be a canonical SHA-256 digest");
         }
     }
-    if !manifest
-        .image
-        .reference
-        .ends_with(&format!("@{}", manifest.image.digest))
-    {
-        bail!("Console image reference must pin the declared image digest");
+    if manifest.image.reference != format!("{TRUSTED_IMAGE_REPOSITORY}@{}", manifest.image.digest) {
+        bail!("Console image reference must pin the reviewed image repository and digest");
     }
     if manifest
         .compatible_from_schema_digests
@@ -354,7 +363,7 @@ fn build_plan(
             PlanStep {
                 order: 3,
                 workload: "console",
-                effect: "replace the Console API and Worker workload",
+                effect: "replace the Console workload and wait for health",
             },
             PlanStep {
                 order: 4,
@@ -381,7 +390,33 @@ fn require_approval(plan: &InstallationPlan, options: &ChangeOptions) -> Result<
     Ok(())
 }
 
-fn apply_change(
+trait ComposeAdapter {
+    fn run(&self, root: &Path, env_file: &Path, compose_file: &Path, args: &[&str]) -> Result<()>;
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DockerComposeAdapter;
+
+impl ComposeAdapter for DockerComposeAdapter {
+    fn run(&self, root: &Path, env_file: &Path, compose_file: &Path, args: &[&str]) -> Result<()> {
+        let status = Command::new("docker")
+            .args(["compose", "--project-name", "lenso-console", "--env-file"])
+            .arg(env_file)
+            .args(["--file"])
+            .arg(compose_file)
+            .args(args)
+            .current_dir(root)
+            .status()
+            .context("run Docker Compose Console installation adapter")?;
+        if !status.success() {
+            bail!("Docker Compose Console installation step failed with {status}");
+        }
+        Ok(())
+    }
+}
+
+fn apply_change_with(
+    adapter: &impl ComposeAdapter,
     root: &Path,
     env_file: &Path,
     manifest_bytes: &[u8],
@@ -391,50 +426,65 @@ fn apply_change(
     fs::create_dir_all(root)
         .with_context(|| format!("create Console installation root {}", root.display()))?;
     let compose = compose_document(&manifest.image.reference);
-    atomic_write(&root.join(COMPOSE_FILE), compose.as_bytes())?;
-    atomic_write(&root.join(MANIFEST_FILE), manifest_bytes)?;
+    let candidate_id = Uuid::now_v7();
+    let candidate_compose = root.join(format!(".{COMPOSE_FILE}.candidate-{candidate_id}"));
+    let candidate_manifest = root.join(format!(".{MANIFEST_FILE}.candidate-{candidate_id}"));
+    let result = (|| -> Result<()> {
+        atomic_write(&candidate_compose, compose.as_bytes())?;
+        atomic_write(&candidate_manifest, manifest_bytes)?;
 
-    run_compose(root, env_file, &["pull"])?;
-    run_compose(root, env_file, &["run", "--rm", "migrate"])?;
-    run_compose(root, env_file, &["up", "--detach", "console"])?;
+        adapter.run(root, env_file, &candidate_compose, &["pull"])?;
+        adapter.run(
+            root,
+            env_file,
+            &candidate_compose,
+            &["run", "--rm", "migrate"],
+        )?;
+        adapter.run(
+            root,
+            env_file,
+            &candidate_compose,
+            &[
+                "up",
+                "--detach",
+                "--wait",
+                "--wait-timeout",
+                "120",
+                "console",
+            ],
+        )
+        .context(
+            "candidate Console workload did not become healthy; canonical installation state was not changed",
+        )?;
 
-    let state = InstallationState {
-        schema: STATE_SCHEMA.to_owned(),
-        release_id: manifest.release_id.clone(),
-        release_digest: plan.release_digest.clone(),
-        image_reference: manifest.image.reference.clone(),
-        schema_digest: manifest.schema_digest.clone(),
-        composition_digest: manifest.composition_digest.clone(),
-        contract_digest: manifest.contract_digest.clone(),
-        configuration_digest: manifest.configuration_digest.clone(),
-        applied_plan_digest: plan.plan_digest.clone(),
-        applied_at_unix_ms: unix_time_ms()?,
-    };
-    atomic_write(
-        &root.join(STATE_FILE),
-        &serde_json::to_vec_pretty(&state).context("encode Console installation state")?,
-    )
+        atomic_write(&root.join(COMPOSE_FILE), compose.as_bytes())?;
+        atomic_write(&root.join(MANIFEST_FILE), manifest_bytes)?;
+        let state = InstallationState {
+            schema: STATE_SCHEMA.to_owned(),
+            release_id: manifest.release_id.clone(),
+            release_digest: plan.release_digest.clone(),
+            image_reference: manifest.image.reference.clone(),
+            schema_digest: manifest.schema_digest.clone(),
+            composition_digest: manifest.composition_digest.clone(),
+            contract_digest: manifest.contract_digest.clone(),
+            configuration_digest: manifest.configuration_digest.clone(),
+            applied_plan_digest: plan.plan_digest.clone(),
+            applied_at_unix_ms: unix_time_ms()?,
+        };
+        atomic_write(
+            &root.join(STATE_FILE),
+            &serde_json::to_vec_pretty(&state).context("encode Console installation state")?,
+        )
+    })();
+    let _ = fs::remove_file(candidate_compose);
+    let _ = fs::remove_file(candidate_manifest);
+    result
 }
 
 fn compose_document(image: &str) -> String {
     format!(
         "name: lenso-console\n\nservices:\n  migrate:\n    image: {image}\n    command: [\"/usr/local/bin/lenso-console-migrate\"]\n    environment: &console-environment\n      APP_ENV: production\n      CORS_ALLOWED_ORIGINS: ${{CONSOLE_PUBLIC_ORIGIN:?set CONSOLE_PUBLIC_ORIGIN}}\n      DATABASE_URL: ${{CONSOLE_DATABASE_URL:?set CONSOLE_DATABASE_URL}}\n      LENSO_COMPOSITION_PROFILE: core\n      SERVICE_NAME: lenso-console\n    read_only: true\n    security_opt:\n      - no-new-privileges:true\n    cap_drop:\n      - ALL\n    tmpfs:\n      - /tmp\n  console:\n    image: {image}\n    environment: *console-environment\n    ports:\n      - \"${{CONSOLE_HTTP_PORT:-3030}}:3030\"\n    read_only: true\n    restart: unless-stopped\n    security_opt:\n      - no-new-privileges:true\n    cap_drop:\n      - ALL\n    tmpfs:\n      - /tmp\n"
     )
-}
-
-fn run_compose(root: &Path, env_file: &Path, args: &[&str]) -> Result<()> {
-    let status = Command::new("docker")
-        .args(["compose", "--project-name", "lenso-console", "--env-file"])
-        .arg(env_file)
-        .args(["--file"])
-        .arg(root.join(COMPOSE_FILE))
-        .args(args)
-        .status()
-        .context("run Docker Compose Console installation adapter")?;
-    if !status.success() {
-        bail!("Docker Compose Console installation step failed with {status}");
-    }
-    Ok(())
 }
 
 pub async fn doctor(options: DoctorOptions) -> Result<()> {
@@ -597,12 +647,16 @@ fn read_state_optional(root: &Path) -> Result<Option<InstallationState>> {
     let state: InstallationState =
         serde_json::from_slice(&bytes).context("decode Console installation state")?;
     if state.schema != STATE_SCHEMA
+        || !state
+            .release_id
+            .strip_prefix("lenso-console@")
+            .is_some_and(is_canonical_version)
         || !is_sha256(&state.release_digest)
         || !is_sha256(&state.schema_digest)
         || !is_sha256(&state.composition_digest)
         || !is_sha256(&state.contract_digest)
         || !is_sha256(&state.configuration_digest)
-        || !image_reference_is_digest_pinned(&state.image_reference)
+        || !trusted_image_reference(&state.image_reference)
         || !is_sha256(&state.applied_plan_digest)
     {
         bail!("Console installation state is invalid");
@@ -720,10 +774,21 @@ fn is_sha256(value: &str) -> bool {
     })
 }
 
-fn image_reference_is_digest_pinned(value: &str) -> bool {
+fn trusted_image_reference(value: &str) -> bool {
     value
-        .rsplit_once('@')
-        .is_some_and(|(name, digest)| !name.is_empty() && is_sha256(digest))
+        .strip_prefix(&format!("{TRUSTED_IMAGE_REPOSITORY}@"))
+        .is_some_and(is_sha256)
+}
+
+fn is_canonical_version(value: &str) -> bool {
+    let parts = value.split('.').collect::<Vec<_>>();
+    parts.len() == 3
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && part.bytes().all(|byte| byte.is_ascii_digit())
+                && (part.len() == 1 || !part.starts_with('0'))
+                && part.parse::<u64>().is_ok()
+        })
 }
 
 fn all_unique(values: &[String]) -> bool {
@@ -755,7 +820,35 @@ fn fail(id: &'static str, detail: &str) -> DoctorCheck {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use super::*;
+
+    #[derive(Debug, Default)]
+    struct RecordingComposeAdapter {
+        calls: RefCell<Vec<Vec<String>>>,
+        fail_on: Option<usize>,
+    }
+
+    impl ComposeAdapter for RecordingComposeAdapter {
+        fn run(
+            &self,
+            _root: &Path,
+            _env_file: &Path,
+            compose_file: &Path,
+            args: &[&str],
+        ) -> Result<()> {
+            if !compose_file.is_file() {
+                bail!("candidate Compose file is missing");
+            }
+            let mut calls = self.calls.borrow_mut();
+            calls.push(args.iter().map(|value| (*value).to_owned()).collect());
+            if self.fail_on == Some(calls.len()) {
+                bail!("simulated Compose failure");
+            }
+            Ok(())
+        }
+    }
 
     fn digest(character: char) -> String {
         format!("sha256:{}", character.to_string().repeat(64))
@@ -796,6 +889,39 @@ mod tests {
         }
     }
 
+    fn installation_plan(root: &Path, release: &ConsoleReleaseManifest) -> InstallationPlan {
+        let manifest_bytes = serde_json::to_vec(release).unwrap();
+        let mut plan = build_plan(
+            ChangeAction::Install,
+            root,
+            release,
+            &sha256(&manifest_bytes),
+            None,
+        )
+        .unwrap();
+        plan.plan_digest = plan_digest(&plan).unwrap();
+        plan
+    }
+
+    fn test_root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "lenso-console-installation-{label}-{}",
+            Uuid::now_v7()
+        ))
+    }
+
+    fn candidate_files(root: &Path) -> Vec<PathBuf> {
+        fs::read_dir(root)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.contains(".candidate-"))
+            })
+            .collect()
+    }
+
     #[test]
     fn manifest_requires_exact_oci_digest_and_contract_digests() {
         assert!(validate_manifest(&manifest()).is_ok());
@@ -804,6 +930,16 @@ mod tests {
         assert!(validate_manifest(&invalid).is_err());
         invalid = manifest();
         invalid.contract_digest = "sha256:ABC".to_owned();
+        assert!(validate_manifest(&invalid).is_err());
+        invalid = manifest();
+        invalid.image.reference = format!("ghcr.io/attacker/console@{}", invalid.image.digest);
+        assert!(validate_manifest(&invalid).is_err());
+        invalid = manifest();
+        invalid.version = "01.2.0".to_owned();
+        invalid.release_id = "lenso-console@01.2.0".to_owned();
+        assert!(validate_manifest(&invalid).is_err());
+        invalid = manifest();
+        invalid.release_id = "lenso-console@0.2.1".to_owned();
         assert!(validate_manifest(&invalid).is_err());
     }
 
@@ -814,6 +950,31 @@ mod tests {
             TRUSTED_SIGNER_WORKFLOW,
             "LioRael/lenso-runtime-console/.github/workflows/publish.yml"
         );
+        assert_eq!(TRUSTED_IMAGE_REPOSITORY, "ghcr.io/liorael/lenso-console");
+    }
+
+    #[test]
+    fn installation_state_requires_canonical_release_and_image_authority() {
+        let root = test_root("state-authority");
+        fs::create_dir_all(&root).unwrap();
+        let mut invalid = state();
+        invalid.image_reference = format!("ghcr.io/attacker/console@{}", digest('9'));
+        fs::write(
+            root.join(STATE_FILE),
+            serde_json::to_vec_pretty(&invalid).unwrap(),
+        )
+        .unwrap();
+        assert!(read_state_optional(&root).is_err());
+
+        invalid = state();
+        invalid.release_id = "lenso-console@01.0.0".to_owned();
+        fs::write(
+            root.join(STATE_FILE),
+            serde_json::to_vec_pretty(&invalid).unwrap(),
+        )
+        .unwrap();
+        assert!(read_state_optional(&root).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -886,5 +1047,72 @@ mod tests {
         assert!(!document.contains(":latest"));
         assert!(document.contains("lenso-console-migrate"));
         assert!(document.contains("read_only: true"));
+    }
+
+    #[test]
+    fn apply_waits_for_health_before_committing_installation_state() {
+        let root = test_root("healthy");
+        fs::create_dir_all(&root).unwrap();
+        let env_file = root.join("console.env");
+        fs::write(&env_file, "CONSOLE_HTTP_PORT=3030\n").unwrap();
+        let release = manifest();
+        let manifest_bytes = serde_json::to_vec_pretty(&release).unwrap();
+        let plan = installation_plan(&root, &release);
+        let adapter = RecordingComposeAdapter::default();
+
+        apply_change_with(&adapter, &root, &env_file, &manifest_bytes, &release, &plan).unwrap();
+
+        assert_eq!(
+            adapter.calls.into_inner(),
+            vec![
+                vec!["pull"],
+                vec!["run", "--rm", "migrate"],
+                vec![
+                    "up",
+                    "--detach",
+                    "--wait",
+                    "--wait-timeout",
+                    "120",
+                    "console",
+                ],
+            ]
+        );
+        assert_eq!(fs::read(root.join(MANIFEST_FILE)).unwrap(), manifest_bytes);
+        assert!(root.join(COMPOSE_FILE).is_file());
+        assert!(read_state_optional(&root).unwrap().is_some());
+        assert!(candidate_files(&root).is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_health_wait_preserves_the_previous_installation() {
+        let root = test_root("unhealthy");
+        fs::create_dir_all(&root).unwrap();
+        let env_file = root.join("console.env");
+        fs::write(&env_file, "CONSOLE_HTTP_PORT=3030\n").unwrap();
+        let old_compose = b"previous compose\n";
+        let old_manifest = b"previous manifest\n";
+        let old_state = serde_json::to_vec_pretty(&state()).unwrap();
+        fs::write(root.join(COMPOSE_FILE), old_compose).unwrap();
+        fs::write(root.join(MANIFEST_FILE), old_manifest).unwrap();
+        fs::write(root.join(STATE_FILE), &old_state).unwrap();
+        let release = manifest();
+        let manifest_bytes = serde_json::to_vec_pretty(&release).unwrap();
+        let plan = installation_plan(&root, &release);
+        let adapter = RecordingComposeAdapter {
+            calls: RefCell::default(),
+            fail_on: Some(3),
+        };
+
+        assert!(
+            apply_change_with(&adapter, &root, &env_file, &manifest_bytes, &release, &plan,)
+                .is_err()
+        );
+
+        assert_eq!(fs::read(root.join(COMPOSE_FILE)).unwrap(), old_compose);
+        assert_eq!(fs::read(root.join(MANIFEST_FILE)).unwrap(), old_manifest);
+        assert_eq!(fs::read(root.join(STATE_FILE)).unwrap(), old_state);
+        assert!(candidate_files(&root).is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 }
