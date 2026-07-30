@@ -1089,6 +1089,10 @@ struct ConsoleOperatorBootstrapArgs {
     #[arg(long)]
     console_root: Option<std::path::PathBuf>,
 
+    /// Console Service URL used only to create the first password user.
+    #[arg(long)]
+    console_url: Option<String>,
+
     /// Environment file to read for `DATABASE_URL`.
     #[arg(long)]
     env_file: Option<std::path::PathBuf>,
@@ -1100,6 +1104,14 @@ struct ConsoleOperatorBootstrapArgs {
     /// Password-auth identifier, such as an email address.
     #[arg(long)]
     identifier: Option<String>,
+
+    /// Read the new password from a private regular file.
+    #[arg(long, conflicts_with = "password_stdin")]
+    password_file: Option<std::path::PathBuf>,
+
+    /// Read the new password from standard input.
+    #[arg(long, conflicts_with = "password_file")]
+    password_stdin: bool,
 
     /// Additional scope to grant beyond the Console Minimum operator scopes.
     #[arg(long = "scope")]
@@ -3025,8 +3037,11 @@ impl From<&ConsoleOperatorBootstrapArgs> for console_operator::BootstrapOperator
     fn from(args: &ConsoleOperatorBootstrapArgs) -> Self {
         Self {
             console_root: args.console_root.clone(),
+            console_url: args.console_url.clone(),
             env_file: args.env_file.clone(),
             identifier: args.identifier.clone(),
+            password_file: args.password_file.clone(),
+            password_stdin: args.password_stdin,
             scopes: args.scopes.clone(),
             user_id: args.user_id.clone(),
         }
@@ -4276,6 +4291,10 @@ mod tests {
             "../lenso-console",
             "--identifier",
             "admin@example.com",
+            "--console-url",
+            "http://127.0.0.1:3030",
+            "--password-file",
+            "./operator-password",
             "--scope",
             "runtime.stories.read",
         ]);
@@ -4294,6 +4313,11 @@ mod tests {
             Some(std::path::Path::new("../lenso-console"))
         );
         assert_eq!(args.identifier.as_deref(), Some("admin@example.com"));
+        assert_eq!(
+            args.password_file.as_deref(),
+            Some(std::path::Path::new("./operator-password"))
+        );
+        assert_eq!(args.console_url.as_deref(), Some("http://127.0.0.1:3030"));
         assert_eq!(args.scopes, ["runtime.stories.read"]);
         assert!(
             Cli::try_parse_from([

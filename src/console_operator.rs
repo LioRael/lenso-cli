@@ -1,9 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::io::{self, Read};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use reqwest::{Client, Url, redirect::Policy};
+use serde::Deserialize;
 use serde_json::{Value, json};
-use sqlx::postgres::PgPoolOptions;
+use sqlx::{Executor, Postgres, Transaction, postgres::PgPoolOptions};
 use uuid::Uuid;
 
 const CONSOLE_ADMIN_USER_SCOPES_KEY: &str = "auth.console_admin_user_scopes";
@@ -21,14 +26,29 @@ const MINIMUM_OPERATOR_SCOPES: &[&str] = &[
 #[derive(Debug, Clone)]
 pub struct BootstrapOperatorOptions {
     pub console_root: Option<PathBuf>,
+    pub console_url: Option<String>,
     pub env_file: Option<PathBuf>,
+    pub password_file: Option<PathBuf>,
+    pub password_stdin: bool,
     pub user_id: Option<String>,
     pub identifier: Option<String>,
     pub scopes: Vec<String>,
 }
 
+struct PasswordRegistration {
+    console_url: Url,
+    identifier: String,
+    password: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PasswordSessionResponse {
+    user_id: String,
+}
+
 /// Bootstrap the first operator in an independent Lenso Console Service.
 pub async fn bootstrap_operator(options: BootstrapOperatorOptions) -> Result<()> {
+    let registration = password_registration(&options)?;
     let console_root = options
         .console_root
         .as_deref()
@@ -41,9 +61,21 @@ pub async fn bootstrap_operator(options: BootstrapOperatorOptions) -> Result<()>
         .await
         .context("connect to the Lenso Console Service Store")?;
     verify_console_service_store(&pool).await?;
-    let user_id = resolve_operator_user_id(&pool, options.user_id, options.identifier).await?;
+
+    let mut tx = pool.begin().await.context("begin operator bootstrap")?;
+    lock_operator_bootstrap(&mut tx).await?;
+    let old_value = load_operator_grants(&mut tx).await?;
+    ensure_no_existing_operator(&decode_operator_grants(old_value.clone())?)?;
+
+    let user_id = if let Some(registration) = registration {
+        let user_id = register_password_user(registration).await?;
+        resolve_operator_user_id(&mut tx, Some(user_id), None).await?
+    } else {
+        resolve_operator_user_id(&mut tx, options.user_id, options.identifier).await?
+    };
     let scopes = operator_scopes(options.scopes);
-    let stored = store_initial_operator(&pool, &user_id, &scopes).await?;
+    let stored = write_initial_operator(&mut tx, old_value, &user_id, &scopes).await?;
+    tx.commit().await.context("commit operator bootstrap")?;
 
     eprintln!("Bootstrapped Lenso Console operator {user_id}.");
     eprintln!("Stored {CONSOLE_ADMIN_USER_SCOPES_KEY}: {stored}");
@@ -75,8 +107,176 @@ fn console_service_root(console_root: &Path) -> PathBuf {
     }
 }
 
+fn password_registration(
+    options: &BootstrapOperatorOptions,
+) -> Result<Option<PasswordRegistration>> {
+    if options.password_file.is_some() && options.password_stdin {
+        bail!("pass either --password-file or --password-stdin, not both");
+    }
+    if options.password_file.is_none() && !options.password_stdin {
+        if options.console_url.is_some() {
+            bail!("--console-url requires --password-file or --password-stdin");
+        }
+        return Ok(None);
+    }
+    if options.user_id.is_some() {
+        bail!("--user-id cannot be combined with password-user creation");
+    }
+    let identifier = options
+        .identifier
+        .as_deref()
+        .context("--identifier is required when creating the password user")?;
+    let identifier = normalize_identifier(identifier)?;
+    let console_url = secure_console_url(
+        options
+            .console_url
+            .as_deref()
+            .context("--console-url is required when creating the password user")?,
+    )?;
+    let password = if let Some(path) = options.password_file.as_deref() {
+        read_password_file(path)?
+    } else {
+        read_password_stdin()?
+    };
+    Ok(Some(PasswordRegistration {
+        console_url,
+        identifier,
+        password,
+    }))
+}
+
+fn secure_console_url(value: &str) -> Result<Url> {
+    let mut url = Url::parse(value).context("parse --console-url")?;
+    if !url.username().is_empty() || url.password().is_some() {
+        bail!("--console-url must not contain credentials");
+    }
+    let secure = url.scheme() == "https";
+    let loopback = url.host_str().is_some_and(|host| {
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    });
+    if !secure && !(url.scheme() == "http" && loopback) {
+        bail!("--console-url must use HTTPS unless it targets loopback");
+    }
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url)
+}
+
+fn read_password_file(path: &Path) -> Result<String> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect password file {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("password file must be a regular file and not a symbolic link");
+    }
+    ensure_private_password_file(&metadata, path)?;
+    let password = fs::read_to_string(path)
+        .with_context(|| format!("read password file {}", path.display()))?;
+    validate_password(strip_terminal_newline(password))
+}
+
+#[cfg(unix)]
+fn ensure_private_password_file(metadata: &fs::Metadata, path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if metadata.permissions().mode() & 0o077 != 0 {
+        bail!(
+            "password file {} must not be readable or writable by group or others",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_private_password_file(_metadata: &fs::Metadata, _path: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn read_password_stdin() -> Result<String> {
+    let mut password = String::new();
+    io::stdin()
+        .read_to_string(&mut password)
+        .context("read password from stdin")?;
+    validate_password(strip_terminal_newline(password))
+}
+
+fn strip_terminal_newline(mut password: String) -> String {
+    if password.ends_with('\n') {
+        password.pop();
+        if password.ends_with('\r') {
+            password.pop();
+        }
+    }
+    password
+}
+
+fn validate_password(password: String) -> Result<String> {
+    if password.is_empty() {
+        bail!("password input is empty");
+    }
+    Ok(password)
+}
+
+async fn register_password_user(registration: PasswordRegistration) -> Result<String> {
+    let endpoint = registration
+        .console_url
+        .join("/v1/auth/password/register")
+        .context("build Console password registration URL")?;
+    let client = Client::builder()
+        .redirect(Policy::none())
+        .build()
+        .context("build Console Auth client")?;
+    let response = client
+        .post(endpoint)
+        .json(&json!({
+            "identifier": registration.identifier,
+            "password": registration.password
+        }))
+        .send()
+        .await
+        .context("register password user through the Console Auth Module")?;
+    if !response.status().is_success() {
+        bail!(
+            "Console Auth password registration failed with HTTP {}",
+            response.status()
+        );
+    }
+    let response = response
+        .json::<PasswordSessionResponse>()
+        .await
+        .context("decode Console Auth password registration response")?;
+    if response.user_id.trim().is_empty() {
+        bail!("Console Auth returned an empty user id");
+    }
+    Ok(response.user_id)
+}
+
+async fn lock_operator_bootstrap(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
+    sqlx::query("select pg_advisory_xact_lock(hashtext($1))")
+        .bind(BOOTSTRAP_LOCK)
+        .execute(&mut **tx)
+        .await
+        .context("fence concurrent operator bootstrap")?;
+    Ok(())
+}
+
+async fn load_operator_grants(tx: &mut Transaction<'_, Postgres>) -> Result<Option<Value>> {
+    sqlx::query_scalar::<_, Value>(
+        "select value from config.setting_values where service = $1 and key = $2",
+    )
+    .bind(RUNTIME_CONFIG_SERVICE)
+    .bind(CONSOLE_ADMIN_USER_SCOPES_KEY)
+    .fetch_optional(&mut **tx)
+    .await
+    .context("load current Console operator grants")
+}
+
 async fn resolve_operator_user_id(
-    pool: &sqlx::PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     user_id: Option<String>,
     identifier: Option<String>,
 ) -> Result<String> {
@@ -86,7 +286,7 @@ async fn resolve_operator_user_id(
             let user_id = user_id.trim();
             let exists = sqlx::query_scalar::<_, String>("select id from auth.users where id = $1")
                 .bind(user_id)
-                .fetch_optional(pool)
+                .fetch_optional(&mut **tx)
                 .await
                 .context("check Console Auth user")?;
             exists.with_context(|| format!("Console Auth user `{user_id}` was not found"))
@@ -97,7 +297,7 @@ async fn resolve_operator_user_id(
                 "select user_id from auth.identities where provider = 'password' and provider_subject = $1",
             )
             .bind(&normalized)
-            .fetch_optional(pool)
+            .fetch_optional(&mut **tx)
             .await
             .with_context(|| format!("find Console password identity `{normalized}`"))?
             .with_context(|| format!("Console password identity `{normalized}` was not found"))
@@ -132,29 +332,12 @@ fn operator_scopes(scopes: Vec<String>) -> Vec<String> {
     set.into_iter().collect()
 }
 
-async fn store_initial_operator(
-    pool: &sqlx::PgPool,
+async fn write_initial_operator(
+    tx: &mut Transaction<'_, Postgres>,
+    old_value: Option<Value>,
     user_id: &str,
     scopes: &[String],
 ) -> Result<Value> {
-    let mut tx = pool.begin().await.context("begin operator bootstrap")?;
-    sqlx::query("select pg_advisory_xact_lock(hashtext($1))")
-        .bind(BOOTSTRAP_LOCK)
-        .execute(&mut *tx)
-        .await
-        .context("fence concurrent operator bootstrap")?;
-
-    let old_value = sqlx::query_scalar::<_, Value>(
-        "select value from config.setting_values where service = $1 and key = $2",
-    )
-    .bind(RUNTIME_CONFIG_SERVICE)
-    .bind(CONSOLE_ADMIN_USER_SCOPES_KEY)
-    .fetch_optional(&mut *tx)
-    .await
-    .context("load current Console operator grants")?;
-    let existing = decode_operator_grants(old_value.clone())?;
-    ensure_no_existing_operator(&existing)?;
-
     let grants = BTreeMap::from([(user_id.to_owned(), scopes.to_vec())]);
     let next_value = serde_json::to_value(grants).context("encode Console operator grants")?;
     sqlx::query(
@@ -169,25 +352,25 @@ async fn store_initial_operator(
     .bind(CONSOLE_ADMIN_USER_SCOPES_KEY)
     .bind(&next_value)
     .bind(BOOTSTRAP_ACTOR)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .context("write initial Console operator grant")?;
-    sqlx::query(
-        r"
-        insert into config.setting_audit (id, service, key, old_value, new_value, actor, changed_at)
-        values ($1, $2, $3, $4, $5, $6, now())
-        ",
+    tx.execute(
+        sqlx::query(
+            r"
+            insert into config.setting_audit (id, service, key, old_value, new_value, actor, changed_at)
+            values ($1, $2, $3, $4, $5, $6, now())
+            ",
+        )
+        .bind(Uuid::now_v7())
+        .bind(RUNTIME_CONFIG_SERVICE)
+        .bind(CONSOLE_ADMIN_USER_SCOPES_KEY)
+        .bind(&old_value)
+        .bind(&next_value)
+        .bind(BOOTSTRAP_ACTOR),
     )
-    .bind(Uuid::now_v7())
-    .bind(RUNTIME_CONFIG_SERVICE)
-    .bind(CONSOLE_ADMIN_USER_SCOPES_KEY)
-    .bind(&old_value)
-    .bind(&next_value)
-    .bind(BOOTSTRAP_ACTOR)
-    .execute(&mut *tx)
     .await
     .context("audit initial Console operator grant")?;
-    tx.commit().await.context("commit operator bootstrap")?;
     Ok(next_value)
 }
 
@@ -208,6 +391,19 @@ fn ensure_no_existing_operator(existing: &BTreeMap<String, Vec<String>>) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn options() -> BootstrapOperatorOptions {
+        BootstrapOperatorOptions {
+            console_root: None,
+            console_url: None,
+            env_file: None,
+            password_file: None,
+            password_stdin: false,
+            user_id: None,
+            identifier: Some("admin@example.com".to_owned()),
+            scopes: Vec::new(),
+        }
+    }
 
     #[test]
     fn operator_scope_set_contains_console_minimum_and_extra_scopes() {
@@ -257,5 +453,118 @@ mod tests {
         let error = ensure_no_existing_operator(&existing).unwrap_err();
         assert!(error.to_string().contains("already has an operator"));
         assert!(ensure_no_existing_operator(&BTreeMap::new()).is_ok());
+    }
+
+    #[test]
+    fn password_user_creation_requires_a_safe_exact_input() {
+        let mut input = options();
+        input.console_url = Some("http://console.example.com:3030".to_owned());
+        input.password_stdin = true;
+        let Err(error) = password_registration(&input) else {
+            panic!("remote plaintext HTTP must be rejected");
+        };
+        assert!(error.to_string().contains("HTTPS"));
+
+        input.console_url = Some("https://console.example.com".to_owned());
+        input.user_id = Some("usr_existing".to_owned());
+        let Err(error) = password_registration(&input) else {
+            panic!("password-user creation with --user-id must be rejected");
+        };
+        assert!(error.to_string().contains("--user-id"));
+    }
+
+    #[test]
+    fn console_url_allows_https_and_loopback_only() {
+        assert!(secure_console_url("https://console.example.com").is_ok());
+        assert!(secure_console_url("http://127.0.0.1:3030").is_ok());
+        assert!(secure_console_url("http://[::1]:3030").is_ok());
+        assert!(secure_console_url("http://console.example.com").is_err());
+        assert!(secure_console_url("https://user:secret@console.example.com").is_err());
+    }
+
+    #[test]
+    fn password_newline_removal_preserves_other_characters() {
+        assert_eq!(
+            strip_terminal_newline(" secret value \r\n".to_owned()),
+            " secret value "
+        );
+        assert_eq!(strip_terminal_newline("secret  ".to_owned()), "secret  ");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn password_file_requires_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "lenso-console-operator-password-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::write(&path, "strong password\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(read_password_file(&path).unwrap(), "strong password");
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(read_password_file(&path).is_err());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn password_registration_uses_console_auth_without_returning_the_session_secret() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 2048];
+            loop {
+                let read = stream.read(&mut buffer).unwrap();
+                request.extend_from_slice(&buffer[..read]);
+                let request_text = String::from_utf8_lossy(&request);
+                let Some((headers, body)) = request_text.split_once("\r\n\r\n") else {
+                    continue;
+                };
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(str::trim)
+                            .and_then(|value| value.parse::<usize>().ok())
+                    })
+                    .unwrap();
+                if body.len() >= content_length {
+                    assert!(headers.starts_with("POST /v1/auth/password/register HTTP/1.1"));
+                    assert!(body.contains("admin@example.com"));
+                    assert!(body.contains("strong-password"));
+                    break;
+                }
+            }
+            let body = r#"{"user_id":"usr_console","token":"session-secret","expires_at":"2026-07-30T00:00:00Z"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+
+        let user_id = register_password_user(PasswordRegistration {
+            console_url: Url::parse(&format!("http://{address}")).unwrap(),
+            identifier: "admin@example.com".to_owned(),
+            password: "strong-password".to_owned(),
+        })
+        .await
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(user_id, "usr_console");
     }
 }
