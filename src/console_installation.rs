@@ -19,6 +19,7 @@ const PLAN_SCHEMA: &str = "lenso.console-installation-plan.v1";
 const STATE_SCHEMA: &str = "lenso.console-installation-state.v1";
 const DOCTOR_SCHEMA: &str = "lenso.console-doctor.v1";
 const TRUSTED_RELEASE_REPOSITORY: &str = "LioRael/lenso-runtime-console";
+const TRUSTED_SIGNER_WORKFLOW: &str = "LioRael/lenso-runtime-console/.github/workflows/publish.yml";
 const STATE_FILE: &str = "installation-state.json";
 const MANIFEST_FILE: &str = "release-manifest.json";
 const COMPOSE_FILE: &str = "compose.yaml";
@@ -260,7 +261,13 @@ fn verify_attestation(manifest: &Path) -> Result<()> {
     let status = Command::new("gh")
         .args(["attestation", "verify"])
         .arg(manifest)
-        .args(["--repo", TRUSTED_RELEASE_REPOSITORY])
+        .args([
+            "--repo",
+            TRUSTED_RELEASE_REPOSITORY,
+            "--signer-workflow",
+            TRUSTED_SIGNER_WORKFLOW,
+            "--deny-self-hosted-runners",
+        ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -798,6 +805,15 @@ mod tests {
         invalid = manifest();
         invalid.contract_digest = "sha256:ABC".to_owned();
         assert!(validate_manifest(&invalid).is_err());
+    }
+
+    #[test]
+    fn release_authority_pins_repository_and_signer_workflow() {
+        assert_eq!(TRUSTED_RELEASE_REPOSITORY, "LioRael/lenso-runtime-console");
+        assert_eq!(
+            TRUSTED_SIGNER_WORKFLOW,
+            "LioRael/lenso-runtime-console/.github/workflows/publish.yml"
+        );
     }
 
     #[test]

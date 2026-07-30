@@ -38,8 +38,10 @@ lenso console doctor --root /srv/lenso-console \
   --live-url https://console.example.com --json
 ```
 
-The manifest must be attested by `LioRael/lenso-runtime-console` and must pin an
-OCI image by digest. The apply adapter pulls that image, runs its migration
+The manifest must be attested by the repository's coordinator-only
+`.github/workflows/publish.yml` signer and must pin an OCI image by digest. The
+CLI rejects attestations from any other workflow and from self-hosted runners.
+The apply adapter pulls that image, runs its migration
 workload, starts the Console workload, and records state only after success.
 Upgrade uses `lenso console upgrade` with the same protocol. An upgrade that
 declares irreversible migrations additionally requires
