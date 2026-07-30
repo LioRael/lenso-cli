@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 const RELEASE_SCHEMA: &str = "lenso.console-service-release.v1";
 const PLAN_SCHEMA: &str = "lenso.console-installation-plan.v1";
-const STATE_SCHEMA: &str = "lenso.console-installation-state.v1";
+const STATE_SCHEMA: &str = "lenso.console-installation-state.v2";
 const ATTEMPT_SCHEMA: &str = "lenso.console-installation-attempt.v1";
 const LOCK_SCHEMA: &str = "lenso.console-installation-lock.v1";
 const RECOVERY_SET_SCHEMA: &str = "lenso.console-recovery-set.v1";
@@ -193,6 +193,8 @@ struct InstallationState {
     contract_digest: String,
     configuration_digest: String,
     applied_plan_digest: String,
+    authority_probe: ConsoleAuthorityProbe,
+    authority_probe_digest: String,
     applied_at_unix_ms: u64,
 }
 
@@ -981,34 +983,43 @@ impl ActivationAdapter for ProductionActivationAdapter {
         compose_file: &Path,
         expected: ConsoleWorkloadMode,
     ) -> Result<ConsoleAuthorityProbe> {
-        let output = Command::new("docker")
-            .args(["compose", "--project-name", "lenso-console", "--env-file"])
-            .arg(env_file)
-            .args(["--file"])
-            .arg(compose_file)
-            .args([
-                "exec",
-                "-T",
-                "console",
-                "/usr/bin/curl",
-                "--fail",
-                "--silent",
-                "--show-error",
-                "--max-time",
-                "5",
-                "http://127.0.0.1:3030/health/authority",
-            ])
-            .current_dir(root)
-            .output()
-            .context("read the running Console authority probe")?;
-        if !output.status.success() {
-            bail!("running Console authority probe was unavailable");
-        }
-        let probe: ConsoleAuthorityProbe = serde_json::from_slice(&output.stdout)
-            .context("decode the running Console authority probe")?;
-        validate_authority_probe(&probe, expected)?;
-        Ok(probe)
+        docker_compose_authority_probe(root, env_file, compose_file, expected)
     }
+}
+
+fn docker_compose_authority_probe(
+    root: &Path,
+    env_file: &Path,
+    compose_file: &Path,
+    expected: ConsoleWorkloadMode,
+) -> Result<ConsoleAuthorityProbe> {
+    let output = Command::new("docker")
+        .args(["compose", "--project-name", "lenso-console", "--env-file"])
+        .arg(env_file)
+        .args(["--file"])
+        .arg(compose_file)
+        .args([
+            "exec",
+            "-T",
+            "console",
+            "/usr/bin/curl",
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--max-time",
+            "5",
+            "http://127.0.0.1:3030/health/authority",
+        ])
+        .current_dir(root)
+        .output()
+        .context("read the running Console authority probe")?;
+    if !output.status.success() {
+        bail!("running Console authority probe was unavailable");
+    }
+    let probe: ConsoleAuthorityProbe = serde_json::from_slice(&output.stdout)
+        .context("decode the running Console authority probe")?;
+    validate_authority_probe(&probe, expected)?;
+    Ok(probe)
 }
 
 fn validate_authority_probe(
@@ -3154,7 +3165,7 @@ fn build_plan(
             PlanStep {
                 order: 3,
                 workload: "console",
-                effect: "replace the Console workload and wait for health",
+                effect: "replace the Console workload and verify health plus normal authority",
             },
             PlanStep {
                 order: 4,
@@ -3183,6 +3194,13 @@ fn require_approval(plan: &InstallationPlan, options: &ChangeOptions) -> Result<
 
 trait ComposeAdapter {
     fn run(&self, root: &Path, env_file: &Path, compose_file: &Path, args: &[&str]) -> Result<()>;
+    fn verify_authority_mode(
+        &self,
+        root: &Path,
+        env_file: &Path,
+        compose_file: &Path,
+        expected: ConsoleWorkloadMode,
+    ) -> Result<ConsoleAuthorityProbe>;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3204,6 +3222,16 @@ impl ComposeAdapter for DockerComposeAdapter {
         }
         Ok(())
     }
+
+    fn verify_authority_mode(
+        &self,
+        root: &Path,
+        env_file: &Path,
+        compose_file: &Path,
+        expected: ConsoleWorkloadMode,
+    ) -> Result<ConsoleAuthorityProbe> {
+        docker_compose_authority_probe(root, env_file, compose_file, expected)
+    }
 }
 
 fn apply_change_with(
@@ -3214,6 +3242,9 @@ fn apply_change_with(
     manifest: &ConsoleReleaseManifest,
     plan: &InstallationPlan,
 ) -> Result<()> {
+    if console_env_value(env_file, "CONSOLE_RECOVERY_MODE")? != "normal" {
+        bail!("installation environment must set CONSOLE_RECOVERY_MODE=normal");
+    }
     fs::create_dir_all(root)
         .with_context(|| format!("create Console installation root {}", root.display()))?;
     let compose = compose_document(&manifest.image.reference);
@@ -3281,6 +3312,25 @@ fn apply_change_with(
             "candidate Console workload did not become healthy; canonical installation state was not changed",
         )?;
 
+        phase = "authority";
+        write_attempt(
+            root,
+            plan,
+            AttemptStatus::Applying,
+            phase,
+            started_at_unix_ms,
+        )?;
+        let authority_probe = adapter
+            .verify_authority_mode(
+                root,
+                env_file,
+                &candidate_compose,
+                ConsoleWorkloadMode::Normal,
+            )
+            .context(
+                "candidate Console workload did not prove normal-mode authority; canonical installation state was not changed",
+            )?;
+
         phase = "commit";
         write_attempt(
             root,
@@ -3301,6 +3351,8 @@ fn apply_change_with(
             contract_digest: manifest.contract_digest.clone(),
             configuration_digest: manifest.configuration_digest.clone(),
             applied_plan_digest: plan.plan_digest.clone(),
+            authority_probe_digest: authority_probe_digest(&authority_probe)?,
+            authority_probe,
             applied_at_unix_ms: unix_time_ms()?,
         };
         atomic_write(
@@ -3348,7 +3400,7 @@ fn write_attempt(
 
 fn compose_document(image: &str) -> String {
     format!(
-        "name: lenso-console\n\nservices:\n  migrate:\n    image: {image}\n    command: [\"/usr/local/bin/lenso-console-migrate\"]\n    environment: &console-environment\n      APP_ENV: production\n      CORS_ALLOWED_ORIGINS: ${{CONSOLE_PUBLIC_ORIGIN:?set CONSOLE_PUBLIC_ORIGIN}}\n      DATABASE_URL: ${{CONSOLE_DATABASE_URL:?set CONSOLE_DATABASE_URL}}\n      CONSOLE_RECOVERY_MODE: ${{CONSOLE_RECOVERY_MODE:-normal}}\n      LENSO_COMPOSITION_PROFILE: core\n      SERVICE_NAME: lenso-console\n    read_only: true\n    security_opt:\n      - no-new-privileges:true\n    cap_drop:\n      - ALL\n    tmpfs:\n      - /tmp\n  console:\n    image: {image}\n    environment: *console-environment\n    ports:\n      - \"${{CONSOLE_HTTP_PORT:-3030}}:3030\"\n    read_only: true\n    restart: unless-stopped\n    security_opt:\n      - no-new-privileges:true\n    cap_drop:\n      - ALL\n    tmpfs:\n      - /tmp\n"
+        "name: lenso-console\n\nservices:\n  migrate:\n    image: {image}\n    command: [\"/usr/local/bin/lenso-console-migrate\"]\n    environment: &console-environment\n      APP_ENV: production\n      CORS_ALLOWED_ORIGINS: ${{CONSOLE_PUBLIC_ORIGIN:?set CONSOLE_PUBLIC_ORIGIN}}\n      DATABASE_URL: ${{CONSOLE_DATABASE_URL:?set CONSOLE_DATABASE_URL}}\n      CONSOLE_RECOVERY_MODE: ${{CONSOLE_RECOVERY_MODE:?set CONSOLE_RECOVERY_MODE}}\n      LENSO_COMPOSITION_PROFILE: core\n      SERVICE_NAME: lenso-console\n    read_only: true\n    security_opt:\n      - no-new-privileges:true\n    cap_drop:\n      - ALL\n    tmpfs:\n      - /tmp\n  console:\n    image: {image}\n    environment: *console-environment\n    ports:\n      - \"${{CONSOLE_HTTP_PORT:-3030}}:3030\"\n    read_only: true\n    restart: unless-stopped\n    security_opt:\n      - no-new-privileges:true\n    cap_drop:\n      - ALL\n    tmpfs:\n      - /tmp\n"
     )
 }
 
@@ -3373,7 +3425,14 @@ pub async fn doctor(options: DoctorOptions) -> Result<()> {
     check_installation_lock(&root, &mut checks);
     check_recovery_state(&root, &mut checks);
     if let Some(url) = options.live_url.as_deref() {
-        checks.push(live_check(url).await);
+        checks.push(live_readiness_check(url).await);
+        checks.push(match expected_workload_mode(&root) {
+            Ok(expected) => live_authority_check(url, expected).await,
+            Err(error) => fail(
+                "authority",
+                &format!("cannot determine expected Console workload mode: {error}"),
+            ),
+        });
     }
     let status = if checks
         .iter()
@@ -3675,7 +3734,14 @@ fn check_recovery_state(root: &Path, checks: &mut Vec<DoctorCheck>) {
     }
 }
 
-async fn live_check(value: &str) -> DoctorCheck {
+fn expected_workload_mode(root: &Path) -> Result<ConsoleWorkloadMode> {
+    Ok(match read_recovery_state_optional(root)? {
+        Some(state) if state.status != RecoveryStatus::Activated => ConsoleWorkloadMode::Restore,
+        Some(_) | None => ConsoleWorkloadMode::Normal,
+    })
+}
+
+async fn live_readiness_check(value: &str) -> DoctorCheck {
     let result = async {
         let url = secure_live_url(value)?;
         let endpoint = url.join("/health/ready")?;
@@ -3695,6 +3761,40 @@ async fn live_check(value: &str) -> DoctorCheck {
     match result {
         Ok(()) => pass("readiness", "Console readiness endpoint is healthy"),
         Err(error) => fail("readiness", &error.to_string()),
+    }
+}
+
+async fn live_authority_check(value: &str, expected: ConsoleWorkloadMode) -> DoctorCheck {
+    let result = async {
+        let url = secure_live_url(value)?;
+        let endpoint = url.join("/health/authority")?;
+        let response = Client::builder()
+            .redirect(Policy::none())
+            .build()?
+            .get(endpoint)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            bail!("authority returned HTTP {}", response.status());
+        }
+        let probe: ConsoleAuthorityProbe = serde_json::from_slice(&response.bytes().await?)
+            .context("decode the live Console authority probe")?;
+        validate_authority_probe(&probe, expected)
+    }
+    .await;
+    match result {
+        Ok(()) => pass(
+            "authority",
+            match expected {
+                ConsoleWorkloadMode::Normal => {
+                    "Console authority identifies the normal Service workload"
+                }
+                ConsoleWorkloadMode::Restore => {
+                    "Console authority identifies the restore Service workload"
+                }
+            },
+        ),
+        Err(error) => fail("authority", &error.to_string()),
     }
 }
 
@@ -3728,6 +3828,9 @@ fn read_state_optional(root: &Path) -> Result<Option<InstallationState>> {
         || !is_sha256(&state.configuration_digest)
         || !trusted_image_reference(&state.image_reference)
         || !is_sha256(&state.applied_plan_digest)
+        || validate_authority_probe(&state.authority_probe, ConsoleWorkloadMode::Normal).is_err()
+        || !is_sha256(&state.authority_probe_digest)
+        || state.authority_probe_digest != authority_probe_digest(&state.authority_probe)?
     {
         bail!("Console installation state is invalid");
     }
@@ -3747,7 +3850,7 @@ fn read_attempt_optional(root: &Path) -> Result<Option<InstallationAttempt>> {
         || !is_sha256(&attempt.plan_digest)
         || !matches!(
             attempt.phase.as_str(),
-            "staging" | "pull" | "migration" | "readiness" | "commit"
+            "staging" | "pull" | "migration" | "readiness" | "authority" | "commit"
         )
         || attempt.started_at_unix_ms == 0
         || attempt.updated_at_unix_ms < attempt.started_at_unix_ms
@@ -4233,10 +4336,21 @@ mod tests {
 
     use super::*;
 
-    #[derive(Debug, Default)]
+    #[derive(Debug)]
     struct RecordingComposeAdapter {
         calls: RefCell<Vec<Vec<String>>>,
         fail_on: Option<usize>,
+        authority_mode: ConsoleWorkloadMode,
+    }
+
+    impl Default for RecordingComposeAdapter {
+        fn default() -> Self {
+            Self {
+                calls: RefCell::default(),
+                fail_on: None,
+                authority_mode: ConsoleWorkloadMode::Normal,
+            }
+        }
     }
 
     #[derive(Debug)]
@@ -4403,6 +4517,28 @@ mod tests {
             }
             Ok(())
         }
+
+        fn verify_authority_mode(
+            &self,
+            _root: &Path,
+            _env_file: &Path,
+            compose_file: &Path,
+            expected: ConsoleWorkloadMode,
+        ) -> Result<ConsoleAuthorityProbe> {
+            if !compose_file.is_file() {
+                bail!("candidate Compose file is missing");
+            }
+            self.calls.borrow_mut().push(vec![
+                "authority".to_owned(),
+                match expected {
+                    ConsoleWorkloadMode::Normal => "normal".to_owned(),
+                    ConsoleWorkloadMode::Restore => "restore".to_owned(),
+                },
+            ]);
+            let probe = authority_probe(self.authority_mode);
+            validate_authority_probe(&probe, expected)?;
+            Ok(probe)
+        }
     }
 
     fn digest(character: char) -> String {
@@ -4438,6 +4574,7 @@ mod tests {
     }
 
     fn state() -> InstallationState {
+        let authority_probe = authority_probe(ConsoleWorkloadMode::Normal);
         InstallationState {
             schema: STATE_SCHEMA.to_owned(),
             release_id: "lenso-console@0.1.0".to_owned(),
@@ -4448,6 +4585,8 @@ mod tests {
             contract_digest: digest('3'),
             configuration_digest: digest('4'),
             applied_plan_digest: digest('5'),
+            authority_probe_digest: authority_probe_digest(&authority_probe).unwrap(),
+            authority_probe,
             applied_at_unix_ms: 1,
         }
     }
@@ -4546,6 +4685,7 @@ mod tests {
         release: &ConsoleReleaseManifest,
         manifest_bytes: &[u8],
     ) -> InstallationState {
+        let authority_probe = authority_probe(ConsoleWorkloadMode::Normal);
         InstallationState {
             schema: STATE_SCHEMA.to_owned(),
             release_id: release.release_id.clone(),
@@ -4556,6 +4696,8 @@ mod tests {
             contract_digest: release.contract_digest.clone(),
             configuration_digest: release.configuration_digest.clone(),
             applied_plan_digest: digest('5'),
+            authority_probe_digest: authority_probe_digest(&authority_probe).unwrap(),
+            authority_probe,
             applied_at_unix_ms: 1,
         }
     }
@@ -4639,6 +4781,24 @@ mod tests {
 
         invalid = state();
         invalid.release_id = "lenso-console@01.0.0".to_owned();
+        fs::write(
+            root.join(STATE_FILE),
+            serde_json::to_vec_pretty(&invalid).unwrap(),
+        )
+        .unwrap();
+        assert!(read_state_optional(&root).is_err());
+
+        invalid = state();
+        invalid.authority_probe.workload_mode = ConsoleWorkloadMode::Restore;
+        fs::write(
+            root.join(STATE_FILE),
+            serde_json::to_vec_pretty(&invalid).unwrap(),
+        )
+        .unwrap();
+        assert!(read_state_optional(&root).is_err());
+
+        invalid = state();
+        invalid.authority_probe_digest = digest('f');
         fs::write(
             root.join(STATE_FILE),
             serde_json::to_vec_pretty(&invalid).unwrap(),
@@ -5540,7 +5700,9 @@ mod tests {
         assert!(!document.contains(":latest"));
         assert!(document.contains("lenso-console-migrate"));
         assert!(document.contains("read_only: true"));
-        assert!(document.contains("CONSOLE_RECOVERY_MODE: ${CONSOLE_RECOVERY_MODE:-normal}"));
+        assert!(document.contains(
+            "CONSOLE_RECOVERY_MODE: ${CONSOLE_RECOVERY_MODE:?set CONSOLE_RECOVERY_MODE}"
+        ));
     }
 
     #[test]
@@ -5548,7 +5710,11 @@ mod tests {
         let root = test_root("healthy");
         fs::create_dir_all(&root).unwrap();
         let env_file = root.join("console.env");
-        fs::write(&env_file, "CONSOLE_HTTP_PORT=3030\n").unwrap();
+        fs::write(
+            &env_file,
+            "CONSOLE_HTTP_PORT=3030\nCONSOLE_RECOVERY_MODE=normal\n",
+        )
+        .unwrap();
         let release = manifest();
         let manifest_bytes = serde_json::to_vec_pretty(&release).unwrap();
         let plan = installation_plan(&root, &release);
@@ -5569,6 +5735,7 @@ mod tests {
                     "120",
                     "console",
                 ],
+                vec!["authority", "normal"],
             ]
         );
         assert_eq!(fs::read(root.join(MANIFEST_FILE)).unwrap(), manifest_bytes);
@@ -5592,7 +5759,11 @@ mod tests {
         let root = test_root("unhealthy");
         fs::create_dir_all(&root).unwrap();
         let env_file = root.join("console.env");
-        fs::write(&env_file, "CONSOLE_HTTP_PORT=3030\n").unwrap();
+        fs::write(
+            &env_file,
+            "CONSOLE_HTTP_PORT=3030\nCONSOLE_RECOVERY_MODE=normal\n",
+        )
+        .unwrap();
         let old_compose = b"previous compose\n";
         let old_manifest = b"previous manifest\n";
         let old_state = serde_json::to_vec_pretty(&state()).unwrap();
@@ -5605,6 +5776,7 @@ mod tests {
         let adapter = RecordingComposeAdapter {
             calls: RefCell::default(),
             fail_on: Some(3),
+            authority_mode: ConsoleWorkloadMode::Normal,
         };
 
         assert!(
@@ -5622,6 +5794,103 @@ mod tests {
         check_installation_attempt(&root, Some(&state()), &mut checks);
         assert!(matches!(checks[0].status, CheckStatus::Fail));
         assert!(candidate_files(&root).is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn wrong_authority_mode_preserves_the_previous_installation() {
+        let root = test_root("wrong-authority");
+        fs::create_dir_all(&root).unwrap();
+        let env_file = root.join("console.env");
+        fs::write(&env_file, "CONSOLE_RECOVERY_MODE=normal\n").unwrap();
+        let old_compose = b"previous compose\n";
+        let old_manifest = b"previous manifest\n";
+        let old_state = serde_json::to_vec_pretty(&state()).unwrap();
+        fs::write(root.join(COMPOSE_FILE), old_compose).unwrap();
+        fs::write(root.join(MANIFEST_FILE), old_manifest).unwrap();
+        fs::write(root.join(STATE_FILE), &old_state).unwrap();
+        let release = manifest();
+        let manifest_bytes = serde_json::to_vec_pretty(&release).unwrap();
+        let plan = installation_plan(&root, &release);
+        let adapter = RecordingComposeAdapter {
+            authority_mode: ConsoleWorkloadMode::Restore,
+            ..Default::default()
+        };
+
+        assert!(
+            apply_change_with(&adapter, &root, &env_file, &manifest_bytes, &release, &plan)
+                .is_err()
+        );
+
+        assert_eq!(fs::read(root.join(COMPOSE_FILE)).unwrap(), old_compose);
+        assert_eq!(fs::read(root.join(MANIFEST_FILE)).unwrap(), old_manifest);
+        assert_eq!(fs::read(root.join(STATE_FILE)).unwrap(), old_state);
+        let attempt = read_attempt_optional(&root).unwrap().unwrap();
+        assert_eq!(attempt.status, AttemptStatus::Failed);
+        assert_eq!(attempt.phase, "authority");
+        assert!(candidate_files(&root).is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn installation_requires_explicit_normal_workload_mode() {
+        let root = test_root("missing-mode");
+        fs::create_dir_all(&root).unwrap();
+        let env_file = root.join("console.env");
+        fs::write(&env_file, "CONSOLE_HTTP_PORT=3030\n").unwrap();
+        let release = manifest();
+        let manifest_bytes = serde_json::to_vec_pretty(&release).unwrap();
+        let plan = installation_plan(&root, &release);
+
+        assert!(
+            apply_change_with(
+                &RecordingComposeAdapter::default(),
+                &root,
+                &env_file,
+                &manifest_bytes,
+                &release,
+                &plan,
+            )
+            .is_err()
+        );
+        assert!(!root.join(ATTEMPT_FILE).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn doctor_derives_expected_workload_mode_from_recovery_state() {
+        let root = test_root("doctor-mode");
+        fs::create_dir_all(&root).unwrap();
+        assert_eq!(
+            expected_workload_mode(&root).unwrap(),
+            ConsoleWorkloadMode::Normal
+        );
+
+        let mut recovery = recovery_state();
+        fs::write(
+            root.join(RECOVERY_STATE_FILE),
+            serde_json::to_vec_pretty(&recovery).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            expected_workload_mode(&root).unwrap(),
+            ConsoleWorkloadMode::Restore
+        );
+
+        recovery.status = RecoveryStatus::Activated;
+        recovery.phase = "activated".to_owned();
+        recovery.reconciliation_evidence_digest = Some(digest('b'));
+        recovery.activation_plan_digest = Some(digest('c'));
+        recovery.activation_evidence_digest = Some(digest('d'));
+        fs::write(
+            root.join(RECOVERY_STATE_FILE),
+            serde_json::to_vec_pretty(&recovery).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            expected_workload_mode(&root).unwrap(),
+            ConsoleWorkloadMode::Normal
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }
