@@ -21,6 +21,31 @@ lenso serve
 
 The package name defaults to the target directory name and can be overridden with
 `--name`. Pass `--force` to scaffold into a non-empty directory.
+
+## Install Lenso Console
+
+Lenso Console is installed as an independent Service, not embedded into a
+business Service. Obtain an official GitHub-attested Console Release Manifest,
+review the deterministic plan, and then approve that exact plan digest:
+
+```sh
+lenso console install --manifest lenso-console-release.json \
+  --root /srv/lenso-console --output install-plan.json
+lenso console install --manifest lenso-console-release.json \
+  --root /srv/lenso-console --env-file /secure/console.env --apply \
+  --approve-plan-digest sha256:<reviewed-plan-digest>
+lenso console doctor --root /srv/lenso-console \
+  --live-url https://console.example.com --json
+```
+
+The manifest must be attested by `LioRael/lenso-runtime-console` and must pin an
+OCI image by digest. The apply adapter pulls that image, runs its migration
+workload, starts the Console workload, and records state only after success.
+Upgrade uses `lenso console upgrade` with the same protocol. An upgrade that
+declares irreversible migrations additionally requires
+`--approve-irreversible`. Secrets remain in the operator-owned environment file
+and are never copied into the plan, manifest, or installation state.
+
 After installing and starting the independent Lenso Console Service, create its
 first password user and bootstrap that user as the first Console Operator from
 outside the Service. Keep the password out of shell history:

@@ -1,5 +1,6 @@
 mod capability;
 mod console_dev;
+mod console_installation;
 mod console_operator;
 mod delivery;
 mod extraction;
@@ -1126,6 +1127,12 @@ enum ConsoleOperatorCommand {
 
 #[derive(Debug, Subcommand)]
 enum ConsoleCommand {
+    /// Plan or apply an independent Lenso Console installation.
+    Install(ConsoleChangeArgs),
+    /// Plan or apply an immutable Lenso Console Release upgrade.
+    Upgrade(ConsoleChangeArgs),
+    /// Validate persisted Console installation state and optional readiness.
+    Doctor(ConsoleDoctorArgs),
     /// Manage operators in the independent Lenso Console Service.
     Operator {
         #[command(subcommand)]
@@ -1138,6 +1145,52 @@ enum ConsoleCommand {
         #[command(subcommand)]
         command: ConsolePackageCommand,
     },
+}
+
+#[derive(Debug, Args, Clone)]
+struct ConsoleChangeArgs {
+    /// GitHub-attested Console Service Release Manifest.
+    #[arg(long)]
+    manifest: std::path::PathBuf,
+
+    /// External Console installation root.
+    #[arg(long, default_value = ".lenso-console")]
+    root: std::path::PathBuf,
+
+    /// Secret-bearing environment file used only by Docker Compose.
+    #[arg(long)]
+    env_file: Option<std::path::PathBuf>,
+
+    /// Write the deterministic installation plan to this path.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+
+    /// Apply the reviewed plan through the local Docker Compose adapter.
+    #[arg(long)]
+    apply: bool,
+
+    /// Exact plan digest approved by the operator.
+    #[arg(long, requires = "apply")]
+    approve_plan_digest: Option<String>,
+
+    /// Separately approve irreversible Store migrations.
+    #[arg(long, requires = "apply")]
+    approve_irreversible: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ConsoleDoctorArgs {
+    /// External Console installation root.
+    #[arg(long, default_value = ".lenso-console")]
+    root: std::path::PathBuf,
+
+    /// Console URL to include an HTTPS or loopback readiness check.
+    #[arg(long)]
+    live_url: Option<String>,
+
+    /// Emit the versioned doctor report as JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -3048,6 +3101,30 @@ impl From<&ConsoleOperatorBootstrapArgs> for console_operator::BootstrapOperator
     }
 }
 
+impl From<&ConsoleChangeArgs> for console_installation::ChangeOptions {
+    fn from(args: &ConsoleChangeArgs) -> Self {
+        Self {
+            manifest: args.manifest.clone(),
+            root: args.root.clone(),
+            env_file: args.env_file.clone(),
+            output: args.output.clone(),
+            apply: args.apply,
+            approve_plan_digest: args.approve_plan_digest.clone(),
+            approve_irreversible: args.approve_irreversible,
+        }
+    }
+}
+
+impl From<&ConsoleDoctorArgs> for console_installation::DoctorOptions {
+    fn from(args: &ConsoleDoctorArgs) -> Self {
+        Self {
+            root: args.root.clone(),
+            live_url: args.live_url.clone(),
+            json: args.json,
+        }
+    }
+}
+
 impl From<&ModuleCreateArgs> for module::ModuleCreateOptions {
     fn from(args: &ModuleCreateArgs) -> Self {
         Self {
@@ -3370,6 +3447,9 @@ async fn main() -> anyhow::Result<()> {
             HostCommand::Init { dir, name, force } => host::init(&dir, name.as_deref(), force)?,
         },
         Command::Console { command } => match command {
+            ConsoleCommand::Install(args) => console_installation::install((&args).into())?,
+            ConsoleCommand::Upgrade(args) => console_installation::upgrade((&args).into())?,
+            ConsoleCommand::Doctor(args) => console_installation::doctor((&args).into()).await?,
             ConsoleCommand::Operator { command } => match command {
                 ConsoleOperatorCommand::Bootstrap(args) => {
                     console_operator::bootstrap_operator((&args).into()).await?;
@@ -4330,6 +4410,95 @@ mod tests {
             .is_err()
         );
         assert!(Cli::try_parse_from(["lenso", "console", "update"]).is_err());
+    }
+
+    #[test]
+    fn parses_console_installation_authority_commands() {
+        let install = Cli::parse_from([
+            "lenso",
+            "console",
+            "install",
+            "--manifest",
+            "release.json",
+            "--root",
+            "/srv/lenso-console",
+            "--output",
+            "plan.json",
+        ]);
+        let Command::Console {
+            command: ConsoleCommand::Install(args),
+        } = install.command
+        else {
+            panic!("expected Console install");
+        };
+        assert_eq!(args.manifest, std::path::Path::new("release.json"));
+        assert_eq!(args.root, std::path::Path::new("/srv/lenso-console"));
+        assert_eq!(
+            args.output.as_deref(),
+            Some(std::path::Path::new("plan.json"))
+        );
+        assert!(!args.apply);
+
+        let upgrade = Cli::parse_from([
+            "lenso",
+            "console",
+            "upgrade",
+            "--manifest",
+            "release.json",
+            "--env-file",
+            "console.env",
+            "--apply",
+            "--approve-plan-digest",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--approve-irreversible",
+        ]);
+        let Command::Console {
+            command: ConsoleCommand::Upgrade(args),
+        } = upgrade.command
+        else {
+            panic!("expected Console upgrade");
+        };
+        assert!(args.apply);
+        assert!(args.approve_irreversible);
+        assert_eq!(
+            args.env_file.as_deref(),
+            Some(std::path::Path::new("console.env"))
+        );
+
+        let doctor = Cli::parse_from([
+            "lenso",
+            "console",
+            "doctor",
+            "--root",
+            "/srv/lenso-console",
+            "--live-url",
+            "https://console.example.com",
+            "--json",
+        ]);
+        let Command::Console {
+            command: ConsoleCommand::Doctor(args),
+        } = doctor.command
+        else {
+            panic!("expected Console doctor");
+        };
+        assert_eq!(
+            args.live_url.as_deref(),
+            Some("https://console.example.com")
+        );
+        assert!(args.json);
+
+        assert!(
+            Cli::try_parse_from([
+                "lenso",
+                "console",
+                "install",
+                "--manifest",
+                "release.json",
+                "--approve-plan-digest",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ])
+            .is_err()
+        );
     }
 
     #[test]
