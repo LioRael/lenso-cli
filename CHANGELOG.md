@@ -1,3 +1,10 @@
+## lenso-cli@0.2.15
+
+### Fixes
+
+Preserve executable modes on the bundled Unix CLI binaries when an npm release
+is rebuilt through the reviewed partial-recovery path.
+
 ## @lenso/cli@0.2.14
 
 ### Features
@@ -102,3 +109,4 @@ after replacing the stale publisher contract.
 
 Add the M6 GA support manifest, environment verification, migration, rollback,
 retirement, recovery, and coordination-outage command surfaces.
+
