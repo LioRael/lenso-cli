@@ -1,9 +1,9 @@
 mod capability;
+mod console_composition;
 mod console_dev;
 mod console_installation;
 mod console_operator;
 mod delivery;
-mod extraction;
 mod ga;
 mod host;
 mod launchpad;
@@ -77,7 +77,7 @@ enum Command {
         #[command(subcommand)]
         command: SystemCommand,
     },
-    /// Manage Runtime Console assets, access, and packages.
+    /// Manage the independent Lenso Console Service.
     Console {
         #[command(subcommand)]
         command: ConsoleCommand,
@@ -366,7 +366,7 @@ struct DevUpArgs {
     #[arg(long)]
     repo_root: Option<std::path::PathBuf>,
 
-    /// Remote module services file.
+    /// Service module services file.
     #[arg(long)]
     module_services_file: Option<std::path::PathBuf>,
 
@@ -1139,6 +1139,14 @@ enum ConsoleRecoveryCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum ConsoleCompositionCommand {
+    /// Build a digest-bound Console Composition Change Plan.
+    Plan(ConsoleCompositionPlanArgs),
+    /// Apply an exactly approved Console Composition Change Plan.
+    Apply(ConsoleCompositionApplyArgs),
+}
+
+#[derive(Debug, Subcommand)]
 enum ConsoleCommand {
     /// Plan or apply an independent Lenso Console installation.
     Install(ConsoleChangeArgs),
@@ -1160,13 +1168,13 @@ enum ConsoleCommand {
         #[command(subcommand)]
         command: ConsoleOperatorCommand,
     },
-    /// Start a Runtime Console package development shell.
-    Dev(ConsoleDevArgs),
-    /// Manage Runtime Console package registration.
-    Package {
+    /// Plan or apply the Console Service's own Module composition.
+    Composition {
         #[command(subcommand)]
-        command: ConsolePackageCommand,
+        command: ConsoleCompositionCommand,
     },
+    /// Start the complete local Console Service.
+    Dev(ConsoleDevArgs),
 }
 
 #[derive(Debug, Args, Clone)]
@@ -1229,89 +1237,52 @@ struct ConsoleRestoreArgs {
 
 #[derive(Debug, Args, Clone)]
 struct ConsoleReconcileArgs {
-    /// External Console installation root.
     #[arg(long, default_value = ".lenso-console")]
     root: std::path::PathBuf,
-
-    /// Recovery environment file containing the restored Store URL.
     #[arg(long)]
     env_file: std::path::PathBuf,
-
-    /// Operator-reviewed reconciliation input bound to external evidence.
     #[arg(long)]
     evidence: std::path::PathBuf,
-
-    /// Write the deterministic reconciliation plan to this path.
     #[arg(long)]
     output: Option<std::path::PathBuf>,
-
-    /// Record the reviewed reconciliation evidence.
     #[arg(long)]
     apply: bool,
-
-    /// Exact reconciliation plan digest approved by the operator.
     #[arg(long, requires = "apply")]
     approve_plan_digest: Option<String>,
 }
 
 #[derive(Debug, Args, Clone)]
 struct ConsoleActivateArgs {
-    /// External Console installation root.
     #[arg(long, default_value = ".lenso-console")]
     root: std::path::PathBuf,
-
-    /// Recovery-mode environment used for automatic rollback.
     #[arg(long)]
     recovery_env_file: std::path::PathBuf,
-
-    /// Normal-mode environment used for authority transfer.
     #[arg(long)]
     active_env_file: std::path::PathBuf,
-
-    /// Write the deterministic activation plan to this path.
     #[arg(long)]
     output: Option<std::path::PathBuf>,
-
-    /// Apply the reviewed activation plan.
     #[arg(long)]
     apply: bool,
-
-    /// Exact activation plan digest approved by the operator.
     #[arg(long, requires = "apply")]
     approve_plan_digest: Option<String>,
-
-    /// Explicitly approve transfer to the normal-mode authoritative writer.
     #[arg(long, requires = "apply")]
     approve_authority_transfer: bool,
 }
 
 #[derive(Debug, Args, Clone)]
 struct ConsoleRecoverActivationArgs {
-    /// External Console installation root.
     #[arg(long, default_value = ".lenso-console")]
     root: std::path::PathBuf,
-
-    /// Recovery-mode environment used to re-establish the fence.
     #[arg(long)]
     recovery_env_file: std::path::PathBuf,
-
-    /// Normal-mode environment used to stop any possible writer.
     #[arg(long)]
     active_env_file: std::path::PathBuf,
-
-    /// Write the deterministic activation recovery plan to this path.
     #[arg(long)]
     output: Option<std::path::PathBuf>,
-
-    /// Apply the reviewed activation recovery plan.
     #[arg(long)]
     apply: bool,
-
-    /// Exact activation recovery plan digest approved by the operator.
     #[arg(long, requires = "apply")]
     approve_plan_digest: Option<String>,
-
-    /// Explicitly approve resetting authority to recovery mode.
     #[arg(long, requires = "apply")]
     approve_authority_reset: bool,
 }
@@ -1364,25 +1335,43 @@ struct ConsoleDoctorArgs {
 
 #[derive(Debug, Args, Clone)]
 struct ConsoleDevArgs {
-    /// Console package directory. Defaults to the current directory.
-    #[arg(long = "package")]
-    package: Option<std::path::PathBuf>,
+    /// Console repository root. Defaults to the current repository.
+    #[arg(long = "console-root")]
+    console_root: Option<std::path::PathBuf>,
+}
 
-    /// Real Lenso host URL to proxy. Omit for standalone mock mode.
+#[derive(Debug, Args, Clone)]
+struct ConsoleCompositionPlanArgs {
+    /// Desired Console composition document.
     #[arg(long)]
-    host: Option<String>,
+    composition: std::path::PathBuf,
 
-    /// Runtime Console dev server port.
-    #[arg(long, default_value_t = 5174)]
-    port: u16,
-
-    /// Open browser after startup.
+    /// Console Service environment file containing CONSOLE_DATABASE_URL.
     #[arg(long)]
-    open: bool,
+    env_file: std::path::PathBuf,
 
-    /// Runtime Console repository root.
-    #[arg(long = "runtime-console-root")]
-    runtime_console_root: Option<std::path::PathBuf>,
+    /// Write the immutable plan to a new file.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+
+    /// Print the plan as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ConsoleCompositionApplyArgs {
+    /// Immutable Console composition plan.
+    #[arg(long)]
+    plan: std::path::PathBuf,
+
+    /// Console Service environment file containing CONSOLE_DATABASE_URL.
+    #[arg(long)]
+    env_file: std::path::PathBuf,
+
+    /// Exact plan digest approved by the installation authority.
+    #[arg(long)]
+    approve_plan_digest: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1392,116 +1381,26 @@ enum ModuleCommand {
     /// Start module-local development helpers.
     Dev(ModuleDevArgs),
     /// Install a module capability from a release, catalog entry, service, or linked source.
-    Install(RemoteModuleInstallArgs),
-    /// Enable a module capability.
-    Enable(RemoteModuleInstallArgs),
-    /// Add a configured service source.
-    Add(RemoteModuleInstallArgs),
+    Install(ServiceModuleInstallArgs),
     /// Reapply an installed module from its install receipt.
     Update(ModuleUpdateArgs),
-    /// Remove a remote source or disable a linked module.
-    Uninstall(RemoteModuleUninstallArgs),
+    /// Remove a Module from the application composition.
+    Remove(ServiceModuleUninstallArgs),
     /// Disable a module capability.
-    Disable(RemoteModuleUninstallArgs),
+    Disable(ServiceModuleUninstallArgs),
     /// Diagnose installed services.
     Doctor(ModuleDoctorArgs),
-    /// Analyze extraction readiness for a linked Module.
-    Extraction {
-        #[command(subcommand)]
-        command: ModuleExtractionCommand,
-    },
-    /// Inspect and validate module release artifacts.
-    Release {
-        #[command(subcommand)]
-        command: ModuleReleaseCommand,
-    },
-    /// Inspect and manage declared service processes.
-    Service {
-        #[command(subcommand)]
-        command: ModuleServiceCommand,
-    },
-    /// Install services.
-    Marketplace {
-        #[command(subcommand)]
-        command: ModuleMarketplaceCommand,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum ModuleExtractionCommand {
-    /// Report whether one linked Module is ready for extraction.
-    Readiness(ModuleExtractionReadinessArgs),
-}
-
-#[derive(Debug, Args, Clone)]
-struct ModuleExtractionReadinessArgs {
-    /// Stable target Module name.
-    module_name: String,
-
-    /// Module manifest JSON. Defaults to modules/<MODULE>/lenso.module.json.
-    #[arg(long)]
-    module_manifest: Option<std::path::PathBuf>,
-
-    /// System v2 definition. Defaults to lenso.system.json.
-    #[arg(long)]
-    system_file: Option<std::path::PathBuf>,
-
-    /// Structured Contract and active Consumer evidence JSON.
-    #[arg(long)]
-    evidence_file: Option<std::path::PathBuf>,
-
-    /// Lenso repository root. Defaults to the current directory.
-    #[arg(long)]
-    repo_root: Option<std::path::PathBuf>,
-
-    /// Rust Modules directory. Defaults to <repo-root>/modules.
-    #[arg(long)]
-    modules_root: Option<std::path::PathBuf>,
-
-    /// Print the stable versioned JSON report.
-    #[arg(long)]
-    json: bool,
 }
 
 #[derive(Debug, Args, Clone)]
 struct ModuleDevArgs {
-    /// Start the Runtime Console package dev shell for this module repository.
-    #[arg(long)]
-    console: bool,
+    /// Start the Module-owned Console UI artifact development server.
+    #[arg(long = "console-ui")]
+    console_ui: bool,
 
     /// Module repository root. Defaults to the current directory.
     #[arg(long)]
     repo_root: Option<std::path::PathBuf>,
-
-    /// Real Lenso host URL to proxy. Omit for standalone mock mode.
-    #[arg(long)]
-    host: Option<String>,
-
-    /// Runtime Console dev server port.
-    #[arg(long, default_value_t = 5174)]
-    port: u16,
-
-    /// Open browser after startup.
-    #[arg(long)]
-    open: bool,
-
-    /// Runtime Console repository root.
-    #[arg(long = "runtime-console-root")]
-    runtime_console_root: Option<std::path::PathBuf>,
-}
-
-#[derive(Debug, Subcommand)]
-enum ModuleReleaseCommand {
-    /// Inspect a module release artifact.
-    Inspect(ModuleReleaseInspectArgs),
-    /// Validate a module release artifact.
-    Check(ModuleReleaseInspectArgs),
-}
-
-#[derive(Debug, Subcommand)]
-enum ModuleMarketplaceCommand {
-    /// Install a service from its manifest.
-    Install(RemoteModuleInstallArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -1530,7 +1429,7 @@ enum ServiceCommand {
     /// Install a service manifest.
     Install(ServiceInstallArgs),
     /// Remove a service provider and its provided modules.
-    Uninstall(RemoteModuleUninstallArgs),
+    Uninstall(ServiceModuleUninstallArgs),
     /// Show changes between installed and candidate service manifests.
     Diff(ServiceDiffArgs),
     /// Preview the upgrade impact for an installed service.
@@ -1984,7 +1883,7 @@ struct ServiceDevArgs {
     #[arg(long)]
     repo_root: Option<std::path::PathBuf>,
 
-    /// Remote module services file.
+    /// Service module services file.
     #[arg(long)]
     module_services_file: Option<std::path::PathBuf>,
 
@@ -2073,7 +1972,7 @@ struct ServiceCheckArgs {
     #[arg(long)]
     env_file: Option<std::path::PathBuf>,
 
-    /// Remote module services file.
+    /// Service module services file.
     #[arg(long)]
     module_services_file: Option<std::path::PathBuf>,
 
@@ -2107,7 +2006,7 @@ struct ServiceUpgradeArgs {
     /// Candidate service manifest URL/path.
     manifest_reference: String,
 
-    /// Remote service base URL for local manifest files.
+    /// Provider Service base URL for local manifest files.
     #[arg(long)]
     base_url: Option<String>,
 
@@ -2119,7 +2018,7 @@ struct ServiceUpgradeArgs {
     #[arg(long)]
     env_file: Option<std::path::PathBuf>,
 
-    /// Remote module services file.
+    /// Service module services file.
     #[arg(long)]
     module_services_file: Option<std::path::PathBuf>,
 
@@ -2149,7 +2048,7 @@ struct ServiceRollbackArgs {
     #[arg(long)]
     env_file: Option<std::path::PathBuf>,
 
-    /// Remote module services file.
+    /// Service module services file.
     #[arg(long)]
     module_services_file: Option<std::path::PathBuf>,
 
@@ -2324,7 +2223,7 @@ struct ServiceReleaseApplyArgs {
     #[arg(long = "env")]
     environment_name: Option<String>,
 
-    /// Remote service base URL for local manifest files.
+    /// Provider Service base URL for local manifest files.
     #[arg(long)]
     base_url: Option<String>,
 
@@ -2336,7 +2235,7 @@ struct ServiceReleaseApplyArgs {
     #[arg(long)]
     env_file: Option<std::path::PathBuf>,
 
-    /// Remote module services file.
+    /// Service module services file.
     #[arg(long)]
     module_services_file: Option<std::path::PathBuf>,
 
@@ -2444,7 +2343,7 @@ struct ModuleServiceListArgs {
     #[arg(long)]
     repo_root: Option<std::path::PathBuf>,
 
-    /// Remote module services file.
+    /// Service module services file.
     #[arg(long)]
     module_services_file: Option<std::path::PathBuf>,
 
@@ -2467,7 +2366,7 @@ struct ModuleServiceExportArgs {
     #[arg(long)]
     repo_root: Option<std::path::PathBuf>,
 
-    /// Remote module services file.
+    /// Service module services file.
     #[arg(long)]
     module_services_file: Option<std::path::PathBuf>,
 }
@@ -2484,7 +2383,7 @@ struct ModuleServiceStatusArgs {
     #[arg(long)]
     repo_root: Option<std::path::PathBuf>,
 
-    /// Remote module services file.
+    /// Service module services file.
     #[arg(long)]
     module_services_file: Option<std::path::PathBuf>,
 
@@ -2509,7 +2408,7 @@ struct ModuleServiceLogsArgs {
     #[arg(long)]
     repo_root: Option<std::path::PathBuf>,
 
-    /// Remote module services file.
+    /// Service module services file.
     #[arg(long)]
     module_services_file: Option<std::path::PathBuf>,
 }
@@ -2526,7 +2425,7 @@ struct ModuleServiceStartArgs {
     #[arg(long)]
     repo_root: Option<std::path::PathBuf>,
 
-    /// Remote module services file.
+    /// Service module services file.
     #[arg(long)]
     module_services_file: Option<std::path::PathBuf>,
 }
@@ -2543,19 +2442,15 @@ struct ModuleServiceStopArgs {
     #[arg(long)]
     repo_root: Option<std::path::PathBuf>,
 
-    /// Remote module services file.
+    /// Service module services file.
     #[arg(long)]
     module_services_file: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Args, Clone)]
-struct RemoteModuleInstallArgs {
-    /// Module reference: remote manifest URL/path, or linked module name.
+struct ServiceModuleInstallArgs {
+    /// Exact Module Release reference, catalog entry, Service export, or linked Module name.
     manifest_reference: String,
-
-    /// Legacy loading-source override when the reference is not a descriptor.
-    #[arg(long, default_value = "remote")]
-    source: String,
 
     /// Lenso host repository root.
     #[arg(long)]
@@ -2565,11 +2460,11 @@ struct RemoteModuleInstallArgs {
     #[arg(long)]
     env_file: Option<std::path::PathBuf>,
 
-    /// Remote module services file.
+    /// Service module services file.
     #[arg(long)]
     module_services_file: Option<std::path::PathBuf>,
 
-    /// Remote module base URL.
+    /// Service module base URL.
     #[arg(long)]
     base_url: Option<String>,
 
@@ -2580,10 +2475,6 @@ struct RemoteModuleInstallArgs {
     /// Install descriptor profile to apply.
     #[arg(long = "profile", alias = "with", value_delimiter = ',')]
     install_profiles: Vec<String>,
-
-    /// Skip Runtime Console extension registration.
-    #[arg(long = "no-console-extension", alias = "no-console-plan", action = clap::ArgAction::SetFalse, default_value_t = true)]
-    console_plan: bool,
 
     /// Execute manifest-declared install.commands.
     #[arg(long)]
@@ -2601,7 +2492,7 @@ struct RemoteModuleInstallArgs {
 #[derive(Debug, Args, Clone)]
 struct ServiceInstallArgs {
     #[command(flatten)]
-    install: RemoteModuleInstallArgs,
+    install: ServiceModuleInstallArgs,
 
     /// Service workspace file used to infer --base-url for local service manifests.
     #[arg(long)]
@@ -2609,27 +2500,9 @@ struct ServiceInstallArgs {
 }
 
 #[derive(Debug, Args, Clone)]
-struct ModuleReleaseInspectArgs {
-    /// Module release artifact path or URL.
-    release_reference: String,
-
-    /// Runtime service base URL to use when installing local package artifacts.
-    #[arg(long)]
-    base_url: Option<String>,
-
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Debug, Args, Clone)]
-struct RemoteModuleUninstallArgs {
+struct ServiceModuleUninstallArgs {
     /// Module name.
     module_name: String,
-
-    /// Loading source: remote or linked.
-    #[arg(long)]
-    source: Option<String>,
 
     /// Lenso host repository root.
     #[arg(long)]
@@ -2639,7 +2512,7 @@ struct RemoteModuleUninstallArgs {
     #[arg(long)]
     env_file: Option<std::path::PathBuf>,
 
-    /// Remote module services file.
+    /// Service module services file.
     #[arg(long)]
     module_services_file: Option<std::path::PathBuf>,
 
@@ -2661,21 +2534,17 @@ struct ModuleUpdateArgs {
     #[arg(long)]
     env_file: Option<std::path::PathBuf>,
 
-    /// Remote module services file.
+    /// Service module services file.
     #[arg(long)]
     module_services_file: Option<std::path::PathBuf>,
 
-    /// Remote module base URL override.
+    /// Service module base URL override.
     #[arg(long)]
     base_url: Option<String>,
 
     /// Install descriptor profile to apply.
     #[arg(long = "profile", alias = "with", value_delimiter = ',')]
     install_profiles: Vec<String>,
-
-    /// Skip Runtime Console extension registration.
-    #[arg(long = "no-console-extension", alias = "no-console-plan", action = clap::ArgAction::SetFalse, default_value_t = true)]
-    console_plan: bool,
 
     /// Execute manifest-declared install.commands.
     #[arg(long)]
@@ -2703,21 +2572,13 @@ struct ModuleDoctorArgs {
     #[arg(long)]
     env_file: Option<std::path::PathBuf>,
 
-    /// Remote module services file.
+    /// Service module services file.
     #[arg(long)]
     module_services_file: Option<std::path::PathBuf>,
 
     /// Print machine-readable JSON.
     #[arg(long)]
     json: bool,
-}
-
-#[derive(Debug, Subcommand)]
-enum ConsolePackageCommand {
-    /// Create a Runtime Console package scaffold.
-    Create(ConsolePackageCreateArgs),
-    /// Apply a console package install plan.
-    ApplyPlan(ConsolePackageApplyPlanArgs),
 }
 
 #[derive(Debug, Args, Clone)]
@@ -2729,18 +2590,6 @@ struct ModuleCreateArgs {
     #[arg(long)]
     repo_root: Option<std::path::PathBuf>,
 
-    /// Directory for standalone service packages.
-    #[arg(long)]
-    output_dir: Option<std::path::PathBuf>,
-
-    /// Runtime Console app root.
-    #[arg(long)]
-    runtime_console_root: Option<std::path::PathBuf>,
-
-    /// Console surface area.
-    #[arg(long)]
-    area: Option<String>,
-
     /// Display label.
     #[arg(long)]
     label: Option<String>,
@@ -2757,87 +2606,9 @@ struct ModuleCreateArgs {
     #[arg(long)]
     icon: Option<String>,
 
-    /// Console package install source.
-    #[arg(long)]
-    source: Option<String>,
-
-    /// Create a standalone service package.
-    #[arg(long)]
-    remote: bool,
-
-    /// Create a matching Runtime Console package.
-    #[arg(long)]
-    with_console: bool,
-
-    /// Console package slug.
-    #[arg(long)]
-    package_slug: Option<String>,
-
-    /// Console package npm scope.
-    #[arg(long)]
-    package_scope: Option<String>,
-
-    /// Full console package name.
-    #[arg(long)]
-    package_name: Option<String>,
-
-    /// Console surface name.
-    #[arg(long)]
-    surface_name: Option<String>,
-
-    /// Remote package root directory.
-    #[arg(long)]
-    package_root: Option<String>,
-
-    /// Print files without writing them.
-    #[arg(long)]
-    dry_run: bool,
-}
-
-#[derive(Debug, Args, Clone)]
-struct ConsolePackageCreateArgs {
-    /// Module id, such as billing or support.
-    module_id: String,
-
-    /// Runtime Console app root.
-    #[arg(long)]
-    runtime_console_root: Option<std::path::PathBuf>,
-
-    /// Console surface area.
-    #[arg(long)]
-    area: Option<String>,
-
-    /// Display label.
-    #[arg(long)]
-    label: Option<String>,
-
-    /// Console route.
-    #[arg(long)]
-    route: Option<String>,
-
-    /// Required capability.
-    #[arg(long)]
-    capability: Option<String>,
-
-    /// Lucide icon name.
-    #[arg(long)]
-    icon: Option<String>,
-
-    /// Console package install source.
-    #[arg(long)]
-    source: Option<String>,
-
-    /// Console package slug.
-    #[arg(long)]
-    package_slug: Option<String>,
-
-    /// Console package npm scope.
-    #[arg(long)]
-    package_scope: Option<String>,
-
-    /// Full console package name.
-    #[arg(long)]
-    package_name: Option<String>,
+    /// Create a Console UI artifact bound to the same Module Release.
+    #[arg(long = "with-console-ui")]
+    with_console_ui: bool,
 
     /// Console surface name.
     #[arg(long)]
@@ -2848,65 +2619,32 @@ struct ConsolePackageCreateArgs {
     dry_run: bool,
 }
 
-#[derive(Debug, Args, Clone)]
-struct ConsolePackageApplyPlanArgs {
-    /// Lenso host repository root.
-    #[arg(long)]
-    repo_root: Option<std::path::PathBuf>,
-
-    /// Runtime Console app root.
-    #[arg(long)]
-    runtime_console_root: Option<std::path::PathBuf>,
-
-    /// Console package install plan file.
-    #[arg(long)]
-    install_plan_file: Option<std::path::PathBuf>,
-
-    /// Dependency version to write when the package is not already declared.
-    #[arg(long)]
-    dependency_version: Option<String>,
-
-    /// Print install plan changes without writing them.
-    #[arg(long)]
-    dry_run: bool,
-}
-
-impl From<&RemoteModuleInstallArgs> for module::RemoteModuleInstallOptions {
-    fn from(args: &RemoteModuleInstallArgs) -> Self {
+impl From<&ServiceModuleInstallArgs> for module::ServiceModuleInstallOptions {
+    fn from(args: &ServiceModuleInstallArgs) -> Self {
         Self {
             allow_incompatible: args.allow_incompatible,
             base_url: args.base_url.clone(),
             catalog_url: args.catalog_url.clone(),
-            console_plan: args.console_plan,
+            console_plan: false,
             dry_run: args.dry_run,
             env_file: args.env_file.clone(),
             install_profiles: args.install_profiles.clone(),
             module_services_file: args.module_services_file.clone(),
             repo_root: args.repo_root.clone(),
             run_install_commands: args.run_install_commands,
-            source: args.source.clone(),
+            source: "service".to_owned(),
         }
     }
 }
 
-impl From<&ModuleReleaseInspectArgs> for module::ModuleReleaseInspectOptions {
-    fn from(args: &ModuleReleaseInspectArgs) -> Self {
-        Self {
-            base_url: args.base_url.clone(),
-            check: false,
-            json: args.json,
-        }
-    }
-}
-
-impl From<&RemoteModuleUninstallArgs> for module::RemoteModuleUninstallOptions {
-    fn from(args: &RemoteModuleUninstallArgs) -> Self {
+impl From<&ServiceModuleUninstallArgs> for module::ServiceModuleUninstallOptions {
+    fn from(args: &ServiceModuleUninstallArgs) -> Self {
         Self {
             dry_run: args.dry_run,
             env_file: args.env_file.clone(),
             module_services_file: args.module_services_file.clone(),
             repo_root: args.repo_root.clone(),
-            source: args.source.clone(),
+            source: None,
         }
     }
 }
@@ -2916,7 +2654,7 @@ impl From<&ModuleUpdateArgs> for module::ModuleUpdateOptions {
         Self {
             allow_incompatible: args.allow_incompatible,
             base_url: args.base_url.clone(),
-            console_plan: args.console_plan,
+            console_plan: false,
             dry_run: args.dry_run,
             env_file: args.env_file.clone(),
             install_profiles: args.install_profiles.clone(),
@@ -3365,57 +3103,15 @@ impl From<&ConsoleRecoverActivationArgs> for console_installation::RecoverActiva
 impl From<&ModuleCreateArgs> for module::ModuleCreateOptions {
     fn from(args: &ModuleCreateArgs) -> Self {
         Self {
-            area: args.area.clone(),
             capability: args.capability.clone(),
             dry_run: args.dry_run,
             icon: args.icon.clone(),
             label: args.label.clone(),
             module_id: args.module_id.clone(),
-            output_dir: args.output_dir.clone(),
-            package_name: args.package_name.clone(),
-            package_root: args.package_root.clone(),
-            package_scope: args.package_scope.clone(),
-            package_slug: args.package_slug.clone(),
-            remote: args.remote,
             repo_root: args.repo_root.clone(),
             route: args.route.clone(),
-            runtime_console_root: args.runtime_console_root.clone(),
-            source: args.source.clone(),
             surface_name: args.surface_name.clone(),
-            with_console: args.with_console,
-        }
-    }
-}
-
-impl From<&ConsolePackageCreateArgs> for module::ConsolePackageCreateOptions {
-    fn from(args: &ConsolePackageCreateArgs) -> Self {
-        Self {
-            area: args.area.clone(),
-            capability: args.capability.clone(),
-            dry_run: args.dry_run,
-            icon: args.icon.clone(),
-            label: args.label.clone(),
-            module_id: args.module_id.clone(),
-            package_name: args.package_name.clone(),
-            package_scope: args.package_scope.clone(),
-            package_slug: args.package_slug.clone(),
-            route: args.route.clone(),
-            runtime_console_root: args.runtime_console_root.clone(),
-            source: args.source.clone(),
-            surface_name: args.surface_name.clone(),
-        }
-    }
-}
-
-impl From<&ConsolePackageApplyPlanArgs> for module::ConsolePackageApplyPlanOptions {
-    fn from(args: &ConsolePackageApplyPlanArgs) -> Self {
-        Self {
-            dependency_version: args.dependency_version.clone(),
-            dry_run: args.dry_run,
-            install_plan_file: args.install_plan_file.clone(),
-            log_next_steps: true,
-            repo_root: args.repo_root.clone(),
-            runtime_console_root: args.runtime_console_root.clone(),
+            with_console: args.with_console_ui,
         }
     }
 }
@@ -3473,14 +3169,6 @@ async fn run_service_check_or_doctor(
         module::doctor_module(args.into()).await?;
     }
     Ok(())
-}
-
-fn warn_module_install_manifest_reference(reference: &str) {
-    if looks_like_manifest_reference(reference) {
-        eprintln!(
-            "warning: `lenso module install <manifest>` is deprecated for service manifests; use `lenso service install <manifest>` or `lenso module install <module-name>`."
-        );
-    }
 }
 
 #[tokio::main]
@@ -3705,24 +3393,30 @@ async fn main() -> anyhow::Result<()> {
                     console_operator::bootstrap_operator((&args).into()).await?;
                 }
             },
-            ConsoleCommand::Dev(args) => {
-                console_dev::run_console_dev(console_dev::ConsoleDevOptions {
-                    cwd: None,
-                    host: args.host,
-                    open: args.open,
-                    package: args.package,
-                    port: args.port,
-                    runtime_console_root: args.runtime_console_root,
-                })?;
-            }
-            ConsoleCommand::Package { command } => match command {
-                ConsolePackageCommand::Create(args) => {
-                    module::create_console_package((&args).into()).await?;
+            ConsoleCommand::Composition { command } => match command {
+                ConsoleCompositionCommand::Plan(args) => {
+                    console_composition::plan(console_composition::PlanOptions {
+                        composition_file: args.composition,
+                        env_file: args.env_file,
+                        json: args.json,
+                        output: args.output,
+                    })
+                    .await?;
                 }
-                ConsolePackageCommand::ApplyPlan(args) => {
-                    module::apply_console_package_install_plan((&args).into()).await?;
+                ConsoleCompositionCommand::Apply(args) => {
+                    console_composition::apply(console_composition::ApplyOptions {
+                        approve_plan_digest: args.approve_plan_digest,
+                        env_file: args.env_file,
+                        plan_file: args.plan,
+                    })
+                    .await?;
                 }
             },
+            ConsoleCommand::Dev(args) => {
+                console_dev::run_console_dev(console_dev::ConsoleDevOptions {
+                    console_root: args.console_root,
+                })?;
+            }
         },
         Command::Ga { command } => match command {
             GaCommand::SupportCheck(args) => ga::support_check(
@@ -3933,32 +3627,18 @@ async fn main() -> anyhow::Result<()> {
                 module::create_module((&args).into()).await?;
             }
             ModuleCommand::Dev(args) => {
-                if !args.console {
-                    anyhow::bail!("`lenso module dev` currently requires --console");
+                if !args.console_ui {
+                    anyhow::bail!("`lenso module dev` currently requires --console-ui");
                 }
-                console_dev::run_console_dev(console_dev::ConsoleDevOptions {
-                    cwd: args.repo_root,
-                    host: args.host,
-                    open: args.open,
-                    package: None,
-                    port: args.port,
-                    runtime_console_root: args.runtime_console_root,
-                })?;
+                console_dev::run_module_console_ui_dev(args.repo_root.as_deref())?;
             }
             ModuleCommand::Install(args) => {
-                warn_module_install_manifest_reference(&args.manifest_reference);
-                module::install_module(&args.manifest_reference, (&args).into()).await?;
-            }
-            ModuleCommand::Enable(args) => {
-                module::install_module(&args.manifest_reference, (&args).into()).await?;
-            }
-            ModuleCommand::Add(args) => {
                 module::install_module(&args.manifest_reference, (&args).into()).await?;
             }
             ModuleCommand::Update(args) => {
                 module::update_module(&args.module_name, (&args).into()).await?;
             }
-            ModuleCommand::Uninstall(args) => {
+            ModuleCommand::Remove(args) => {
                 module::uninstall_module(&args.module_name, (&args).into()).await?;
             }
             ModuleCommand::Disable(args) => {
@@ -3967,56 +3647,6 @@ async fn main() -> anyhow::Result<()> {
             ModuleCommand::Doctor(args) => {
                 module::doctor_module((&args).into()).await?;
             }
-            ModuleCommand::Extraction { command } => match command {
-                ModuleExtractionCommand::Readiness(args) => {
-                    extraction::report_module_extraction_readiness(
-                        extraction::ModuleExtractionReadinessOptions {
-                            evidence_file: args.evidence_file,
-                            json: args.json,
-                            module_manifest: args.module_manifest,
-                            module_name: args.module_name,
-                            modules_root: args.modules_root,
-                            repo_root: args.repo_root,
-                            system_file: args.system_file,
-                        },
-                    )?;
-                }
-            },
-            ModuleCommand::Release { command } => match command {
-                ModuleReleaseCommand::Inspect(args) => {
-                    module::inspect_module_release(&args.release_reference, (&args).into()).await?;
-                }
-                ModuleReleaseCommand::Check(args) => {
-                    let mut options: module::ModuleReleaseInspectOptions = (&args).into();
-                    options.check = true;
-                    module::inspect_module_release(&args.release_reference, options).await?;
-                }
-            },
-            ModuleCommand::Service { command } => match command {
-                ModuleServiceCommand::List(args) => {
-                    module::list_module_services((&args).into()).await?;
-                }
-                ModuleServiceCommand::Export(args) => {
-                    module::export_module_services((&args).into()).await?;
-                }
-                ModuleServiceCommand::Status(args) => {
-                    module::status_module_service((&args).into()).await?;
-                }
-                ModuleServiceCommand::Logs(args) => {
-                    module::logs_module_service((&args).into()).await?;
-                }
-                ModuleServiceCommand::Start(args) => {
-                    module::start_module_service((&args).into()).await?;
-                }
-                ModuleServiceCommand::Stop(args) => {
-                    module::stop_module_service((&args).into()).await?;
-                }
-            },
-            ModuleCommand::Marketplace { command } => match command {
-                ModuleMarketplaceCommand::Install(args) => {
-                    module::install_module(&args.manifest_reference, (&args).into()).await?;
-                }
-            },
         },
         Command::Service { command } => match command {
             ServiceCommand::Create(args) => {
@@ -4094,7 +3724,7 @@ async fn main() -> anyhow::Result<()> {
                 service::package_service((&args).into()).await?;
             }
             ServiceCommand::Install(args) => {
-                let mut options: module::RemoteModuleInstallOptions = (&args.install).into();
+                let mut options: module::ServiceModuleInstallOptions = (&args.install).into();
                 let mut manifest_reference = args.install.manifest_reference.clone();
                 if let Some(resolved) = service::resolve_workspace_install_reference(
                     &manifest_reference,
@@ -4116,7 +3746,7 @@ async fn main() -> anyhow::Result<()> {
                 module::install_module(&manifest_reference, options).await?;
             }
             ServiceCommand::Uninstall(args) => {
-                module::uninstall_remote_module(&args.module_name, (&args).into()).await?;
+                module::uninstall_service_module(&args.module_name, (&args).into()).await?;
             }
             ServiceCommand::Diff(args) => {
                 module::diff_service((&args).into()).await?;
@@ -4580,15 +4210,8 @@ mod tests {
             "lenso",
             "console",
             "dev",
-            "--package",
-            "packages/auth-console",
-            "--host",
-            "http://127.0.0.1:3000",
-            "--port",
-            "5175",
-            "--open",
-            "--runtime-console-root",
-            "../lenso-runtime-console",
+            "--console-root",
+            "../lenso-console",
         ]);
         let Command::Console {
             command: ConsoleCommand::Dev(args),
@@ -4598,16 +4221,10 @@ mod tests {
         };
 
         assert_eq!(
-            args.package.as_deref(),
-            Some(std::path::Path::new("packages/auth-console"))
+            args.console_root.as_deref(),
+            Some(std::path::Path::new("../lenso-console"))
         );
-        assert_eq!(args.host.as_deref(), Some("http://127.0.0.1:3000"));
-        assert_eq!(args.port, 5175);
-        assert!(args.open);
-        assert_eq!(
-            args.runtime_console_root.as_deref(),
-            Some(std::path::Path::new("../lenso-runtime-console"))
-        );
+        assert!(Cli::try_parse_from(["lenso", "console", "package"]).is_err());
     }
 
     #[test]
@@ -4660,6 +4277,60 @@ mod tests {
             .is_err()
         );
         assert!(Cli::try_parse_from(["lenso", "console", "update"]).is_err());
+        assert!(Cli::try_parse_from(["lenso", "console", "recovery"]).is_err());
+    }
+
+    #[test]
+    fn parses_console_composition_plan_and_apply() {
+        let plan = Cli::parse_from([
+            "lenso",
+            "console",
+            "composition",
+            "plan",
+            "--composition",
+            "composition.json",
+            "--env-file",
+            "console.env",
+            "--output",
+            "plan.json",
+        ]);
+        let Command::Console {
+            command:
+                ConsoleCommand::Composition {
+                    command: ConsoleCompositionCommand::Plan(args),
+                },
+        } = plan.command
+        else {
+            panic!("expected Console composition plan");
+        };
+        assert_eq!(args.composition, std::path::Path::new("composition.json"));
+        assert_eq!(
+            args.output.as_deref(),
+            Some(std::path::Path::new("plan.json"))
+        );
+
+        let apply = Cli::parse_from([
+            "lenso",
+            "console",
+            "composition",
+            "apply",
+            "--plan",
+            "plan.json",
+            "--env-file",
+            "console.env",
+            "--approve-plan-digest",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ]);
+        let Command::Console {
+            command:
+                ConsoleCommand::Composition {
+                    command: ConsoleCompositionCommand::Apply(args),
+                },
+        } = apply.command
+        else {
+            panic!("expected Console composition apply");
+        };
+        assert_eq!(args.plan, std::path::Path::new("plan.json"));
     }
 
     #[test]
@@ -4768,94 +4439,6 @@ mod tests {
             Some(std::path::Path::new("age-key.txt"))
         );
 
-        let reconcile = Cli::parse_from([
-            "lenso",
-            "console",
-            "recovery",
-            "reconcile",
-            "--root",
-            "/srv/lenso-console",
-            "--env-file",
-            "recovery.env",
-            "--evidence",
-            "reconciliation-input.json",
-            "--apply",
-            "--approve-plan-digest",
-            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        ]);
-        let Command::Console {
-            command:
-                ConsoleCommand::Recovery {
-                    command: ConsoleRecoveryCommand::Reconcile(args),
-                },
-        } = reconcile.command
-        else {
-            panic!("expected Console recovery reconciliation");
-        };
-        assert!(args.apply);
-        assert_eq!(
-            args.evidence,
-            std::path::Path::new("reconciliation-input.json")
-        );
-
-        let activate = Cli::parse_from([
-            "lenso",
-            "console",
-            "recovery",
-            "activate",
-            "--root",
-            "/srv/lenso-console",
-            "--recovery-env-file",
-            "recovery.env",
-            "--active-env-file",
-            "active.env",
-            "--apply",
-            "--approve-plan-digest",
-            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-            "--approve-authority-transfer",
-        ]);
-        let Command::Console {
-            command:
-                ConsoleCommand::Recovery {
-                    command: ConsoleRecoveryCommand::Activate(args),
-                },
-        } = activate.command
-        else {
-            panic!("expected Console recovery activation");
-        };
-        assert!(args.apply);
-        assert!(args.approve_authority_transfer);
-        assert_eq!(args.active_env_file, std::path::Path::new("active.env"));
-
-        let recover_activation = Cli::parse_from([
-            "lenso",
-            "console",
-            "recovery",
-            "recover-activation",
-            "--root",
-            "/srv/lenso-console",
-            "--recovery-env-file",
-            "recovery.env",
-            "--active-env-file",
-            "active.env",
-            "--apply",
-            "--approve-plan-digest",
-            "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-            "--approve-authority-reset",
-        ]);
-        let Command::Console {
-            command:
-                ConsoleCommand::Recovery {
-                    command: ConsoleRecoveryCommand::RecoverActivation(args),
-                },
-        } = recover_activation.command
-        else {
-            panic!("expected Console activation recovery");
-        };
-        assert!(args.apply);
-        assert!(args.approve_authority_reset);
-        assert_eq!(args.recovery_env_file, std::path::Path::new("recovery.env"));
-
         let backup = Cli::parse_from([
             "lenso",
             "console",
@@ -4895,21 +4478,14 @@ mod tests {
     }
 
     #[test]
-    fn parses_module_dev_console() {
+    fn parses_module_dev_console_ui() {
         let cli = Cli::parse_from([
             "lenso",
             "module",
             "dev",
-            "--console",
+            "--console-ui",
             "--repo-root",
             "./module-repo",
-            "--host",
-            "http://127.0.0.1:3000",
-            "--port",
-            "5176",
-            "--open",
-            "--runtime-console-root",
-            "../lenso-runtime-console",
         ]);
         let Command::Module {
             command: ModuleCommand::Dev(args),
@@ -4918,18 +4494,12 @@ mod tests {
             panic!("expected module dev");
         };
 
-        assert!(args.console);
+        assert!(args.console_ui);
         assert_eq!(
             args.repo_root.as_deref(),
             Some(std::path::Path::new("./module-repo"))
         );
-        assert_eq!(args.host.as_deref(), Some("http://127.0.0.1:3000"));
-        assert_eq!(args.port, 5176);
-        assert!(args.open);
-        assert_eq!(
-            args.runtime_console_root.as_deref(),
-            Some(std::path::Path::new("../lenso-runtime-console"))
-        );
+        assert!(Cli::try_parse_from(["lenso", "module", "dev", "--console"]).is_err());
     }
 
     #[test]
@@ -5438,16 +5008,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_module_enable_disable_aliases() {
-        let cli = Cli::parse_from(["lenso", "module", "enable", "support-ticket"]);
-        let Command::Module {
-            command: ModuleCommand::Enable(enable_args),
-        } = cli.command
-        else {
-            panic!("expected module enable");
-        };
-        assert_eq!(enable_args.manifest_reference, "support-ticket");
-
+    fn parses_module_disable_and_rejects_removed_aliases() {
         let cli = Cli::parse_from(["lenso", "module", "disable", "support-ticket"]);
         let Command::Module {
             command: ModuleCommand::Disable(disable_args),
@@ -5456,6 +5017,9 @@ mod tests {
             panic!("expected module disable");
         };
         assert_eq!(disable_args.module_name, "support-ticket");
+        assert!(Cli::try_parse_from(["lenso", "module", "enable", "support-ticket"]).is_err());
+        assert!(Cli::try_parse_from(["lenso", "module", "add", "support-ticket"]).is_err());
+        assert!(Cli::try_parse_from(["lenso", "module", "uninstall", "support-ticket"]).is_err());
     }
 
     #[test]

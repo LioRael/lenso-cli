@@ -216,11 +216,11 @@ running until Ctrl-C. New hosts run them in one local process; pass
 lenso module create billing
 ```
 
-Add `--with-console` when the linked module should also get a Runtime Console
-workspace package:
+Add `--with-console-ui` when the Module Release should also contain its isolated
+Console UI artifact:
 
 ```sh
-lenso module create billing --with-console
+lenso module create billing --with-console-ui
 ```
 
 For a standalone service provider:
@@ -384,16 +384,14 @@ lenso service install dist/lenso-service/support-suite-provider/lenso.service-pa
   --base-url http://127.0.0.1:4100/lenso/service/v1
 ```
 
-Install a packaged module release with the module command:
+Install and manage a Module through the stable lifecycle commands:
 
 ```sh
-lenso module release inspect dist/lenso-service/support-suite-provider/modules/support-ticket/lenso.module-release.json
-lenso module release check dist/lenso-service/support-suite-provider/modules/support-ticket/lenso.module-release.json \
-  --base-url http://127.0.0.1:4100/lenso/service/v1
 lenso module install dist/lenso-service/support-suite-provider/modules/support-ticket/lenso.module-release.json \
   --base-url http://127.0.0.1:4100/lenso/service/v1
-lenso module enable support-ticket
 lenso module disable support-ticket
+lenso module remove support-ticket
+lenso module doctor support-ticket
 ```
 
 `lenso.module-release.v1` is the module release channel. It records the module
@@ -408,48 +406,25 @@ name, version, capabilities, source, and optional provider pointer. V11 keeps
 connects a service, but it does not mean every module inside that service is
 the user-facing install target.
 
-When this command runs from a framework checkout with sibling `lenso` and
-`lenso-runtime-console` repositories, the scaffold uses local path/file
-dependencies so `cargo check` or `pnpm install` can run before the packages are
-published. Outside that checkout it keeps the future-publish version
-dependencies and prints a note to replace them with local paths until
-`lenso-service` and `@lenso/service-kit` are published.
+The Service scaffold consumes `@lenso/service-kit` from the framework SDK when
+used in a sibling checkout. Outside that checkout it uses the published SDK.
 
-The older standalone module package generator is still available as:
+### Console and Module UI development
+
+Run the complete local Console Service from its repository:
 
 ```sh
-lenso module create billing --remote --output-dir ../module-packages
+lenso console dev --console-root ../lenso-runtime-console
 ```
 
-The Runtime Console package generator is available directly as:
+Run the Console UI artifact owned by the current Module:
 
 ```sh
-lenso console package create billing
+lenso module dev --console-ui
 ```
 
-### Runtime Console package development
-
-Preview a console package while editing it:
-
-```sh
-lenso console dev --package packages/auth-console
-```
-
-From a module repository root, discover every local console package:
-
-```sh
-lenso module dev --console
-```
-
-Both commands default to standalone mock mode. Add `--host` to proxy real Lenso
-host APIs while still loading the local package bundle:
-
-```sh
-lenso module dev --console --host http://localhost:3000
-```
-
-Set `LENSO_RUNTIME_CONSOLE_ROOT=/path/to/lenso-runtime-console` when the Runtime
-Console checkout is not a sibling of the current repository.
+The UI artifact remains bound to the same immutable Module Release. The CLI no
+longer copies packages into a Console checkout or maintains extension registries.
 
 ## Install a module
 
@@ -489,7 +464,7 @@ also infer `--base-url`; package artifacts outside that workspace still need
 `--base-url` so the host records the runtime service endpoint rather than the
 file path.
 
-Service installs update `REMOTE_MODULES`, copy declared Runtime Console bundles to
+Service installs update `SERVICE_MODULES`, copy declared Runtime Console bundles to
 `.lenso/console/extensions`, update `.lenso/console/extensions/registry.json`,
 and record `.lenso/module-installs.json` in one step. Linked modules update the
 host `Cargo.toml`, `src/lib.rs`, `.env` toggle, and the same install receipt
@@ -522,13 +497,9 @@ lenso module update auth
 lenso module update billing --base-url https://example.com/lenso/module/v1
 ```
 
-`module update` reuses the recorded `manifestReference` and source. Remote
-updates refresh `REMOTE_MODULES`, service state, install receipts, and copied
-Runtime Console bundles. Linked updates reapply the recorded descriptor or
-builtin module entry.
-
-Use `--no-console-extension` when you want to skip Runtime Console extension
-registration.
+`module update` reuses the recorded `manifestReference` and delivery form.
+Service-backed updates refresh provider state and install receipts; Linked
+updates reapply the recorded descriptor or builtin Module entry.
 
 Service module manifests may also declare `install.env` values and
 `install.commands`. Env values are written to `.env`; commands are run only when
@@ -599,7 +570,7 @@ lenso service doctor billing --json
 lenso service check billing --json
 ```
 
-The doctor reads `REMOTE_MODULES`, `.lenso/module-installs.json`, and
+The doctor reads `SERVICE_MODULES`, `.lenso/module-installs.json`, and
 `.lenso/module-services.json`. It reports whether the service is
 installed, configured, whether an HTTP manifest is reachable, whether managed
 service `readyUrl` endpoints are ready, and which stale `.lock`/`.pid` files

@@ -24,7 +24,7 @@ export const service = defineService({
   name: "{{service_name}}",
   version: "0.1.0",
   compatibility: {
-    remote_protocol_version: "1",
+    provider_protocol_version: "lenso.provider.v1",
     required_host_features: ["service.status"],
   },
   install: {

@@ -2607,7 +2607,7 @@ mod tests {
         write_json(
             &root.join(MODULE_INSTALLS_PATH),
             &json!({
-                "modules": [{ "moduleName": "support-ticket", "source": "remote" }],
+                "modules": [{ "moduleName": "support-ticket", "source": "service" }],
                 "version": 1
             }),
         )
@@ -2866,7 +2866,7 @@ mod tests {
         write_json(
             &root.join(MODULE_INSTALLS_PATH),
             &json!({
-                "modules": [{ "moduleName": "support-ticket", "source": "remote" }],
+                "modules": [{ "moduleName": "support-ticket", "source": "service" }],
                 "version": 1
             }),
         )
