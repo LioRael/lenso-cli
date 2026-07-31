@@ -1,5 +1,5 @@
 core:changelogs:
-  - content: "---\npackages:\n  lenso-cli:\n    type: patch\n  \"@lenso/cli\":\n    type: patch\n---\n\n### Features\n\nPublish independent Lenso Console installation, upgrade, recovery, backup, and\nOperator bootstrap operations through the universal CLI distribution.\n"
+  - content: "---\npackages:\n  lenso-cli:\n    type: patch\n  \"@lenso/cli\":\n    type: patch\n---\n\n### Fixes\n\nPreserve executable modes on the bundled Unix CLI binaries when an npm release\nis rebuilt through the reviewed partial-recovery path.\n"
     filename: release.md
     v: 0.0.0
 core:packages:
