@@ -19,7 +19,7 @@ const MINIMUM_OPERATOR_SCOPES: &[&str] = &[
     "auth.users.read",
     "auth_password.credentials.write",
     "console.admin",
-    "console.extensions.manage",
+    "console.artifacts.manage",
     "console.system-registry.read",
     "console.system-registry.revoke",
 ];
@@ -447,7 +447,7 @@ mod tests {
                 "auth.users.read",
                 "auth_password.credentials.write",
                 "console.admin",
-                "console.extensions.manage",
+                "console.artifacts.manage",
                 "console.system-registry.read",
                 "console.system-registry.revoke",
                 "runtime.stories.read",
