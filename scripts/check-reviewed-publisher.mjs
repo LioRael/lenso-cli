@@ -21,8 +21,28 @@ assert.ok(
 );
 assert.equal(
   workflow.match(/ref: \$\{\{ inputs\.release_commit \}\}/gu)?.length,
-  2,
-  "build and publish jobs must use the exact reviewed release commit",
+  3,
+  "build, publish, and partial recovery jobs must use the exact reviewed release commit",
+);
+assert.match(
+  workflow,
+  /^  build:\n(?:.*\n)*?    if: startsWith\(github\.ref_name, 'release-execution\/'\)$/mu,
+  "build must be restricted to a protected release execution ref",
+);
+assert.match(
+  workflow,
+  /^  publish:\n    if: startsWith\(github\.ref_name, 'release-execution\/'\)$/mu,
+  "publish must be restricted to a protected release execution ref",
+);
+assert.match(
+  workflow,
+  /^  recover-partial:\n    if: github\.ref_name == github\.event\.repository\.default_branch && \(contains\(inputs\.packages_json, 'npm:'\) \|\| contains\(inputs\.packages_json, 'oci:'\)\)$/mu,
+  "partial recovery must be restricted to the default branch and a non-Cargo package set",
+);
+assert.match(
+  workflow,
+  /LENSO_WORKFLOW_PATH: \.github\/workflows\/publish\.yml/u,
+  "partial recovery must bind the trusted publisher workflow",
 );
 
 console.log("reviewed publisher workflow check passed");
