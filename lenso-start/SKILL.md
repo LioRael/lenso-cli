@@ -27,7 +27,7 @@ Start from the user goal, then route them to the smallest public surface that fi
 - If the user wants a generated business app, prefer `lenso app compose`, then `lenso app next`, `lenso app explain`, and `lenso agent task --from-app-plan "add the requested business behavior"`.
 - If the user wants a reusable business slice that combines modules, services, and agent handoff, create a capability pack, add it to the local capability library, run `lenso capability fit`, then compose it into the app with `--pack`.
 - If the user wants to define manifests, routes, runtime functions, events, lifecycle checks, or console metadata in Rust, use `lenso-module-authoring`.
-- If the user wants an independently running service in JavaScript or TypeScript, use `lenso-remote-module-authoring`.
+- If the user wants an independently running service in JavaScript or TypeScript, use `lenso-provider-authoring`.
 - If the user wants to run a blank backend host, use `lenso-starter-host`.
 - If the user wants to consume or verify HTTP APIs, use `lenso-api-client`.
 
@@ -45,7 +45,7 @@ Return the chosen path, the next command, and the follow-up skill:
 - capability pack -> `lenso capability init support-sla --dir ./capabilities/support-sla --lang ts --for-blueprint support-desk` -> `lenso capability library add ./capabilities/support-sla` -> `lenso capability fit support-sla --repo-root .` -> `lenso app compose ./acme-support --blueprint support-desk --pack support-sla --apply` -> `lenso agent task --for-capability support-sla "add enterprise SLA escalation"`
 - host app -> `lenso host init <dir>` -> `lenso-starter-host`
 - in-host Rust module -> `lenso module create <name>` -> `lenso-module-authoring`
-- service -> `@lenso/service-kit` -> `lenso-remote-module-authoring` -> `lenso service list` and `lenso service doctor <module> --json`
+- service -> `@lenso/service-kit` -> `lenso-provider-authoring` -> `lenso service list` and `lenso service doctor <module> --json`
 - API client -> committed OpenAPI contract -> `lenso-api-client`
 
 ## Keep Out

@@ -31,7 +31,7 @@ Do not ask for exhaustive product requirements before giving a path.
 3. Decide whether the work belongs in a host app, an existing module, one new module, or multiple modules.
 4. Decide whether each new module should stay linked in Rust or be provided by a service.
 5. Sketch the required declarations: manifest, HTTP routes, schema-admin data, admin actions, runtime functions, events, lifecycle jobs, console surfaces, config, and dependencies.
-6. Identify cross-module collaboration through declared dependencies, events, host-owned queues, remote HTTP/proxy surfaces, or public APIs.
+6. Identify cross-module collaboration through declared dependencies, events, host-owned queues, provider HTTP/proxy surfaces, or public APIs.
 7. If the slice should be reused across apps or mixes modules, services, and agent work, create a capability pack before composing it:
    `lenso capability init support-sla --dir ./capabilities/support-sla --lang ts --for-blueprint support-desk`,
    `lenso capability library add ./capabilities/support-sla`,
@@ -63,7 +63,7 @@ not install or trust.
 When choosing a service, include the operator loop in the first slice:
 run the service, install the manifest, check `lenso service list`, check
 `lenso service doctor <module> --json`, and verify Runtime Console Modules,
-Remote Calls, and Runtime Story.
+Provider Calls, and Runtime Story.
 
 Keep the host thin. Put business-owned behavior in modules unless the work is pure host setup, auth/config anchoring, or deployment wiring.
 
@@ -73,7 +73,7 @@ For a clarified plan, return:
 
 - clarifying questions, only if they block a responsible module decision
 - assumptions
-- recommended shape: host app, modules, linked vs remote, and dependency graph
+- recommended shape: host app, modules, linked vs provider, and dependency graph
 - first slice with the smallest testable workflow
 - module plan table with each module's owner, data, surfaces, collaborations, and reason
 - next commands and follow-up skills
@@ -84,7 +84,7 @@ Use these follow-up routes:
 - composed app -> `lenso app compose ./acme-support --blueprint support-desk --addon support-sla --apply` -> `lenso app next`
 - capability pack -> `lenso capability init support-sla --dir ./capabilities/support-sla --lang ts --for-blueprint support-desk` -> `lenso capability library add ./capabilities/support-sla` -> `lenso capability fit support-sla --repo-root .` -> `lenso app compose ./acme-support --blueprint support-desk --pack support-sla --apply` -> `lenso agent task --for-capability support-sla "add enterprise SLA escalation"`
 - in-host module -> `lenso module create <name>` -> `lenso-module-authoring`
-- service -> `@lenso/service-kit` -> `lenso-remote-module-authoring` -> service lifecycle checks
+- service -> `@lenso/service-kit` -> `lenso-provider-authoring` -> service lifecycle checks
 - API client or integration check -> committed OpenAPI contract -> `lenso-api-client`
 
 ## Keep Out

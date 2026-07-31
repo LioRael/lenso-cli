@@ -1,6 +1,6 @@
 ---
-name: lenso-remote-module-authoring
-description: Use when building or editing an out-of-process Lenso service in JavaScript or TypeScript with `@lenso/service-kit`, including service manifests, provided modules, remote routes, runtime functions, event handlers, and custom admin surfaces.
+name: lenso-provider-authoring
+description: Use when building or editing an out-of-process Lenso service in JavaScript or TypeScript with `@lenso/service-kit`, including service manifests, provided modules, provider routes, runtime functions, event handlers, and custom admin surfaces.
 ---
 
 # Lenso Service Module Authoring
@@ -59,7 +59,7 @@ For a service, leave:
 - capability-pack instructions using `lenso capability library add <pack-dir>`, `lenso capability fit <pack> --repo-root .`, and `lenso agent task --for-capability <pack> "add the requested business behavior"` when the service ships as part of a pack
 - a manifest `install.services` declaration when the service has a local process command
 - one package or focused check that proves the service can run outside the host
-- Console expectations: Modules should show the provided module installed / configured / ready, with Remote Calls and Runtime Story staying host-owned
+- Console expectations: Modules should show the provided module installed / configured / ready, with Provider Calls and Runtime Story staying host-owned
 
 ## Checks
 
