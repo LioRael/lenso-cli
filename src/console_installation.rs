@@ -3400,7 +3400,7 @@ fn write_attempt(
 
 fn compose_document(image: &str) -> String {
     format!(
-        "name: lenso-console\n\nservices:\n  migrate:\n    image: {image}\n    command: [\"/usr/local/bin/lenso-console-migrate\"]\n    environment: &console-environment\n      APP_ENV: production\n      CORS_ALLOWED_ORIGINS: ${{CONSOLE_PUBLIC_ORIGIN:?set CONSOLE_PUBLIC_ORIGIN}}\n      DATABASE_URL: ${{CONSOLE_DATABASE_URL:?set CONSOLE_DATABASE_URL}}\n      CONSOLE_RECOVERY_MODE: ${{CONSOLE_RECOVERY_MODE:?set CONSOLE_RECOVERY_MODE}}\n      LENSO_COMPOSITION_PROFILE: core\n      SERVICE_NAME: lenso-console\n    read_only: true\n    security_opt:\n      - no-new-privileges:true\n    cap_drop:\n      - ALL\n    tmpfs:\n      - /tmp\n  console:\n    image: {image}\n    environment: *console-environment\n    ports:\n      - \"${{CONSOLE_HTTP_PORT:-3030}}:3030\"\n    read_only: true\n    restart: unless-stopped\n    security_opt:\n      - no-new-privileges:true\n    cap_drop:\n      - ALL\n    tmpfs:\n      - /tmp\n"
+        "name: lenso-console\n\nservices:\n  migrate:\n    image: {image}\n    command: [\"/usr/local/bin/lenso-console-migrate\"]\n    environment: &console-environment\n      APP_ENV: production\n      CORS_ALLOWED_ORIGINS: ${{CONSOLE_PUBLIC_ORIGIN:?set CONSOLE_PUBLIC_ORIGIN}}\n      DATABASE_URL: ${{CONSOLE_DATABASE_URL:?set CONSOLE_DATABASE_URL}}\n      CONSOLE_RECOVERY_MODE: ${{CONSOLE_RECOVERY_MODE:?set CONSOLE_RECOVERY_MODE}}\n      LENSO_COMPOSITION_PROFILE: core\n      SERVICE_NAME: lenso-console\n    read_only: true\n    security_opt:\n      - no-new-privileges:true\n    cap_drop:\n      - ALL\n    tmpfs:\n      - /tmp\n  console:\n    image: {image}\n    environment: *console-environment\n    ports:\n      - \"${{CONSOLE_HTTP_PORT:-3030}}:3030\"\n    read_only: true\n    restart: unless-stopped\n    security_opt:\n      - no-new-privileges:true\n    cap_drop:\n      - ALL\n    tmpfs:\n      - /tmp\n    volumes:\n      - console-extensions:/opt/lenso-console/extensions\n\nvolumes:\n  console-extensions:\n"
     )
 }
 
@@ -5703,6 +5703,8 @@ mod tests {
         assert!(document.contains(
             "CONSOLE_RECOVERY_MODE: ${CONSOLE_RECOVERY_MODE:?set CONSOLE_RECOVERY_MODE}"
         ));
+        assert!(document.contains("console-extensions:/opt/lenso-console/extensions"));
+        assert!(document.contains("volumes:\n  console-extensions:"));
     }
 
     #[test]
