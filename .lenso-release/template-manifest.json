@@ -8,7 +8,7 @@
     },
     {
       "path": ".github/workflows/recover-partial-production.yml",
-      "sha256": "sha256:e809548e695d69171d8bae3f207bf265d4f23d708d86a5ae8341d91fac30917b"
+      "sha256": "sha256:6cf3bea56239b3ad6a9913501139d176eeead2f0850c658a9bbd242960d45f21"
     },
     {
       "path": ".github/workflows/release-plan.yml",
