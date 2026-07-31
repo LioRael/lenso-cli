@@ -414,7 +414,7 @@ used in a sibling checkout. Outside that checkout it uses the published SDK.
 Run the complete local Console Service from its repository:
 
 ```sh
-lenso console dev --console-root ../lenso-runtime-console
+lenso console dev --console-root ../lenso-console
 ```
 
 Run the Console UI artifact owned by the current Module:
