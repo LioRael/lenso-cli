@@ -1090,7 +1090,10 @@ struct ConsoleOperatorBootstrapArgs {
     #[arg(long)]
     console_root: Option<std::path::PathBuf>,
 
-    /// Console Service URL used only to create the first password user.
+    /// Console Service URL used to create the first password user.
+    ///
+    /// When no password input option is supplied, an interactive terminal
+    /// prompts for and confirms the password without echoing it.
     #[arg(long)]
     console_url: Option<String>,
 
@@ -1106,11 +1109,11 @@ struct ConsoleOperatorBootstrapArgs {
     #[arg(long)]
     identifier: Option<String>,
 
-    /// Read the new password from a private regular file.
+    /// Read the new password from a private regular file instead of prompting.
     #[arg(long, conflicts_with = "password_stdin")]
     password_file: Option<std::path::PathBuf>,
 
-    /// Read the new password from standard input.
+    /// Read the new password from standard input instead of prompting.
     #[arg(long, conflicts_with = "password_file")]
     password_stdin: bool,
 

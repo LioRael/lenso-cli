@@ -205,9 +205,13 @@ pub(crate) fn database_url(repo_root: &Path, env_file: Option<&Path>) -> Result<
         return Ok(value);
     }
     let env_path = env_file.map_or_else(|| repo_root.join(".env"), Path::to_path_buf);
-    dotenv_value_from_path(&env_path, "DATABASE_URL")
+    database_url_from_path(&env_path)
+}
+
+pub(crate) fn database_url_from_path(env_path: &Path) -> Result<String> {
+    dotenv_value_from_path(env_path, "DATABASE_URL")
         .filter(|value| !value.trim().is_empty())
-        .with_context(|| format!("DATABASE_URL is not set in env or {}", env_path.display()))
+        .with_context(|| format!("DATABASE_URL is not set in {}", env_path.display()))
 }
 
 fn dotenv_value_from_path(path: &Path, key: &str) -> Option<String> {

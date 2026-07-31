@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, IsTerminal, Read};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
@@ -54,7 +54,7 @@ pub async fn bootstrap_operator(options: BootstrapOperatorOptions) -> Result<()>
         .as_deref()
         .unwrap_or_else(|| Path::new("."));
     let service_root = console_service_root(console_root);
-    let database_url = crate::host::database_url(&service_root, options.env_file.as_deref())?;
+    let database_url = console_database_url(&service_root, options.env_file.as_deref())?;
     let pool = PgPoolOptions::new()
         .max_connections(1)
         .connect(&database_url)
@@ -81,6 +81,17 @@ pub async fn bootstrap_operator(options: BootstrapOperatorOptions) -> Result<()>
     eprintln!("Stored {CONSOLE_ADMIN_USER_SCOPES_KEY}: {stored}");
     eprintln!("Restart the Console API and Worker for the operator grant to apply.");
     Ok(())
+}
+
+fn console_database_url(service_root: &Path, env_file: Option<&Path>) -> Result<String> {
+    if let Some(env_file) = env_file {
+        return crate::host::database_url_from_path(env_file);
+    }
+    let service_env = service_root.join(".env");
+    if service_env.is_file() {
+        return crate::host::database_url_from_path(&service_env);
+    }
+    crate::host::database_url(service_root, None)
 }
 
 async fn verify_console_service_store(pool: &sqlx::PgPool) -> Result<()> {
@@ -113,10 +124,7 @@ fn password_registration(
     if options.password_file.is_some() && options.password_stdin {
         bail!("pass either --password-file or --password-stdin, not both");
     }
-    if options.password_file.is_none() && !options.password_stdin {
-        if options.console_url.is_some() {
-            bail!("--console-url requires --password-file or --password-stdin");
-        }
+    if options.password_file.is_none() && !options.password_stdin && options.console_url.is_none() {
         return Ok(None);
     }
     if options.user_id.is_some() {
@@ -133,16 +141,38 @@ fn password_registration(
             .as_deref()
             .context("--console-url is required when creating the password user")?,
     )?;
-    let password = if let Some(path) = options.password_file.as_deref() {
-        read_password_file(path)?
-    } else {
-        read_password_stdin()?
-    };
+    let password = read_password(options.password_file.as_deref(), options.password_stdin)?;
     Ok(Some(PasswordRegistration {
         console_url,
         identifier,
         password,
     }))
+}
+
+fn read_password(password_file: Option<&Path>, password_stdin: bool) -> Result<String> {
+    if let Some(path) = password_file {
+        return read_password_file(path);
+    }
+    if password_stdin {
+        return read_password_stdin();
+    }
+    prompt_password()
+}
+
+fn prompt_password() -> Result<String> {
+    if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+        bail!(
+            "interactive password input requires a terminal; use --password-stdin or --password-file"
+        );
+    }
+    let password = rpassword::prompt_password("New Console operator password: ")
+        .context("read Console operator password")?;
+    let confirmation = rpassword::prompt_password("Confirm Console operator password: ")
+        .context("confirm Console operator password")?;
+    if password != confirmation {
+        bail!("Console operator passwords do not match");
+    }
+    validate_password(password)
 }
 
 fn secure_console_url(value: &str) -> Result<Url> {
@@ -439,6 +469,32 @@ mod tests {
     fn non_checkout_path_is_used_as_service_root() {
         let root = Path::new("/tmp/lenso-console");
         assert_eq!(console_service_root(root), root);
+    }
+
+    #[test]
+    fn console_environment_file_is_the_default_database_authority() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "lenso-console-operator-env-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join(".env"),
+            "DATABASE_URL=postgres://console:secret@127.0.0.1:55433/console\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            console_database_url(&root, None).unwrap(),
+            "postgres://console:secret@127.0.0.1:55433/console"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

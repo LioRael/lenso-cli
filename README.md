@@ -175,19 +175,14 @@ authority transfer and is fenced again.
 
 After installing and starting the independent Lenso Console Service, create its
 first password user and bootstrap that user as the first Console Operator from
-outside the Service. Keep the password out of shell history:
+outside the Service. In an interactive terminal, the CLI securely prompts for
+and confirms the password without echoing it:
 
 ```sh
-umask 077
-read -r -s operator_password
-printf '%s\n' "$operator_password" > operator-password
-unset operator_password
 lenso console operator bootstrap \
   --console-root ../lenso-console \
   --console-url http://127.0.0.1:3030 \
-  --identifier admin@example.com \
-  --password-file operator-password
-rm operator-password
+  --identifier admin@example.com
 ```
 
 The command grants only the Console Minimum operator scopes plus explicit
@@ -195,12 +190,13 @@ The command grants only the Console Minimum operator scopes plus explicit
 run after an operator grant already exists. It also verifies the mandatory
 System Registry state before writing, so a business Service Store is rejected.
 Password-user creation goes through the Console Service's own Auth Module over
-HTTPS, with loopback HTTP allowed for local installation. Use `--password-stdin`
-instead of `--password-file` when a secret manager supplies standard input. For
-recovery after Auth registration succeeded but the grant did not, rerun without
-a password option and select the existing identity with `--identifier` or
-`--user-id`. Restart the Console API and Worker after bootstrapping. Business
-Service users and Auth state are never modified.
+HTTPS, with loopback HTTP allowed for local installation. Non-interactive
+automation must use `--password-stdin` or a private regular file through
+`--password-file`. For recovery after Auth registration succeeded but the grant
+did not, rerun without `--console-url` or a password option and select the
+existing identity with `--identifier` or `--user-id`. Restart the Console API
+and Worker after bootstrapping. Business Service users and Auth state are never
+modified.
 
 The generated host depends on the crates.io `lenso` crate with the `host`
 feature, which is the current narrow host API for booting API, worker, and
