@@ -1,3 +1,10 @@
+## lenso-cli@0.2.14
+
+### Features
+
+Publish independent Lenso Console installation, upgrade, recovery, backup, and
+Operator bootstrap operations through the universal CLI distribution.
+
 ## lenso-cli@0.2.13
 
 ### Fixes
