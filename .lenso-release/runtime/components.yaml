@@ -1,5 +1,8 @@
 schema: lenso.component-registry.v1
-internalPackages: []
+internalPackages:
+  - cargo:lenso-platform-runtime-observability
+  - cargo:lenso-platform-runtime-operations
+  - cargo:lenso-platform-system-plane
 packages:
   - id: cargo:lenso-contracts
     repository: LioRael/lenso
@@ -67,6 +70,35 @@ packages:
     userFacing: true
     publishable: true
     dependencies: [cargo:lenso-contracts]
+  - id: cargo:lenso-platform-system-plane
+    repository: LioRael/lenso
+    registry: crates-io
+    releaseGroup: foundation
+    userFacing: false
+    publishable: true
+    dependencies:
+      - cargo:lenso-platform-core
+      - cargo:lenso-service
+  - id: cargo:lenso-platform-runtime-observability
+    repository: LioRael/lenso
+    registry: crates-io
+    releaseGroup: foundation
+    userFacing: false
+    publishable: true
+    dependencies:
+      - cargo:lenso-platform-core
+      - cargo:lenso-platform-system-plane
+      - cargo:lenso-service
+  - id: cargo:lenso-platform-runtime-operations
+    repository: LioRael/lenso
+    registry: crates-io
+    releaseGroup: foundation
+    userFacing: false
+    publishable: true
+    dependencies:
+      - cargo:lenso-platform-core
+      - cargo:lenso-platform-system-plane
+      - cargo:lenso-service
   - id: cargo:lenso-autonomous-service
     repository: LioRael/lenso
     registry: crates-io
@@ -78,6 +110,9 @@ packages:
       - cargo:lenso-platform-core
       - cargo:lenso-platform-http
       - cargo:lenso-platform-runtime
+      - cargo:lenso-platform-runtime-observability
+      - cargo:lenso-platform-runtime-operations
+      - cargo:lenso-platform-system-plane
       - cargo:lenso-service
   - id: cargo:lenso-module-story
     repository: LioRael/lenso
@@ -213,6 +248,13 @@ packages:
       - cargo:lenso-platform-http
       - cargo:lenso-platform-module
   - id: npm:@lenso/runtime-console-api
+    repository: LioRael/lenso-runtime-console
+    registry: npm
+    releaseGroup: console
+    userFacing: true
+    publishable: true
+    dependencies: []
+  - id: npm:@lenso/console-package-api
     repository: LioRael/lenso-runtime-console
     registry: npm
     releaseGroup: console
@@ -355,6 +397,7 @@ packages:
       - cargo:lenso-platform-http
       - cargo:lenso-platform-module
       - cargo:lenso-worker
+      - cargo:lenso-service
   - id: cargo:lenso-operator
     repository: LioRael/lenso
     registry: crates-io
@@ -362,9 +405,10 @@ packages:
     userFacing: true
     publishable: false
     dependencies: []
-  - id: artifact:lenso-runtime-console
+  - id: oci:lenso-console-service
     repository: LioRael/lenso-runtime-console
-    registry: github-release
+    registry: ghcr
+    registryPath: liorael/lenso-console
     releaseGroup: console
     userFacing: true
     publishable: true
@@ -376,7 +420,7 @@ packages:
     userFacing: true
     publishable: true
     dependencies:
-      - artifact:lenso-runtime-console
+      - oci:lenso-console-service
       - cargo:lenso
       - cargo:lenso-service
   - id: npm:@lenso/cli
@@ -386,7 +430,7 @@ packages:
     userFacing: true
     publishable: true
     dependencies:
-      - artifact:lenso-runtime-console
+      - oci:lenso-console-service
       - cargo:lenso
       - cargo:lenso-cli
   - id: catalog:lenso-official-module-catalog
@@ -396,7 +440,7 @@ packages:
     userFacing: true
     publishable: true
     dependencies:
-      - artifact:lenso-runtime-console
+      - oci:lenso-console-service
       - cargo:lenso-module-audit-log
       - cargo:lenso-module-auth
       - cargo:lenso-module-auth-anonymous
