@@ -44,5 +44,10 @@ assert.match(
   /LENSO_WORKFLOW_PATH: \.github\/workflows\/publish\.yml/u,
   "partial recovery must bind the trusted publisher workflow",
 );
+assert.match(
+  workflow,
+  /chmod \+x recovery-candidate\/vendor\/darwin-arm64\/lenso recovery-candidate\/vendor\/darwin-x64\/lenso recovery-candidate\/vendor\/linux-x64\/lenso/u,
+  "partial recovery must restore executable modes before npm packing",
+);
 
 console.log("reviewed publisher workflow check passed");
