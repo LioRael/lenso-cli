@@ -98,6 +98,7 @@ jobs:
           LENSO_SHADOW_CRATES_API_URL: ${{ vars.LENSO_SHADOW_CRATES_API_URL }}
           LENSO_SHADOW_CRATES_UPLOAD_URL: ${{ vars.LENSO_SHADOW_CRATES_UPLOAD_URL }}
           LENSO_SHADOW_GITHUB_API_URL: ${{ vars.LENSO_SHADOW_GITHUB_API_URL }}
+          LENSO_SHADOW_OCI_REGISTRY_URL: ${{ vars.LENSO_SHADOW_OCI_REGISTRY_URL }}
           LENSO_SHADOW_ATTESTATION_URL: ${{ vars.LENSO_SHADOW_ATTESTATION_URL }}
         run: node scripts/release-mode.mjs >> "$GITHUB_ENV"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
