@@ -47,8 +47,6 @@ The API binds to `HTTP_HOST:HTTP_PORT` from `.env` and serves:
 - `GET /.well-known/jwks.json`;
 - `GET /oauth/authorize`;
 - `POST /oauth/token`;
-- Runtime Console frontend under `/console`;
-- Runtime Console admin APIs under `/admin/*`;
 - installed service module HTTP proxies under `/modules/{module}/http/*`.
 
 The starter uses `LENSO_COMPOSITION_PROFILE=demo`, which includes the
@@ -63,29 +61,15 @@ lenso module install auth-password
 lenso module install auth-oidc
 ```
 
-The OIDC provider is loaded but disabled until configured. Runtime Console
-sign-in uses this registered redirect URI:
-
-```text
-http://127.0.0.1:3000/console/oidc/callback
-```
-
-Set `LENSO_MODULE_AUTH_OIDC_ENABLED=true` only with a real issuer, JWKS,
-RSA signing key, and `CONSOLE_REDIRECT_URIS` that includes the callback above.
+The OIDC provider is loaded but disabled until configured. Set
+`LENSO_MODULE_AUTH_OIDC_ENABLED=true` only with a real issuer, JWKS, and RSA
+signing key.
 When writing JSON values in `.env`, wrap the whole JSON value in single quotes
 so dotenv preserves the inner double quotes.
 
-After registering a password user, grant the first Console admin from the host
-root:
-
-```sh
-lenso console bootstrap-admin --identifier admin@example.com
-# or
-lenso console bootstrap-admin --user-id usr_...
-```
-
-Restart `api` and `worker` after bootstrapping; Console admin scopes are loaded
-at startup.
+Lenso Console is installed as an independent Service and owns its own Auth
+domain. Do not bootstrap Console operators in this business Host or share this
+Host's users with the Console Service.
 
 ## Add A Service Module
 
@@ -97,9 +81,8 @@ lenso service list
 lenso service doctor <module-name> --json
 ```
 
-Restart `api` and `worker` after changing module configuration. Runtime
-Console `/console` should then show the service module as installed,
-configured, and ready. If doctor reports `restart_pending`, restart the host;
+Restart `api` and `worker` after changing module configuration. If doctor
+reports `restart_pending`, restart the host;
 if it reports `manifest_unreachable` or `service_not_ready`, start the module
 service or fix the manifest base URL.
 

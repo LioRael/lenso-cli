@@ -1,5 +1,7 @@
 mod capability;
 mod console_dev;
+mod console_installation;
+mod console_operator;
 mod delivery;
 mod extraction;
 mod ga;
@@ -1083,10 +1085,17 @@ enum HostCommand {
 }
 
 #[derive(Debug, Args, Clone)]
-struct ConsoleBootstrapAdminArgs {
-    /// Lenso host repository root.
+struct ConsoleOperatorBootstrapArgs {
+    /// Lenso Console repository root. Defaults to the current directory.
     #[arg(long)]
-    repo_root: Option<std::path::PathBuf>,
+    console_root: Option<std::path::PathBuf>,
+
+    /// Console Service URL used to create the first password user.
+    ///
+    /// When no password input option is supplied, an interactive terminal
+    /// prompts for and confirms the password without echoing it.
+    #[arg(long)]
+    console_url: Option<String>,
 
     /// Environment file to read for `DATABASE_URL`.
     #[arg(long)]
@@ -1100,17 +1109,57 @@ struct ConsoleBootstrapAdminArgs {
     #[arg(long)]
     identifier: Option<String>,
 
-    /// Extra scope to grant. console.admin is always included.
+    /// Read the new password from a private regular file instead of prompting.
+    #[arg(long, conflicts_with = "password_stdin")]
+    password_file: Option<std::path::PathBuf>,
+
+    /// Read the new password from standard input instead of prompting.
+    #[arg(long, conflicts_with = "password_file")]
+    password_stdin: bool,
+
+    /// Additional scope to grant beyond the Console Minimum operator scopes.
     #[arg(long = "scope")]
     scopes: Vec<String>,
 }
 
 #[derive(Debug, Subcommand)]
+enum ConsoleOperatorCommand {
+    /// Bootstrap the first operator in an independent Lenso Console Service.
+    Bootstrap(ConsoleOperatorBootstrapArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum ConsoleRecoveryCommand {
+    /// Validate and record reviewed post-restore reconciliation evidence.
+    Reconcile(ConsoleReconcileArgs),
+    /// Activate a reconciled Console recovery with explicit authority transfer.
+    Activate(ConsoleActivateArgs),
+    /// Re-establish recovery-mode authority after an interrupted activation.
+    RecoverActivation(ConsoleRecoverActivationArgs),
+}
+
+#[derive(Debug, Subcommand)]
 enum ConsoleCommand {
-    /// Refresh the hosted Runtime Console assets in a host project.
-    Update(ConsoleUpdateArgs),
-    /// Grant Runtime Console admin scopes to an auth user.
-    BootstrapAdmin(ConsoleBootstrapAdminArgs),
+    /// Plan or apply an independent Lenso Console installation.
+    Install(ConsoleChangeArgs),
+    /// Plan or apply an immutable Lenso Console Release upgrade.
+    Upgrade(ConsoleChangeArgs),
+    /// Create an encrypted Console Recovery Set.
+    Backup(ConsoleBackupArgs),
+    /// Plan or apply a fenced Console Recovery Set restore.
+    Restore(ConsoleRestoreArgs),
+    /// Advance an externally fenced Console recovery workflow.
+    Recovery {
+        #[command(subcommand)]
+        command: ConsoleRecoveryCommand,
+    },
+    /// Validate exact Console installation evidence and optional readiness.
+    Doctor(ConsoleDoctorArgs),
+    /// Manage operators in the independent Lenso Console Service.
+    Operator {
+        #[command(subcommand)]
+        command: ConsoleOperatorCommand,
+    },
     /// Start a Runtime Console package development shell.
     Dev(ConsoleDevArgs),
     /// Manage Runtime Console package registration.
@@ -1121,18 +1170,196 @@ enum ConsoleCommand {
 }
 
 #[derive(Debug, Args, Clone)]
-struct ConsoleUpdateArgs {
-    /// Lenso host repository root.
+struct ConsoleBackupArgs {
+    /// External Console installation root.
+    #[arg(long, default_value = ".lenso-console")]
+    root: std::path::PathBuf,
+
+    /// Secret-bearing environment file containing CONSOLE_DATABASE_URL.
     #[arg(long)]
-    repo_root: Option<std::path::PathBuf>,
+    env_file: std::path::PathBuf,
 
-    /// Install from a local artifact directory or .tar.gz instead of downloading.
-    #[arg(long = "artifact")]
-    source: Option<std::path::PathBuf>,
+    /// New directory that will contain the encrypted Recovery Set.
+    #[arg(long)]
+    output: std::path::PathBuf,
 
-    /// Runtime Console GitHub release version to download.
-    #[arg(long = "console-version", default_value = "latest")]
-    console_version: String,
+    /// age recipient that can decrypt the Store payload.
+    #[arg(long)]
+    recipient: String,
+
+    /// Emit the Recovery Set manifest as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ConsoleRestoreArgs {
+    /// External Console installation root.
+    #[arg(long, default_value = ".lenso-console")]
+    root: std::path::PathBuf,
+
+    /// Directory containing recovery-set.json and store.dump.age.
+    #[arg(long)]
+    recovery_set: std::path::PathBuf,
+
+    /// Current deployment environment file used to fence the old workload.
+    #[arg(long)]
+    current_env_file: std::path::PathBuf,
+
+    /// Recovery environment file pointing to a distinct clean Store.
+    #[arg(long)]
+    recovery_env_file: std::path::PathBuf,
+
+    /// Write the deterministic restore plan to this path.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+
+    /// Apply the reviewed restore plan.
+    #[arg(long)]
+    apply: bool,
+
+    /// Exact restore plan digest approved by the operator.
+    #[arg(long, requires = "apply")]
+    approve_plan_digest: Option<String>,
+
+    /// Private age identity file used only during apply.
+    #[arg(long, requires = "apply")]
+    identity_file: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ConsoleReconcileArgs {
+    /// External Console installation root.
+    #[arg(long, default_value = ".lenso-console")]
+    root: std::path::PathBuf,
+
+    /// Recovery environment file containing the restored Store URL.
+    #[arg(long)]
+    env_file: std::path::PathBuf,
+
+    /// Operator-reviewed reconciliation input bound to external evidence.
+    #[arg(long)]
+    evidence: std::path::PathBuf,
+
+    /// Write the deterministic reconciliation plan to this path.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+
+    /// Record the reviewed reconciliation evidence.
+    #[arg(long)]
+    apply: bool,
+
+    /// Exact reconciliation plan digest approved by the operator.
+    #[arg(long, requires = "apply")]
+    approve_plan_digest: Option<String>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ConsoleActivateArgs {
+    /// External Console installation root.
+    #[arg(long, default_value = ".lenso-console")]
+    root: std::path::PathBuf,
+
+    /// Recovery-mode environment used for automatic rollback.
+    #[arg(long)]
+    recovery_env_file: std::path::PathBuf,
+
+    /// Normal-mode environment used for authority transfer.
+    #[arg(long)]
+    active_env_file: std::path::PathBuf,
+
+    /// Write the deterministic activation plan to this path.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+
+    /// Apply the reviewed activation plan.
+    #[arg(long)]
+    apply: bool,
+
+    /// Exact activation plan digest approved by the operator.
+    #[arg(long, requires = "apply")]
+    approve_plan_digest: Option<String>,
+
+    /// Explicitly approve transfer to the normal-mode authoritative writer.
+    #[arg(long, requires = "apply")]
+    approve_authority_transfer: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ConsoleRecoverActivationArgs {
+    /// External Console installation root.
+    #[arg(long, default_value = ".lenso-console")]
+    root: std::path::PathBuf,
+
+    /// Recovery-mode environment used to re-establish the fence.
+    #[arg(long)]
+    recovery_env_file: std::path::PathBuf,
+
+    /// Normal-mode environment used to stop any possible writer.
+    #[arg(long)]
+    active_env_file: std::path::PathBuf,
+
+    /// Write the deterministic activation recovery plan to this path.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+
+    /// Apply the reviewed activation recovery plan.
+    #[arg(long)]
+    apply: bool,
+
+    /// Exact activation recovery plan digest approved by the operator.
+    #[arg(long, requires = "apply")]
+    approve_plan_digest: Option<String>,
+
+    /// Explicitly approve resetting authority to recovery mode.
+    #[arg(long, requires = "apply")]
+    approve_authority_reset: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ConsoleChangeArgs {
+    /// GitHub-attested Console Service Release Manifest.
+    #[arg(long)]
+    manifest: std::path::PathBuf,
+
+    /// External Console installation root.
+    #[arg(long, default_value = ".lenso-console")]
+    root: std::path::PathBuf,
+
+    /// Secret-bearing environment file used only by Docker Compose.
+    #[arg(long)]
+    env_file: Option<std::path::PathBuf>,
+
+    /// Write the deterministic installation plan to this path.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+
+    /// Apply the reviewed plan through the local Docker Compose adapter.
+    #[arg(long)]
+    apply: bool,
+
+    /// Exact plan digest approved by the operator.
+    #[arg(long, requires = "apply")]
+    approve_plan_digest: Option<String>,
+
+    /// Separately approve irreversible Store migrations.
+    #[arg(long, requires = "apply")]
+    approve_irreversible: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ConsoleDoctorArgs {
+    /// External Console installation root.
+    #[arg(long, default_value = ".lenso-console")]
+    root: std::path::PathBuf,
+
+    /// Console URL to include an HTTPS or loopback readiness check.
+    #[arg(long)]
+    live_url: Option<String>,
+
+    /// Emit the versioned doctor report as JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -3028,14 +3255,109 @@ impl From<&ModuleServiceStopArgs> for module::ModuleServiceStopOptions {
     }
 }
 
-impl From<&ConsoleBootstrapAdminArgs> for host::BootstrapAdminOptions {
-    fn from(args: &ConsoleBootstrapAdminArgs) -> Self {
+impl From<&ConsoleOperatorBootstrapArgs> for console_operator::BootstrapOperatorOptions {
+    fn from(args: &ConsoleOperatorBootstrapArgs) -> Self {
         Self {
+            console_root: args.console_root.clone(),
+            console_url: args.console_url.clone(),
             env_file: args.env_file.clone(),
             identifier: args.identifier.clone(),
-            repo_root: args.repo_root.clone(),
+            password_file: args.password_file.clone(),
+            password_stdin: args.password_stdin,
             scopes: args.scopes.clone(),
             user_id: args.user_id.clone(),
+        }
+    }
+}
+
+impl From<&ConsoleChangeArgs> for console_installation::ChangeOptions {
+    fn from(args: &ConsoleChangeArgs) -> Self {
+        Self {
+            manifest: args.manifest.clone(),
+            root: args.root.clone(),
+            env_file: args.env_file.clone(),
+            output: args.output.clone(),
+            apply: args.apply,
+            approve_plan_digest: args.approve_plan_digest.clone(),
+            approve_irreversible: args.approve_irreversible,
+        }
+    }
+}
+
+impl From<&ConsoleDoctorArgs> for console_installation::DoctorOptions {
+    fn from(args: &ConsoleDoctorArgs) -> Self {
+        Self {
+            root: args.root.clone(),
+            live_url: args.live_url.clone(),
+            json: args.json,
+        }
+    }
+}
+
+impl From<&ConsoleBackupArgs> for console_installation::BackupOptions {
+    fn from(args: &ConsoleBackupArgs) -> Self {
+        Self {
+            root: args.root.clone(),
+            env_file: args.env_file.clone(),
+            output: args.output.clone(),
+            recipient: args.recipient.clone(),
+            json: args.json,
+        }
+    }
+}
+
+impl From<&ConsoleRestoreArgs> for console_installation::RestoreOptions {
+    fn from(args: &ConsoleRestoreArgs) -> Self {
+        Self {
+            root: args.root.clone(),
+            recovery_set: args.recovery_set.clone(),
+            current_env_file: args.current_env_file.clone(),
+            recovery_env_file: args.recovery_env_file.clone(),
+            output: args.output.clone(),
+            apply: args.apply,
+            approve_plan_digest: args.approve_plan_digest.clone(),
+            identity_file: args.identity_file.clone(),
+        }
+    }
+}
+
+impl From<&ConsoleReconcileArgs> for console_installation::ReconcileOptions {
+    fn from(args: &ConsoleReconcileArgs) -> Self {
+        Self {
+            root: args.root.clone(),
+            env_file: args.env_file.clone(),
+            evidence: args.evidence.clone(),
+            output: args.output.clone(),
+            apply: args.apply,
+            approve_plan_digest: args.approve_plan_digest.clone(),
+        }
+    }
+}
+
+impl From<&ConsoleActivateArgs> for console_installation::ActivateOptions {
+    fn from(args: &ConsoleActivateArgs) -> Self {
+        Self {
+            root: args.root.clone(),
+            recovery_env_file: args.recovery_env_file.clone(),
+            active_env_file: args.active_env_file.clone(),
+            output: args.output.clone(),
+            apply: args.apply,
+            approve_plan_digest: args.approve_plan_digest.clone(),
+            approve_authority_transfer: args.approve_authority_transfer,
+        }
+    }
+}
+
+impl From<&ConsoleRecoverActivationArgs> for console_installation::RecoverActivationOptions {
+    fn from(args: &ConsoleRecoverActivationArgs) -> Self {
+        Self {
+            root: args.root.clone(),
+            recovery_env_file: args.recovery_env_file.clone(),
+            active_env_file: args.active_env_file.clone(),
+            output: args.output.clone(),
+            apply: args.apply,
+            approve_plan_digest: args.approve_plan_digest.clone(),
+            approve_authority_reset: args.approve_authority_reset,
         }
     }
 }
@@ -3362,17 +3684,27 @@ async fn main() -> anyhow::Result<()> {
             HostCommand::Init { dir, name, force } => host::init(&dir, name.as_deref(), force)?,
         },
         Command::Console { command } => match command {
-            ConsoleCommand::Update(args) => {
-                host::update_console(host::UpdateConsoleOptions {
-                    repo_root: args.repo_root,
-                    source: args.source,
-                    version: args.console_version,
-                })
-                .await?;
-            }
-            ConsoleCommand::BootstrapAdmin(args) => {
-                host::bootstrap_admin((&args).into()).await?;
-            }
+            ConsoleCommand::Install(args) => console_installation::install((&args).into())?,
+            ConsoleCommand::Upgrade(args) => console_installation::upgrade((&args).into())?,
+            ConsoleCommand::Backup(args) => console_installation::backup((&args).into())?,
+            ConsoleCommand::Restore(args) => console_installation::restore((&args).into())?,
+            ConsoleCommand::Recovery { command } => match command {
+                ConsoleRecoveryCommand::Reconcile(args) => {
+                    console_installation::reconcile((&args).into())?;
+                }
+                ConsoleRecoveryCommand::Activate(args) => {
+                    console_installation::activate((&args).into())?;
+                }
+                ConsoleRecoveryCommand::RecoverActivation(args) => {
+                    console_installation::recover_activation((&args).into())?;
+                }
+            },
+            ConsoleCommand::Doctor(args) => console_installation::doctor((&args).into()).await?,
+            ConsoleCommand::Operator { command } => match command {
+                ConsoleOperatorCommand::Bootstrap(args) => {
+                    console_operator::bootstrap_operator((&args).into()).await?;
+                }
+            },
             ConsoleCommand::Dev(args) => {
                 console_dev::run_console_dev(console_dev::ConsoleDevOptions {
                     cwd: None,
@@ -4275,6 +4607,290 @@ mod tests {
         assert_eq!(
             args.runtime_console_root.as_deref(),
             Some(std::path::Path::new("../lenso-runtime-console"))
+        );
+    }
+
+    #[test]
+    fn parses_console_operator_bootstrap_without_legacy_alias() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "console",
+            "operator",
+            "bootstrap",
+            "--console-root",
+            "../lenso-console",
+            "--identifier",
+            "admin@example.com",
+            "--console-url",
+            "http://127.0.0.1:3030",
+            "--password-file",
+            "./operator-password",
+            "--scope",
+            "runtime.stories.read",
+        ]);
+        let Command::Console {
+            command:
+                ConsoleCommand::Operator {
+                    command: ConsoleOperatorCommand::Bootstrap(args),
+                },
+        } = cli.command
+        else {
+            panic!("expected Console operator bootstrap");
+        };
+
+        assert_eq!(
+            args.console_root.as_deref(),
+            Some(std::path::Path::new("../lenso-console"))
+        );
+        assert_eq!(args.identifier.as_deref(), Some("admin@example.com"));
+        assert_eq!(
+            args.password_file.as_deref(),
+            Some(std::path::Path::new("./operator-password"))
+        );
+        assert_eq!(args.console_url.as_deref(), Some("http://127.0.0.1:3030"));
+        assert_eq!(args.scopes, ["runtime.stories.read"]);
+        assert!(
+            Cli::try_parse_from([
+                "lenso",
+                "console",
+                "bootstrap-admin",
+                "--identifier",
+                "admin@example.com",
+            ])
+            .is_err()
+        );
+        assert!(Cli::try_parse_from(["lenso", "console", "update"]).is_err());
+    }
+
+    #[test]
+    fn parses_console_installation_authority_commands() {
+        let install = Cli::parse_from([
+            "lenso",
+            "console",
+            "install",
+            "--manifest",
+            "release.json",
+            "--root",
+            "/srv/lenso-console",
+            "--output",
+            "plan.json",
+        ]);
+        let Command::Console {
+            command: ConsoleCommand::Install(args),
+        } = install.command
+        else {
+            panic!("expected Console install");
+        };
+        assert_eq!(args.manifest, std::path::Path::new("release.json"));
+        assert_eq!(args.root, std::path::Path::new("/srv/lenso-console"));
+        assert_eq!(
+            args.output.as_deref(),
+            Some(std::path::Path::new("plan.json"))
+        );
+        assert!(!args.apply);
+
+        let upgrade = Cli::parse_from([
+            "lenso",
+            "console",
+            "upgrade",
+            "--manifest",
+            "release.json",
+            "--env-file",
+            "console.env",
+            "--apply",
+            "--approve-plan-digest",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--approve-irreversible",
+        ]);
+        let Command::Console {
+            command: ConsoleCommand::Upgrade(args),
+        } = upgrade.command
+        else {
+            panic!("expected Console upgrade");
+        };
+        assert!(args.apply);
+        assert!(args.approve_irreversible);
+        assert_eq!(
+            args.env_file.as_deref(),
+            Some(std::path::Path::new("console.env"))
+        );
+
+        let doctor = Cli::parse_from([
+            "lenso",
+            "console",
+            "doctor",
+            "--root",
+            "/srv/lenso-console",
+            "--live-url",
+            "https://console.example.com",
+            "--json",
+        ]);
+        let Command::Console {
+            command: ConsoleCommand::Doctor(args),
+        } = doctor.command
+        else {
+            panic!("expected Console doctor");
+        };
+        assert_eq!(
+            args.live_url.as_deref(),
+            Some("https://console.example.com")
+        );
+        assert!(args.json);
+
+        let restore = Cli::parse_from([
+            "lenso",
+            "console",
+            "restore",
+            "--root",
+            "/srv/lenso-console",
+            "--recovery-set",
+            "recovery-set",
+            "--current-env-file",
+            "current.env",
+            "--recovery-env-file",
+            "recovery.env",
+            "--apply",
+            "--approve-plan-digest",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--identity-file",
+            "age-key.txt",
+        ]);
+        let Command::Console {
+            command: ConsoleCommand::Restore(args),
+        } = restore.command
+        else {
+            panic!("expected Console restore");
+        };
+        assert!(args.apply);
+        assert_eq!(args.recovery_set, std::path::Path::new("recovery-set"));
+        assert_eq!(
+            args.identity_file.as_deref(),
+            Some(std::path::Path::new("age-key.txt"))
+        );
+
+        let reconcile = Cli::parse_from([
+            "lenso",
+            "console",
+            "recovery",
+            "reconcile",
+            "--root",
+            "/srv/lenso-console",
+            "--env-file",
+            "recovery.env",
+            "--evidence",
+            "reconciliation-input.json",
+            "--apply",
+            "--approve-plan-digest",
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ]);
+        let Command::Console {
+            command:
+                ConsoleCommand::Recovery {
+                    command: ConsoleRecoveryCommand::Reconcile(args),
+                },
+        } = reconcile.command
+        else {
+            panic!("expected Console recovery reconciliation");
+        };
+        assert!(args.apply);
+        assert_eq!(
+            args.evidence,
+            std::path::Path::new("reconciliation-input.json")
+        );
+
+        let activate = Cli::parse_from([
+            "lenso",
+            "console",
+            "recovery",
+            "activate",
+            "--root",
+            "/srv/lenso-console",
+            "--recovery-env-file",
+            "recovery.env",
+            "--active-env-file",
+            "active.env",
+            "--apply",
+            "--approve-plan-digest",
+            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "--approve-authority-transfer",
+        ]);
+        let Command::Console {
+            command:
+                ConsoleCommand::Recovery {
+                    command: ConsoleRecoveryCommand::Activate(args),
+                },
+        } = activate.command
+        else {
+            panic!("expected Console recovery activation");
+        };
+        assert!(args.apply);
+        assert!(args.approve_authority_transfer);
+        assert_eq!(args.active_env_file, std::path::Path::new("active.env"));
+
+        let recover_activation = Cli::parse_from([
+            "lenso",
+            "console",
+            "recovery",
+            "recover-activation",
+            "--root",
+            "/srv/lenso-console",
+            "--recovery-env-file",
+            "recovery.env",
+            "--active-env-file",
+            "active.env",
+            "--apply",
+            "--approve-plan-digest",
+            "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "--approve-authority-reset",
+        ]);
+        let Command::Console {
+            command:
+                ConsoleCommand::Recovery {
+                    command: ConsoleRecoveryCommand::RecoverActivation(args),
+                },
+        } = recover_activation.command
+        else {
+            panic!("expected Console activation recovery");
+        };
+        assert!(args.apply);
+        assert!(args.approve_authority_reset);
+        assert_eq!(args.recovery_env_file, std::path::Path::new("recovery.env"));
+
+        let backup = Cli::parse_from([
+            "lenso",
+            "console",
+            "backup",
+            "--root",
+            "/srv/lenso-console",
+            "--env-file",
+            "console.env",
+            "--output",
+            "recovery-set",
+            "--recipient",
+            "age1example",
+            "--json",
+        ]);
+        let Command::Console {
+            command: ConsoleCommand::Backup(args),
+        } = backup.command
+        else {
+            panic!("expected Console backup");
+        };
+        assert_eq!(args.output, std::path::Path::new("recovery-set"));
+        assert_eq!(args.recipient, "age1example");
+        assert!(args.json);
+
+        assert!(
+            Cli::try_parse_from([
+                "lenso",
+                "console",
+                "install",
+                "--manifest",
+                "release.json",
+                "--approve-plan-digest",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ])
+            .is_err()
         );
     }
 

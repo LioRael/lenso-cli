@@ -1,48 +1,22 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use include_dir::{Dir, DirEntry, include_dir};
-use reqwest::header::USER_AGENT;
-use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
-use std::collections::{BTreeMap, BTreeSet};
-use uuid::Uuid;
+use std::collections::BTreeMap;
 
 /// Embedded starter-host template. This is the single source of truth for the
 /// project that `lenso host init` writes out.
 const TEMPLATE_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/templates/starter-host");
-
-const CONSOLE_ARTIFACT_NAME: &str = "lenso-runtime-console.tar.gz";
-const CONSOLE_RELEASE_BASE_URL: &str = "https://github.com/LioRael/lenso-runtime-console/releases";
-const CONSOLE_ADMIN_SCOPE: &str = "console.admin";
-const CONSOLE_ADMIN_USER_SCOPES_KEY: &str = "auth.console_admin_user_scopes";
-const RUNTIME_CONFIG_SERVICE: &str = "*";
-const BOOTSTRAP_ACTOR: &str = "lenso-cli:console-bootstrap-admin";
 
 /// Template-wide rewrite values applied when scaffolding a named project.
 #[derive(Debug, Clone)]
 struct Rewrites {
     package_name: String,
     lib_name: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct BootstrapAdminOptions {
-    pub repo_root: Option<PathBuf>,
-    pub env_file: Option<PathBuf>,
-    pub user_id: Option<String>,
-    pub identifier: Option<String>,
-    pub scopes: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct UpdateConsoleOptions {
-    pub repo_root: Option<PathBuf>,
-    pub source: Option<PathBuf>,
-    pub version: String,
 }
 
 /// Scaffold a new Lenso host application into `dir`.
@@ -66,51 +40,6 @@ pub fn init(dir: &str, name: Option<&str>, force: bool) -> Result<()> {
     extract(&TEMPLATE_DIR, &target, PathBuf::new(), &rewrites)?;
 
     print_next_steps(&target, &package_name);
-    Ok(())
-}
-
-/// Refresh hosted Runtime Console assets in an existing Lenso host project.
-pub async fn update_console(options: UpdateConsoleOptions) -> Result<()> {
-    let target = options
-        .repo_root
-        .as_deref()
-        .unwrap_or_else(|| Path::new("."));
-    ensure_host_root(target)?;
-
-    if let Some(source) = options.source.as_deref() {
-        install_console_source(source, target)?;
-    } else {
-        install_downloaded_console(&options.version, target).await?;
-    }
-
-    eprintln!(
-        "Updated Runtime Console in {}",
-        target.join(".lenso").join("console").display()
-    );
-    Ok(())
-}
-
-/// Grant Runtime Console admin scopes to an existing auth user.
-pub async fn bootstrap_admin(options: BootstrapAdminOptions) -> Result<()> {
-    let repo_root = options
-        .repo_root
-        .as_deref()
-        .unwrap_or_else(|| Path::new("."));
-    ensure_host_root(repo_root)?;
-
-    let database_url = database_url(repo_root, options.env_file.as_deref())?;
-    let pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&database_url)
-        .await
-        .context("connect to DATABASE_URL")?;
-    let user_id = resolve_bootstrap_user_id(&pool, options.user_id, options.identifier).await?;
-    let granted = bootstrap_scopes(options.scopes);
-    let stored = upsert_console_admin_scopes(&pool, &user_id, &granted).await?;
-
-    eprintln!("Bootstrapped Runtime Console admin user {user_id}.");
-    eprintln!("Stored {CONSOLE_ADMIN_USER_SCOPES_KEY}: {stored}");
-    eprintln!("Restart api/worker for the scope change to apply.");
     Ok(())
 }
 
@@ -239,7 +168,6 @@ fn print_serve_ready(repo_root: &Path) {
     eprintln!("Lenso host is serving");
     eprintln!();
     eprintln!("  API:     {base_url}");
-    eprintln!("{}", console_line(repo_root, &base_url));
     eprintln!("  Docs:    {base_url}/docs");
     eprintln!("  Health:  {base_url}/livez");
     eprintln!();
@@ -270,16 +198,20 @@ fn dotenv_value(repo_root: &Path, key: &str) -> Option<String> {
     dotenv_value_from_path(&repo_root.join(".env"), key)
 }
 
-fn database_url(repo_root: &Path, env_file: Option<&Path>) -> Result<String> {
+pub(crate) fn database_url(repo_root: &Path, env_file: Option<&Path>) -> Result<String> {
     if let Ok(value) = std::env::var("DATABASE_URL")
         && !value.trim().is_empty()
     {
         return Ok(value);
     }
     let env_path = env_file.map_or_else(|| repo_root.join(".env"), Path::to_path_buf);
-    dotenv_value_from_path(&env_path, "DATABASE_URL")
+    database_url_from_path(&env_path)
+}
+
+pub(crate) fn database_url_from_path(env_path: &Path) -> Result<String> {
+    dotenv_value_from_path(env_path, "DATABASE_URL")
         .filter(|value| !value.trim().is_empty())
-        .with_context(|| format!("DATABASE_URL is not set in env or {}", env_path.display()))
+        .with_context(|| format!("DATABASE_URL is not set in {}", env_path.display()))
 }
 
 fn dotenv_value_from_path(path: &Path, key: &str) -> Option<String> {
@@ -338,14 +270,6 @@ fn browser_host(host: &str) -> String {
     }
 }
 
-fn console_line(repo_root: &Path, base_url: &str) -> String {
-    if repo_root.join(".lenso/console/dist/index.html").exists() {
-        format!("  Console: {base_url}/console")
-    } else {
-        "  Console: not installed. Run `lenso console update`.".to_owned()
-    }
-}
-
 fn cargo_run_args(bin: &str) -> Vec<&str> {
     vec!["run", "--bin", bin]
 }
@@ -386,128 +310,6 @@ fn stop_child(label: &str, child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
     eprintln!("Stopped {label}.");
-}
-
-async fn resolve_bootstrap_user_id(
-    pool: &sqlx::PgPool,
-    user_id: Option<String>,
-    identifier: Option<String>,
-) -> Result<String> {
-    match (user_id, identifier) {
-        (Some(_), Some(_)) => bail!("pass either --user-id or --identifier, not both"),
-        (Some(user_id), None) => {
-            let exists = sqlx::query_scalar::<_, String>("select id from auth.users where id = $1")
-                .bind(user_id.trim())
-                .fetch_optional(pool)
-                .await
-                .context("check auth user")?;
-            exists.with_context(|| format!("auth user `{}` was not found", user_id.trim()))
-        }
-        (None, Some(identifier)) => {
-            let normalized = normalize_identifier(&identifier)?;
-            sqlx::query_scalar::<_, String>(
-                "select user_id from auth.identities where provider = 'password' and provider_subject = $1",
-            )
-            .bind(&normalized)
-            .fetch_optional(pool)
-            .await
-            .with_context(|| format!("find password identity `{normalized}`"))?
-            .with_context(|| format!("password identity `{normalized}` was not found"))
-        }
-        (None, None) => bail!("pass --user-id or --identifier"),
-    }
-}
-
-fn normalize_identifier(identifier: &str) -> Result<String> {
-    let trimmed = identifier.trim();
-    if trimmed.is_empty() {
-        bail!("identifier is empty");
-    }
-    if trimmed.contains('@') {
-        Ok(trimmed.to_ascii_lowercase())
-    } else {
-        Ok(trimmed.to_owned())
-    }
-}
-
-fn bootstrap_scopes(scopes: Vec<String>) -> Vec<String> {
-    let mut set = BTreeSet::from([CONSOLE_ADMIN_SCOPE.to_owned()]);
-    set.extend(
-        scopes
-            .into_iter()
-            .map(|scope| scope.trim().to_owned())
-            .filter(|scope| !scope.is_empty()),
-    );
-    set.into_iter().collect()
-}
-
-async fn upsert_console_admin_scopes(
-    pool: &sqlx::PgPool,
-    user_id: &str,
-    scopes: &[String],
-) -> Result<Value> {
-    let mut tx = pool.begin().await.context("begin runtime config update")?;
-    let old_value = sqlx::query_scalar::<_, Value>(
-        "select value from config.setting_values where service = $1 and key = $2",
-    )
-    .bind(RUNTIME_CONFIG_SERVICE)
-    .bind(CONSOLE_ADMIN_USER_SCOPES_KEY)
-    .fetch_optional(&mut *tx)
-    .await
-    .context("load current console admin scopes")?;
-
-    let mut grants = decode_console_admin_scopes(old_value.clone())?;
-    merge_user_scopes(&mut grants, user_id, scopes);
-    let next_value = serde_json::to_value(grants).context("encode console admin scopes")?;
-
-    sqlx::query(
-        r"
-        insert into config.setting_values (service, key, value, updated_at, updated_by)
-        values ($1, $2, $3, now(), $4)
-        on conflict (service, key)
-        do update set value = excluded.value, updated_at = now(), updated_by = excluded.updated_by
-        ",
-    )
-    .bind(RUNTIME_CONFIG_SERVICE)
-    .bind(CONSOLE_ADMIN_USER_SCOPES_KEY)
-    .bind(&next_value)
-    .bind(BOOTSTRAP_ACTOR)
-    .execute(&mut *tx)
-    .await
-    .context("write console admin scopes")?;
-
-    sqlx::query(
-        r"
-        insert into config.setting_audit (id, service, key, old_value, new_value, actor, changed_at)
-        values ($1, $2, $3, $4, $5, $6, now())
-        ",
-    )
-    .bind(Uuid::now_v7())
-    .bind(RUNTIME_CONFIG_SERVICE)
-    .bind(CONSOLE_ADMIN_USER_SCOPES_KEY)
-    .bind(&old_value)
-    .bind(&next_value)
-    .bind(BOOTSTRAP_ACTOR)
-    .execute(&mut *tx)
-    .await
-    .context("audit console admin scope update")?;
-
-    tx.commit().await.context("commit runtime config update")?;
-    Ok(next_value)
-}
-
-fn decode_console_admin_scopes(value: Option<Value>) -> Result<BTreeMap<String, Vec<String>>> {
-    serde_json::from_value(value.unwrap_or_else(|| json!({})))
-        .context("decode auth.console_admin_user_scopes")
-}
-
-fn merge_user_scopes(grants: &mut BTreeMap<String, Vec<String>>, user_id: &str, scopes: &[String]) {
-    let entry = grants.entry(user_id.to_owned()).or_default();
-    for scope in scopes {
-        if !entry.iter().any(|existing| existing == scope) {
-            entry.push(scope.clone());
-        }
-    }
 }
 
 /// Convert a package name to its Cargo library crate name (`-` becomes `_`).
@@ -621,222 +423,6 @@ fn write_file(contents: &[u8], kind: RewriteKind, out: &Path, rewrites: &Rewrite
     Ok(())
 }
 
-async fn install_downloaded_console(version: &str, target: &Path) -> Result<()> {
-    let temp_root = create_temp_dir("lenso-console-download")?;
-    let result = install_downloaded_console_inner(version, target, &temp_root).await;
-    let _ = fs::remove_dir_all(&temp_root);
-    result
-}
-
-async fn install_downloaded_console_inner(
-    version: &str,
-    target: &Path,
-    temp_root: &Path,
-) -> Result<()> {
-    let archive = temp_root.join(CONSOLE_ARTIFACT_NAME);
-    let url = console_artifact_url(version);
-    eprintln!("Downloading Runtime Console from {url}");
-
-    let response = reqwest::Client::new()
-        .get(&url)
-        .header(
-            USER_AGENT,
-            format!("lenso-cli/{}", env!("CARGO_PKG_VERSION")),
-        )
-        .send()
-        .await
-        .with_context(|| format!("download Runtime Console artifact from {url}"))?;
-    if !response.status().is_success() {
-        bail!(
-            "Runtime Console artifact download failed: {} {}",
-            response.status(),
-            url
-        );
-    }
-
-    let bytes = response
-        .bytes()
-        .await
-        .context("read Runtime Console artifact response")?;
-    fs::write(&archive, bytes).with_context(|| format!("write {}", archive.display()))?;
-    install_console_source(&archive, target)
-}
-
-fn console_artifact_url(version: &str) -> String {
-    let version = version.trim();
-    if version.is_empty() || version == "latest" {
-        format!("{CONSOLE_RELEASE_BASE_URL}/latest/download/{CONSOLE_ARTIFACT_NAME}")
-    } else {
-        format!("{CONSOLE_RELEASE_BASE_URL}/download/{version}/{CONSOLE_ARTIFACT_NAME}")
-    }
-}
-
-fn install_console_source(source: &Path, target: &Path) -> Result<()> {
-    if source.is_dir() {
-        return install_console_from_dir(source, target);
-    }
-    if source.is_file() {
-        let temp_root = create_temp_dir("lenso-console-artifact")?;
-        let result = extract_console_archive(source, &temp_root)
-            .and_then(|source_root| install_console_from_dir(&source_root, target));
-        let _ = fs::remove_dir_all(&temp_root);
-        return result;
-    }
-
-    bail!(
-        "Runtime Console source does not exist: {}",
-        source.display()
-    );
-}
-
-fn extract_console_archive(archive: &Path, target: &Path) -> Result<PathBuf> {
-    fs::create_dir_all(target).with_context(|| format!("create {}", target.display()))?;
-    let status = Command::new("tar")
-        .args(["-xzf"])
-        .arg(archive)
-        .args(["-C"])
-        .arg(target)
-        .status()
-        .with_context(|| format!("extract Runtime Console artifact {}", archive.display()))?;
-    if !status.success() {
-        bail!("tar exited with {status}");
-    }
-    Ok(target.to_path_buf())
-}
-
-fn install_console_from_dir(source: &Path, target: &Path) -> Result<()> {
-    let layout = console_source_layout(source)?;
-
-    let console_root = target.join(".lenso").join("console");
-    copy_dir_replace(&layout.dist, &console_root.join("dist"))?;
-
-    let extensions_root = console_root.join("extensions");
-    fs::create_dir_all(&extensions_root)
-        .with_context(|| format!("create {}", extensions_root.display()))?;
-    if let Some(host_extensions) = layout.host_extensions.as_deref() {
-        copy_dir_replace(host_extensions, &extensions_root.join("host"))?;
-    }
-
-    let registry = extensions_root.join("registry.json");
-    if !registry.exists() {
-        if let Some(source_registry) = layout.registry.as_deref() {
-            fs::copy(source_registry, &registry)
-                .with_context(|| format!("copy {}", registry.display()))?;
-        } else {
-            fs::write(&registry, b"{\"version\":1,\"bundles\":[]}\n")
-                .with_context(|| format!("write {}", registry.display()))?;
-        }
-    }
-
-    Ok(())
-}
-
-#[derive(Debug)]
-struct ConsoleSourceLayout {
-    dist: PathBuf,
-    host_extensions: Option<PathBuf>,
-    registry: Option<PathBuf>,
-}
-
-fn console_source_layout(source: &Path) -> Result<ConsoleSourceLayout> {
-    if let Some(layout) = console_source_layout_at(source) {
-        return Ok(layout);
-    }
-
-    if source.is_dir() {
-        for entry in fs::read_dir(source).with_context(|| format!("read {}", source.display()))? {
-            let path = entry
-                .with_context(|| format!("read entry in {}", source.display()))?
-                .path();
-            if path.is_dir()
-                && let Some(layout) = console_source_layout_at(&path)
-            {
-                return Ok(layout);
-            }
-        }
-    }
-
-    bail!(
-        "Runtime Console artifact must contain `dist/index.html` or `index.html`: {}",
-        source.display()
-    );
-}
-
-fn console_source_layout_at(root: &Path) -> Option<ConsoleSourceLayout> {
-    let dist = if root.join("dist/index.html").exists() {
-        root.join("dist")
-    } else if root.join("index.html").exists() {
-        root.to_path_buf()
-    } else {
-        return None;
-    };
-
-    let host_extensions = [
-        root.join("extensions").join("host"),
-        dist.join("extensions").join("host"),
-    ]
-    .into_iter()
-    .find(|path| path.is_dir());
-    let registry = [
-        root.join("extensions").join("registry.json"),
-        dist.join("extensions").join("registry.json"),
-    ]
-    .into_iter()
-    .find(|path| path.is_file());
-
-    Some(ConsoleSourceLayout {
-        dist,
-        host_extensions,
-        registry,
-    })
-}
-
-fn copy_dir_replace(source: &Path, target: &Path) -> Result<()> {
-    if target.exists() {
-        fs::remove_dir_all(target).with_context(|| format!("remove {}", target.display()))?;
-    }
-    fs::create_dir_all(target).with_context(|| format!("create {}", target.display()))?;
-    copy_dir_contents(source, target)
-}
-
-fn copy_dir_contents(source: &Path, target: &Path) -> Result<()> {
-    for entry in fs::read_dir(source).with_context(|| format!("read {}", source.display()))? {
-        let entry = entry.with_context(|| format!("read entry in {}", source.display()))?;
-        let out_path = target.join(entry.file_name());
-        if entry
-            .file_type()
-            .with_context(|| format!("read file type {}", entry.path().display()))?
-            .is_dir()
-        {
-            fs::create_dir_all(&out_path)
-                .with_context(|| format!("create {}", out_path.display()))?;
-            copy_dir_contents(&entry.path(), &out_path)?;
-        } else {
-            fs::copy(entry.path(), &out_path)
-                .with_context(|| format!("copy {}", out_path.display()))?;
-        }
-    }
-
-    Ok(())
-}
-
-fn create_temp_dir(prefix: &str) -> Result<PathBuf> {
-    for attempt in 0..100 {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .context("system clock is before UNIX_EPOCH")?
-            .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("{prefix}-{}-{now}-{attempt}", std::process::id()));
-        match fs::create_dir(&path) {
-            Ok(()) => return Ok(path),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error).with_context(|| format!("create {}", path.display())),
-        }
-    }
-    bail!("could not create a temporary directory for {prefix}");
-}
-
 /// Replace the template package name with the requested project name.
 fn rewrite_cargo_toml(contents: &[u8], rewrites: &Rewrites) -> Result<String> {
     let text = std::str::from_utf8(contents).context("template Cargo.toml is not UTF-8")?;
@@ -863,9 +449,7 @@ fn print_next_steps(target: &Path, package_name: &str) {
     eprintln!("Next steps:");
     eprintln!("  cd {}", target.display());
     eprintln!("  cp .env.example .env");
-    eprintln!("  lenso console update");
     eprintln!("  lenso serve");
-    eprintln!("  open http://127.0.0.1:3000/console");
     eprintln!();
     eprintln!("Install a service with `lenso service install <service-name-or-manifest>`.");
 }
@@ -965,105 +549,6 @@ mod tests {
             Some("postgres://lenso:lenso@127.0.0.1:4545/lenso")
         );
 
-        fs::remove_dir_all(target).unwrap();
-    }
-
-    #[test]
-    fn bootstrap_scope_merge_preserves_existing_scopes() {
-        let mut grants =
-            BTreeMap::from([("usr_admin".to_owned(), vec!["auth.users.read".to_owned()])]);
-        merge_user_scopes(
-            &mut grants,
-            "usr_admin",
-            &bootstrap_scopes(vec![
-                "auth.users.read".to_owned(),
-                "identity.users.read".to_owned(),
-            ]),
-        );
-
-        assert_eq!(
-            grants["usr_admin"],
-            vec!["auth.users.read", "console.admin", "identity.users.read"]
-        );
-    }
-
-    #[test]
-    fn bootstrap_identifier_normalizes_email_only() {
-        assert_eq!(
-            normalize_identifier(" Ada@Example.COM ").unwrap(),
-            "ada@example.com"
-        );
-        assert_eq!(
-            normalize_identifier(" +8613800000000 ").unwrap(),
-            "+8613800000000"
-        );
-    }
-
-    #[test]
-    fn console_line_reports_installed_or_update_command() {
-        let target = temp_dir("lenso-cli-console-line");
-        fs::create_dir_all(target.join(".lenso/console/dist")).unwrap();
-
-        assert_eq!(
-            console_line(&target, "http://127.0.0.1:3000"),
-            "  Console: not installed. Run `lenso console update`."
-        );
-
-        fs::write(target.join(".lenso/console/dist/index.html"), "").unwrap();
-        assert_eq!(
-            console_line(&target, "http://127.0.0.1:3000"),
-            "  Console: http://127.0.0.1:3000/console"
-        );
-
-        fs::remove_dir_all(target).unwrap();
-    }
-
-    #[test]
-    fn installs_console_from_source_dir_preserving_module_extensions() {
-        let source = temp_dir("lenso-cli-console-source");
-        let target = temp_dir("lenso-cli-console-target");
-        fs::create_dir_all(source.join("dist/assets")).unwrap();
-        fs::create_dir_all(source.join("extensions/host")).unwrap();
-        fs::write(source.join("dist/index.html"), "<html></html>").unwrap();
-        fs::write(source.join("dist/assets/app.js"), "console.log('app');").unwrap();
-        fs::write(
-            source.join("extensions/host/runtime-console-api.js"),
-            "export {};",
-        )
-        .unwrap();
-
-        fs::create_dir_all(target.join(".lenso/console/extensions/billing")).unwrap();
-        fs::write(
-            target.join(".lenso/console/extensions/billing/billing-console.js"),
-            "export {};",
-        )
-        .unwrap();
-        fs::write(
-            target.join(".lenso/console/extensions/registry.json"),
-            r#"{"version":1,"bundles":[{"moduleName":"billing"}]}"#,
-        )
-        .unwrap();
-
-        install_console_from_dir(&source, &target).unwrap();
-
-        assert!(target.join(".lenso/console/dist/index.html").exists());
-        assert!(target.join(".lenso/console/dist/assets/app.js").exists());
-        assert!(
-            target
-                .join(".lenso/console/extensions/host/runtime-console-api.js")
-                .exists()
-        );
-        assert!(
-            target
-                .join(".lenso/console/extensions/billing/billing-console.js")
-                .exists()
-        );
-        assert_eq!(
-            fs::read_to_string(target.join(".lenso/console/extensions/registry.json")).unwrap(),
-            r#"{"version":1,"bundles":[{"moduleName":"billing"}]}"#
-        );
-
-        fs::remove_dir_all(source).unwrap();
         fs::remove_dir_all(target).unwrap();
     }
 

@@ -16,34 +16,187 @@ cargo install lenso-cli
 lenso host init my-app
 cd my-app
 cp .env.example .env
-lenso console update
 lenso serve
 ```
 
 The package name defaults to the target directory name and can be overridden with
 `--name`. Pass `--force` to scaffold into a non-empty directory.
-Install or update the hosted Runtime Console with:
+
+## Install Lenso Console
+
+Lenso Console is installed as an independent Service, not embedded into a
+business Service. Obtain an official GitHub-attested Console Release Manifest,
+review the deterministic plan, and then approve that exact plan digest:
 
 ```sh
-lenso console update
+lenso console install --manifest lenso-console-release.json \
+  --root /srv/lenso-console --output install-plan.json
+lenso console install --manifest lenso-console-release.json \
+  --root /srv/lenso-console --env-file /secure/console.env --apply \
+  --approve-plan-digest sha256:<reviewed-plan-digest>
+lenso console doctor --root /srv/lenso-console \
+  --live-url https://console.example.com --json
 ```
 
-The command downloads the latest `lenso-runtime-console` release artifact and
-installs it under `.lenso/console`, so the host API can serve `/console`
-without requiring Node.js or pnpm in the host application. For local builds,
-pass `--artifact <dir-or-tar.gz>`. For a pinned release, pass
-`--console-version vX.Y.Z`.
+The manifest must be attested by the repository's coordinator-only
+`.github/workflows/publish.yml` signer and must pin an OCI image by digest. The
+CLI rejects attestations from any other workflow and from self-hosted runners.
+The apply environment must set `CONSOLE_RECOVERY_MODE=normal` explicitly. The
+adapter pulls that image, runs its migration workload, starts the Console
+workload, waits up to two minutes for container health, and then requires the
+running `/health/authority` response to identify `lenso-console` in `normal`
+mode. It records the canonical deployment and state only after both checks pass.
+The secret-free `lenso.console-installation-state.v2` evidence retains that
+exact authority probe and its canonical digest, so doctor can detect later
+evidence drift without trusting the live endpoint alone.
+A failed readiness or authority check preserves the previous canonical files
+and state instead of recording the candidate as installed. `lenso console
+doctor --live-url <console-url>` independently checks both endpoints before a
+retry or intervention. Upgrade uses the same
+protocol through `lenso console upgrade`. An upgrade that declares irreversible
+migrations additionally requires
+`--approve-irreversible`. Secrets remain in the operator-owned environment file
+and are never copied into the plan, manifest, or installation state.
 
-After creating a password user, grant the first Runtime Console admin:
+Before producing an upgrade plan, the CLI revalidates the installed manifest's
+GitHub attestation, requires the manifest and generated Compose deployment to
+exactly match the applied state, and requires the target version to be strictly
+newer. Run `lenso console doctor` and resolve any local drift rather than editing
+the CLI-owned installation files.
+
+Every applied change also updates a secret-free `installation-attempt.json` with
+its target release, approved plan digest, current phase, and final status. Doctor
+reports an interrupted or failed attempt until a later change commits cleanly;
+database credentials and other environment values are never included.
+
+Apply holds an exclusive OS-backed `installation.lock` from the state reread
+through readiness and evidence commit. A concurrent install or upgrade fails
+without mutation. If the process exits without releasing the lock, the operating
+system releases ownership while the active record remains as crash evidence;
+doctor reports it as recoverable and the next apply safely claims the same lock.
+
+Create a Recovery Set without ever writing plaintext Store bytes to disk. The
+CLI verifies the installed release evidence and attestation, holds the same
+installation lock used by upgrade, streams PostgreSQL custom-format output
+directly into `age`, and atomically publishes a new output directory:
 
 ```sh
-lenso console bootstrap-admin --identifier admin@example.com
-# or
-lenso console bootstrap-admin --user-id usr_...
+lenso console backup --root /srv/lenso-console \
+  --env-file /secure/console.env --output ./console-recovery-2026-07-30 \
+  --recipient age1example
 ```
 
-`console.admin` is always added. Pass extra `--scope <name>` flags when the
-user should also see scoped module data, then restart the API/worker.
+The host must provide `pg_dump` and `age`. The secret database URL is read from
+`CONSOLE_DATABASE_URL` in the environment file and is passed only through the
+child-process environment. `recovery-set.json` binds the encrypted payload to
+the exact release, image, Store schema, composition, contract, and configuration
+digests. Live session rows under `auth.sessions` are explicitly excluded and the
+exclusion is recorded in the protected manifest. Existing output is never
+overwritten.
+
+Restore is also a plan-and-approval operation. Use a current environment with
+`CONSOLE_RECOVERY_MODE=normal` and a recovery environment with
+`CONSOLE_RECOVERY_MODE=restore` that points to a distinct, empty PostgreSQL
+database:
+
+```sh
+lenso console restore --root /srv/lenso-console \
+  --recovery-set ./console-recovery-2026-07-30 \
+  --current-env-file /secure/console.env \
+  --recovery-env-file /secure/console-recovery.env \
+  --output restore-plan.json
+lenso console restore --root /srv/lenso-console \
+  --recovery-set ./console-recovery-2026-07-30 \
+  --current-env-file /secure/console.env \
+  --recovery-env-file /secure/console-recovery.env \
+  --apply --approve-plan-digest sha256:<reviewed-plan-digest> \
+  --identity-file /secure/console-recovery-identity.txt
+```
+
+Before fencing the current deployment, apply verifies the Recovery Set content
+digest, proves that the owner-only `age` identity decrypts a readable PostgreSQL
+archive, and confirms that the isolated target Store has no relations. It then
+stops the previous Console, streams decryption directly into a transactional
+`pg_restore`, and starts the Console against the recovery Store. No plaintext
+Store file is written. A failed or completed restore writes durable
+`recovery-state.json` evidence, and `lenso console doctor` remains failed while
+that evidence exists. Successful restore therefore means “awaiting
+reconciliation,” not activation: the CLI never changes recovery mode back to
+normal or declares the restored deployment authoritative.
+
+After restore, reconcile the passive Store with separately collected deployment,
+identity/enrollment, and Outbox evidence. The reviewed input must name every
+managed Service exactly as observed in the restored Store, in `serviceId` order,
+and reference external evidence without embedding credentials:
+
+```json
+{
+  "schema": "lenso.console-reconciliation-input.v1",
+  "recoverySetId": "rcv_<uuid>",
+  "observedAtUnixMs": 1785369600000,
+  "reviewedBy": "operator:alice",
+  "authorityEvidenceRef": "change:console-dr-42",
+  "identityEvidenceRef": "audit:identity-continuity-42",
+  "outboxEvidenceRef": "audit:outbox-reconciliation-42",
+  "singleAuthoritativeDeployment": true,
+  "identityAndEnrollmentContinuityVerified": true,
+  "outboxReconciled": true,
+  "managedServices": []
+}
+```
+
+```sh
+lenso console recovery reconcile --root /srv/lenso-console \
+  --env-file /secure/console-recovery.env \
+  --evidence reconciliation-input.json --output reconciliation-plan.json
+lenso console recovery reconcile --root /srv/lenso-console \
+  --env-file /secure/console-recovery.env \
+  --evidence reconciliation-input.json --apply \
+  --approve-plan-digest sha256:<reviewed-plan-digest>
+```
+
+The command reads the restored Store without mutation, rejects any browser
+session predating recovery while allowing newly authenticated recovery
+operators, binds a streamed digest of exact Outbox rows plus status counts and
+the managed-Service identity set, and writes content-addressed
+`reconciliation-evidence.json`. It advances only to
+`ready_for_activation`; doctor continues to fail and neither the Worker nor
+management mutations are enabled.
+
+Generated deployments set `CONSOLE_RECOVERY_MODE` explicitly. `normal` runs the
+API and Worker; `restore` keeps the inspection API available while the Console
+Service suppresses background work and rejects management mutations. Recovery
+mode can only be changed through the external installation authority. During
+activation and activation recovery, the CLI reads the running container's
+minimal `/health/authority` response and requires the exact Console Service
+identity plus the expected `normal` or `restore` mode before committing durable
+evidence. A healthy process with the wrong workload mode is treated as a failed
+authority transfer and is fenced again.
+
+After installing and starting the independent Lenso Console Service, create its
+first password user and bootstrap that user as the first Console Operator from
+outside the Service. In an interactive terminal, the CLI securely prompts for
+and confirms the password without echoing it:
+
+```sh
+lenso console operator bootstrap \
+  --console-root ../lenso-console \
+  --console-url http://127.0.0.1:3030 \
+  --identifier admin@example.com
+```
+
+The command grants only the Console Minimum operator scopes plus explicit
+`--scope <name>` additions, writes append-only audit evidence, and refuses to
+run after an operator grant already exists. It also verifies the mandatory
+System Registry state before writing, so a business Service Store is rejected.
+Password-user creation goes through the Console Service's own Auth Module over
+HTTPS, with loopback HTTP allowed for local installation. Non-interactive
+automation must use `--password-stdin` or a private regular file through
+`--password-file`. For recovery after Auth registration succeeded but the grant
+did not, rerun without `--console-url` or a password option and select the
+existing identity with `--identifier` or `--user-id`. Restart the Console API
+and Worker after bootstrapping. Business Service users and Auth state are never
+modified.
 
 The generated host depends on the crates.io `lenso` crate with the `host`
 feature, which is the current narrow host API for booting API, worker, and
