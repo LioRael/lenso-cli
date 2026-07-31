@@ -2625,7 +2625,6 @@ impl From<&ServiceModuleInstallArgs> for module::ServiceModuleInstallOptions {
             allow_incompatible: args.allow_incompatible,
             base_url: args.base_url.clone(),
             catalog_url: args.catalog_url.clone(),
-            console_plan: false,
             dry_run: args.dry_run,
             env_file: args.env_file.clone(),
             install_profiles: args.install_profiles.clone(),
@@ -2654,7 +2653,6 @@ impl From<&ModuleUpdateArgs> for module::ModuleUpdateOptions {
         Self {
             allow_incompatible: args.allow_incompatible,
             base_url: args.base_url.clone(),
-            console_plan: false,
             dry_run: args.dry_run,
             env_file: args.env_file.clone(),
             install_profiles: args.install_profiles.clone(),

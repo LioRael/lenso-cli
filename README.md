@@ -464,9 +464,9 @@ also infer `--base-url`; package artifacts outside that workspace still need
 `--base-url` so the host records the runtime service endpoint rather than the
 file path.
 
-Service installs update `SERVICE_MODULES`, copy declared Runtime Console bundles to
-`.lenso/console/extensions`, update `.lenso/console/extensions/registry.json`,
-and record `.lenso/module-installs.json` in one step. Linked modules update the
+Service installs update `SERVICE_MODULES` and record `.lenso/module-installs.json`
+in one step. Console UI artifacts remain immutable members of their Module
+Release and are bound only by an applied Console Service Composition. Linked modules update the
 host `Cargo.toml`, `src/lib.rs`, `.env` toggle, and the same install receipt
 from the descriptor's `linked` section. `module add` remains a compatibility
 alias for service installs.

@@ -42,7 +42,6 @@ pub struct ServiceModuleInstallOptions {
     pub allow_incompatible: bool,
     pub base_url: Option<String>,
     pub catalog_url: Option<String>,
-    pub console_plan: bool,
     pub dry_run: bool,
     pub env_file: Option<PathBuf>,
     pub install_profiles: Vec<String>,
@@ -78,7 +77,6 @@ pub struct ServiceModuleUninstallOptions {
 pub struct ModuleUpdateOptions {
     pub allow_incompatible: bool,
     pub base_url: Option<String>,
-    pub console_plan: bool,
     pub dry_run: bool,
     pub env_file: Option<PathBuf>,
     pub install_profiles: Vec<String>,
@@ -528,16 +526,9 @@ const MODULE_INSTALL_LEDGER_PATH: &str = ".lenso/module-installs.json";
 const SERVICE_RELEASE_LEDGER_PATH: &str = ".lenso/service-releases.json";
 const SERVICE_ENVIRONMENTS_PATH: &str = ".lenso/service-environments.json";
 const SERVICE_DEPLOYMENTS_PATH: &str = ".lenso/service-deployments.json";
-const CONSOLE_EXTENSION_REGISTRY_PATH: &str = ".lenso/console/extensions/registry.json";
 const RUNTIME_CONFIG_DEFAULTS_PATH: &str = ".lenso/runtime-config-defaults.json";
-const CONSOLE_EXTENSION_ROUTE_PREFIX: &str = "/console/extensions";
-const CONSOLE_BUNDLE_HOST_API: &str = "1";
 const PROVIDER_PROTOCOL_VERSION: &str = "lenso.provider.v1";
-const SUPPORTED_SERVICE_MODULE_FEATURES: &[&str] = &[
-    "console.package-api.1",
-    "service.lifecycle",
-    "service.status",
-];
+const SUPPORTED_SERVICE_MODULE_FEATURES: &[&str] = &["service.lifecycle", "service.status"];
 
 pub async fn create_module(options: ModuleCreateOptions) -> Result<()> {
     let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
@@ -928,92 +919,17 @@ fn linked_catalog_descriptor(
         .or_else(|| descriptor_reference.strip_prefix("linked:"))
         && let Some(descriptor) = builtin_linked_module_descriptor(builtin_module_name)
     {
-        return Ok(merge_linked_catalog_metadata(descriptor, entry));
+        return Ok(descriptor);
     }
     if let Some(descriptor) = builtin_linked_module_descriptor(module_name) {
-        return Ok(merge_linked_catalog_metadata(descriptor, entry));
+        return Ok(descriptor);
     }
     if entry.get("linked").is_some() {
-        return Ok(merge_linked_catalog_metadata(entry.clone(), entry));
+        return Ok(entry.clone());
     }
     bail!(
         "Official catalog module `{module_name}` points to linked source `{descriptor_reference}`, but this lenso-cli version does not know how to install it"
     );
-}
-
-fn merge_linked_catalog_metadata(mut descriptor: Value, entry: &Value) -> Value {
-    if let Some(console_packages) = entry
-        .get("consolePackages")
-        .or_else(|| entry.get("console_packages"))
-        .and_then(Value::as_array)
-    {
-        let console = console_packages
-            .iter()
-            .filter_map(catalog_console_package_surface)
-            .collect::<Vec<_>>();
-        if !console.is_empty() {
-            descriptor["console"] = Value::Array(console);
-        }
-    }
-    descriptor
-}
-
-fn catalog_console_package_surface(package: &Value) -> Option<Value> {
-    let package_name = package
-        .get("packageName")
-        .or_else(|| package.get("package_name"))
-        .and_then(Value::as_str)?;
-    let export_name = package
-        .get("exportName")
-        .or_else(|| package.get("export_name"))
-        .and_then(Value::as_str)?;
-    let mut surface = json!({
-        "package": {
-            "export": export_name,
-            "name": package_name,
-        },
-    });
-    let surface_object = surface.as_object_mut()?;
-    if let Some(bundle_url) = package
-        .get("bundleUrl")
-        .or_else(|| package.get("bundle_url"))
-        .and_then(Value::as_str)
-    {
-        surface_object
-            .get_mut("package")?
-            .as_object_mut()?
-            .insert("bundleUrl".to_owned(), json!(bundle_url));
-    }
-    if let Some(host_api) = package
-        .get("hostApi")
-        .or_else(|| package.get("host_api"))
-        .and_then(Value::as_str)
-    {
-        surface_object
-            .get_mut("package")?
-            .as_object_mut()?
-            .insert("hostApi".to_owned(), json!(host_api));
-    }
-    if let Some(version) = package.get("version").and_then(Value::as_str) {
-        surface_object
-            .get_mut("package")?
-            .as_object_mut()?
-            .insert("version".to_owned(), json!(version));
-    }
-    if let Some(route) = package.get("route").and_then(Value::as_str) {
-        surface_object.insert("route".to_owned(), json!(route));
-    }
-    if let Some(required_capabilities) = package
-        .get("requiredCapabilities")
-        .or_else(|| package.get("required_capabilities"))
-        .cloned()
-    {
-        surface_object.insert("required_capabilities".to_owned(), required_capabilities);
-    }
-    if let Some(styles) = package.get("styles").cloned() {
-        surface_object.insert("styles".to_owned(), styles);
-    }
-    Some(surface)
 }
 
 async fn install_module_descriptor(
@@ -1120,8 +1036,7 @@ pub async fn update_module(module_name: &str, options: ModuleUpdateOptions) -> R
             .await
         }
         ModuleSource::Linked => {
-            update_linked_module_from_receipt(module_name, manifest_reference, options, repo_root)
-                .await
+            update_linked_module_from_receipt(manifest_reference, options, repo_root).await
         }
     }
 }
@@ -1156,7 +1071,6 @@ async fn update_service_module_from_receipt(
                     .clone()
                     .or_else(|| service_receipt_base_url(receipt)),
                 catalog_url: None,
-                console_plan: options.console_plan,
                 dry_run: options.dry_run,
                 env_file: options.env_file,
                 install_profiles: options.install_profiles,
@@ -1174,15 +1088,6 @@ async fn update_service_module_from_receipt(
         bail!("Installed module `{module_name}` update resolved manifest for `{manifest_name}`");
     }
 
-    let cleanup =
-        remove_stale_module_console_artifacts(&repo_root, module_name, true, options.dry_run)?;
-    if options.dry_run && !cleanup.is_empty() {
-        println!("Service module update dry run:");
-        for path in cleanup {
-            println!("- {}", display_relative(&repo_root, &path));
-        }
-    }
-
     add_service_module(
         manifest_reference,
         ServiceModuleInstallOptions {
@@ -1194,7 +1099,6 @@ async fn update_service_module_from_receipt(
                     .map(ToOwned::to_owned)
             }),
             catalog_url: None,
-            console_plan: options.console_plan,
             dry_run: options.dry_run,
             env_file: options.env_file,
             install_profiles: options.install_profiles,
@@ -1208,7 +1112,6 @@ async fn update_service_module_from_receipt(
 }
 
 async fn update_linked_module_from_receipt(
-    module_name: &str,
     manifest_reference: &str,
     options: ModuleUpdateOptions,
     repo_root: PathBuf,
@@ -1217,22 +1120,12 @@ async fn update_linked_module_from_receipt(
         bail!("--base-url only applies to service module updates");
     }
 
-    let cleanup =
-        remove_stale_module_console_artifacts(&repo_root, module_name, false, options.dry_run)?;
-    if options.dry_run && !cleanup.is_empty() {
-        println!("Linked module update dry run:");
-        for path in cleanup {
-            println!("- {}", display_relative(&repo_root, &path));
-        }
-    }
-
     install_module(
         module_update_reference(manifest_reference),
         ServiceModuleInstallOptions {
             allow_incompatible: options.allow_incompatible,
             base_url: None,
             catalog_url: None,
-            console_plan: options.console_plan,
             dry_run: options.dry_run,
             env_file: options.env_file,
             install_profiles: options.install_profiles,
@@ -1265,7 +1158,6 @@ async fn add_service_module_with_context(
             .as_deref()
             .unwrap_or_else(|| Path::new(".env")),
     );
-    let console_extension_registry_path = repo_root.join(CONSOLE_EXTENSION_REGISTRY_PATH);
     let install_ledger_path = repo_root.join(MODULE_INSTALL_LEDGER_PATH);
     let module_services_path = resolve_path(
         &repo_root,
@@ -1291,11 +1183,9 @@ async fn add_service_module_with_context(
         return add_service_manifest_with_paths(
             &service_manifest_reference,
             service_manifest,
-            &service_loaded.provenance,
             &options,
             &repo_root,
             &env_file_path,
-            &console_extension_registry_path,
             &install_ledger_path,
             &module_services_path,
             Some(&package_context),
@@ -1307,11 +1197,9 @@ async fn add_service_module_with_context(
         return add_service_manifest_with_paths(
             manifest_reference,
             validate_service_manifest(manifest)?,
-            &loaded.provenance,
             &options,
             &repo_root,
             &env_file_path,
-            &console_extension_registry_path,
             &install_ledger_path,
             &module_services_path,
             None,
@@ -1334,15 +1222,6 @@ async fn add_service_module_with_context(
         update_service_modules_env(&env_file_path, &module_name, &base_url)?,
         &install_env,
     );
-    let console_bundle_install = install_runtime_console_bundles(
-        &repo_root,
-        &console_extension_registry_path,
-        &manifest,
-        &loaded.provenance,
-        options.console_plan,
-        options.dry_run,
-    )
-    .await?;
     let module_services = update_service_module_services_file(
         &module_services_path,
         &module_name,
@@ -1358,9 +1237,6 @@ async fn add_service_module_with_context(
             service_module_install_writes(
                 &repo_root,
                 &env_file_path,
-                console_bundle_install
-                    .registry_changed
-                    .then_some(console_extension_registry_path.as_path()),
                 module_services
                     .as_ref()
                     .map(|_| module_services_path.as_path()),
@@ -1368,22 +1244,12 @@ async fn add_service_module_with_context(
             &install_env,
             &install_commands,
             &install_services,
-            console_bundle_install.bundle_count,
         ),
     )?;
 
     if options.dry_run {
         println!("Module install dry run:");
         println!("- {}", display_relative(&repo_root, &env_file_path));
-        if console_bundle_install.registry_changed {
-            println!(
-                "- {}",
-                display_relative(&repo_root, &console_extension_registry_path)
-            );
-            for file_path in &console_bundle_install.bundle_files {
-                println!("- {}", display_relative(&repo_root, file_path));
-            }
-        }
         println!("- {}", display_relative(&repo_root, &install_ledger_path));
         if module_services.is_some() {
             println!("- {}", display_relative(&repo_root, &module_services_path));
@@ -1392,7 +1258,6 @@ async fn add_service_module_with_context(
         println!("- install env vars: {}", install_env.len());
         println!("- install commands: {}", install_commands.len());
         println!("- install services: {}", install_services.len());
-        println!("- console bundles: {}", console_bundle_install.bundle_count);
         return Ok(());
     }
 
@@ -1405,15 +1270,6 @@ async fn add_service_module_with_context(
     println!("Installed module {module_name}.");
     println!("Updated:");
     println!("- {}", display_relative(&repo_root, &env_file_path));
-    if console_bundle_install.registry_changed {
-        println!(
-            "- {}",
-            display_relative(&repo_root, &console_extension_registry_path)
-        );
-        for file_path in &console_bundle_install.bundle_files {
-            println!("- {}", display_relative(&repo_root, file_path));
-        }
-    }
     println!("- {}", display_relative(&repo_root, &install_ledger_path));
     if module_services.is_some() {
         println!("- {}", display_relative(&repo_root, &module_services_path));
@@ -1422,7 +1278,6 @@ async fn add_service_module_with_context(
     println!("Install env vars: {}", install_env.len());
     println!("Install commands: {}", install_commands.len());
     println!("Install services: {}", install_services.len());
-    println!("Console bundles: {}", console_bundle_install.bundle_count);
 
     let install_commands_ran = if !install_commands.is_empty() && options.run_install_commands {
         run_install_commands(&repo_root, &install_commands)?;
@@ -1443,7 +1298,6 @@ async fn add_service_module_with_context(
 async fn add_service_manifest_with_options(
     manifest_reference: &str,
     manifest: Value,
-    provenance: &ManifestProvenance,
     options: &ServiceModuleInstallOptions,
     package_context: Option<&ServicePackageInstallContext>,
     module_release_context: Option<&ModuleReleaseInstallContext>,
@@ -1456,7 +1310,6 @@ async fn add_service_manifest_with_options(
             .as_deref()
             .unwrap_or_else(|| Path::new(".env")),
     );
-    let console_extension_registry_path = repo_root.join(CONSOLE_EXTENSION_REGISTRY_PATH);
     let install_ledger_path = repo_root.join(MODULE_INSTALL_LEDGER_PATH);
     let module_services_path = resolve_path(
         &repo_root,
@@ -1468,11 +1321,9 @@ async fn add_service_manifest_with_options(
     add_service_manifest_with_paths(
         manifest_reference,
         manifest,
-        provenance,
         options,
         &repo_root,
         &env_file_path,
-        &console_extension_registry_path,
         &install_ledger_path,
         &module_services_path,
         package_context,
@@ -1531,11 +1382,9 @@ struct ModuleReleaseInstallContext {
 async fn add_service_manifest_with_paths(
     manifest_reference: &str,
     manifest: Value,
-    provenance: &ManifestProvenance,
     options: &ServiceModuleInstallOptions,
     repo_root: &Path,
     env_file_path: &Path,
-    console_extension_registry_path: &Path,
     install_ledger_path: &Path,
     module_services_path: &Path,
     package_context: Option<&ServicePackageInstallContext>,
@@ -1570,9 +1419,6 @@ async fn add_service_manifest_with_paths(
         &install_services,
     )?;
 
-    let mut console_bundle_files = Vec::new();
-    let mut console_bundle_count = 0;
-    let mut console_registry_changed = false;
     let mut install_ledger = read_json_if_exists(install_ledger_path)?
         .unwrap_or_else(|| json!({ "modules": [], "version": 1 }));
     let mut module_names = Vec::new();
@@ -1583,19 +1429,6 @@ async fn add_service_manifest_with_paths(
         let previous_manifest_snapshot =
             module_install_ledger_entry_value(&install_ledger, &module_name)
                 .and_then(|entry| entry.get("serviceManifestSnapshot").cloned());
-        let console_bundle_install = install_runtime_console_bundles(
-            repo_root,
-            console_extension_registry_path,
-            module_manifest,
-            provenance,
-            options.console_plan,
-            options.dry_run,
-        )
-        .await?;
-        console_registry_changed |= console_bundle_install.registry_changed;
-        console_bundle_count += console_bundle_install.bundle_count;
-        console_bundle_files.extend(console_bundle_install.bundle_files);
-
         let mut entry = service_module_install_ledger_entry(
             &module_name,
             manifest_reference,
@@ -1604,13 +1437,11 @@ async fn add_service_manifest_with_paths(
             service_module_install_writes(
                 repo_root,
                 env_file_path,
-                console_registry_changed.then_some(console_extension_registry_path),
                 module_services.as_ref().map(|_| module_services_path),
             ),
             &install_env,
             &install_commands,
             &install_services,
-            console_bundle_install.bundle_count,
         );
         entry["serviceManifestSnapshot"] = manifest.clone();
         if let Some(previous_manifest_snapshot) = previous_manifest_snapshot {
@@ -1648,15 +1479,6 @@ async fn add_service_manifest_with_paths(
     if options.dry_run {
         println!("Service install dry run:");
         println!("- {}", display_relative(repo_root, env_file_path));
-        if console_registry_changed {
-            println!(
-                "- {}",
-                display_relative(repo_root, console_extension_registry_path)
-            );
-            for file_path in &console_bundle_files {
-                println!("- {}", display_relative(repo_root, file_path));
-            }
-        }
         println!("- {}", display_relative(repo_root, install_ledger_path));
         if module_services.is_some() {
             println!("- {}", display_relative(repo_root, module_services_path));
@@ -1666,7 +1488,6 @@ async fn add_service_manifest_with_paths(
         println!("- install env vars: {}", install_env.len());
         println!("- install commands: {}", install_commands.len());
         println!("- install services: {}", install_services.len());
-        println!("- console bundles: {console_bundle_count}");
         return Ok(());
     }
 
@@ -1679,15 +1500,6 @@ async fn add_service_manifest_with_paths(
     println!("Installed service {service_name}.");
     println!("Updated:");
     println!("- {}", display_relative(repo_root, env_file_path));
-    if console_registry_changed {
-        println!(
-            "- {}",
-            display_relative(repo_root, console_extension_registry_path)
-        );
-        for file_path in &console_bundle_files {
-            println!("- {}", display_relative(repo_root, file_path));
-        }
-    }
     println!("- {}", display_relative(repo_root, install_ledger_path));
     if module_services.is_some() {
         println!("- {}", display_relative(repo_root, module_services_path));
@@ -1697,7 +1509,6 @@ async fn add_service_manifest_with_paths(
     println!("Install env vars: {}", install_env.len());
     println!("Install commands: {}", install_commands.len());
     println!("Install services: {}", install_services.len());
-    println!("Console bundles: {console_bundle_count}");
 
     let install_commands_ran = if !install_commands.is_empty() && options.run_install_commands {
         run_install_commands(repo_root, &install_commands)?;
@@ -1729,7 +1540,7 @@ fn install_linked_module(module_name: &str, options: ServiceModuleInstallOptions
 async fn install_linked_module_descriptor(
     descriptor: &Value,
     descriptor_reference: &str,
-    provenance: &ManifestProvenance,
+    _provenance: &ManifestProvenance,
     options: ServiceModuleInstallOptions,
 ) -> Result<()> {
     let module_name = string_field(descriptor, "name")?.trim().to_owned();
@@ -1755,7 +1566,6 @@ async fn install_linked_module_descriptor(
             .unwrap_or_else(|| Path::new(".env")),
     );
     let cargo_toml_path = repo_root.join("Cargo.toml");
-    let console_extension_registry_path = repo_root.join(CONSOLE_EXTENSION_REGISTRY_PATH);
     let host_lib_path = repo_root.join("src/lib.rs");
     let install_ledger_path = repo_root.join(MODULE_INSTALL_LEDGER_PATH);
     let runtime_config_defaults_path = repo_root.join(RUNTIME_CONFIG_DEFAULTS_PATH);
@@ -1824,19 +1634,6 @@ async fn install_linked_module_descriptor(
         linked.get("use").and_then(Value::as_str),
         &call,
     )?;
-    let mut console_manifests = dependency_descriptors
-        .iter()
-        .map(|(_, descriptor)| (descriptor, ManifestProvenance::Builtin))
-        .collect::<Vec<_>>();
-    console_manifests.push((&descriptor, provenance.clone()));
-    let console_bundle_install = install_runtime_console_bundles_for_manifests(
-        &repo_root,
-        &console_extension_registry_path,
-        &console_manifests,
-        options.console_plan,
-        options.dry_run,
-    )
-    .await?;
     let install_ledger = update_module_install_ledger(
         &install_ledger_path,
         linked_module_install_ledger_entry(
@@ -1856,9 +1653,6 @@ async fn install_linked_module_descriptor(
                 runtime_config_defaults
                     .as_ref()
                     .map(|_| runtime_config_defaults_path.as_path()),
-                console_bundle_install
-                    .registry_changed
-                    .then_some(console_extension_registry_path.as_path()),
             ),
             cargo_toml_changed,
         ),
@@ -1871,15 +1665,6 @@ async fn install_linked_module_descriptor(
             println!("- {}", display_relative(&repo_root, &cargo_toml_path));
         }
         println!("- {}", display_relative(&repo_root, &host_lib_path));
-        if console_bundle_install.registry_changed {
-            println!(
-                "- {}",
-                display_relative(&repo_root, &console_extension_registry_path)
-            );
-            for file_path in &console_bundle_install.bundle_files {
-                println!("- {}", display_relative(&repo_root, file_path));
-            }
-        }
         if runtime_config_defaults.is_some() {
             println!(
                 "- {}",
@@ -1888,7 +1673,6 @@ async fn install_linked_module_descriptor(
         }
         println!("- {}", display_relative(&repo_root, &install_ledger_path));
         println!("- {module_name}");
-        println!("- console bundles: {}", console_bundle_install.bundle_count);
         return Ok(());
     }
 
@@ -1909,15 +1693,6 @@ async fn install_linked_module_descriptor(
         println!("- {}", display_relative(&repo_root, &cargo_toml_path));
     }
     println!("- {}", display_relative(&repo_root, &host_lib_path));
-    if console_bundle_install.registry_changed {
-        println!(
-            "- {}",
-            display_relative(&repo_root, &console_extension_registry_path)
-        );
-        for file_path in &console_bundle_install.bundle_files {
-            println!("- {}", display_relative(&repo_root, file_path));
-        }
-    }
     if runtime_config_defaults.is_some() {
         println!(
             "- {}",
@@ -1925,7 +1700,6 @@ async fn install_linked_module_descriptor(
         );
     }
     println!("- {}", display_relative(&repo_root, &install_ledger_path));
-    println!("Console bundles: {}", console_bundle_install.bundle_count);
     println!("Next steps:");
     println!("- cargo run --bin migrate");
     println!("- restart the API and worker");
@@ -1964,11 +1738,6 @@ fn uninstall_module_source(
             .as_deref()
             .unwrap_or_else(|| Path::new(".env")),
     );
-    let install_plan_path = resolve_path(
-        &repo_root,
-        Path::new(".lenso/console-package-install-plan.json"),
-    );
-    let console_extension_registry_path = repo_root.join(CONSOLE_EXTENSION_REGISTRY_PATH);
     let install_ledger_path = repo_root.join(MODULE_INSTALL_LEDGER_PATH);
     let module_services_path = resolve_path(
         &repo_root,
@@ -1984,13 +1753,7 @@ fn uninstall_module_source(
     infer_uninstall_module_source(
         module_name,
         &read_text_if_exists(&env_file_path)?,
-        service_module_install_state_exists(
-            module_name,
-            &env_file_path,
-            &install_plan_path,
-            &console_extension_registry_path,
-            &module_services_path,
-        )?,
+        service_module_install_state_exists(module_name, &env_file_path, &module_services_path)?,
     )
 }
 
@@ -2010,10 +1773,6 @@ pub async fn uninstall_service_module(
             .as_deref()
             .unwrap_or_else(|| Path::new(".env")),
     );
-    let install_plan_path = resolve_path(
-        &repo_root,
-        Path::new(".lenso/console-package-install-plan.json"),
-    );
     let install_ledger_path = repo_root.join(MODULE_INSTALL_LEDGER_PATH);
     let module_services_path = resolve_path(
         &repo_root,
@@ -2022,40 +1781,20 @@ pub async fn uninstall_service_module(
             .as_deref()
             .unwrap_or_else(|| Path::new(".lenso/module-services.json")),
     );
-    let console_extension_registry_path = repo_root.join(CONSOLE_EXTENSION_REGISTRY_PATH);
     let target = service_uninstall_target(&install_ledger_path, module_name)?;
     for warning in service_uninstall_dependency_warnings(&install_ledger_path, &target)? {
         eprintln!("warning: {warning}");
     }
-    let console_extension_module_dirs = target
-        .module_names
-        .iter()
-        .map(|module_name| {
-            repo_root
-                .join(".lenso/console/extensions")
-                .join(slugify(module_name))
-        })
-        .filter(|path| path.exists())
-        .collect::<Vec<_>>();
     let env_file = remove_service_module_from_env(&env_file_path, &target.provider_name)?;
-    let install_plan =
-        remove_console_package_install_plan_modules(&install_plan_path, &target.module_names)?;
     let install_ledger =
         remove_module_install_ledger_modules(&install_ledger_path, &target.module_names)?;
     let module_services =
         remove_service_module_services_file_module(&module_services_path, &target.provider_name)?;
-    let console_registry = remove_runtime_console_bundle_registry_modules(
-        &console_extension_registry_path,
-        &target.module_names,
-    )?;
 
     if options.dry_run {
         println!("Service uninstall dry run:");
         if env_file.is_some() {
             println!("- {}", display_relative(&repo_root, &env_file_path));
-        }
-        if install_plan.is_some() {
-            println!("- {}", display_relative(&repo_root, &install_plan_path));
         }
         if install_ledger.is_some() {
             println!("- {}", display_relative(&repo_root, &install_ledger_path));
@@ -2063,51 +1802,21 @@ pub async fn uninstall_service_module(
         if module_services.is_some() {
             println!("- {}", display_relative(&repo_root, &module_services_path));
         }
-        if console_registry.is_some() {
-            println!(
-                "- {}",
-                display_relative(&repo_root, &console_extension_registry_path)
-            );
-        }
-        for path in &console_extension_module_dirs {
-            println!("- {}", display_relative(&repo_root, path));
-        }
-        if env_file.is_none()
-            && install_plan.is_none()
-            && install_ledger.is_none()
-            && module_services.is_none()
-            && console_registry.is_none()
-            && console_extension_module_dirs.is_empty()
-        {
+        if env_file.is_none() && install_ledger.is_none() && module_services.is_none() {
             println!("- no local install state found");
         }
         return Ok(());
     }
 
-    let changed = env_file.is_some()
-        || install_plan.is_some()
-        || install_ledger.is_some()
-        || module_services.is_some()
-        || console_registry.is_some()
-        || !console_extension_module_dirs.is_empty();
+    let changed = env_file.is_some() || install_ledger.is_some() || module_services.is_some();
     if let Some(env_file) = env_file {
         write_file(&env_file_path, env_file.as_bytes())?;
-    }
-    if let Some(install_plan) = install_plan {
-        write_json(&install_plan_path, &install_plan)?;
     }
     if let Some(install_ledger) = install_ledger {
         write_json(&install_ledger_path, &install_ledger)?;
     }
     if let Some(module_services) = module_services {
         write_json(&module_services_path, &module_services)?;
-    }
-    if let Some(console_registry) = console_registry {
-        write_json(&console_extension_registry_path, &console_registry)?;
-    }
-    for path in console_extension_module_dirs {
-        fs::remove_dir_all(&path)
-            .with_context(|| format!("remove console extension directory {}", path.display()))?;
     }
 
     if !changed {
@@ -3579,14 +3288,13 @@ pub async fn upgrade_service(options: ServiceUpgradeOptions) -> Result<()> {
         })
         .await;
     }
-    let (manifest_reference, candidate, provenance, package_context) =
+    let (manifest_reference, candidate, _provenance, package_context) =
         read_service_or_package_manifest(&options.manifest_reference).await?;
     ensure_service_name_matches(&candidate, &options.service_name)?;
     let install_options = ServiceModuleInstallOptions {
         allow_incompatible: options.allow_incompatible,
         base_url: options.base_url,
         catalog_url: None,
-        console_plan: false,
         dry_run: options.dry_run,
         env_file: options.env_file,
         install_profiles: Vec::new(),
@@ -3598,7 +3306,6 @@ pub async fn upgrade_service(options: ServiceUpgradeOptions) -> Result<()> {
     add_service_manifest_with_options(
         &manifest_reference,
         candidate,
-        &provenance,
         &install_options,
         package_context.as_ref(),
         None,
@@ -3630,7 +3337,6 @@ pub async fn rollback_service(options: ServiceRollbackOptions) -> Result<()> {
         allow_incompatible: true,
         base_url: service_receipt_base_url(&receipt),
         catalog_url: None,
-        console_plan: false,
         dry_run: options.dry_run,
         env_file: options.env_file,
         install_profiles: Vec::new(),
@@ -3639,15 +3345,8 @@ pub async fn rollback_service(options: ServiceRollbackOptions) -> Result<()> {
         run_install_commands: false,
         source: "service".to_owned(),
     };
-    add_service_manifest_with_options(
-        &manifest_reference,
-        previous,
-        &ManifestProvenance::Builtin,
-        &install_options,
-        None,
-        None,
-    )
-    .await
+    add_service_manifest_with_options(&manifest_reference, previous, &install_options, None, None)
+        .await
 }
 
 pub fn list_service_environments(options: ServiceEnvListOptions) -> Result<()> {
@@ -7679,16 +7378,6 @@ fn service_module_manifest_compatibility_issue(manifest: &Value) -> Option<Strin
             ));
         }
     }
-    if let Some(console_package_api) = compatibility
-        .get("consolePackageApi")
-        .or_else(|| compatibility.get("console_package_api"))
-        .and_then(Value::as_str)
-        && console_package_api != CONSOLE_BUNDLE_HOST_API
-    {
-        return Some(format!(
-            "{module_name} requires console package API {console_package_api}; host supports {CONSOLE_BUNDLE_HOST_API}"
-        ));
-    }
     if let Some(protocol_version) = compatibility
         .get("providerProtocolVersion")
         .or_else(|| compatibility.get("provider_protocol_version"))
@@ -7748,12 +7437,9 @@ async fn read_json_reference_with_provenance(reference: &str) -> Result<LoadedJs
             .json::<Value>()
             .await
             .context("parse service module manifest JSON")?;
-        let base = url
-            .join(".")
-            .with_context(|| format!("derive module manifest base URL {reference}"))?;
         return Ok(LoadedJsonReference {
             value,
-            provenance: ManifestProvenance::Network { base },
+            provenance: ManifestProvenance::Network,
         });
     }
     let path = if let Some(file_path) = reference.strip_prefix("file://") {
@@ -7763,13 +7449,9 @@ async fn read_json_reference_with_provenance(reference: &str) -> Result<LoadedJs
     };
     let path = fs::canonicalize(&path)
         .with_context(|| format!("canonicalize local manifest {}", path.display()))?;
-    let root = path
-        .parent()
-        .ok_or_else(|| anyhow!("local manifest has no parent directory: {}", path.display()))?
-        .to_path_buf();
     Ok(LoadedJsonReference {
         value: read_json(&path)?,
-        provenance: ManifestProvenance::Local { root },
+        provenance: ManifestProvenance::Local,
     })
 }
 
@@ -7845,8 +7527,6 @@ fn remove_service_module_from_env_source(source: &str, module_name: &str) -> Opt
 fn service_module_install_state_exists(
     module_name: &str,
     env_file_path: &Path,
-    install_plan_path: &Path,
-    console_extension_registry_path: &Path,
     module_services_path: &Path,
 ) -> Result<bool> {
     let env_source = read_text_if_exists(env_file_path)?;
@@ -7857,44 +7537,9 @@ fn service_module_install_state_exists(
         return Ok(true);
     }
 
-    if read_json_if_exists(install_plan_path)?
-        .as_ref()
-        .is_some_and(|plan| install_plan_has_module(plan, module_name))
-    {
-        return Ok(true);
-    }
-
-    if read_json_if_exists(console_extension_registry_path)?
-        .as_ref()
-        .is_some_and(|registry| console_extension_registry_has_module(registry, module_name))
-    {
-        return Ok(true);
-    }
-
     Ok(read_service_module_service_states(module_services_path)?
         .iter()
         .any(|state| state.module_name == module_name))
-}
-
-fn install_plan_has_module(plan: &Value, module_name: &str) -> bool {
-    plan.get("modules")
-        .and_then(Value::as_array)
-        .is_some_and(|modules| {
-            modules
-                .iter()
-                .any(|module| module.get("moduleName").and_then(Value::as_str) == Some(module_name))
-        })
-}
-
-fn console_extension_registry_has_module(registry: &Value, module_name: &str) -> bool {
-    registry
-        .get("bundles")
-        .and_then(Value::as_array)
-        .is_some_and(|bundles| {
-            bundles
-                .iter()
-                .any(|bundle| bundle.get("moduleName").and_then(Value::as_str) == Some(module_name))
-        })
 }
 
 fn update_module_install_ledger(ledger_path: &Path, entry: Value) -> Result<Value> {
@@ -8180,14 +7825,12 @@ fn service_module_install_ledger_entry(
     install_env: &[(String, String)],
     install_commands: &[InstallCommandSpec],
     install_services: &[ServiceModuleServiceInstallSpec],
-    console_package_count: usize,
 ) -> Value {
     let mut entry = json!({
         "baseUrl": base_url,
         "enabled": true,
         "install": {
             "commands": install_command_receipts(install_commands),
-            "consolePackages": console_package_count,
             "env": install_env_receipts(install_env),
             "services": install_service_receipts(install_services),
         },
@@ -8255,7 +7898,6 @@ fn simple_linked_module_install_ledger_entry(
 fn service_module_install_writes(
     repo_root: &Path,
     env_file_path: &Path,
-    console_extension_registry_path: Option<&Path>,
     module_services_path: Option<&Path>,
 ) -> Vec<Value> {
     let mut writes = vec![json!({
@@ -8263,12 +7905,6 @@ fn service_module_install_writes(
         "key": "SERVICE_MODULES",
         "path": display_relative(repo_root, env_file_path),
     })];
-    if let Some(console_extension_registry_path) = console_extension_registry_path {
-        writes.push(json!({
-            "kind": "consoleExtensionRegistry",
-            "path": display_relative(repo_root, console_extension_registry_path),
-        }));
-    }
     if let Some(module_services_path) = module_services_path {
         writes.push(json!({
             "kind": "moduleServices",
@@ -8284,7 +7920,6 @@ fn linked_module_install_writes(
     cargo_toml_path: Option<&Path>,
     host_lib_path: &Path,
     runtime_config_defaults_path: Option<&Path>,
-    console_extension_registry_path: Option<&Path>,
 ) -> Vec<Value> {
     let mut writes = vec![json!({
         "kind": "env",
@@ -8304,12 +7939,6 @@ fn linked_module_install_writes(
         writes.push(json!({
             "kind": "runtimeConfigDefaults",
             "path": display_relative(repo_root, runtime_config_defaults_path),
-        }));
-    }
-    if let Some(console_extension_registry_path) = console_extension_registry_path {
-        writes.push(json!({
-            "kind": "consoleExtensionRegistry",
-            "path": display_relative(repo_root, console_extension_registry_path),
         }));
     }
     writes
@@ -8437,19 +8066,6 @@ fn uninstall_linked_module(
     let env_file = (env_file != env_source).then_some(env_file);
     let host_lib = remove_linked_modules_from_host_lib_source(&host_lib_source, &calls);
     let install_ledger = remove_module_install_ledger_modules(&install_ledger_path, &modules)?;
-    let console_extension_registry_path = repo_root.join(CONSOLE_EXTENSION_REGISTRY_PATH);
-    let console_registry =
-        remove_runtime_console_bundle_registry_modules(&console_extension_registry_path, &modules)?;
-    let console_extension_module_dirs = modules
-        .iter()
-        .map(|module_name| {
-            repo_root
-                .join(".lenso/console/extensions")
-                .join(slugify(module_name))
-        })
-        .filter(|path| path.exists())
-        .collect::<Vec<_>>();
-
     if options.dry_run {
         println!("Linked module uninstall dry run:");
         if env_file.is_some() {
@@ -8460,15 +8076,6 @@ fn uninstall_linked_module(
         }
         if install_ledger.is_some() {
             println!("- {}", display_relative(&repo_root, &install_ledger_path));
-        }
-        if console_registry.is_some() {
-            println!(
-                "- {}",
-                display_relative(&repo_root, &console_extension_registry_path)
-            );
-        }
-        for path in &console_extension_module_dirs {
-            println!("- {}", display_relative(&repo_root, path));
         }
         for call in calls {
             println!("- remove {call}");
@@ -8485,14 +8092,6 @@ fn uninstall_linked_module(
     if let Some(install_ledger) = install_ledger {
         write_json(&install_ledger_path, &install_ledger)?;
     }
-    if let Some(console_registry) = console_registry {
-        write_json(&console_extension_registry_path, &console_registry)?;
-    }
-    for path in console_extension_module_dirs {
-        fs::remove_dir_all(&path)
-            .with_context(|| format!("remove console extension directory {}", path.display()))?;
-    }
-
     println!("Uninstalled linked module(s): {}.", modules.join(", "));
     println!("Next steps:");
     println!("- restart the API and worker");
@@ -8589,37 +8188,9 @@ fn shell_command(command: &str) -> Command {
 }
 
 #[derive(Debug, Clone)]
-struct ConsoleBundleInstall {
-    bundle_count: usize,
-    bundle_files: Vec<PathBuf>,
-    registry_changed: bool,
-}
-
-#[derive(Debug, Clone)]
-struct ConsoleBundleSpec {
-    bundle_reference: ResolvedBundleReference,
-    entry: String,
-    export_name: String,
-    host_api: String,
-    module_name: String,
-    package_name: String,
-    required_capabilities: Vec<String>,
-    styles: Vec<ConsoleBundleStyleSpec>,
-    target_path: PathBuf,
-    version: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct ConsoleBundleStyleSpec {
-    entry: String,
-    source_reference: ResolvedBundleReference,
-    target_path: PathBuf,
-}
-
-#[derive(Debug, Clone)]
 enum ManifestProvenance {
-    Local { root: PathBuf },
-    Network { base: reqwest::Url },
+    Local,
+    Network,
     Builtin,
 }
 
@@ -8627,381 +8198,6 @@ enum ManifestProvenance {
 struct LoadedJsonReference {
     value: Value,
     provenance: ManifestProvenance,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ResolvedBundleReference {
-    Http(reqwest::Url),
-    Local(PathBuf),
-}
-
-impl ResolvedBundleReference {
-    fn display(&self) -> String {
-        match self {
-            Self::Http(url) => url.to_string(),
-            Self::Local(path) => path.display().to_string(),
-        }
-    }
-}
-
-async fn install_runtime_console_bundles(
-    repo_root: &Path,
-    registry_path: &Path,
-    manifest: &Value,
-    provenance: &ManifestProvenance,
-    enabled: bool,
-    dry_run: bool,
-) -> Result<ConsoleBundleInstall> {
-    if !enabled {
-        return Ok(ConsoleBundleInstall {
-            bundle_count: 0,
-            bundle_files: Vec::new(),
-            registry_changed: false,
-        });
-    }
-
-    let specs = service_module_console_bundle_specs(repo_root, manifest, provenance)?;
-    install_runtime_console_bundle_specs(registry_path, specs, dry_run).await
-}
-
-async fn install_runtime_console_bundles_for_manifests(
-    repo_root: &Path,
-    registry_path: &Path,
-    manifests: &[(&Value, ManifestProvenance)],
-    enabled: bool,
-    dry_run: bool,
-) -> Result<ConsoleBundleInstall> {
-    if !enabled {
-        return Ok(ConsoleBundleInstall {
-            bundle_count: 0,
-            bundle_files: Vec::new(),
-            registry_changed: false,
-        });
-    }
-
-    let mut specs = Vec::new();
-    for (manifest, provenance) in manifests {
-        specs.extend(service_module_console_bundle_specs(
-            repo_root, manifest, provenance,
-        )?);
-    }
-    install_runtime_console_bundle_specs(registry_path, specs, dry_run).await
-}
-
-async fn install_runtime_console_bundle_specs(
-    registry_path: &Path,
-    specs: Vec<ConsoleBundleSpec>,
-    dry_run: bool,
-) -> Result<ConsoleBundleInstall> {
-    if specs.is_empty() {
-        return Ok(ConsoleBundleInstall {
-            bundle_count: 0,
-            bundle_files: Vec::new(),
-            registry_changed: false,
-        });
-    }
-
-    if !dry_run {
-        for spec in &specs {
-            let bytes = read_bundle_reference(&spec.bundle_reference).await?;
-            write_file(&spec.target_path, &bytes)?;
-            for style in &spec.styles {
-                let bytes = read_bundle_reference(&style.source_reference).await?;
-                write_file(&style.target_path, &bytes)?;
-            }
-        }
-        let registry = update_runtime_console_bundle_registry(registry_path, &specs)?;
-        write_json(registry_path, &registry)?;
-    }
-
-    Ok(ConsoleBundleInstall {
-        bundle_count: specs.len(),
-        bundle_files: specs
-            .iter()
-            .flat_map(|spec| {
-                std::iter::once(spec.target_path.clone())
-                    .chain(spec.styles.iter().map(|style| style.target_path.clone()))
-            })
-            .collect(),
-        registry_changed: true,
-    })
-}
-
-fn service_module_console_bundle_specs(
-    repo_root: &Path,
-    manifest: &Value,
-    provenance: &ManifestProvenance,
-) -> Result<Vec<ConsoleBundleSpec>> {
-    let module_name = string_field(manifest, "name")?.trim();
-    let module_slug = slugify(module_name);
-    let mut specs = Vec::new();
-    let Some(surfaces) = manifest.get("console").and_then(Value::as_array) else {
-        return Ok(specs);
-    };
-    for surface in surfaces {
-        let package = surface.get("package").and_then(Value::as_object);
-        let Some(package_name) = package.and_then(|p| p.get("name")).and_then(Value::as_str) else {
-            continue;
-        };
-        let Some(export_name) = package
-            .and_then(|p| p.get("export"))
-            .and_then(Value::as_str)
-        else {
-            continue;
-        };
-        let Some(bundle_reference) = console_bundle_url(surface, package) else {
-            continue;
-        };
-        let bundle_reference = resolve_bundle_reference(bundle_reference, provenance)?;
-        let file_name = console_bundle_file_name(&bundle_reference, export_name);
-        let target_path = repo_root
-            .join(".lenso/console/extensions")
-            .join(&module_slug)
-            .join(&file_name);
-        let entry = format!("{CONSOLE_EXTENSION_ROUTE_PREFIX}/{module_slug}/{file_name}");
-        let styles = console_bundle_styles(surface, package)
-            .into_iter()
-            .map(|style_reference| {
-                let source_reference = resolve_bundle_reference(style_reference, provenance)?;
-                let file_name = console_style_file_name(&source_reference, export_name);
-                Ok(ConsoleBundleStyleSpec {
-                    entry: format!("{CONSOLE_EXTENSION_ROUTE_PREFIX}/{module_slug}/{file_name}"),
-                    source_reference,
-                    target_path: repo_root
-                        .join(".lenso/console/extensions")
-                        .join(&module_slug)
-                        .join(file_name),
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        specs.push(ConsoleBundleSpec {
-            bundle_reference,
-            entry,
-            export_name: export_name.to_owned(),
-            host_api: console_bundle_host_api(surface, package).to_owned(),
-            module_name: module_name.to_owned(),
-            package_name: package_name.to_owned(),
-            required_capabilities: surface
-                .get("required_capabilities")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(ToOwned::to_owned)
-                .collect(),
-            styles,
-            target_path,
-            version: package
-                .and_then(|p| p.get("version"))
-                .or_else(|| surface.get("version"))
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned),
-        });
-    }
-    Ok(specs)
-}
-
-fn console_bundle_url<'a>(
-    surface: &'a Value,
-    package: Option<&'a Map<String, Value>>,
-) -> Option<&'a str> {
-    package
-        .and_then(|p| p.get("bundleUrl").or_else(|| p.get("bundle_url")))
-        .and_then(Value::as_str)
-        .or_else(|| {
-            package
-                .and_then(|p| p.get("bundle"))
-                .and_then(|bundle| bundle.get("url"))
-                .and_then(Value::as_str)
-        })
-        .or_else(|| {
-            surface
-                .get("bundleUrl")
-                .or_else(|| surface.get("bundle_url"))
-                .and_then(Value::as_str)
-        })
-}
-
-fn console_bundle_styles<'a>(
-    surface: &'a Value,
-    package: Option<&'a Map<String, Value>>,
-) -> Vec<&'a str> {
-    let mut styles = Vec::new();
-    collect_console_bundle_styles(package.and_then(|p| p.get("styles")), &mut styles);
-    collect_console_bundle_styles(
-        package
-            .and_then(|p| p.get("bundle"))
-            .and_then(|bundle| bundle.get("styles")),
-        &mut styles,
-    );
-    collect_console_bundle_styles(surface.get("styles"), &mut styles);
-    collect_console_bundle_styles(
-        surface
-            .get("bundle")
-            .and_then(|bundle| bundle.get("styles")),
-        &mut styles,
-    );
-    styles
-}
-
-fn collect_console_bundle_styles<'a>(value: Option<&'a Value>, styles: &mut Vec<&'a str>) {
-    match value {
-        Some(Value::String(style)) => styles.push(style),
-        Some(Value::Array(items)) => {
-            styles.extend(items.iter().filter_map(Value::as_str));
-        }
-        _ => {}
-    }
-}
-
-fn console_bundle_host_api<'a>(
-    surface: &'a Value,
-    package: Option<&'a Map<String, Value>>,
-) -> &'a str {
-    package
-        .and_then(|p| p.get("hostApi").or_else(|| p.get("host_api")))
-        .and_then(Value::as_str)
-        .or_else(|| {
-            surface
-                .get("hostApi")
-                .or_else(|| surface.get("host_api"))
-                .and_then(Value::as_str)
-        })
-        .unwrap_or(CONSOLE_BUNDLE_HOST_API)
-}
-
-fn resolve_bundle_reference(
-    reference: &str,
-    provenance: &ManifestProvenance,
-) -> Result<ResolvedBundleReference> {
-    match provenance {
-        ManifestProvenance::Local { root } => {
-            if reference.starts_with("file:") || Path::new(reference).is_absolute() {
-                bail!("local manifest console bundle reference must be relative: {reference}");
-            }
-            let resolved = fs::canonicalize(root.join(reference))
-                .with_context(|| format!("resolve local manifest console bundle {reference}"))?;
-            if !resolved.starts_with(root) {
-                bail!("local manifest console bundle reference escapes its directory: {reference}");
-            }
-            Ok(ResolvedBundleReference::Local(resolved))
-        }
-        ManifestProvenance::Network { base } => {
-            let resolved = base
-                .join(reference)
-                .with_context(|| format!("resolve remote manifest console bundle {reference}"))?;
-            if !matches!(resolved.scheme(), "http" | "https") {
-                bail!(
-                    "remote manifest console bundle reference must use http or https: {reference}"
-                );
-            }
-            Ok(ResolvedBundleReference::Http(resolved))
-        }
-        ManifestProvenance::Builtin => {
-            let resolved = reqwest::Url::parse(reference)
-                .with_context(|| format!("resolve builtin console bundle {reference}"))?;
-            if !matches!(resolved.scheme(), "http" | "https") {
-                bail!("builtin console bundle reference must use http or https: {reference}");
-            }
-            Ok(ResolvedBundleReference::Http(resolved))
-        }
-    }
-}
-
-fn console_bundle_file_name(
-    bundle_reference: &ResolvedBundleReference,
-    export_name: &str,
-) -> String {
-    console_asset_file_name(bundle_reference, export_name, "js")
-}
-
-fn console_style_file_name(style_reference: &ResolvedBundleReference, export_name: &str) -> String {
-    console_asset_file_name(style_reference, export_name, "css")
-}
-
-fn console_asset_file_name(
-    reference: &ResolvedBundleReference,
-    export_name: &str,
-    extension: &str,
-) -> String {
-    match reference {
-        ResolvedBundleReference::Http(url) => url
-            .path_segments()
-            .and_then(Iterator::last)
-            .filter(|segment| !segment.is_empty())
-            .map(ToOwned::to_owned),
-        ResolvedBundleReference::Local(path) => path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(ToOwned::to_owned),
-    }
-    .unwrap_or_else(|| format!("{}.{}", slugify(export_name), extension))
-}
-
-async fn read_bundle_reference(reference: &ResolvedBundleReference) -> Result<Vec<u8>> {
-    if let ResolvedBundleReference::Http(url) = reference {
-        let response = reqwest::get(url.clone())
-            .await
-            .with_context(|| format!("fetch console bundle {}", reference.display()))?;
-        if !response.status().is_success() {
-            bail!(
-                "Failed to fetch console bundle: {} {}",
-                response.status().as_u16(),
-                response.status().canonical_reason().unwrap_or("")
-            );
-        }
-        return response
-            .bytes()
-            .await
-            .map(|bytes| bytes.to_vec())
-            .context("read console bundle bytes");
-    }
-    let ResolvedBundleReference::Local(path) = reference else {
-        unreachable!("HTTP references return above");
-    };
-    fs::read(path).with_context(|| format!("read console bundle {}", path.display()))
-}
-
-fn update_runtime_console_bundle_registry(
-    registry_path: &Path,
-    specs: &[ConsoleBundleSpec],
-) -> Result<Value> {
-    let mut registry = read_json_if_exists(registry_path)?
-        .unwrap_or_else(|| json!({ "bundles": [], "version": 1 }));
-    let bundles = registry
-        .get_mut("bundles")
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| anyhow!("Runtime Console extension registry bundles must be an array"))?;
-    for spec in specs {
-        bundles.retain(|entry| {
-            entry.get("packageName").and_then(Value::as_str) != Some(spec.package_name.as_str())
-                || entry.get("exportName").and_then(Value::as_str)
-                    != Some(spec.export_name.as_str())
-        });
-        let mut entry = json!({
-            "entry": spec.entry,
-            "exportName": spec.export_name,
-            "hostApi": spec.host_api,
-            "moduleName": spec.module_name,
-            "packageName": spec.package_name,
-        });
-        if !spec.required_capabilities.is_empty() {
-            entry["requiredCapabilities"] = json!(spec.required_capabilities);
-        }
-        if !spec.styles.is_empty() {
-            entry["styles"] = json!(
-                spec.styles
-                    .iter()
-                    .map(|style| style.entry.as_str())
-                    .collect::<Vec<_>>()
-            );
-        }
-        if let Some(version) = &spec.version {
-            entry["version"] = json!(version);
-        }
-        bundles.push(entry);
-    }
-    Ok(registry)
 }
 
 fn update_service_module_services_file(
@@ -9536,145 +8732,6 @@ fn install_command_plans(
         .collect()
 }
 
-fn remove_console_package_install_plan_module(
-    install_plan_path: &Path,
-    module_name: &str,
-) -> Result<Option<Value>> {
-    remove_console_package_install_plan_modules(install_plan_path, &[module_name.to_owned()])
-}
-
-fn remove_console_package_install_plan_modules(
-    install_plan_path: &Path,
-    module_names: &[String],
-) -> Result<Option<Value>> {
-    read_json_if_exists(install_plan_path)?.map_or(Ok(None), |mut plan| {
-        let version = plan.get("version").cloned().unwrap_or_else(|| json!(1));
-        let modules = plan
-            .get_mut("modules")
-            .and_then(Value::as_array_mut)
-            .ok_or_else(|| anyhow!("Console package install plan modules must be an array"))?;
-        let original_len = modules.len();
-        modules.retain(|entry| {
-            let Some(module_name) = entry.get("moduleName").and_then(Value::as_str) else {
-                return true;
-            };
-            !module_names.iter().any(|name| name == module_name)
-        });
-        if modules.len() == original_len {
-            return Ok(None);
-        }
-        Ok(Some(
-            json!({ "modules": modules.clone(), "version": version }),
-        ))
-    })
-}
-
-#[cfg(test)]
-fn remove_console_package_install_plan_module_value(
-    mut plan: Value,
-    module_name: &str,
-) -> Result<Option<Value>> {
-    let version = plan.get("version").cloned().unwrap_or_else(|| json!(1));
-    let modules = plan
-        .get_mut("modules")
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| anyhow!("Console package install plan modules must be an array"))?;
-    let original_len = modules.len();
-    modules.retain(|entry| entry.get("moduleName").and_then(Value::as_str) != Some(module_name));
-    if modules.len() == original_len {
-        return Ok(None);
-    }
-    Ok(Some(
-        json!({ "modules": modules.clone(), "version": version }),
-    ))
-}
-
-fn remove_runtime_console_bundle_registry_module(
-    registry_path: &Path,
-    module_name: &str,
-) -> Result<Option<Value>> {
-    remove_runtime_console_bundle_registry_modules(registry_path, &[module_name.to_owned()])
-}
-
-fn remove_runtime_console_bundle_registry_modules(
-    registry_path: &Path,
-    module_names: &[String],
-) -> Result<Option<Value>> {
-    read_json_if_exists(registry_path)?.map_or(Ok(None), |mut registry| {
-        let version = registry.get("version").cloned().unwrap_or_else(|| json!(1));
-        let bundles = registry
-            .get_mut("bundles")
-            .and_then(Value::as_array_mut)
-            .ok_or_else(|| {
-                anyhow!("Runtime Console extension registry bundles must be an array")
-            })?;
-        let original_len = bundles.len();
-        bundles.retain(|entry| {
-            let Some(module_name) = entry.get("moduleName").and_then(Value::as_str) else {
-                return true;
-            };
-            !module_names.iter().any(|name| name == module_name)
-        });
-        if bundles.len() == original_len {
-            return Ok(None);
-        }
-        Ok(Some(
-            json!({ "bundles": bundles.clone(), "version": version }),
-        ))
-    })
-}
-
-fn remove_stale_module_console_artifacts(
-    repo_root: &Path,
-    module_name: &str,
-    include_install_plan: bool,
-    dry_run: bool,
-) -> Result<Vec<PathBuf>> {
-    let mut changed = Vec::new();
-    if include_install_plan {
-        let install_plan_path = repo_root.join(".lenso/console-package-install-plan.json");
-        if let Some(install_plan) =
-            remove_console_package_install_plan_module(&install_plan_path, module_name)?
-        {
-            changed.push(install_plan_path.clone());
-            if !dry_run {
-                write_json(&install_plan_path, &install_plan)?;
-            }
-        }
-    }
-
-    let registry_path = repo_root.join(CONSOLE_EXTENSION_REGISTRY_PATH);
-    if let Some(registry) =
-        remove_runtime_console_bundle_registry_module(&registry_path, module_name)?
-    {
-        changed.push(registry_path.clone());
-        if !dry_run {
-            write_json(&registry_path, &registry)?;
-        }
-    }
-
-    let module_slug = slugify(module_name);
-    if module_slug.is_empty() {
-        return Ok(changed);
-    }
-    let module_dir = repo_root
-        .join(".lenso/console/extensions")
-        .join(module_slug);
-    if module_dir.exists() {
-        changed.push(module_dir.clone());
-        if !dry_run {
-            fs::remove_dir_all(&module_dir).with_context(|| {
-                format!(
-                    "remove console extension directory {}",
-                    module_dir.display()
-                )
-            })?;
-        }
-    }
-
-    Ok(changed)
-}
-
 async fn read_install_descriptor(reference: &str) -> Result<Option<LoadedJsonReference>> {
     if let Some(descriptor) = builtin_linked_module_descriptor(reference) {
         return Ok(Some(LoadedJsonReference {
@@ -9699,19 +8756,6 @@ fn builtin_linked_module_descriptor(reference: &str) -> Option<Value> {
         "auth" => Some(json!({
             "name": "auth",
             "source": "linked",
-            "console": [
-                {
-                    "package": {
-                        "bundleUrl": "https://cdn.jsdelivr.net/npm/@lenso/auth-console@0.1.3/dist/auth-console.js",
-                        "export": "authConsoleModule",
-                        "hostApi": "1",
-                        "name": "@lenso/auth-console",
-                        "styles": ["https://cdn.jsdelivr.net/npm/@lenso/auth-console@0.1.3/dist/auth-console.css"],
-                        "version": "0.1.3"
-                    },
-                    "required_capabilities": ["auth.users.read"]
-                }
-            ],
             "linked": {
                 "call": "builtins::auth()"
             },
@@ -11320,61 +10364,6 @@ mod tests {
     }
 
     #[test]
-    fn module_update_removes_stale_console_artifacts() {
-        let repo_root = std::env::temp_dir().join(format!(
-            "lenso-module-update-console-{}",
-            std::process::id()
-        ));
-        fs::remove_dir_all(&repo_root).ok();
-        write_json(
-            &repo_root.join(".lenso/console-package-install-plan.json"),
-            &json!({
-                "modules": [
-                    { "moduleName": "crm" },
-                    { "moduleName": "billing" }
-                ],
-                "version": 1
-            }),
-        )
-        .unwrap();
-        write_json(
-            &repo_root.join(CONSOLE_EXTENSION_REGISTRY_PATH),
-            &json!({
-                "bundles": [
-                    { "moduleName": "crm" },
-                    { "moduleName": "billing" }
-                ],
-                "version": 1
-            }),
-        )
-        .unwrap();
-        write_file(
-            &repo_root.join(".lenso/console/extensions/crm/crm-console.js"),
-            b"export const crmConsoleModule = {};\n",
-        )
-        .unwrap();
-
-        let changed =
-            remove_stale_module_console_artifacts(&repo_root, "crm", true, false).unwrap();
-
-        let plan = read_json(&repo_root.join(".lenso/console-package-install-plan.json")).unwrap();
-        let registry = read_json(&repo_root.join(CONSOLE_EXTENSION_REGISTRY_PATH)).unwrap();
-        assert_eq!(changed.len(), 3);
-        assert!(!repo_root.join(".lenso/console/extensions/crm").exists());
-        assert_eq!(
-            plan["modules"][0].get("moduleName").and_then(Value::as_str),
-            Some("billing")
-        );
-        assert_eq!(
-            registry["bundles"][0]
-                .get("moduleName")
-                .and_then(Value::as_str),
-            Some("billing")
-        );
-        fs::remove_dir_all(&repo_root).ok();
-    }
-
-    #[test]
     fn linked_uninstall_call_reads_install_receipt() {
         let path =
             std::env::temp_dir().join(format!("lenso-module-installs-{}.json", std::process::id()));
@@ -11433,78 +10422,12 @@ mod tests {
     }
 
     #[test]
-    fn linked_uninstall_removes_console_extension_files() {
-        let repo_root = std::env::temp_dir().join(format!(
-            "lenso-linked-uninstall-extension-{}",
-            std::process::id()
-        ));
-        fs::remove_dir_all(&repo_root).ok();
-        write_file(&repo_root.join(".env"), b"LENSO_MODULE_AUTH_ENABLED=true\n").unwrap();
-        write_file(
-            &repo_root.join("src/lib.rs"),
-            b"pub fn host_composition() -> HostComposition {\n    HostBuilder::new()\n        .linked_module(builtins::auth())\n        .linked_module(modules::app::linked_module())\n        .build()\n}\n",
-        )
-        .unwrap();
-        write_json(
-            &repo_root.join(MODULE_INSTALL_LEDGER_PATH),
-            &json!({
-                "modules": [{
-                    "enabled": true,
-                    "linked": { "call": "builtins::auth()" },
-                    "moduleName": "auth",
-                    "source": "linked"
-                }],
-                "version": 1
-            }),
-        )
-        .unwrap();
-        write_json(
-            &repo_root.join(CONSOLE_EXTENSION_REGISTRY_PATH),
-            &json!({
-                "bundles": [
-                    { "moduleName": "auth" },
-                    { "moduleName": "crm" }
-                ],
-                "version": 1
-            }),
-        )
-        .unwrap();
-        write_file(
-            &repo_root.join(".lenso/console/extensions/auth/auth-console.js"),
-            b"export const authConsoleModule = {};\n",
-        )
-        .unwrap();
-
-        uninstall_linked_module(
-            "auth",
-            ServiceModuleUninstallOptions {
-                dry_run: false,
-                env_file: None,
-                module_services_file: None,
-                repo_root: Some(repo_root.clone()),
-                source: None,
-            },
-        )
-        .unwrap();
-
-        let registry = read_json(&repo_root.join(CONSOLE_EXTENSION_REGISTRY_PATH)).unwrap();
-        assert!(!repo_root.join(".lenso/console/extensions/auth").exists());
-        assert_eq!(registry["bundles"].as_array().unwrap().len(), 1);
-        assert_eq!(registry["bundles"][0]["moduleName"], "crm");
-        fs::remove_dir_all(&repo_root).ok();
-    }
-
-    #[test]
     fn builtin_auth_descriptor_declares_linked_source() {
         let descriptor = builtin_linked_module_descriptor("auth").expect("auth descriptor");
 
         assert_eq!(descriptor["name"], "auth");
         assert_eq!(descriptor["source"], "linked");
         assert_eq!(descriptor["linked"]["call"], "builtins::auth()");
-        assert_eq!(
-            descriptor["console"][0]["package"]["bundleUrl"],
-            "https://cdn.jsdelivr.net/npm/@lenso/auth-console@0.1.3/dist/auth-console.js"
-        );
     }
 
     #[test]
@@ -11546,94 +10469,6 @@ mod tests {
         assert_eq!(descriptor_reference, "builtin:auth-phone");
         assert_eq!(descriptor["dependencies"], json!(["auth", "auth-password"]));
         assert_eq!(descriptor["linked"]["call"], "builtins::auth_phone()");
-    }
-
-    #[test]
-    fn catalog_linked_entry_resolves_builtin_descriptor_and_console_metadata() {
-        let catalog = json!({
-            "version": 1,
-            "modules": [
-                {
-                    "name": "auth",
-                    "version": "0.1.4",
-                    "source": "linked",
-                    "manifestReference": "builtin:auth",
-                    "consolePackages": [
-                        {
-                            "packageName": "@lenso/auth-console",
-                            "exportName": "authConsoleModule",
-                            "bundleUrl": "https://cdn.example.test/auth-console.js",
-                            "hostApi": "1",
-                            "requiredCapabilities": ["auth.users.read"],
-                            "styles": ["https://cdn.example.test/auth-console.css"],
-                            "version": "0.1.99"
-                        }
-                    ]
-                }
-            ]
-        });
-
-        let target = catalog_install_target_for_module(&catalog, "auth")
-            .unwrap()
-            .expect("catalog target");
-
-        let CatalogInstallTarget::Descriptor {
-            descriptor,
-            descriptor_reference,
-            provenance: _,
-        } = target
-        else {
-            panic!("expected linked descriptor target");
-        };
-        assert_eq!(descriptor_reference, "builtin:auth");
-        assert_eq!(descriptor["linked"]["call"], "builtins::auth()");
-        assert_eq!(
-            descriptor["console"][0]["package"]["bundleUrl"],
-            "https://cdn.example.test/auth-console.js"
-        );
-        assert_eq!(
-            descriptor["console"][0]["required_capabilities"],
-            json!(["auth.users.read"])
-        );
-        assert_eq!(descriptor["console"][0]["package"]["version"], "0.1.99");
-    }
-
-    #[test]
-    fn network_catalog_descriptor_cannot_claim_local_bundle_provenance() {
-        let catalog = json!({
-            "version": 1,
-            "modules": [{
-                "name": "auth",
-                "source": "linked",
-                "manifestReference": "/tmp/catalog-spoof.json",
-                "consolePackages": [{
-                    "packageName": "@lenso/auth-console",
-                    "exportName": "authConsoleModule",
-                    "bundleUrl": "file:///etc/passwd"
-                }]
-            }]
-        });
-        let catalog_provenance = ManifestProvenance::Network {
-            base: reqwest::Url::parse("https://catalog.example.test/v1/").unwrap(),
-        };
-        let target =
-            catalog_install_target_for_module_with_provenance(&catalog, "auth", catalog_provenance)
-                .unwrap()
-                .expect("catalog target");
-        let CatalogInstallTarget::Descriptor {
-            descriptor,
-            provenance,
-            ..
-        } = target
-        else {
-            panic!("expected linked descriptor target");
-        };
-
-        let error =
-            service_module_console_bundle_specs(Path::new("/tmp/host"), &descriptor, &provenance)
-                .expect_err("remote catalog descriptors must not resolve local files");
-
-        assert!(error.to_string().contains("remote manifest"));
     }
 
     #[test]
@@ -11893,7 +10728,7 @@ mod tests {
                 },
                 "commands": [
                     "just migrate",
-                    { "command": "pnpm install", "cwd": "../lenso-runtime-console" }
+                    { "command": "pnpm install", "cwd": "../module-ui" }
                 ]
             }
         });
@@ -11906,7 +10741,7 @@ mod tests {
             vec![("CRM_API_URL".to_owned(), "http://crm".to_owned())]
         );
         assert_eq!(commands[0].command, "just migrate");
-        assert_eq!(commands[1].cwd.as_deref(), Some("../lenso-runtime-console"));
+        assert_eq!(commands[1].cwd.as_deref(), Some("../module-ui"));
         assert_eq!(
             command_plan[0].get("status").and_then(Value::as_str),
             Some("requires_manual_run")
@@ -12083,7 +10918,6 @@ mod tests {
             &[],
             &[],
             &[],
-            0,
         );
 
         assert_eq!(receipt["service"]["name"], json!("api"));
@@ -12201,7 +11035,6 @@ mod tests {
                 allow_incompatible: false,
                 base_url: Some("http://127.0.0.1:4110/lenso/service/v1".to_owned()),
                 catalog_url: None,
-                console_plan: false,
                 dry_run: false,
                 env_file: None,
                 install_profiles: Vec::new(),
@@ -12305,7 +11138,6 @@ mod tests {
                 allow_incompatible: false,
                 base_url: Some("http://127.0.0.1:4110/lenso/service/v1".to_owned()),
                 catalog_url: None,
-                console_plan: false,
                 dry_run: false,
                 env_file: None,
                 install_profiles: Vec::new(),
@@ -12405,7 +11237,6 @@ mod tests {
                 allow_incompatible: false,
                 base_url: None,
                 catalog_url: Some(catalog_path.to_string_lossy().to_string()),
-                console_plan: false,
                 dry_run: false,
                 env_file: None,
                 install_profiles: Vec::new(),
@@ -12478,7 +11309,6 @@ mod tests {
                 allow_incompatible: false,
                 base_url: None,
                 catalog_url: Some(catalog_path.to_string_lossy().to_string()),
-                console_plan: false,
                 dry_run: false,
                 env_file: None,
                 install_profiles: Vec::new(),
@@ -12554,7 +11384,6 @@ mod tests {
                     allow_incompatible: false,
                     base_url: None,
                     catalog_url: Some(catalog_path.to_string_lossy().to_string()),
-                    console_plan: false,
                     dry_run: false,
                     env_file: None,
                     install_profiles: Vec::new(),
@@ -13321,62 +12150,6 @@ mod tests {
     }
 
     #[test]
-    fn install_plan_module_is_removed() {
-        let plan = json!({
-            "modules": [
-                { "moduleName": "crm", "consolePackages": [] },
-                { "moduleName": "billing", "consolePackages": [] }
-            ],
-            "version": 1
-        });
-        let updated = remove_console_package_install_plan_module_value(plan, "crm")
-            .unwrap()
-            .unwrap();
-        let modules = updated.get("modules").and_then(Value::as_array).unwrap();
-
-        assert_eq!(modules.len(), 1);
-        assert_eq!(
-            modules[0].get("moduleName").and_then(Value::as_str),
-            Some("billing")
-        );
-    }
-
-    #[test]
-    fn install_plan_service_modules_are_removed_together() {
-        let path = std::env::temp_dir().join(format!(
-            "lenso-console-install-plan-{}.json",
-            std::process::id()
-        ));
-        write_json(
-            &path,
-            &json!({
-                "modules": [
-                    { "moduleName": "support-ticket", "consolePackages": [] },
-                    { "moduleName": "support-sla", "consolePackages": [] },
-                    { "moduleName": "billing", "consolePackages": [] }
-                ],
-                "version": 1
-            }),
-        )
-        .unwrap();
-
-        let updated = remove_console_package_install_plan_modules(
-            &path,
-            &["support-ticket".to_owned(), "support-sla".to_owned()],
-        )
-        .unwrap()
-        .unwrap();
-        fs::remove_file(&path).ok();
-        let modules = updated.get("modules").and_then(Value::as_array).unwrap();
-
-        assert_eq!(modules.len(), 1);
-        assert_eq!(
-            modules[0].get("moduleName").and_then(Value::as_str),
-            Some("billing")
-        );
-    }
-
-    #[test]
     fn manifest_url_derives_base_url() {
         let base = derive_remote_base_url(
             None,
@@ -13385,189 +12158,5 @@ mod tests {
         .unwrap();
 
         assert_eq!(base, "https://example.com/lenso/module/v1");
-    }
-
-    #[test]
-    fn console_bundle_specs_use_manifest_bundle_url() {
-        let manifest = json!({
-            "console": [
-                {
-                    "package": {
-                        "bundleUrl": "console/entry.js",
-                        "export": "crmConsoleModule",
-                        "hostApi": "1",
-                        "name": "@vendor/crm-console",
-                        "styles": ["console/entry.css"],
-                        "version": "1.2.3"
-                    },
-                    "required_capabilities": ["crm.read"]
-                }
-            ],
-            "name": "remote-crm"
-        });
-
-        let provenance = ManifestProvenance::Network {
-            base: reqwest::Url::parse("https://module.example.test/lenso/module/v1/").unwrap(),
-        };
-        let specs =
-            service_module_console_bundle_specs(Path::new("/tmp/host"), &manifest, &provenance)
-                .unwrap();
-
-        assert_eq!(specs.len(), 1);
-        assert_eq!(
-            specs[0].bundle_reference.display(),
-            "https://module.example.test/lenso/module/v1/console/entry.js"
-        );
-        assert_eq!(specs[0].entry, "/console/extensions/remote-crm/entry.js");
-        assert_eq!(
-            specs[0].target_path,
-            PathBuf::from("/tmp/host/.lenso/console/extensions/remote-crm/entry.js")
-        );
-        assert_eq!(
-            specs[0].styles[0].source_reference.display(),
-            "https://module.example.test/lenso/module/v1/console/entry.css"
-        );
-        assert_eq!(
-            specs[0].styles[0].entry,
-            "/console/extensions/remote-crm/entry.css"
-        );
-        assert_eq!(
-            specs[0].styles[0].target_path,
-            PathBuf::from("/tmp/host/.lenso/console/extensions/remote-crm/entry.css")
-        );
-        assert_eq!(specs[0].required_capabilities, vec!["crm.read"]);
-        assert_eq!(specs[0].version.as_deref(), Some("1.2.3"));
-    }
-
-    #[test]
-    fn console_bundle_reference_rejects_remote_file_url() {
-        let manifest = json!({
-            "console": [{
-                "package": {
-                    "bundleUrl": "file:///etc/passwd",
-                    "export": "crmConsoleModule",
-                    "name": "@vendor/crm-console"
-                }
-            }],
-            "name": "remote-crm"
-        });
-        let provenance = ManifestProvenance::Network {
-            base: reqwest::Url::parse("https://module.example.test/lenso/module/v1/").unwrap(),
-        };
-
-        let error =
-            service_module_console_bundle_specs(Path::new("/tmp/host"), &manifest, &provenance)
-                .expect_err("remote manifests must not resolve file URLs");
-
-        assert!(error.to_string().contains("remote manifest"));
-    }
-
-    fn console_bundle_test_root() -> PathBuf {
-        std::env::temp_dir().join(format!("lenso-cli-console-bundle-{}", uuid::Uuid::now_v7()))
-    }
-
-    #[test]
-    fn console_bundle_reference_allows_local_child_asset() {
-        let root = console_bundle_test_root();
-        let assets = root.join("assets");
-        fs::create_dir_all(&assets).unwrap();
-        let asset = assets.join("entry.js");
-        fs::write(&asset, "export default {};").unwrap();
-        let manifest = json!({
-            "console": [{
-                "package": {
-                    "bundleUrl": "./assets/entry.js",
-                    "export": "crmConsoleModule",
-                    "name": "@vendor/crm-console"
-                }
-            }],
-            "name": "local-crm"
-        });
-        let provenance = ManifestProvenance::Local {
-            root: fs::canonicalize(&root).unwrap(),
-        };
-
-        let specs =
-            service_module_console_bundle_specs(Path::new("/tmp/host"), &manifest, &provenance)
-                .expect("local asset below the manifest root is allowed");
-
-        assert_eq!(
-            specs[0].bundle_reference,
-            ResolvedBundleReference::Local(fs::canonicalize(&asset).unwrap())
-        );
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn console_bundle_reference_rejects_local_parent_escape() {
-        let root = console_bundle_test_root();
-        fs::create_dir_all(&root).unwrap();
-        let outside = root.with_file_name(format!(
-            "{}-outside.js",
-            root.file_name().unwrap().to_string_lossy()
-        ));
-        fs::write(&outside, "do not read me").unwrap();
-        let escaped_reference = format!("../{}", outside.file_name().unwrap().to_string_lossy());
-        let manifest = json!({
-            "console": [{
-                "package": {
-                    "bundleUrl": escaped_reference,
-                    "export": "crmConsoleModule",
-                    "name": "@vendor/crm-console"
-                }
-            }],
-            "name": "local-crm"
-        });
-        let provenance = ManifestProvenance::Local {
-            root: fs::canonicalize(&root).unwrap(),
-        };
-
-        let error =
-            service_module_console_bundle_specs(Path::new("/tmp/host"), &manifest, &provenance)
-                .expect_err("local assets must remain below the manifest root");
-
-        assert!(error.to_string().contains("local manifest"));
-        fs::remove_dir_all(root).unwrap();
-        fs::remove_file(outside).unwrap();
-    }
-
-    #[test]
-    fn runtime_console_bundle_registry_upserts_by_package_export() {
-        let registry_path = Path::new("/tmp/missing-console-registry.json");
-        let specs = vec![ConsoleBundleSpec {
-            bundle_reference: ResolvedBundleReference::Http(
-                reqwest::Url::parse("https://module.example.test/entry.js").unwrap(),
-            ),
-            entry: "/console/extensions/crm/entry.js".to_owned(),
-            export_name: "crmConsoleModule".to_owned(),
-            host_api: "1".to_owned(),
-            module_name: "crm".to_owned(),
-            package_name: "@vendor/crm-console".to_owned(),
-            required_capabilities: vec!["crm.read".to_owned()],
-            styles: vec![ConsoleBundleStyleSpec {
-                entry: "/console/extensions/crm/entry.css".to_owned(),
-                source_reference: ResolvedBundleReference::Http(
-                    reqwest::Url::parse("https://module.example.test/entry.css").unwrap(),
-                ),
-                target_path: PathBuf::from("/tmp/host/.lenso/console/extensions/crm/entry.css"),
-            }],
-            target_path: PathBuf::from("/tmp/host/.lenso/console/extensions/crm/entry.js"),
-            version: Some("1.0.0".to_owned()),
-        }];
-
-        let registry = update_runtime_console_bundle_registry(registry_path, &specs).unwrap();
-
-        assert_eq!(registry["version"], 1);
-        assert_eq!(registry["bundles"][0]["moduleName"], "crm");
-        assert_eq!(registry["bundles"][0]["packageName"], "@vendor/crm-console");
-        assert_eq!(registry["bundles"][0]["exportName"], "crmConsoleModule");
-        assert_eq!(
-            registry["bundles"][0]["requiredCapabilities"],
-            json!(["crm.read"])
-        );
-        assert_eq!(
-            registry["bundles"][0]["styles"],
-            json!(["/console/extensions/crm/entry.css"])
-        );
     }
 }
