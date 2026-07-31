@@ -5,82 +5,59 @@ use anyhow::{Context, Result, bail};
 
 #[derive(Debug, Clone)]
 pub struct ConsoleDevOptions {
-    pub cwd: Option<PathBuf>,
-    pub host: Option<String>,
-    pub open: bool,
-    pub package: Option<PathBuf>,
-    pub port: u16,
-    pub runtime_console_root: Option<PathBuf>,
+    pub console_root: Option<PathBuf>,
 }
 
 pub fn run_console_dev(options: ConsoleDevOptions) -> Result<()> {
-    let runtime_console_root =
-        resolve_runtime_console_root(options.runtime_console_root.as_deref())?;
-    let script = runtime_console_root.join("scripts/console-package-dev.mjs");
-    if !script.exists() {
-        bail!("Runtime Console dev runner not found: {}", script.display());
-    }
+    let root = resolve_console_root(options.console_root.as_deref())?;
+    run_pnpm(&root, "service:serve", "Console Service")
+}
 
-    let mut command = Command::new("node");
-    command.arg(script);
-    if let Some(cwd) = options.cwd {
-        command.arg("--cwd").arg(cwd);
+pub fn run_module_console_ui_dev(repo_root: Option<&Path>) -> Result<()> {
+    let root = repo_root
+        .map(Path::to_path_buf)
+        .unwrap_or(std::env::current_dir().context("read current directory")?);
+    let ui_root = root.join("console-ui");
+    if !ui_root.join("package.json").is_file() {
+        bail!(
+            "Module Console UI artifact not found: {}",
+            ui_root.join("package.json").display()
+        );
     }
-    if let Some(host) = options.host {
-        command.arg("--host").arg(host);
-    }
-    if let Some(package) = options.package {
-        command.arg("--package").arg(package);
-    }
-    command.arg("--port").arg(options.port.to_string());
-    if options.open {
-        command.env("LENSO_CONSOLE_DEV_OPEN", "1");
-    }
+    run_pnpm(&ui_root, "dev", "Module Console UI artifact")
+}
 
-    let status = command.status().with_context(|| {
-        format!(
-            "run Runtime Console dev runner in {}",
-            runtime_console_root.display()
-        )
-    })?;
+fn run_pnpm(root: &Path, script: &str, subject: &str) -> Result<()> {
+    let status = Command::new("pnpm")
+        .args(["run", script])
+        .current_dir(root)
+        .status()
+        .with_context(|| format!("start {subject} in {}", root.display()))?;
     if !status.success() {
-        bail!("Runtime Console dev runner exited with {status}");
+        bail!("{subject} dev process exited with {status}");
     }
     Ok(())
 }
 
-fn resolve_runtime_console_root(explicit: Option<&Path>) -> Result<PathBuf> {
+fn resolve_console_root(explicit: Option<&Path>) -> Result<PathBuf> {
     if let Some(root) = explicit {
-        return Ok(root.to_path_buf());
+        return validate_console_root(root.to_path_buf());
     }
-    if let Ok(root) = std::env::var("LENSO_RUNTIME_CONSOLE_ROOT") {
-        return Ok(PathBuf::from(root));
-    }
-
     let cwd = std::env::current_dir().context("read current directory")?;
-    if let Some(root) = find_runtime_console_root_from(&cwd) {
-        return Ok(root);
+    if is_console_root(&cwd) {
+        return Ok(cwd);
     }
-
-    let sibling = cwd
-        .join("../lenso-runtime-console")
-        .canonicalize()
-        .context(
-            "resolve sibling lenso-runtime-console; set LENSO_RUNTIME_CONSOLE_ROOT if it is elsewhere",
-        )?;
-    Ok(sibling)
+    bail!("could not find the Console repository; pass --console-root")
 }
 
-fn find_runtime_console_root_from(start: &Path) -> Option<PathBuf> {
-    start
-        .ancestors()
-        .find(|candidate| is_runtime_console_root(candidate))
-        .map(Path::to_path_buf)
+fn validate_console_root(root: PathBuf) -> Result<PathBuf> {
+    if is_console_root(&root) {
+        Ok(root)
+    } else {
+        bail!("Console repository not found at {}", root.display())
+    }
 }
 
-fn is_runtime_console_root(candidate: &Path) -> bool {
-    candidate
-        .join("scripts")
-        .join("console-package-dev.mjs")
-        .is_file()
+fn is_console_root(candidate: &Path) -> bool {
+    candidate.join("service/Cargo.toml").is_file() && candidate.join("package.json").is_file()
 }

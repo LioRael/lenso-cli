@@ -39,7 +39,7 @@ fn service_manifest() -> Value {
             "summary": "{{service_label}} provider",
         },
         "compatibility": {
-            "remoteProtocolVersion": "1",
+            "providerProtocolVersion": "lenso.provider.v1",
             "requiredHostFeatures": ["service.status"],
         },
         "install": {

@@ -1253,7 +1253,6 @@ struct ServiceScaffold {
     package_name: String,
     pnpm_workspace_overrides: String,
     publish_note: Option<String>,
-    remote_module_kit_dependency: String,
     repo_root_display: String,
     service_cwd: String,
     service_kit_dependency: String,
@@ -1293,7 +1292,6 @@ fn service_scaffold(options: &ServiceCreateOptions) -> Result<ServiceScaffold> {
         package_name: service_name.clone(),
         pnpm_workspace_overrides: dependencies.pnpm_workspace_overrides,
         publish_note: dependencies.publish_note,
-        remote_module_kit_dependency: dependencies.remote_module_kit_dependency,
         repo_root_display: current_dir.to_string_lossy().to_string(),
         service_cwd: json_string(&display_relative(&current_dir, &target_dir)),
         service_kit_dependency: dependencies.service_kit_dependency,
@@ -1334,10 +1332,6 @@ fn render_template(template: &str, scaffold: &ServiceScaffold) -> String {
             "{{service_kit_dependency}}",
             &scaffold.service_kit_dependency,
         )
-        .replace(
-            "{{remote_module_kit_dependency}}",
-            &scaffold.remote_module_kit_dependency,
-        )
         .replace("{{service_cwd}}", &scaffold.service_cwd)
         .replace(
             "{{pnpm_workspace_overrides}}",
@@ -1354,7 +1348,6 @@ struct ServiceDependencyPlan {
     lenso_service_dependency: String,
     pnpm_workspace_overrides: String,
     publish_note: Option<String>,
-    remote_module_kit_dependency: String,
     service_kit_dependency: String,
 }
 
@@ -1366,25 +1359,19 @@ fn service_dependencies() -> ServiceDependencyPlan {
             publish_note: Some(
                 "@lenso/service-kit and lenso-service must be published, or replace dependencies with local paths.".to_owned(),
             ),
-            remote_module_kit_dependency: json_string("0.1.3"),
-            service_kit_dependency: json_string("0.1.0"),
+            service_kit_dependency: json_string("0.1.1"),
         };
     };
 
-    let service_kit = framework_root.join("lenso-runtime-console/packages/service-kit");
-    let remote_module_kit = framework_root.join("lenso-runtime-console/packages/remote-module-kit");
+    let service_kit = framework_root.join("lenso/sdk/typescript/packages/service-kit");
     let lenso_service = framework_root.join("lenso/crates/lenso-service");
     ServiceDependencyPlan {
         lenso_service_dependency: format!(
             "lenso-service = {{ path = \"{}\" }}",
             toml_string(&lenso_service)
         ),
-        pnpm_workspace_overrides: format!(
-            "overrides:\n  \"@lenso/remote-module-kit\": {}\n",
-            json_string(&format!("file:{}", remote_module_kit.display()))
-        ),
+        pnpm_workspace_overrides: String::new(),
         publish_note: None,
-        remote_module_kit_dependency: json_string(&format!("file:{}", remote_module_kit.display())),
         service_kit_dependency: json_string(&format!("file:{}", service_kit.display())),
     }
 }
@@ -1393,7 +1380,7 @@ fn find_framework_root() -> Option<PathBuf> {
     let mut current = std::env::current_dir().ok()?;
     loop {
         if current
-            .join("lenso-runtime-console/packages/service-kit")
+            .join("lenso/sdk/typescript/packages/service-kit")
             .is_dir()
             && current.join("lenso/crates/lenso-service").is_dir()
         {
@@ -1534,10 +1521,9 @@ mod tests {
             package_name: "support-suite-provider".to_owned(),
             pnpm_workspace_overrides: String::new(),
             publish_note: None,
-            remote_module_kit_dependency: json_string("0.1.3"),
             repo_root_display: "/tmp/host".to_owned(),
             service_cwd: json_string("../services/support-suite-provider"),
-            service_kit_dependency: json_string("0.1.0"),
+            service_kit_dependency: json_string("0.1.1"),
             service_label: "Support Suite".to_owned(),
             service_name: "support-suite-provider".to_owned(),
             service_port: 4110,

@@ -32,8 +32,8 @@ const ACTIVATION_RECOVERY_EVIDENCE_SCHEMA: &str = "lenso.console-activation-reco
 const CONSOLE_AUTHORITY_SCHEMA: &str = "lenso.console-authority.v1";
 const CONSOLE_SERVICE_ID: &str = "lenso-console";
 const DOCTOR_SCHEMA: &str = "lenso.console-doctor.v1";
-const TRUSTED_RELEASE_REPOSITORY: &str = "LioRael/lenso-runtime-console";
-const TRUSTED_SIGNER_WORKFLOW: &str = "LioRael/lenso-runtime-console/.github/workflows/publish.yml";
+const TRUSTED_RELEASE_REPOSITORY: &str = "LioRael/lenso-console";
+const TRUSTED_SIGNER_WORKFLOW: &str = "LioRael/lenso-console/.github/workflows/publish.yml";
 const TRUSTED_IMAGE_REPOSITORY: &str = "ghcr.io/liorael/lenso-console";
 const STATE_FILE: &str = "installation-state.json";
 const ATTEMPT_FILE: &str = "installation-attempt.json";
@@ -4758,10 +4758,10 @@ mod tests {
 
     #[test]
     fn release_authority_pins_repository_and_signer_workflow() {
-        assert_eq!(TRUSTED_RELEASE_REPOSITORY, "LioRael/lenso-runtime-console");
+        assert_eq!(TRUSTED_RELEASE_REPOSITORY, "LioRael/lenso-console");
         assert_eq!(
             TRUSTED_SIGNER_WORKFLOW,
-            "LioRael/lenso-runtime-console/.github/workflows/publish.yml"
+            "LioRael/lenso-console/.github/workflows/publish.yml"
         );
         assert_eq!(TRUSTED_IMAGE_REPOSITORY, "ghcr.io/liorael/lenso-console");
     }
