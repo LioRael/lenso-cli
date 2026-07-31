@@ -1,0 +1,70 @@
+{
+  "schema": "lenso.release-plan.v1",
+  "repository": "LioRael/lenso-cli",
+  "sourceCommit": "e6f733dca809f6d2c57a21666587a7a0bad8d6fd",
+  "tegamiVersion": "1.2.5",
+  "publisher": {
+    "workflow": ".github/workflows/publish.yml",
+    "workflowSha256": "sha256:f5e9896e99d32bbeb122b1367040ed1a372ccbe73d8650d5b2023d53d0ee5cf9",
+    "sharedRevision": "dfeeb3b910770955a2f8dfdfd99d33077c43e0d2",
+    "sharedBundleSha256": "sha256:d169fc0c21c563d9ef850b7071f5b968df45224c3b98503ab8b33230d245599e",
+    "runner": "ubuntu-24.04",
+    "node": "24.18.0",
+    "npm": "11.7.0",
+    "rust": "1.94.0"
+  },
+  "generatedFiles": [
+    {
+      "path": ".tegami/publish-lock.yaml",
+      "sha256": "sha256:fc071465bbec27745c4cc3918d283d3d4048c9a2e353f50de8a80df02cb8455d"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "sha256": "sha256:cb6e0da38a7007084d3a95e68fcadd1fcecb35913dd763c0e99c378132971c29"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "sha256:72618faaadbbe96e51ac2132decb599214429b5a103b816d557ca281d093c955"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "sha256:3f5d71edf98fe759dfec3a2a81a9472121012f0c8b93c9957f20bcae7f280eb0"
+    },
+    {
+      "path": "package.json",
+      "sha256": "sha256:1a9d4901fc71319b71c3c673f153a0094f24f42c6880ceb313ea7d3936d3dc77"
+    },
+    {
+      "path": "pnpm-lock.yaml",
+      "sha256": "sha256:30779af9c232ec5dfa5bedc1bf0f6cb63e5d5bb9cccaf9cede46ab5474024656"
+    }
+  ],
+  "packages": [
+    {
+      "id": "cargo:lenso-cli",
+      "previousVersion": "0.2.13",
+      "nextVersion": "0.2.14",
+      "bump": "patch",
+      "releaseGroup": "distribution",
+      "userFacing": true,
+      "dependencies": [
+        {
+          "id": "cargo:lenso-service",
+          "requirement": "^0.1.4",
+          "resolvedVersion": "0.1.4",
+          "source": "registry"
+        }
+      ]
+    },
+    {
+      "id": "npm:@lenso/cli",
+      "previousVersion": "0.2.13",
+      "nextVersion": "0.2.14",
+      "bump": "patch",
+      "releaseGroup": "distribution",
+      "userFacing": true,
+      "dependencies": []
+    }
+  ],
+  "planId": "sha256:ae3dcc15358b7d1b8881962cb7f93444c138149e21a845bba031c09afa171b44"
+}
