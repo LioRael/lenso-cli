@@ -260,6 +260,8 @@ jobs:
           pattern: lenso-cli-*
           path: recovery-candidate/vendor
           merge-multiple: true
+      - name: Restore executable modes for downloaded CLI artifacts
+        run: chmod +x recovery-candidate/vendor/darwin-arm64/lenso recovery-candidate/vendor/darwin-x64/lenso recovery-candidate/vendor/linux-x64/lenso
       - name: Rebuild and verify the partial package set
         env:
           INPUT_EVENT_ID: ${{ inputs.event_id }}
