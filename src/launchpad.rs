@@ -1022,7 +1022,7 @@ fn launchpad_state_from_blueprint(project_name: &str, blueprint: &Blueprint) -> 
             },
             LaunchpadChecklistItem {
                 id: "console-open".to_owned(),
-                label: "Open Runtime Console Launchpad".to_owned(),
+                label: "Open Console Launchpad".to_owned(),
                 status: "pending".to_owned(),
                 next_command: Some("open http://127.0.0.1:3000/launchpad".to_owned()),
             },

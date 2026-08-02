@@ -26,28 +26,37 @@ export async function observeOciImage(name, version, options = {}) {
     const headers = {
         accept: "application/vnd.oci.image.manifest.v1+json",
     };
-    if (options.token)
-        headers.authorization = `Bearer ${options.token}`;
+    if (options.credential) {
+        headers.authorization = "bearer" in options.credential
+            ? `Bearer ${options.credential.bearer}`
+            : `Basic ${Buffer.from(`${options.credential.username}:${options.credential.password}`).toString("base64")}`;
+    }
     const request = options.fetch ?? globalThis.fetch;
     try {
         let manifestResponse;
         try {
             manifestResponse = await request(endpoint, { signal: controller.signal, headers, redirect: "error" });
-            if (manifestResponse.status === 401 && !options.token) {
+            if (manifestResponse.status === 401) {
                 const challenge = manifestResponse.headers.get("www-authenticate") ?? "";
-                const match = /^Bearer\s+realm="([^"]+)",service="([^"]+)",scope="([^"]+)"$/u.exec(challenge);
-                if (!match)
+                if (!challenge.startsWith("Bearer "))
                     return { failure: "http", detail: "OCI registry authentication challenge was invalid" };
-                const realm = new URL(match[1]);
+                const fields = Object.fromEntries([...challenge.slice(7).matchAll(/([a-z]+)="([^"]+)"/gu)].map((match) => [match[1], match[2]]));
+                if (!fields.realm || !fields.service || !fields.scope)
+                    return { failure: "http", detail: "OCI registry authentication challenge was invalid" };
+                const realm = new URL(fields.realm);
                 if (realm.protocol !== "https:" || realm.origin !== registry.origin)
                     return { failure: "schema", detail: "OCI registry authentication realm was not trusted" };
-                realm.searchParams.set("service", match[2]);
-                realm.searchParams.set("scope", match[3]);
-                const tokenResponse = await request(realm, { signal: controller.signal, redirect: "error", headers: { accept: "application/json" } });
+                realm.searchParams.set("service", fields.service);
+                realm.searchParams.set("scope", fields.scope);
+                const tokenHeaders = { accept: "application/json" };
+                if (headers.authorization?.startsWith("Basic "))
+                    tokenHeaders.authorization = headers.authorization;
+                const tokenResponse = await request(realm, { signal: controller.signal, redirect: "error", headers: tokenHeaders });
                 const tokenBody = tokenResponse.ok ? object(await tokenResponse.json()) : undefined;
-                if (typeof tokenBody?.token !== "string")
+                const token = tokenBody?.token ?? tokenBody?.access_token;
+                if (typeof token !== "string")
                     return { failure: "http", detail: `OCI registry token service returned HTTP ${tokenResponse.status}` };
-                headers.authorization = `Bearer ${tokenBody.token}`;
+                headers.authorization = `Bearer ${token}`;
                 manifestResponse = await request(endpoint, { signal: controller.signal, headers, redirect: "error" });
             }
         }
@@ -76,7 +85,17 @@ export async function observeOciImage(name, version, options = {}) {
         const configUrl = new URL(`${registryPrefix}/v2/${repository}/blobs/${config.digest}`, registry.origin);
         let configResponse;
         try {
-            configResponse = await request(configUrl, { signal: controller.signal, headers: headers.authorization ? { authorization: headers.authorization } : {}, redirect: "error" });
+            configResponse = await request(configUrl, { signal: controller.signal, headers: headers.authorization ? { authorization: headers.authorization } : {}, redirect: "manual" });
+            if (configResponse.status === 307) {
+                const location = configResponse.headers.get("location");
+                if (!location)
+                    return { failure: "schema", detail: "OCI registry config redirect omitted its location" };
+                const target = new URL(location, registry);
+                const trustedGhcrBlob = registry.hostname === "ghcr.io" && target.protocol === "https:" && target.hostname === "pkg-containers.githubusercontent.com" && !target.username && !target.password && !target.hash && /^\/ghcrblobs[0-9]+\/blobs\/sha256:[0-9a-f]{64}$/u.test(target.pathname);
+                if (!trustedGhcrBlob)
+                    return { failure: "schema", detail: "OCI registry config redirect was not trusted" };
+                configResponse = await request(target, { signal: controller.signal, redirect: "error" });
+            }
         }
         catch {
             return controller.signal.aborted ? { failure: "timeout", detail: "OCI registry request timed out" } : { failure: "transport", detail: "OCI registry request failed" };
@@ -95,8 +114,11 @@ export async function observeOciImage(name, version, options = {}) {
         }
         const labels = object(object(imageConfig?.config)?.Labels);
         const created = imageConfig?.created;
-        if (labels?.["org.opencontainers.image.version"] !== version || typeof created !== "string" || !isRfc3339(created))
-            return { failure: "schema", detail: "OCI image config did not bind the requested version and creation time" };
+        if (labels?.["org.opencontainers.image.version"] !== version ||
+            (options.sourceCommit !== undefined && labels?.["org.opencontainers.image.revision"] !== options.sourceCommit) ||
+            typeof created !== "string" ||
+            !isRfc3339(created))
+            return { failure: "schema", detail: "OCI image config did not bind the requested release identity and creation time" };
         return { version, digest: manifestDigest, publishedAt: created, canonicalUrl };
     }
     finally {
