@@ -1,3 +1,10 @@
+## lenso-cli@0.2.16
+
+### Fixes
+
+Use the current Console product name in the CLI launchpad instead of the
+retired Runtime Console name.
+
 ## lenso-cli@0.2.15
 
 ### Fixes

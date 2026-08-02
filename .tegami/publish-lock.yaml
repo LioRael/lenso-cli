@@ -1,14 +1,14 @@
 core:changelogs:
-  - content: "---\npackages:\n  lenso-cli:\n    type: patch\n  \"@lenso/cli\":\n    type: patch\n---\n\n### Fixes\n\nPreserve executable modes on the bundled Unix CLI binaries when an npm release\nis rebuilt through the reviewed partial-recovery path.\n"
-    filename: release.md
+  - content: "---\npackages:\n  cargo:lenso-cli:\n    type: patch\n  \"@lenso/cli\":\n    type: patch\n---\n\n### Fixes\n\nUse the current Console product name in the CLI launchpad instead of the\nretired Runtime Console name.\n"
+    filename: console-name.md
     v: 0.0.0
 core:packages:
   - changelogIds:
-      - release.md
+      - console-name.md
     id: npm:@lenso/cli
     updated: true
   - changelogIds:
-      - release.md
+      - console-name.md
     id: cargo:lenso-cli
     updated: true
 npm:packages:

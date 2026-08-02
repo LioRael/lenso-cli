@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { consumePreflightProof, createPlan, createPreflightProof, prepareRecovery, preparePartialRecovery, publishSelected, recoverPartialPublished, recoverPublished, verifyRecoveryAuthorization, } from "./runtime.js";
+import { authorizedRecoveryKind, consumePreflightProof, createPlan, createPreflightProof, prepareAuthorizedRecovery, preparePartialRecovery, publishSelected, recoverPartialPublished, recoverAuthorized, verifyRecoveryAuthorization, } from "./runtime.js";
 function required(name) {
     const value = process.env[name];
     if (!value)
@@ -46,11 +46,14 @@ else if (command === "publish") {
     process.stdout.write(`${JSON.stringify(receipts)}\n`);
 }
 else if (command === "recover-prepare") {
-    await prepareRecovery(environment());
+    await prepareAuthorizedRecovery(environment());
 }
 else if (command === "recover") {
-    const receipts = await recoverPublished(environment());
+    const receipts = await recoverAuthorized(environment());
     process.stdout.write(`${JSON.stringify(receipts)}\n`);
+}
+else if (command === "recover-kind") {
+    process.stdout.write(`${await authorizedRecoveryKind(environment())}\n`);
 }
 else if (command === "recover-partial-prepare") {
     await preparePartialRecovery(environment());
@@ -60,12 +63,12 @@ else if (command === "recover-partial") {
     process.stdout.write(`${JSON.stringify(receipts)}\n`);
 }
 else if (command === "recover-partial-failed-run-id") {
-    const authorization = await verifyRecoveryAuthorization(environment(), "production-partial");
+    const authorization = await verifyRecoveryAuthorization(environment(), "production-publication");
     const runId = /\/actions\/runs\/([1-9][0-9]*)$/u.exec(authorization.failedRunUrl)?.[1];
     if (!runId)
         throw new Error("partial recovery failed run URL is invalid");
     process.stdout.write(`${runId}\n`);
 }
 else {
-    throw new Error("usage: runtime plan|preflight|consume-preflight|publish|recover-prepare|recover|recover-partial-prepare|recover-partial|recover-partial-failed-run-id");
+    throw new Error("usage: runtime plan|preflight|consume-preflight|publish|recover-kind|recover-prepare|recover|recover-partial-prepare|recover-partial|recover-partial-failed-run-id");
 }
