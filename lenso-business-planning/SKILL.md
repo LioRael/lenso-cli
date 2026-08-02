@@ -62,7 +62,7 @@ not install or trust.
 
 When choosing a service, include the operator loop in the first slice:
 run the service, install the manifest, check `lenso service list`, check
-`lenso service doctor <module> --json`, and verify Runtime Console Modules,
+`lenso service doctor <module> --json`, and verify Console Modules,
 Provider Calls, and Runtime Story.
 
 Keep the host thin. Put business-owned behavior in modules unless the work is pure host setup, auth/config anchoring, or deployment wiring.

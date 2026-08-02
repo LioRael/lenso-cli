@@ -55,7 +55,7 @@ For a new or edited module, leave:
 - manifest declarations for routes, data, actions, runtime functions, and console surfaces that actually exist
 - app-owned behavior in the module, not in platform crates
 - one runnable check or smoke path that fails if the module is not wired
-- a short note on what appears in the Runtime Console
+- a short note on what appears in the Console
 
 ## Checks
 
