@@ -16,17 +16,21 @@
     "vendor"
   ],
   "scripts": {
+    "build:shim": "tsc -p tsconfig.json",
     "changeset": "changeset",
     "check:npm-publish": "node scripts/check-npm-publish.mjs",
-    "check:npm-shim": "node scripts/check-npm-shim.mjs",
-    "package:npm": "node scripts/package-npm.mjs",
-    "prepack": "node scripts/package-npm.mjs",
+    "check:shim-generated": "pnpm build:shim && node scripts/check-shim-generated.mjs",
+    "check:npm-shim": "pnpm check:shim-generated && node scripts/check-npm-shim.mjs",
+    "package:npm": "pnpm build:shim && node scripts/package-npm.mjs",
+    "prepack": "pnpm build:shim && node scripts/package-npm.mjs",
     "prepublishOnly": "node scripts/check-npm-publish.mjs",
     "release": "npm run check:npm-publish && changeset publish",
     "version": "changeset version"
   },
   "devDependencies": {
-    "@changesets/cli": "2.31.1"
+    "@changesets/cli": "2.31.1",
+    "@types/node": "25.9.4",
+    "typescript": "7.0.2"
   },
   "publishConfig": {
     "access": "public"
