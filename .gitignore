@@ -3,5 +3,4 @@
 /console/extensions
 /vendor
 /node_modules
-/.lenso-release/downloads
 /*.tgz

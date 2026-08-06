@@ -16,19 +16,17 @@
     "vendor"
   ],
   "scripts": {
+    "changeset": "changeset",
     "check:npm-publish": "node scripts/check-npm-publish.mjs",
-    "check:reviewed-publisher": "node scripts/check-reviewed-publisher.mjs",
     "check:npm-shim": "node scripts/check-npm-shim.mjs",
-    "check:release-versions": "node scripts/check-release-versions.mjs",
     "package:npm": "node scripts/package-npm.mjs",
     "prepack": "node scripts/package-npm.mjs",
     "prepublishOnly": "node scripts/check-npm-publish.mjs",
-    "release:intent-check": "node scripts/release-plan.mjs --check-intent",
-    "release:plan": "node scripts/release-plan.mjs",
-    "release:verify": "npm run check:release-versions && node scripts/release-plan.mjs --verify"
+    "release": "npm run check:npm-publish && changeset publish",
+    "version": "changeset version"
   },
   "devDependencies": {
-    "tegami": "1.2.5"
+    "@changesets/cli": "2.31.1"
   },
   "publishConfig": {
     "access": "public"
