@@ -54,7 +54,7 @@ For a new or edited module, leave:
 
 - manifest declarations for routes, data, actions, runtime functions, and console surfaces that actually exist
 - app-owned behavior in the module, not in platform crates
-- one runnable check or smoke path that fails if the module is not wired
+- one runnable verification path that fails if the module is not wired
 - a short note on what appears in the Console
 
 ## Checks
@@ -62,8 +62,8 @@ For a new or edited module, leave:
 When the change affects contracts or manifests, run the repo checks the host expects:
 
 ```sh
-just generated-check
-just arch-check
+cargo run --locked -p lenso-api-contracts --bin generate-contracts
+cargo test --locked -p lenso-api-contracts --test architecture
 ```
 
 ## Keep Out

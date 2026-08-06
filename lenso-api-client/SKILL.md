@@ -51,8 +51,8 @@ When consuming an API, leave:
 ## Checks
 
 ```sh
-just generate
-just generated-check
+cargo run --locked -p lenso-api-contracts --bin generate-contracts
+cargo test --locked -p lenso-api-contracts --test architecture
 ```
 
 ## Keep Out
