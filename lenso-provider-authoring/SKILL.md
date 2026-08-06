@@ -64,7 +64,7 @@ For a service, leave:
 ## Checks
 
 ```sh
-pnpm package-readiness
+pnpm --dir sdk/typescript check
 ```
 
 Use `npm pack --dry-run` before publishing a package change.
