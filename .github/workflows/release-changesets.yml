@@ -12,8 +12,10 @@ on:
       - "src/**"
       - "templates/**"
       - "bin/**"
+      - "tsconfig.json"
       - "scripts/check-npm-publish.mjs"
       - "scripts/check-npm-shim.mjs"
+      - "scripts/check-shim-generated.mjs"
       - "scripts/package-npm.mjs"
       - ".github/workflows/release-changesets.yml"
 

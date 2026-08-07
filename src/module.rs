@@ -6391,7 +6391,7 @@ fn queue_console_ui_artifact(
                 "@lenso/console-bridge": "^0.1.0"
             },
             "devDependencies": {
-                "typescript": "^6.0.0",
+                "typescript": "7.0.2",
                 "vite": "^8.0.0"
             }
         }))?,
