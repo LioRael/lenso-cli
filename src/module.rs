@@ -617,7 +617,7 @@ pub async fn create_module(options: ModuleCreateOptions) -> Result<()> {
             display_relative(&repo_root, &module_dir)
         );
         println!(
-            "- The {} surface uses lenso.console-bridge.v1 and is bound to the Module Release.",
+            "- The {} surface uses a console_ui_esm entry and is bound to the Module Release.",
             console_surface.surface_name
         );
     }
@@ -6195,7 +6195,7 @@ workspace = true
 
 fn module_manifest(module_id: &str, console_surface: Option<&ConsoleUiScaffold>) -> Result<String> {
     let imports = if console_surface.is_some() {
-        "use platform_module::{CONSOLE_BRIDGE_PROTOCOL, ConsoleNavigation, ConsoleSurface, ConsoleSurfacePresentation, ConsoleWorkspaceRef, LinkedBinding, Module, ModuleManifest};"
+        "use platform_module::{ConsoleNavigation, ConsoleSurface, ConsoleSurfacePresentation, ConsoleWorkspaceRef, LinkedBinding, Module, ModuleManifest};"
     } else {
         "use platform_module::{LinkedBinding, Module, ModuleManifest};"
     };
@@ -6207,9 +6207,8 @@ fn module_manifest(module_id: &str, console_surface: Option<&ConsoleUiScaffold>)
             name: {}.to_owned(),
             label: {}.to_owned(),
             route: {}.to_owned(),
-            presentation: ConsoleSurfacePresentation::Isolated {{
+            presentation: ConsoleSurfacePresentation::Esm {{
                 entry: {}.to_owned(),
-                bridge_protocol: CONSOLE_BRIDGE_PROTOCOL.to_owned(),
             }},
             icon: Some({}.to_owned()),
             required_capabilities: vec![{}.to_owned()],
@@ -6290,7 +6289,7 @@ fn host_module_manifest(
     console_surface: Option<&ConsoleUiScaffold>,
 ) -> Result<String> {
     let console_imports = if console_surface.is_some() {
-        "use lenso::{CONSOLE_BRIDGE_PROTOCOL, ConsoleNavigation, ConsoleSurface, ConsoleSurfacePresentation, ConsoleWorkspaceRef};\n"
+        "use lenso::{ConsoleNavigation, ConsoleSurface, ConsoleSurfacePresentation, ConsoleWorkspaceRef};\n"
     } else {
         ""
     };
@@ -6302,9 +6301,8 @@ fn host_module_manifest(
             name: {}.to_owned(),
             label: {}.to_owned(),
             route: {}.to_owned(),
-            presentation: ConsoleSurfacePresentation::Isolated {{
+            presentation: ConsoleSurfacePresentation::Esm {{
                 entry: {}.to_owned(),
-                bridge_protocol: CONSOLE_BRIDGE_PROTOCOL.to_owned(),
             }},
             icon: Some({}.to_owned()),
             required_capabilities: vec![{}.to_owned()],
@@ -6383,14 +6381,17 @@ fn queue_console_ui_artifact(
             "private": true,
             "type": "module",
             "scripts": {
-                "build": "vite build",
+                "build": "vite build --config vite.config.ts",
                 "dev": "vite --host 127.0.0.1",
                 "typecheck": "tsc --noEmit"
             },
             "dependencies": {
-                "@lenso/console-bridge": "^0.1.0"
+                "@lenso/console-module-api": "^0.1.0",
+                "@lenso/console-ui": "^0.1.0",
+                "react": "^19.0.0"
             },
             "devDependencies": {
+                "@types/react": "^19.0.0",
                 "typescript": "7.0.2",
                 "vite": "^8.0.0"
             }
@@ -6398,59 +6399,108 @@ fn queue_console_ui_artifact(
     );
     queue_write(
         pending_writes,
-        ui_dir.join("index.html"),
-        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Module Console UI</title></head><body><main id=\"app\"></main><script type=\"module\" src=\"/src/main.ts\"></script></body></html>\n".to_owned(),
+        ui_dir.join("vite.config.ts"),
+        "import { defineConfig } from \"vite\";\n\nexport default defineConfig({\n  build: {\n    lib: { entry: \"src/main.tsx\", formats: [\"es\"], fileName: () => \"main.js\" },\n    rollupOptions: { external: [\"react\"] },\n  },\n});\n".to_owned(),
     );
     queue_write(
         pending_writes,
-        ui_dir.join("src/main.ts"),
+        ui_dir.join("src/main.tsx"),
         format!(
-            r##"import {{ connectConsoleBridge }} from "@lenso/console-bridge";
+            r##"import type {{ ConsoleModuleManifest }} from "@lenso/console-module-api";
+import {{ defineConsoleManifest }} from "@lenso/console-module-api";
+import {{ ConsolePage, defineConsoleUiModule }} from "@lenso/console-ui";
+import {{ type FC }} from "react";
+import "./style.css";
 
-const bridge = await connectConsoleBridge({{
+const manifest: ConsoleModuleManifest = defineConsoleManifest({{
+  protocol: "lenso.console-module.v1",
   moduleId: {},
-  surface: {},
+  hostApi: "^1.0.0",
+  consoleUi: "^1.0.0",
+  surfaces: [{{
+    id: {},
+    path: {},
+    label: {},
+    area: {},
+    requiredCapabilities: [{}],
+    icon: {},
+  }}],
 }});
 
-const app = document.querySelector<HTMLElement>("#app");
-if (!app) throw new Error("Console UI root is missing");
+const MainSurface: FC = () => <ConsolePage>{}</ConsolePage>;
 
-const heading = document.createElement("h1");
-heading.textContent = {};
-const status = document.createElement("p");
-status.textContent = `Connected through ${{bridge.protocol}}.`;
-app.append(heading, status);
+export default defineConsoleUiModule({{
+  manifest,
+  surfaces: {{ {}: MainSurface }},
+}});
 "##,
             serde_json::to_string(&context.module_id)?,
             serde_json::to_string(&context.surface_name)?,
+            serde_json::to_string(&context.route)?,
             serde_json::to_string(&context.label)?,
+            serde_json::to_string(&console_surface_area(&context.route))?,
+            serde_json::to_string(&context.capability)?,
+            serde_json::to_string(&context.icon)?,
+            serde_json::to_string(&context.label)?,
+            serde_json::to_string(&context.surface_name)?,
         ),
+    );
+    queue_write(
+        pending_writes,
+        ui_dir.join("src/style.css"),
+        "/* Module-owned Console styles. Import shared Console tokens here. */\n".to_owned(),
     );
     queue_write(
         pending_writes,
         ui_dir.join("tsconfig.json"),
         json_string_pretty(&json!({
             "compilerOptions": {
+                "jsx": "react-jsx",
                 "lib": ["ES2022", "DOM"],
                 "module": "ESNext",
                 "moduleResolution": "Bundler",
                 "strict": true,
                 "target": "ES2022"
             },
-            "include": ["src"]
+            "include": ["src", "vite.config.ts"]
         }))?,
     );
     queue_write(
         pending_writes,
         ui_dir.join("lenso.console-ui.json"),
         json_string_pretty(&json!({
-            "schema": "lenso.console-ui-artifact.v1",
-            "format": "isolated_web",
-            "bridgeProtocol": "lenso.console-bridge.v1",
+            "schema": "lenso.console-ui-esm.v1",
+            "format": "console_ui_esm",
+            "protocolMajor": 1,
+            "moduleId": context.module_id,
+            "hostApi": "^1.0.0",
+            "consoleUi": "^1.0.0",
+            "entry": "dist/main.js",
             "entries": [{
                 "name": context.surface_name,
-                "path": "dist/index.html"
+                "path": "dist/main.js"
+            }, {
+                "name": format!("{}-style", context.surface_name),
+                "path": "dist/style.css"
             }],
+            "styleAssets": [{
+                "path": "dist/style.css",
+                "order": 0
+            }],
+            "manifest": {
+                "protocol": "lenso.console-module.v1",
+                "moduleId": context.module_id,
+                "hostApi": "^1.0.0",
+                "consoleUi": "^1.0.0",
+                "surfaces": [{
+                    "id": context.surface_name,
+                    "path": context.route,
+                    "label": context.label,
+                    "area": console_surface_area(&context.route),
+                    "requiredCapabilities": [context.capability],
+                    "icon": context.icon
+                }]
+            },
             "requestedPermissions": [{
                 "permissionId": context.capability,
                 "operations": ["read"],
@@ -6459,6 +6509,15 @@ app.append(heading, status);
         }))?,
     );
     Ok(())
+}
+
+fn console_surface_area(route: &str) -> &'static str {
+    match route.split('/').nth(1) {
+        Some("operations") => "operations",
+        Some("data") => "data",
+        Some("configuration") => "configuration",
+        _ => "runtime",
+    }
 }
 
 fn update_host_modules_mod(
@@ -6757,6 +6816,26 @@ fn validate_module_release_descriptor(manifest: Value) -> Result<Value> {
     }
     validate_service_string_array(manifest.get("capabilities"), "$.capabilities")?;
     validate_service_string_array(manifest.get("dependencies"), "$.dependencies")?;
+    if manifest.get("bridgeProtocol").is_some() || manifest.get("bridge_protocol").is_some() {
+        bail!("Module release cannot declare the retired Console Bridge contract");
+    }
+    if let Some(console_surfaces) = manifest.get("console").and_then(Value::as_array) {
+        if console_surfaces.iter().any(|surface| {
+            surface
+                .get("presentation")
+                .and_then(|presentation| presentation.get("kind"))
+                .and_then(Value::as_str)
+                == Some("isolated")
+        }) {
+            bail!("Module release cannot declare retired isolated Console surfaces");
+        }
+    }
+    if let Some(console_artifact) = manifest
+        .get("consoleUiArtifact")
+        .or_else(|| manifest.get("console_ui_artifact"))
+    {
+        validate_console_ui_artifact(console_artifact, name)?;
+    }
     if source == "service" {
         module_release_provider(&manifest)?;
     } else if let Some(provider) = manifest.get("provider")
@@ -6765,6 +6844,105 @@ fn validate_module_release_descriptor(manifest: Value) -> Result<Value> {
         bail!("Module release provider must be an object");
     }
     Ok(manifest)
+}
+
+fn validate_console_ui_artifact(artifact: &Value, module_name: &str) -> Result<()> {
+    if !artifact.is_object() {
+        bail!("Console UI artifact must be an object");
+    }
+    if artifact.get("format").and_then(Value::as_str) != Some("console_ui_esm") {
+        bail!("Console UI artifact format must be console_ui_esm");
+    }
+    if artifact
+        .get("protocolMajor")
+        .or_else(|| artifact.get("protocol_major"))
+        .and_then(Value::as_u64)
+        != Some(1)
+    {
+        bail!("Console UI artifact protocol major must be 1");
+    }
+    if artifact.get("bridgeProtocol").is_some() || artifact.get("bridge_protocol").is_some() {
+        bail!("Console UI artifact cannot declare the retired Console Bridge contract");
+    }
+    let entry = artifact
+        .get("entry")
+        .and_then(Value::as_str)
+        .filter(|entry| !entry.trim().is_empty())
+        .ok_or_else(|| anyhow!("Console UI artifact entry is required"))?;
+    let entries = artifact
+        .get("entries")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("Console UI artifact entries must be an array"))?;
+    if entries.is_empty() {
+        bail!("Console UI artifact entries must not be empty");
+    }
+    let mut entry_paths = BTreeSet::new();
+    for item in entries {
+        let path = item
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("Console UI artifact entry path is required"))?;
+        if !valid_console_artifact_path(path) || !entry_paths.insert(path) {
+            bail!("Console UI artifact entries require unique relative paths without traversal");
+        }
+    }
+    if !entry_paths.contains(entry) {
+        bail!("Console UI artifact entry must be declared by entries");
+    }
+    let style_assets = artifact
+        .get("styleAssets")
+        .or_else(|| artifact.get("style_assets"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("Console UI artifact styleAssets must be an array"))?;
+    let mut style_paths = BTreeSet::new();
+    for item in style_assets {
+        let path = item
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("Console UI style asset path is required"))?;
+        if !valid_console_artifact_path(path) || !style_paths.insert(path) {
+            bail!("Console UI style assets require unique relative paths without traversal");
+        }
+        if !entry_paths.contains(path) {
+            bail!("Console UI style assets must be declared by entries");
+        }
+    }
+    let manifest = artifact
+        .get("manifest")
+        .ok_or_else(|| anyhow!("Console UI artifact manifest is required"))?;
+    if manifest.get("protocol").and_then(Value::as_str) != Some("lenso.console-module.v1") {
+        bail!("Console Module manifest protocol must be lenso.console-module.v1");
+    }
+    let artifact_module_id = manifest
+        .get("moduleId")
+        .or_else(|| manifest.get("module_id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("Console Module manifest moduleId is required"))?;
+    if artifact_module_id != module_name {
+        bail!("Console Module manifest moduleId must match the Module Release");
+    }
+    for field in ["hostApi", "consoleUi"] {
+        if manifest.get(field).and_then(Value::as_str).is_none() {
+            bail!("Console Module manifest {field} compatibility range is required");
+        }
+    }
+    if manifest
+        .get("surfaces")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty)
+    {
+        bail!("Console Module manifest surfaces must not be empty");
+    }
+    Ok(())
+}
+
+fn valid_console_artifact_path(path: &str) -> bool {
+    !path.trim().is_empty()
+        && !path.starts_with('/')
+        && !path.contains('\\')
+        && !path
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
 }
 
 fn module_release_source(manifest: &Value) -> Result<&str> {
@@ -9600,6 +9778,74 @@ fn write_json(path: &Path, value: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_console_scaffold_uses_the_framework_esm_contract() {
+        let context = ConsoleUiScaffold {
+            capability: "billing.read".to_owned(),
+            icon: "boxes".to_owned(),
+            label: "Billing".to_owned(),
+            module_id: "acme/billing".to_owned(),
+            route: "/data/billing".to_owned(),
+            surface_name: "billing".to_owned(),
+        };
+        let manifest = module_manifest(&context.module_id, Some(&context)).unwrap();
+        assert!(manifest.contains("ConsoleSurfacePresentation::Esm"));
+        assert!(!manifest.contains("Console Bridge"));
+        assert!(!manifest.contains("CONSOLE_BRIDGE"));
+
+        let mut pending = PendingWrites::new();
+        let root = PathBuf::from("modules/acme-billing");
+        queue_console_ui_artifact(&mut pending, &root, &context).unwrap();
+        let descriptor = pending
+            .get(&root.join("console-ui/lenso.console-ui.json"))
+            .expect("Console ESM descriptor should be scaffolded");
+        let descriptor: Value = serde_json::from_str(descriptor).unwrap();
+        assert_eq!(descriptor["format"], "console_ui_esm");
+        assert_eq!(descriptor["protocolMajor"], 1);
+        assert_eq!(descriptor["entry"], "dist/main.js");
+        assert_eq!(descriptor["styleAssets"][0]["path"], "dist/style.css");
+        assert_eq!(descriptor["manifest"]["surfaces"][0]["area"], "data");
+        assert_eq!(
+            descriptor["manifest"]["protocol"],
+            "lenso.console-module.v1"
+        );
+        assert!(descriptor.get("bridgeProtocol").is_none());
+    }
+
+    #[test]
+    fn module_release_validation_rejects_retired_console_bridge_artifacts() {
+        let retired = json!({
+            "protocol": "lenso.module-release.v1",
+            "name": "billing",
+            "version": "0.1.0",
+            "source": "linked",
+            "capabilities": [],
+            "dependencies": [],
+            "consoleUiArtifact": {
+                "format": "isolated_web",
+                "protocolMajor": 1,
+                "entry": "dist/index.html",
+                "entries": [{"name": "billing", "path": "dist/index.html"}],
+                "styleAssets": [],
+                "bridgeProtocol": "lenso.console-bridge.v1",
+                "manifest": {
+                    "protocol": "lenso.console-module.v1",
+                    "moduleId": "billing",
+                    "hostApi": "^1.0.0",
+                    "consoleUi": "^1.0.0",
+                    "surfaces": [{
+                        "id": "billing",
+                        "path": "/billing",
+                        "label": "Billing",
+                        "area": "runtime"
+                    }]
+                }
+            }
+        });
+        let error = validate_module_release_descriptor(retired).unwrap_err();
+        assert!(error.to_string().contains("console_ui_esm"));
+    }
 
     #[test]
     fn starter_host_module_scaffold_uses_internal_module_layout() {
