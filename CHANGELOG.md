@@ -1,5 +1,11 @@
 ## lenso-cli@0.2.16
 
+## 0.2.17
+
+### Patch Changes
+
+- 8425caa: Publish the TypeScript-compiled npm CLI shim and its current Console product naming.
+
 ### Fixes
 
 Use the current Console product name in the CLI launchpad instead of the
@@ -116,4 +122,3 @@ after replacing the stale publisher contract.
 
 Add the M6 GA support manifest, environment verification, migration, rollback,
 retirement, recovery, and coordination-outage command surfaces.
-
