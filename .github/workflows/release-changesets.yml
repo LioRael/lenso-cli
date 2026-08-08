@@ -64,6 +64,13 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v6
         with:
           node-version: 24.18.0
+      - name: Set up pnpm
+        uses: pnpm/action-setup@f2b2b233b538f500472c7274c7012f57857d8ce0 # v4
+        with:
+          version: 11.7.0
+          run_install: false
+      - name: Install npm workspace dependencies
+        run: pnpm install --frozen-lockfile
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable
         with:
