@@ -7,11 +7,12 @@ import { fileURLToPath } from "node:url";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const tempDir = mkdtempSync(path.join(os.tmpdir(), "lenso-cli-shim-"));
+const typescriptCli = path.join(root, "node_modules", "typescript", "bin", "tsc");
 
 try {
   const compile = spawnSync(
-    "pnpm",
-    ["exec", "tsc", "-p", "tsconfig.json", "--outDir", tempDir],
+    process.execPath,
+    [typescriptCli, "-p", "tsconfig.json", "--outDir", tempDir],
     { cwd: root, stdio: "inherit" },
   );
   if (compile.status !== 0) {
