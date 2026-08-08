@@ -16,7 +16,7 @@
     "vendor"
   ],
   "scripts": {
-    "build:shim": "tsc -p tsconfig.json",
+    "build:shim": "node node_modules/typescript/bin/tsc -p tsconfig.json",
     "changeset": "changeset",
     "check:npm-publish": "node scripts/check-npm-publish.mjs",
     "check:shim-generated": "pnpm build:shim && node scripts/check-shim-generated.mjs",
