@@ -1,72 +1,50 @@
 ---
 name: lenso-module-authoring
-description: Use when implementing or editing a known Rust Lenso module after the business/module boundary is already chosen, including manifests, HTTP routes, runtime functions, events, lifecycle declarations, and console metadata. For product prompts from scratch, use `lenso-business-planning` first.
+description: Create, implement, or change a linked Rust Lenso Module whose business boundary is already known, including its ModuleManifest, routes, data surfaces, actions, runtime functions, Events, lifecycle work, dependencies, and Console declaration. Use business planning first when ownership is still unclear.
 ---
 
 # Lenso Module Authoring
 
-## Overview
+Implement one vertical business capability through the public `lenso` facade
+and the owning host's supported seams. Keep declaration data serializable and
+behavior behind narrow host bindings.
 
-Use the public `lenso` crate for first-party Rust module authoring.
-Keep declarations serializable and keep host internals out of the module API.
+## Workflow
 
-## Start Here
+1. **Resolve the owner and environment.** Find the Module crate, host
+   composition root, generated-state boundary, repository instructions, and
+   current CLI and Cargo package surfaces. Finish when the exact Module and
+   verification owner are known.
+2. **Confirm the boundary.** Read [Module boundary](references/module-boundary.md).
+   List authoritative data, lifecycle, permissions, dependencies, and the first
+   useful workflow. Finish when the change does not require another Module's
+   private code or tables.
+3. **Scaffold from the public surface.** Prefer the installed CLI's current
+   Module scaffold for a new capability. In an existing app, inspect the
+   generated agent handoff and preserve generated versus user-owned files.
+4. **Declare only real surfaces.** Follow
+   [manifest and surfaces](references/manifest-and-surfaces.md). Add routes,
+   schema-admin data, actions, runtime functions, Events, lifecycle work,
+   configuration, dependencies, and Console metadata only when corresponding
+   behavior exists. Finish when manifest lint has no invented or empty surface.
+5. **Implement vertical behavior.** Follow
+   [behavior and collaboration](references/behavior-and-collaboration.md).
+   Keep input validation, storage, business rules, and emitted evidence inside
+   the owning capability. Register cross-cutting wiring only in the host's
+   composition root.
+6. **Delegate distinct Console UI work.** When the change needs a new or
+   substantially revised operator experience, use
+   `lenso-console-surface-authoring`. The Module remains the source for
+   identity, path, capability, and release-bound presentation metadata.
+7. **Regenerate owned artifacts.** When public handlers, schemas, Events, or
+   manifests change, run the owning repository's current generator before its
+   freshness and architecture checks. Never hand-edit generated output.
+8. **Verify the capability.** Follow [verification](references/verification.md).
+   Finish when one focused path fails without the Module wiring, all changed
+   declarations are exercised, and expected Console evidence is named.
 
-```sh
-cargo add lenso@0.3.16
-```
+## Report
 
-When working inside a composed app, read the app handoff first:
-
-```sh
-lenso agent task --from-app-plan --for-module <module> "add the requested business behavior"
-```
-
-When the module belongs to a capability pack, narrow the handoff to that pack:
-
-```sh
-lenso agent task --for-capability support-sla "add enterprise SLA escalation"
-```
-
-Use `ModuleManifest` for declarations:
-
-- module capabilities
-- admin surfaces
-- HTTP routes
-- runtime functions
-- event handlers
-- lifecycle declarations
-- console surfaces
-
-## Guardrails
-
-- Keep module behavior behind the host boundary.
-- Keep the module vertical.
-- Do not import another module's internals.
-- Treat modules as installable business capabilities; services are out-of-process providers.
-- Treat capability packs as composition metadata around modules and services, not as a replacement for module install.
-- Use the committed OpenAPI and contract artifacts for API-facing work.
-- Prefer `lenso module create <name>` before hand-building a module shape.
-
-## Agent Output
-
-For a new or edited module, leave:
-
-- manifest declarations for routes, data, actions, runtime functions, and console surfaces that actually exist
-- app-owned behavior in the module, not in platform crates
-- one runnable verification path that fails if the module is not wired
-- a short note on what appears in the Console
-
-## Checks
-
-When the change affects contracts or manifests, run the repo checks the host expects:
-
-```sh
-cargo run --locked -p lenso-api-contracts --bin generate-contracts
-cargo test --locked -p lenso-api-contracts --test architecture
-```
-
-## Keep Out
-
-- Do not add a generic CRUD framework before the module needs it.
-- Do not promote app-specific data access into the public host facade.
+Return the Module owner, first useful workflow, declarations added or changed,
+collaboration seams, generated artifacts, focused checks, Console evidence,
+and delivery state.

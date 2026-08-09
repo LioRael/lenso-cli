@@ -1,0 +1,4 @@
+interface:
+  display_name: "Lenso App Composition"
+  short_description: "Compose and verify a generated Lenso application."
+  default_prompt: "Use $lenso-app-composition to compose or evolve this Lenso app through a reviewed plan and App Proof."

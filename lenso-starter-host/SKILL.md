@@ -1,85 +1,37 @@
 ---
 name: lenso-starter-host
-description: Use when creating or running a blank Lenso host app from the starter template, especially when wiring API, worker, migrations, local Postgres, or the first linked module.
+description: Create, run, or repair a thin Lenso host application, including its generated API, Worker, Migration, Postgres, Module wiring, local serve loop, and Console Service connection. Use for host-shell work after product capabilities have been separated from host responsibilities.
 ---
 
-# Lenso Host Starter
+# Lenso Starter Host
 
-## Overview
+Build the smallest runnable composition root around owned Modules and Services.
+Keep business behavior out of the host shell.
 
-Use the starter host when you want a runnable Lenso backend from a blank Rust project.
-It is the public pressure test for host setup.
+## Workflow
 
-## Start Here
+1. **Resolve the host.** Determine whether this is a new scaffold, a generated
+   Launchpad app, or an existing custom host. Inspect the current `lenso host
+   --help` and `lenso serve --help`. Finish when the owning repository and
+   generated versus user-owned files are known.
+2. **Confirm the boundary.** Read [host boundary](references/host-boundary.md).
+   List the API, Worker, Migration, database, Module registrations, Service
+   sources, shared policy anchors, and configuration the host must compose.
+   Finish when every business behavior has a Module or Service owner.
+3. **Scaffold or repair narrowly.** Prefer the current CLI scaffold and public
+   `lenso` host facade. Preserve existing app-owned files and make the smallest
+   wiring change that produces the requested runtime shape.
+4. **Bring up local dependencies.** Use the generated environment example and
+   repository-owned commands. Start migration before API and Worker when the
+   generated project requires it. Finish when startup output identifies the
+   actual database, ports, loaded Modules, and declared Services.
+5. **Prove the host.** Follow [verification](references/verification.md).
+   Finish when a focused check proves the binaries compile, one real host path
+   crosses the composition boundary, and the configured Console Service can
+   observe the intended capability.
 
-Scaffold with `lenso host init <dir>`, then from the generated project:
+## Report
 
-```sh
-cp .env.example .env
-lenso serve
-```
-
-For a generated business app, prefer the App Composer path:
-
-```sh
-lenso app compose ./acme-support --blueprint support-desk --addon support-sla --apply
-lenso app next
-lenso app explain
-```
-
-For a generated app with a reusable capability pack:
-
-```sh
-lenso capability init support-sla --dir ./capabilities/support-sla --lang ts --for-blueprint support-desk
-lenso capability library add ./capabilities/support-sla
-lenso capability fit support-sla --repo-root .
-lenso app compose ./acme-support --blueprint support-desk --pack support-sla --apply
-```
-
-Use separate processes only when debugging service boundaries:
-
-```sh
-docker compose up -d postgres
-cargo run --bin migrate
-cargo run --bin api
-cargo run --bin worker
-```
-
-## What It Covers
-
-- API entrypoint
-- worker entrypoint
-- migration entrypoint
-- local Postgres
-- linked module wiring
-- service-provided module proxying
-- capability pack composition state
-
-## Guardrails
-
-- Use `lenso = { features = ["host"] }` as the host facade.
-- Keep app-owned data in the starter, not in the auth anchor.
-- Keep the starter thin and explicit.
-- Keep generated hosts runnable without requiring the framework monorepo.
-
-## Checks
-
-```sh
-cargo check --bins
-```
-
-## Agent Output
-
-When creating or fixing a starter host, leave:
-
-- the scaffolded project path
-- the command used to start it
-- the `lenso app next` or `lenso app explain` result when the host is a composed app
-- the `lenso capability fit <pack>` result when the host was composed with a capability pack
-- the URL for `/console` when the API is running
-- one focused check result
-
-## Keep Out
-
-- Do not add product-specific CRUD helpers to `lenso::host`.
-- Do not add service orchestration beyond the starter's local process shape.
+Return the host path, files changed, startup command, Module and Service wiring,
+focused verification, Console URL or reason it is unavailable, and any work
+that belongs in a downstream authoring skill.
