@@ -216,8 +216,8 @@ running until Ctrl-C. New hosts run them in one local process; pass
 lenso module create billing
 ```
 
-Add `--with-console-ui` when the Module Release should also contain its isolated
-Console UI artifact:
+Add `--with-console-ui` when the Module Release should also contain its verified
+same-realm ESM Console UI artifact:
 
 ```sh
 lenso module create billing --with-console-ui
