@@ -13,6 +13,7 @@ mod operator;
 mod service;
 mod system;
 mod system_sandbox;
+mod workload_control_contract;
 
 use clap::{Args, Parser, Subcommand};
 

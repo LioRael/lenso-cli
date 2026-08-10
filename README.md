@@ -280,8 +280,9 @@ stop only the adapter-owned workloads. This path does not create a second App
 lock or copy process commands into `lenso.app.json`.
 
 The adapter state under `.lenso/local-control-adapter/<appId>/state.json`
-advertises its `adapterId`, loopback `endpoint`, `workloadControlProtocol`,
-`workloadControlSchemaDigest`, and exact `capabilities`. Without a server-side
+advertises its `adapterId`, exact `adapterWorkload`, loopback `endpoint`,
+`workloadControlProtocol`, `workloadControlSchemaDigest`, and exact
+`capabilities`. Without a server-side
 `LENSO_WORKLOAD_CONTROL_TOKEN` override, startup creates an owner-only local
 credential file and records only its `credentialFile` reference; the bearer
 token is never serialized into adapter state or HTTP responses.
@@ -289,6 +290,13 @@ token is never serialized into adapter state or HTTP responses.
 The Local Control Adapter advertises and accepts only `suspend` and `resume`.
 Each accepted mutation returns an asynchronous Operation Record identified by
 `operationId`; callers poll that handle for the Adapter's final result.
+
+Until the Workload Control contract from
+[LioRael/lenso#530](https://github.com/LioRael/lenso/pull/530) is published,
+the CLI keeps a private, frozen mirror of its wire DTOs and constants. The
+advertised schema digest and protocol conformance tests pin that bounded mirror
+to the reviewed contract without adding an unpublished dependency to the CLI
+package.
 
 The System graph remains in `lenso.system.json`. Local-only executable details
 live beside it in `lenso.system-sandbox.json`:

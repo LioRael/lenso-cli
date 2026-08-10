@@ -669,11 +669,32 @@ async fn local_control_adapter_keeps_workloads_after_coordinator_exits() {
         String::from_utf8_lossy(&started.stderr)
     );
     let state: Value = serde_json::from_slice(&started.stdout).unwrap();
+    assert!(state.get("adapterOwnershipToken").is_none());
+    let adapter_state_path = app.join(".lenso/local-control-adapter/support-desk/state.json");
+    let persisted_ready_state: Value =
+        serde_json::from_slice(&fs::read(&adapter_state_path).unwrap()).unwrap();
+    let adapter_ownership_token = persisted_ready_state["adapterOwnershipToken"]
+        .as_str()
+        .unwrap();
+    assert_eq!(adapter_ownership_token.len(), 64);
+    assert!(
+        adapter_ownership_token
+            .bytes()
+            .all(|byte| { byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte) })
+    );
     assert_eq!(state["protocol"], "lenso.local-control-adapter.v1");
     assert_eq!(state["phase"], "ready");
     assert!(state["adapterPid"].as_u64().unwrap() > 0);
     assert_eq!(state["workloadIdentities"].as_array().unwrap().len(), 2);
     assert_eq!(state["adapterId"], "workload-control:support-desk");
+    assert_eq!(
+        state["adapterWorkload"],
+        serde_json::json!({
+            "systemId": "support-desk",
+            "serviceId": "lenso-local-control-adapter",
+            "workloadId": "workload-control:support-desk"
+        })
+    );
     assert_eq!(
         state["workloadControlProtocol"],
         "lenso.workload-control.v1"
@@ -783,9 +804,8 @@ async fn local_control_adapter_keeps_workloads_after_coordinator_exits() {
     );
     let stopped_state: Value = serde_json::from_slice(&stopped.stdout).unwrap();
     assert_eq!(stopped_state["phase"], "stopped");
-    let adapter_state_path = app.join(".lenso/local-control-adapter/support-desk/state.json");
     let adapter_state: Value =
-        serde_json::from_slice(&fs::read(adapter_state_path).unwrap()).unwrap();
+        serde_json::from_slice(&fs::read(&adapter_state_path).unwrap()).unwrap();
     assert_eq!(adapter_state["phase"], "stopped");
     assert!(!app.join(".lenso/system-sandbox/support-desk").exists());
 

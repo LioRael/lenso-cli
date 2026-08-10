@@ -14,6 +14,17 @@ use std::{
 };
 
 use crate::app_composition::{self, ImplementationBinding};
+use crate::workload_control_contract::{
+    OperationRecord, WORKLOAD_CONTROL_OBSERVE_PATH, WORKLOAD_CONTROL_OPERATION_PATH,
+    WORKLOAD_CONTROL_OPERATIONS_PATH, WORKLOAD_CONTROL_PROTOCOL, WorkloadControlAction,
+    WorkloadControlAuthority, WorkloadControlAuthorityDecision, WorkloadControlCapability,
+    WorkloadControlError, WorkloadControlErrorCode, WorkloadControlFailure,
+    WorkloadMutationRequest, WorkloadObservation, WorkloadObservationRequest,
+    WorkloadOperationPhase, WorkloadOperationResult, WorkloadOperationalState, WorkloadProtection,
+    WorkloadReference, workload_control_schema_digest,
+};
+#[cfg(test)]
+use crate::workload_control_contract::{WorkloadControlActor, WorkloadControlActorKind};
 use anyhow::{Context, Result, bail};
 use axum::{
     Json, Router,
@@ -27,17 +38,6 @@ use lenso_service::{
     ContractSemanticKind, SystemV2Graph, WorkloadRole, check_contract_artifact_value,
     system_v2_graph,
 };
-use lenso_workload_control::workload_control::{
-    OperationRecord, WORKLOAD_CONTROL_OBSERVE_PATH, WORKLOAD_CONTROL_OPERATION_PATH,
-    WORKLOAD_CONTROL_OPERATIONS_PATH, WORKLOAD_CONTROL_PROTOCOL, WorkloadControlAction,
-    WorkloadControlAuthority, WorkloadControlAuthorityDecision, WorkloadControlCapability,
-    WorkloadControlError, WorkloadControlErrorCode, WorkloadControlFailure,
-    WorkloadMutationRequest, WorkloadObservation, WorkloadObservationRequest,
-    WorkloadOperationPhase, WorkloadOperationResult, WorkloadOperationalState, WorkloadProtection,
-    WorkloadReference, workload_control_schema_digest,
-};
-#[cfg(test)]
-use lenso_workload_control::workload_control::{WorkloadControlActor, WorkloadControlActorKind};
 #[cfg(unix)]
 use nix::{
     errno::Errno,
@@ -66,11 +66,17 @@ const STATE_PROTOCOL: &str = "lenso.system-sandbox-state.v1";
 const OWNER_PROTOCOL: &str = "lenso.system-sandbox-owner.v1";
 const LOCAL_CONTROL_ADAPTER_PROTOCOL: &str = "lenso.local-control-adapter.v1";
 const LOCAL_CONTROL_ADAPTER_STATE_SCHEMA: &str = "lenso.local-control-adapter-state.v2";
+const CONSOLE_SERVICE_ID: &str = "lenso-console";
+const LOCAL_CONTROL_ADAPTER_SERVICE_ID: &str = "lenso-local-control-adapter";
 const LOCAL_CONTROL_ADAPTER_PLAN_PROTOCOL: &str = "lenso.local-control-adapter-plan.v1";
 const LOCAL_CONTROL_ADAPTER_DIR: &str = ".lenso/local-control-adapter";
+const LOCAL_CONTROL_ADAPTER_ENV: &str = "LENSO_LOCAL_CONTROL_ADAPTER";
+const LOCAL_CONTROL_ADAPTER_OWNERSHIP_TOKEN_ENV: &str =
+    "LENSO_LOCAL_CONTROL_ADAPTER_OWNERSHIP_TOKEN";
 const WORKSPACE_FILE: &str = "lenso.workspace.json";
 const WORKLOAD_CONTROL_TOKEN_ENV: &str = "LENSO_WORKLOAD_CONTROL_TOKEN";
 const WORKLOAD_CONTROL_CREDENTIAL_FILE: &str = "credential";
+const WORKLOAD_CONTROL_CREDENTIAL_IGNORE_RULE: &str = "/credential";
 const WORKLOAD_CONTROL_REQUEST_LIMIT: usize = 64 * 1024;
 const WORKLOAD_CONTROL_SCALAR_MAX_LENGTH: usize = 255;
 const WORKLOAD_CONTROL_SAFE_MESSAGE_MAX_LENGTH: usize = 1_024;
@@ -254,6 +260,8 @@ struct LocalControlAdapterState {
     schema: String,
     #[serde(default)]
     adapter_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    adapter_workload: Option<WorkloadReference>,
     app_id: String,
     composition_digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -266,6 +274,8 @@ struct LocalControlAdapterState {
     capabilities: BTreeSet<WorkloadControlCapability>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     credential_file: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    adapter_ownership_token: Option<String>,
     adapter_pid: Option<u32>,
     phase: SandboxPhase,
     sandbox_root: PathBuf,
@@ -275,6 +285,7 @@ struct LocalControlAdapterState {
 #[derive(Debug)]
 struct LocalControlRuntime {
     adapter_id: String,
+    control_plane_workloads: BTreeSet<WorkloadReference>,
     available: bool,
     workload_states: BTreeMap<WorkloadReference, WorkloadOperationalState>,
     revisions: BTreeMap<WorkloadReference, String>,
@@ -298,6 +309,21 @@ struct PreparedOperation {
 
 impl LocalControlRuntime {
     fn new(running: &RunningSandbox, adapter_id: String, operation_delay: Duration) -> Self {
+        let control_plane_workloads = running
+            .plan
+            .workloads
+            .iter()
+            .filter(|workload| workload.service_id == CONSOLE_SERVICE_ID)
+            .map(|workload| WorkloadReference {
+                system_id: running.plan.system_id.clone(),
+                service_id: workload.service_id.clone(),
+                workload_id: workload.workload_id.clone(),
+            })
+            .chain(std::iter::once(adapter_workload_for(
+                &running.plan,
+                &adapter_id,
+            )))
+            .collect();
         let workload_states = running
             .plan
             .workloads
@@ -322,6 +348,7 @@ impl LocalControlRuntime {
             .collect();
         Self {
             adapter_id,
+            control_plane_workloads,
             available: true,
             workload_states,
             revisions,
@@ -336,7 +363,7 @@ impl LocalControlRuntime {
         &self,
         workload: &WorkloadReference,
     ) -> std::result::Result<WorkloadObservation, WorkloadControlHttpError> {
-        if is_control_plane_workload(workload, &self.adapter_id) {
+        if self.control_plane_workloads.contains(workload) {
             return Ok(WorkloadObservation {
                 protocol: WORKLOAD_CONTROL_PROTOCOL.to_owned(),
                 workload: workload.clone(),
@@ -394,7 +421,7 @@ impl LocalControlRuntime {
             ));
         }
         validate_mutation_request(&request)?;
-        if is_control_plane_workload(&request.workload, &self.adapter_id) {
+        if self.control_plane_workloads.contains(&request.workload) {
             return Err(WorkloadControlHttpError::new(
                 StatusCode::FORBIDDEN,
                 WorkloadControlErrorCode::ProtectedWorkload,
@@ -716,13 +743,18 @@ async fn resume_sandbox_workload(
     workload: &WorkloadReference,
 ) -> std::result::Result<WorkloadOperationalState, WorkloadControlFailure> {
     let state_index = running.workload_index(workload)?;
-    if running.state.workloads[state_index].phase == SandboxPhase::Ready
-        && running
-            .processes
-            .iter()
-            .any(|process| process.state_index == state_index)
+    if running
+        .processes
+        .iter()
+        .any(|process| process.state_index == state_index)
     {
-        return Ok(WorkloadOperationalState::Running);
+        if running.state.workloads[state_index].phase == SandboxPhase::Ready {
+            return Ok(WorkloadOperationalState::Running);
+        }
+        return Err(local_control_failure(
+            WorkloadControlErrorCode::AuthorityUnavailable,
+            "The Local Control Adapter cannot prove the existing Workload process stopped.",
+        ));
     }
     running.state.workloads[state_index].phase = SandboxPhase::Starting;
     running.state.workloads[state_index].process_id = None;
@@ -853,15 +885,6 @@ fn invalid_workload_control_document(message: &'static str) -> WorkloadControlHt
         WorkloadControlErrorCode::IncompatibleProtocol,
         message,
     )
-}
-
-fn is_control_plane_workload(workload: &WorkloadReference, adapter_id: &str) -> bool {
-    workload.service_id == "lenso-console"
-        || workload.workload_id == "lenso-console"
-        || workload.service_id == "lenso-local-control-adapter"
-        || workload.workload_id == "lenso-local-control-adapter"
-        || workload.service_id == adapter_id
-        || workload.workload_id == adapter_id
 }
 
 #[derive(Debug)]
@@ -1490,7 +1513,7 @@ async fn dev_composition(options: SystemDevOptions, composition_file: PathBuf) -
         cleanup_recorded(&plan.owned_root)
             .await
             .map_err(|error| command_error(error, options.json))?;
-        let state = adapter_state_for(&plan, None, SandboxPhase::Stopped);
+        let state = adapter_state_for(&plan, None, SandboxPhase::Stopped, None);
         write_adapter_state(&adapter_state_path, &state)
             .map_err(|error| command_error(error, options.json))?;
         print_adapter_state(&state, options.json)?;
@@ -1503,10 +1526,17 @@ async fn dev_composition(options: SystemDevOptions, composition_file: PathBuf) -
     validate_workload_control_plan(&plan, &adapter_id_for(&plan))
         .map_err(|error| command_error(error, options.json))?;
 
-    let starting = adapter_state_for(&plan, None, SandboxPhase::Starting);
+    let adapter_ownership_token =
+        new_adapter_ownership_token().map_err(|error| command_error(error, options.json))?;
+    let starting = adapter_state_for(
+        &plan,
+        None,
+        SandboxPhase::Starting,
+        Some(&adapter_ownership_token),
+    );
     write_adapter_state(&adapter_state_path, &starting)
         .map_err(|error| command_error(error, options.json))?;
-    let mut child = start_adapter_child(&composition_file)?;
+    let mut child = start_adapter_child(&composition_file, &adapter_ownership_token)?;
     let adapter_state =
         read_typed::<LocalControlAdapterState>(&adapter_state_path, "Local Control Adapter state")
             .ok();
@@ -1516,11 +1546,17 @@ async fn dev_composition(options: SystemDevOptions, composition_file: PathBuf) -
             SandboxPhase::Ready | SandboxPhase::Failed | SandboxPhase::Stopped
         )
     }) {
-        let starting = adapter_state_for(&plan, Some(child.id()), SandboxPhase::Starting);
+        let starting = adapter_state_for(
+            &plan,
+            Some(child.id()),
+            SandboxPhase::Starting,
+            Some(&adapter_ownership_token),
+        );
         write_adapter_state(&adapter_state_path, &starting)
             .map_err(|error| command_error(error, options.json))?;
     }
-    let state = wait_for_adapter_ready(&mut child, &adapter_state_path).await?;
+    let state =
+        wait_for_adapter_ready(&mut child, &adapter_state_path, &adapter_ownership_token).await?;
     print_adapter_state(&state, options.json)?;
     Ok(())
 }
@@ -1771,6 +1807,14 @@ fn adapter_id_for(plan: &SandboxPlan) -> String {
     format!("workload-control:{}", plan.system_id)
 }
 
+fn adapter_workload_for(plan: &SandboxPlan, adapter_id: &str) -> WorkloadReference {
+    WorkloadReference {
+        system_id: plan.system_id.clone(),
+        service_id: LOCAL_CONTROL_ADAPTER_SERVICE_ID.to_owned(),
+        workload_id: adapter_id.to_owned(),
+    }
+}
+
 fn validate_workload_control_plan(
     plan: &SandboxPlan,
     adapter_id: &str,
@@ -1798,6 +1842,7 @@ fn adapter_state_for(
     plan: &SandboxPlan,
     adapter_pid: Option<u32>,
     phase: SandboxPhase,
+    adapter_ownership_token: Option<&str>,
 ) -> LocalControlAdapterState {
     adapter_state_with_control(
         plan,
@@ -1805,6 +1850,7 @@ fn adapter_state_for(
         phase,
         None,
         workload_control_credential_reference(plan),
+        adapter_ownership_token,
     )
 }
 
@@ -1814,11 +1860,14 @@ fn adapter_state_with_control(
     phase: SandboxPhase,
     endpoint: Option<String>,
     credential_file: Option<PathBuf>,
+    adapter_ownership_token: Option<&str>,
 ) -> LocalControlAdapterState {
+    let authority_id = adapter_id_for(plan);
     LocalControlAdapterState {
         protocol: LOCAL_CONTROL_ADAPTER_PROTOCOL.to_owned(),
         schema: LOCAL_CONTROL_ADAPTER_STATE_SCHEMA.to_owned(),
-        adapter_id: adapter_id_for(plan),
+        adapter_workload: Some(adapter_workload_for(plan, &authority_id)),
+        adapter_id: authority_id,
         app_id: plan.system_id.clone(),
         composition_digest: plan.composition_digest.clone().unwrap_or_default(),
         endpoint,
@@ -1826,6 +1875,7 @@ fn adapter_state_with_control(
         workload_control_schema_digest: workload_control_schema_digest(),
         capabilities: standard_local_capabilities(),
         credential_file,
+        adapter_ownership_token: adapter_ownership_token.map(str::to_owned),
         adapter_pid,
         phase,
         sandbox_root: plan.owned_root.clone(),
@@ -1845,6 +1895,52 @@ fn workload_control_credential_reference(plan: &SandboxPlan) -> Option<PathBuf> 
         .then(|| adapter_credential_path(plan))
 }
 
+fn new_adapter_ownership_token() -> std::result::Result<String, SandboxError> {
+    random_hex_token().map_err(|_| {
+        SandboxError::new(
+            "adapter_ownership_token_failed",
+            "The operating system could not generate Local Control Adapter ownership.",
+            "Restore the operating system random source and restart the adapter.",
+        )
+    })
+}
+
+fn random_hex_token() -> std::result::Result<String, getrandom::Error> {
+    let mut random = [0_u8; 32];
+    getrandom::fill(&mut random)?;
+    let mut token = String::with_capacity(random.len() * 2);
+    for byte in random {
+        std::fmt::Write::write_fmt(&mut token, format_args!("{byte:02x}"))
+            .expect("writing to a String cannot fail");
+    }
+    Ok(token)
+}
+
+fn adapter_ownership_token_from_env() -> std::result::Result<String, SandboxError> {
+    let token = std::env::var(LOCAL_CONTROL_ADAPTER_OWNERSHIP_TOKEN_ENV).map_err(|_| {
+        SandboxError::new(
+            "adapter_ownership_unproven",
+            "The Local Control Adapter child has no App-specific ownership token.",
+            "Start the adapter through lenso system dev.",
+        )
+    })?;
+    if !valid_adapter_ownership_token(&token) {
+        return Err(SandboxError::new(
+            "adapter_ownership_unproven",
+            "The Local Control Adapter child has an invalid App-specific ownership token.",
+            "Start the adapter through lenso system dev.",
+        ));
+    }
+    Ok(token)
+}
+
+fn valid_adapter_ownership_token(token: &str) -> bool {
+    token.len() == 64
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 struct WorkloadControlCredential {
     token: String,
     file: Option<PathBuf>,
@@ -1858,6 +1954,21 @@ fn resolve_workload_control_credential(
         return Ok(WorkloadControlCredential { token, file: None });
     }
     let path = adapter_credential_path(plan);
+    let parent = path.parent().ok_or_else(|| {
+        SandboxError::new(
+            "adapter_credential_write_failed",
+            "The Workload Control credential file has no parent directory.",
+            "Run the adapter from a writable App directory.",
+        )
+    })?;
+    fs::create_dir_all(parent).map_err(|error| {
+        io_error(
+            "adapter_credential_write_failed",
+            "create the Workload Control credential directory",
+            &error,
+        )
+    })?;
+    ensure_workload_control_credential_ignored(parent)?;
     if path.exists() {
         ensure_owner_only_credential(&path)?;
         let token = fs::read_to_string(&path).map_err(|error| {
@@ -1879,32 +1990,13 @@ fn resolve_workload_control_credential(
             file: Some(path),
         });
     }
-    let parent = path.parent().ok_or_else(|| {
-        SandboxError::new(
-            "adapter_credential_write_failed",
-            "The Workload Control credential file has no parent directory.",
-            "Run the adapter from a writable App directory.",
-        )
-    })?;
-    fs::create_dir_all(parent).map_err(|error| {
-        io_error(
-            "adapter_credential_write_failed",
-            "create the Workload Control credential directory",
-            &error,
-        )
-    })?;
-    let mut random = [0_u8; 32];
-    getrandom::fill(&mut random).map_err(|_| {
+    let token = random_hex_token().map_err(|_| {
         SandboxError::new(
             "adapter_credential_write_failed",
             "The operating system could not generate a Workload Control credential.",
             "Restore the operating system random source and restart the adapter.",
         )
     })?;
-    let token = random
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -1934,6 +2026,82 @@ fn resolve_workload_control_credential(
     Ok(WorkloadControlCredential {
         token,
         file: Some(path),
+    })
+}
+
+fn ensure_workload_control_credential_ignored(
+    credential_dir: &Path,
+) -> std::result::Result<(), SandboxError> {
+    let ignore_path = credential_dir.join(".gitignore");
+    let existing = match fs::symlink_metadata(&ignore_path) {
+        Ok(metadata) if metadata.file_type().is_file() => fs::read_to_string(&ignore_path)
+            .map_err(|error| {
+                io_error(
+                    "adapter_credential_ignore_failed",
+                    "read the local adapter ignore boundary",
+                    &error,
+                )
+            })?,
+        Ok(_) => {
+            return Err(SandboxError::new(
+                "adapter_credential_ignore_failed",
+                "The local adapter ignore boundary is not a regular file.",
+                "Replace only the local adapter .gitignore path with a regular file and retry.",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(io_error(
+                "adapter_credential_ignore_failed",
+                "inspect the local adapter ignore boundary",
+                &error,
+            ));
+        }
+    };
+    if existing
+        .lines()
+        .any(|line| line == WORKLOAD_CONTROL_CREDENTIAL_IGNORE_RULE)
+    {
+        return Ok(());
+    }
+
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    let mut file = options.open(&ignore_path).map_err(|error| {
+        io_error(
+            "adapter_credential_ignore_failed",
+            "open the local adapter ignore boundary",
+            &error,
+        )
+    })?;
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        file.write_all(b"\n").map_err(|error| {
+            io_error(
+                "adapter_credential_ignore_failed",
+                "separate the local adapter ignore rule",
+                &error,
+            )
+        })?;
+    }
+    file.write_all(
+        format!(
+            "# Generated by Lenso: never commit the local Workload Control credential.\n{WORKLOAD_CONTROL_CREDENTIAL_IGNORE_RULE}\n"
+        )
+        .as_bytes(),
+    )
+    .map_err(|error| {
+        io_error(
+            "adapter_credential_ignore_failed",
+            "write the local adapter ignore rule",
+            &error,
+        )
+    })?;
+    file.sync_all().map_err(|error| {
+        io_error(
+            "adapter_credential_ignore_failed",
+            "flush the local adapter ignore boundary",
+            &error,
+        )
     })
 }
 
@@ -2011,14 +2179,21 @@ fn write_adapter_state(
     result
 }
 
-fn start_adapter_child(composition_file: &Path) -> Result<std::process::Child> {
+fn start_adapter_child(
+    composition_file: &Path,
+    adapter_ownership_token: &str,
+) -> Result<std::process::Child> {
     let executable = std::env::current_exe().context("resolve lenso executable")?;
     let app_dir = composition_file.parent().unwrap_or(Path::new("."));
     std::process::Command::new(executable)
         .args(["system", "dev", "--adapter-child", "--system-file"])
         .arg(composition_file)
         .current_dir(app_dir)
-        .env("LENSO_LOCAL_CONTROL_ADAPTER", "1")
+        .env(LOCAL_CONTROL_ADAPTER_ENV, "1")
+        .env(
+            LOCAL_CONTROL_ADAPTER_OWNERSHIP_TOKEN_ENV,
+            adapter_ownership_token,
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2046,6 +2221,19 @@ async fn stop_local_adapter(
     if matches!(state.phase, SandboxPhase::Stopped | SandboxPhase::Failed) {
         return Ok(());
     }
+    let Some(adapter_ownership_token) = state
+        .adapter_ownership_token
+        .as_deref()
+        .filter(|token| valid_adapter_ownership_token(token))
+    else {
+        return Err(SandboxError::new(
+            "adapter_ownership_unproven",
+            format!(
+                "Refusing to stop process {pid} because its App-specific adapter ownership is missing or invalid."
+            ),
+            "Inspect the recorded adapter PID and remove only state proven to belong to this App.",
+        ));
+    };
     let output = std::process::Command::new("ps")
         .args(["eww", "-p", &pid.to_string(), "-o", "command="])
         .output()
@@ -2060,11 +2248,19 @@ async fn stop_local_adapter(
         return Ok(());
     }
     let command = String::from_utf8_lossy(&output.stdout);
-    if !command.contains("LENSO_LOCAL_CONTROL_ADAPTER=1") {
+    let generic_marker = format!("{LOCAL_CONTROL_ADAPTER_ENV}=1");
+    let ownership_marker =
+        format!("{LOCAL_CONTROL_ADAPTER_OWNERSHIP_TOKEN_ENV}={adapter_ownership_token}");
+    let has_marker = |expected: &str| {
+        command
+            .split_ascii_whitespace()
+            .any(|segment| segment == expected)
+    };
+    if !has_marker(&generic_marker) || !has_marker(&ownership_marker) {
         return Err(SandboxError::new(
             "adapter_ownership_unproven",
             format!(
-                "Refusing to stop process {pid} because its Local Control Adapter marker does not match."
+                "Refusing to stop process {pid} because its App-specific Local Control Adapter ownership does not match."
             ),
             "Inspect the recorded adapter PID and remove only state proven to belong to this App.",
         ));
@@ -2081,11 +2277,15 @@ async fn stop_local_adapter(
 async fn wait_for_adapter_ready(
     child: &mut std::process::Child,
     state_path: &Path,
+    adapter_ownership_token: &str,
 ) -> Result<LocalControlAdapterState> {
     for _ in 0..300 {
         if state_path.exists() {
             let state: LocalControlAdapterState =
                 read_typed(state_path, "Local Control Adapter state")?;
+            if state.adapter_ownership_token.as_deref() != Some(adapter_ownership_token) {
+                bail!("Local Control Adapter ownership changed during startup")
+            }
             match state.phase {
                 SandboxPhase::Ready => return Ok(state),
                 SandboxPhase::Failed | SandboxPhase::Stopped => {
@@ -2105,6 +2305,8 @@ async fn wait_for_adapter_ready(
 async fn run_composition_adapter_child(plan: SandboxPlan) -> Result<()> {
     let state_path = adapter_state_path(&plan);
     let pid = std::process::id();
+    let adapter_ownership_token =
+        adapter_ownership_token_from_env().map_err(|error| command_error(error, false))?;
     validate_workload_control_plan(&plan, &adapter_id_for(&plan))
         .map_err(|error| command_error(error, false))?;
     let credential =
@@ -2118,6 +2320,7 @@ async fn run_composition_adapter_child(plan: SandboxPlan) -> Result<()> {
             SandboxPhase::Starting,
             None,
             credential.file.clone(),
+            Some(&adapter_ownership_token),
         ),
     )
     .map_err(|error| command_error(error, false))?;
@@ -2132,6 +2335,7 @@ async fn run_composition_adapter_child(plan: SandboxPlan) -> Result<()> {
                     SandboxPhase::Failed,
                     None,
                     credential.file,
+                    Some(&adapter_ownership_token),
                 ),
             );
             return Err(command_error(error, false));
@@ -2156,6 +2360,7 @@ async fn run_composition_adapter_child(plan: SandboxPlan) -> Result<()> {
                     SandboxPhase::Failed,
                     None,
                     credential.file,
+                    Some(&adapter_ownership_token),
                 ),
             );
             return Err(command_error(error, false));
@@ -2170,6 +2375,7 @@ async fn run_composition_adapter_child(plan: SandboxPlan) -> Result<()> {
             SandboxPhase::Ready,
             Some(endpoint.clone()),
             credential.file.clone(),
+            Some(&adapter_ownership_token),
         ),
     ) {
         let error = match server.shutdown().await {
@@ -2191,6 +2397,7 @@ async fn run_composition_adapter_child(plan: SandboxPlan) -> Result<()> {
                 SandboxPhase::Failed,
                 None,
                 credential.file,
+                Some(&adapter_ownership_token),
             ),
         );
         return Err(command_error(error, false));
@@ -2215,6 +2422,7 @@ async fn run_composition_adapter_child(plan: SandboxPlan) -> Result<()> {
                 SandboxPhase::Failed,
                 Some(endpoint),
                 credential.file,
+                Some(&adapter_ownership_token),
             ),
         );
         return Err(command_error(error, false));
@@ -2229,6 +2437,7 @@ async fn run_composition_adapter_child(plan: SandboxPlan) -> Result<()> {
                     SandboxPhase::Stopped,
                     None,
                     credential.file,
+                    Some(&adapter_ownership_token),
                 ),
             )
             .map_err(|error| command_error(error, false))?;
@@ -2243,6 +2452,7 @@ async fn run_composition_adapter_child(plan: SandboxPlan) -> Result<()> {
                     SandboxPhase::Failed,
                     Some(endpoint),
                     credential.file,
+                    Some(&adapter_ownership_token),
                 ),
             );
             Err(command_error(error, false))
@@ -2252,7 +2462,11 @@ async fn run_composition_adapter_child(plan: SandboxPlan) -> Result<()> {
 
 fn print_adapter_state(state: &LocalControlAdapterState, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(state)?);
+        let mut document = serde_json::to_value(state)?;
+        if let Some(fields) = document.as_object_mut() {
+            fields.remove("adapterOwnershipToken");
+        }
+        println!("{}", serde_json::to_string_pretty(&document)?);
         return Ok(());
     }
     let phase_value = serde_json::to_value(state.phase)?;
@@ -2850,6 +3064,8 @@ async fn launch_workload(
             "LENSO_SANDBOX_OWNERSHIP_TOKEN",
             &running.state.ownership_token,
         )
+        .env_remove(LOCAL_CONTROL_ADAPTER_ENV)
+        .env_remove(LOCAL_CONTROL_ADAPTER_OWNERSHIP_TOKEN_ENV)
         .env_remove(WORKLOAD_CONTROL_TOKEN_ENV)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -3742,6 +3958,96 @@ mod tests {
         fs::remove_dir_all(root).ok();
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn adapter_cleanup_refuses_a_stale_pid_owned_by_another_app_adapter() {
+        let root = test_root("adapter-stale-pid");
+        fs::create_dir_all(&root).unwrap();
+        let plan = build_plan(
+            &system_fixture(),
+            &sandbox_fixture(false),
+            &root.join(DEFAULT_SYSTEM_FILE),
+            &root.join(DEFAULT_SANDBOX_FILE),
+        )
+        .unwrap();
+        let mut app_b_system = system_fixture();
+        app_b_system["systemId"] = Value::String("billing-platform".to_owned());
+        let app_b_plan = build_plan(
+            &app_b_system,
+            &sandbox_fixture(false),
+            &root.join("billing-system.json"),
+            &root.join("billing-sandbox.json"),
+        )
+        .unwrap();
+        let stale_owner_token = "a".repeat(64);
+        let other_owner_token = "b".repeat(64);
+        let mut stale_adapter_process = std::process::Command::new("sleep")
+            .arg("30")
+            .env(LOCAL_CONTROL_ADAPTER_ENV, "1")
+            .env(
+                LOCAL_CONTROL_ADAPTER_OWNERSHIP_TOKEN_ENV,
+                &stale_owner_token,
+            )
+            .spawn()
+            .unwrap();
+        let mut other_adapter_process = std::process::Command::new("sleep")
+            .arg("30")
+            .env(LOCAL_CONTROL_ADAPTER_ENV, "1")
+            .env(
+                LOCAL_CONTROL_ADAPTER_OWNERSHIP_TOKEN_ENV,
+                &other_owner_token,
+            )
+            .spawn()
+            .unwrap();
+        stale_adapter_process.kill().unwrap();
+        stale_adapter_process.wait().unwrap();
+
+        let stale_app_a_state: LocalControlAdapterState = serde_json::from_value(
+            serde_json::to_value(adapter_state_with_control(
+                &plan,
+                Some(other_adapter_process.id()),
+                SandboxPhase::Ready,
+                Some("http://127.0.0.1:43210".to_owned()),
+                None,
+                Some(&stale_owner_token),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let other_app_state = adapter_state_with_control(
+            &app_b_plan,
+            Some(other_adapter_process.id()),
+            SandboxPhase::Ready,
+            Some("http://127.0.0.1:43211".to_owned()),
+            None,
+            Some(&other_owner_token),
+        );
+        assert_ne!(stale_app_a_state.app_id, other_app_state.app_id);
+        assert_ne!(
+            stale_app_a_state.adapter_ownership_token,
+            other_app_state.adapter_ownership_token
+        );
+
+        let mut missing_ownership_state = stale_app_a_state.clone();
+        missing_ownership_state.adapter_ownership_token = None;
+        let missing_ownership_result = stop_local_adapter(&missing_ownership_state, &plan).await;
+        let result = stop_local_adapter(&stale_app_a_state, &plan).await;
+        let other_adapter_survived = other_adapter_process.try_wait().unwrap().is_none();
+        let _ = other_adapter_process.kill();
+        let _ = other_adapter_process.wait();
+        fs::remove_dir_all(root).ok();
+
+        assert_eq!(
+            missing_ownership_result.unwrap_err().code,
+            "adapter_ownership_unproven"
+        );
+        assert_eq!(result.unwrap_err().code, "adapter_ownership_unproven");
+        assert!(
+            other_adapter_survived,
+            "cleanup stopped another App's adapter"
+        );
+    }
+
     #[tokio::test]
     async fn recorded_cleanup_stops_owned_process_groups() {
         let root = test_root("recorded-cleanup");
@@ -3984,7 +4290,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workload_control_failure_reconciles_state_and_advances_its_revision() {
+    async fn workload_control_stop_failure_blocks_resume_without_launching_a_duplicate() {
         let root = test_root("workload-control-failure-revision");
         fs::create_dir_all(&root).unwrap();
         let plan = build_plan(
@@ -4004,39 +4310,32 @@ mod tests {
         .await
         .unwrap();
         let client = reqwest::Client::new();
-        let target = serde_json::json!({
-            "systemId": "support-platform",
-            "serviceId": "support",
-            "workloadId": "support-api"
-        });
+        let target_reference = WorkloadReference {
+            system_id: "support-platform".to_owned(),
+            service_id: "support".to_owned(),
+            workload_id: "support-api".to_owned(),
+        };
+        let target = serde_json::to_value(&target_reference).unwrap();
         let before = observe_workload(&client, server.endpoint(), &target).await;
-        {
+        let original_process_group_id = {
             let mut sandbox = server.sandbox.lock().await;
-            let state_index = sandbox
-                .state
-                .workloads
-                .iter()
-                .position(|workload| {
-                    workload.service_id == "support" && workload.workload_id == "support-api"
-                })
-                .unwrap();
+            let state_index = sandbox.workload_index(&target_reference).unwrap();
             let process_index = sandbox
                 .processes
                 .iter()
                 .position(|process| process.state_index == state_index)
                 .unwrap();
-            let mut process = sandbox.processes.remove(process_index);
-            stop_owned_child(&mut process.child, process.process_group_id)
-                .await
-                .unwrap();
-        }
+            let original_process_group_id = sandbox.processes[process_index].process_group_id;
+            sandbox.processes[process_index].process_group_id = u32::MAX;
+            original_process_group_id
+        };
 
         let accepted = submit_workload_operation(
             &client,
             server.endpoint(),
             &target,
             before["observedRevision"].as_str().unwrap(),
-            "missing-process",
+            "stop-failure",
             "suspend",
         )
         .await;
@@ -4052,8 +4351,47 @@ mod tests {
         assert_eq!(after["state"], "failed");
         assert_ne!(after["observedRevision"], before["observedRevision"]);
 
+        let resume = submit_workload_operation(
+            &client,
+            server.endpoint(),
+            &target,
+            after["observedRevision"].as_str().unwrap(),
+            "resume-after-stop-failure",
+            "resume",
+        )
+        .await;
+        let resume_record = wait_for_workload_operation(
+            &client,
+            server.endpoint(),
+            resume["operationId"].as_str().unwrap(),
+        )
+        .await;
+        let owned_process_count = {
+            let mut sandbox = server.sandbox.lock().await;
+            let state_index = sandbox.workload_index(&target_reference).unwrap();
+            let count = sandbox
+                .processes
+                .iter()
+                .filter(|process| process.state_index == state_index)
+                .count();
+            sandbox
+                .processes
+                .iter_mut()
+                .find(|process| process.process_group_id == u32::MAX)
+                .unwrap()
+                .process_group_id = original_process_group_id;
+            count
+        };
+
         server.shutdown().await.unwrap();
         fs::remove_dir_all(root).ok();
+
+        assert_eq!(resume_record["phase"], "failed");
+        assert_eq!(resume_record["failure"]["code"], "authority_unavailable");
+        assert_eq!(
+            owned_process_count, 1,
+            "resume launched a duplicate process"
+        );
     }
 
     #[tokio::test]
@@ -4290,7 +4628,31 @@ mod tests {
             &root.join(DEFAULT_SANDBOX_FILE),
         )
         .unwrap();
-        let running = launch(plan, false).await.unwrap();
+        let mut running = launch(plan, false).await.unwrap();
+        let template_index = running
+            .plan
+            .workloads
+            .iter()
+            .position(|workload| workload.workload_id == "support-api")
+            .unwrap();
+        for (service_id, workload_id) in [
+            ("lenso-console", "console-runtime"),
+            ("support", "lenso-console"),
+            ("workload-control:support-platform", "business-api"),
+            ("lenso-local-control-adapter", "business-api"),
+        ] {
+            let mut planned = running.plan.workloads[template_index].clone();
+            planned.service_id = service_id.to_owned();
+            planned.workload_id = workload_id.to_owned();
+            planned.identity = format!("local-dev://support-platform/{service_id}/{workload_id}");
+            let mut state = running.state.workloads[template_index].clone();
+            state.service_id = service_id.to_owned();
+            state.workload_id = workload_id.to_owned();
+            state.identity = planned.identity.clone();
+            state.process_id = None;
+            running.plan.workloads.push(planned);
+            running.state.workloads.push(state);
+        }
         let mut server = start_workload_control_server(
             running,
             "workload-control:support-platform".to_owned(),
@@ -4331,21 +4693,39 @@ mod tests {
         assert_eq!(restored["observedRevision"], before["observedRevision"]);
         assert!(restored["activeOperation"].is_null());
 
-        for protected in [
+        for false_positive in [
             serde_json::json!({
                 "systemId": "support-platform",
-                "serviceId": "lenso-console",
+                "serviceId": "support",
                 "workloadId": "lenso-console"
             }),
             serde_json::json!({
                 "systemId": "support-platform",
-                "serviceId": "control-plane",
-                "workloadId": "workload-control:support-platform"
+                "serviceId": "workload-control:support-platform",
+                "workloadId": "business-api"
             }),
             serde_json::json!({
                 "systemId": "support-platform",
-                "serviceId": "workload-control:support-platform",
-                "workloadId": "adapter-process"
+                "serviceId": "lenso-local-control-adapter",
+                "workloadId": "business-api"
+            }),
+        ] {
+            let observation = observe_workload(&client, server.endpoint(), &false_positive).await;
+            assert_eq!(observation["protection"], "controllable");
+            assert_eq!(observation["state"], "running");
+            assert!(observation["observedRevision"].is_string());
+        }
+
+        for protected in [
+            serde_json::json!({
+                "systemId": "support-platform",
+                "serviceId": "lenso-console",
+                "workloadId": "console-runtime"
+            }),
+            serde_json::json!({
+                "systemId": "support-platform",
+                "serviceId": "lenso-local-control-adapter",
+                "workloadId": "workload-control:support-platform"
             }),
         ] {
             let observation = observe_workload(&client, server.endpoint(), &protected).await;
@@ -4401,15 +4781,25 @@ mod tests {
             SandboxPhase::Ready,
             Some("http://127.0.0.1:43210".to_owned()),
             credential.file,
+            Some(&"a".repeat(64)),
         );
         let document = serde_json::to_value(&state).unwrap();
         assert_eq!(
             document["workloadControlSchemaDigest"],
             "sha256:d3666bb1fd85576f9af4205dbcc70029acd81462678c47d2b315c40ef1a9161d"
         );
+        assert_eq!(
+            document["adapterWorkload"],
+            serde_json::json!({
+                "systemId": "support-platform",
+                "serviceId": "lenso-local-control-adapter",
+                "workloadId": "workload-control:support-platform"
+            })
+        );
         let source = serde_json::to_string(&document).unwrap();
         assert!(source.contains("credentialFile"));
         assert!(!source.contains(&credential.token));
+        assert_eq!(document["adapterOwnershipToken"], "a".repeat(64));
 
         let overridden =
             resolve_workload_control_credential(&plan, Some("console-server-token".to_owned()))
@@ -4421,10 +4811,79 @@ mod tests {
             SandboxPhase::Ready,
             Some("http://127.0.0.1:43210".to_owned()),
             overridden.file,
+            Some(&"b".repeat(64)),
         );
         let overridden_source = serde_json::to_string(&overridden_state).unwrap();
         assert!(!overridden_source.contains("credentialFile"));
         assert!(!overridden_source.contains(&overridden.token));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn generated_workload_control_credential_is_ignored_without_overwriting_user_rules() {
+        let root = test_root("workload-control-credential-ignore");
+        fs::create_dir_all(&root).unwrap();
+        let plan = build_plan(
+            &system_fixture(),
+            &sandbox_fixture(false),
+            &root.join(DEFAULT_SYSTEM_FILE),
+            &root.join(DEFAULT_SANDBOX_FILE),
+        )
+        .unwrap();
+        let credential_path = adapter_credential_path(&plan);
+        let ignore_path = credential_path.parent().unwrap().join(".gitignore");
+        fs::create_dir_all(ignore_path.parent().unwrap()).unwrap();
+        let user_rules = "# user-owned rules\n/user-cache\n";
+        fs::write(&ignore_path, user_rules).unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let credential = resolve_workload_control_credential(&plan, None).unwrap();
+        let ignore_source = fs::read_to_string(&ignore_path).unwrap();
+        assert!(ignore_source.starts_with(user_rules));
+        assert!(ignore_source.lines().any(|line| line == "/credential"));
+        assert!(
+            std::process::Command::new("git")
+                .args(["add", "--all"])
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let status = std::process::Command::new("git")
+            .args(["status", "--short", "--untracked-files=all"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(status.status.success());
+        let status = String::from_utf8(status.stdout).unwrap();
+        assert!(!status.contains("/credential"));
+        assert!(!status.contains(&credential.token));
+        let relative_credential = credential_path.strip_prefix(&root).unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["check-ignore", "--quiet", "--"])
+                .arg(relative_credential)
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let tracked = std::process::Command::new("git")
+            .args(["ls-files", "--cached", "--"])
+            .arg(relative_credential)
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(tracked.status.success());
+        assert!(tracked.stdout.is_empty());
 
         fs::remove_dir_all(root).ok();
     }
@@ -4440,7 +4899,7 @@ mod tests {
             &root.join(DEFAULT_SANDBOX_FILE),
         )
         .unwrap();
-        let leak_marker = root.join("workload-received-control-token");
+        let leak_marker = root.join("workload-received-adapter-secret");
         let workload = plan
             .workloads
             .iter_mut()
@@ -4450,11 +4909,19 @@ mod tests {
             WORKLOAD_CONTROL_TOKEN_ENV.to_owned(),
             "must-not-reach-workload".to_owned(),
         );
+        workload.env.insert(
+            LOCAL_CONTROL_ADAPTER_ENV.to_owned(),
+            "must-not-reach-workload".to_owned(),
+        );
+        workload.env.insert(
+            LOCAL_CONTROL_ADAPTER_OWNERSHIP_TOKEN_ENV.to_owned(),
+            "must-not-reach-workload".to_owned(),
+        );
         workload.command = vec![
             "sh".to_owned(),
             "-c".to_owned(),
             format!(
-                "if [ -n \"$LENSO_WORKLOAD_CONTROL_TOKEN\" ]; then : > '{}'; fi; exec sleep 30",
+                "if [ -n \"$LENSO_WORKLOAD_CONTROL_TOKEN\" ] || [ -n \"$LENSO_LOCAL_CONTROL_ADAPTER\" ] || [ -n \"$LENSO_LOCAL_CONTROL_ADAPTER_OWNERSHIP_TOKEN\" ]; then : > '{}'; fi; exec sleep 30",
                 leak_marker.display()
             ),
         ];

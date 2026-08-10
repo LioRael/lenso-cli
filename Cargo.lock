@@ -1639,13 +1639,14 @@ dependencies = [
  "clap",
  "getrandom 0.4.3",
  "include_dir",
- "lenso-service 0.1.23",
- "lenso-service 0.1.4",
+ "lenso-service",
  "nix",
  "reqwest",
  "rpassword",
+ "schemars",
  "serde",
  "serde_json",
+ "serde_json_canonicalizer",
  "sha2 0.11.0",
  "sqlx",
  "thiserror",
@@ -1666,22 +1667,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lenso-contracts"
-version = "0.4.0"
-source = "git+https://github.com/LioRael/lenso?rev=42834aa5c603f55f3102877137b9c80abc80a8ca#42834aa5c603f55f3102877137b9c80abc80a8ca"
-dependencies = [
- "chrono",
- "regex",
- "schemars",
- "semver",
- "serde",
- "serde_json",
- "serde_json_canonicalizer",
- "sha2 0.11.0",
- "utoipa",
-]
-
-[[package]]
 name = "lenso-service"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1695,7 +1680,7 @@ dependencies = [
  "http",
  "jsonschema",
  "jsonwebtoken",
- "lenso-contracts 0.3.5",
+ "lenso-contracts",
  "prost",
  "prost-build",
  "prost-types",
@@ -1708,39 +1693,6 @@ dependencies = [
  "sha2 0.11.0",
  "spiffe",
  "sqlx",
- "tonic",
- "tonic-prost",
- "tonic-prost-build",
- "utoipa",
-]
-
-[[package]]
-name = "lenso-service"
-version = "0.1.23"
-source = "git+https://github.com/LioRael/lenso?rev=42834aa5c603f55f3102877137b9c80abc80a8ca#42834aa5c603f55f3102877137b9c80abc80a8ca"
-dependencies = [
- "async-trait",
- "axum",
- "base64",
- "chrono",
- "ed25519-dalek",
- "http",
- "jsonschema",
- "jsonwebtoken",
- "lenso-contracts 0.4.0",
- "prost",
- "prost-build",
- "prost-types",
- "protoc-bin-vendored",
- "reqwest",
- "schemars",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2 0.11.0",
- "spiffe",
- "sqlx",
- "thiserror",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
@@ -2832,11 +2784,9 @@ version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2b42f36aa1cd011945615b92222f6bf73c599a102a300334cd7f8dbeec726cc"
 dependencies = [
- "chrono",
  "dyn-clone",
  "ref-cast",
  "schemars_derive",
- "semver",
  "serde",
  "serde_json",
 ]
@@ -2901,10 +2851,6 @@ name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
-dependencies = [
- "serde",
- "serde_core",
-]
 
 [[package]]
 name = "serde"
