@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -6,13 +7,12 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{ServiceLanguage, capability, host, service};
+use crate::{ServiceLanguage, app_composition, capability, host, service};
 
 const LAUNCHPAD_PROTOCOL: &str = "lenso.launchpad.v1";
 const DEV_DOCTOR_PROTOCOL: &str = "lenso.dev-doctor.v1";
 const APP_PROOF_PROTOCOL: &str = "lenso.app-proof.v1";
 const APP_CHANGE_PLAN_PROTOCOL: &str = "lenso.app-change-plan.v1";
-const APP_COMPOSITION_PROTOCOL: &str = "lenso.app-composition.v1";
 const LAUNCHPAD_FILE: &str = ".lenso/launchpad.json";
 const DEV_DOCTOR_FILE: &str = ".lenso/dev-doctor.json";
 const APP_PROOF_FILE: &str = ".lenso/app-proof.json";
@@ -31,6 +31,7 @@ pub(crate) struct AppCreateOptions {
 #[derive(Debug, Clone)]
 pub(crate) struct AppAddOptions {
     pub(crate) addon: String,
+    pub(crate) observed_revision: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -62,6 +63,8 @@ pub(crate) struct AppComposeOptions {
     pub(crate) blueprint: String,
     pub(crate) dir: Option<PathBuf>,
     pub(crate) explain: bool,
+    pub(crate) implementations: Vec<String>,
+    pub(crate) observed_revision: Option<u64>,
     pub(crate) packs: Vec<PathBuf>,
     pub(crate) repo_root: Option<PathBuf>,
     pub(crate) write_plan: bool,
@@ -454,6 +457,20 @@ pub(crate) fn create_app(options: AppCreateOptions) -> Result<()> {
 }
 
 pub(crate) fn add_app_addon(options: AppAddOptions) -> Result<()> {
+    if Path::new(app_composition::APP_COMPOSITION_FILE).exists() {
+        return app_compose(AppComposeOptions {
+            addons: vec![options.addon],
+            apply: true,
+            blueprint: DEFAULT_BLUEPRINT.to_owned(),
+            dir: None,
+            explain: false,
+            implementations: Vec::new(),
+            observed_revision: options.observed_revision,
+            packs: Vec::new(),
+            repo_root: Some(PathBuf::from(".")),
+            write_plan: false,
+        });
+    }
     let addon = apply_addon_to_repo(Path::new("."), &options.addon)?;
     println!("Added addon {}.", addon.name);
     println!("{}", addon.summary);
@@ -530,50 +547,34 @@ fn validate_app_compose_options(options: &AppComposeOptions) -> Result<()> {
 }
 
 fn compose_new_app(options: AppComposeOptions, dir: PathBuf) -> Result<()> {
-    let composition = composition_preview_for_new_app(&options)?;
+    let project_name = project_name_from_dir(&dir);
+    let authoring = exact_authoring_for_blueprint(
+        &project_name,
+        &options.blueprint,
+        &options.addons,
+        &options.packs,
+        &options.implementations,
+        Path::new("."),
+    )?;
+    let composition = app_composition::build_composition(authoring.clone())?;
     if !options.apply {
-        print_app_composition(&composition);
+        print_exact_composition_impact(None, &composition);
         println!("Next: rerun with --apply to create the app.");
         return Ok(());
     }
 
-    create_app(AppCreateOptions {
-        blueprint: options.blueprint.clone(),
-        dir: dir.clone(),
-        force: false,
-    })?;
+    let current_dir = std::env::current_dir().context("resolve current directory")?;
+    let target = absolutize_from(&current_dir, &dir);
+    host::init(&target.to_string_lossy(), Some(&project_name), false)?;
     with_current_dir(&dir, || {
-        for addon in &options.addons {
-            if addon_already_applied(&read_launchpad_state_required(Path::new("."))?, addon) {
-                continue;
-            }
-            apply_addon_to_repo(Path::new("."), addon)?;
-        }
-        let launchpad = read_launchpad_state_required(Path::new("."))?;
-        let composition =
-            composition_for_existing_app(&dir, &launchpad, &options.addons, &options.packs, None)?;
-        let plan = app_change_plan_state(
-            Path::new("."),
-            &options.addons,
-            &options.packs,
-            Some(composition),
-        )?;
-        write_json(Path::new(APP_CHANGE_PLAN_FILE), &plan)?;
-        if plan.status == "changes" {
-            app_apply(AppApplyOptions {
-                dry_run: false,
-                plan: PathBuf::from(APP_CHANGE_PLAN_FILE),
-                repo_root: Some(PathBuf::from(".")),
-            })?;
-        }
+        materialize_exact_services(Path::new("."), &options.blueprint, &options.addons)?;
+        app_composition::create(Path::new(app_composition::APP_COMPOSITION_FILE), authoring)?;
         Ok(())
     })?;
 
-    println!("Composed app {}.", dir.display());
-    println!(
-        "Next: cd {} && lenso dev doctor --live --write-state",
-        dir.display()
-    );
+    println!("Composed exact App Composition {}.", dir.display());
+    print_exact_composition_impact(None, &composition);
+    println!("Next: cd {} && lenso system dev", dir.display());
     Ok(())
 }
 
@@ -582,37 +583,94 @@ fn compose_existing_app(options: AppComposeOptions) -> Result<()> {
         .repo_root
         .clone()
         .unwrap_or_else(|| PathBuf::from("."));
-    let launchpad = read_launchpad_state_required(&repo_root)?;
-    let composition = composition_for_existing_app(
-        &repo_root,
-        &launchpad,
-        &options.addons,
-        &options.packs,
-        None,
-    )?;
-    let plan = app_change_plan_state(
-        &repo_root,
-        &options.addons,
-        &options.packs,
-        Some(composition),
-    )?;
+    let path = repo_root.join(app_composition::APP_COMPOSITION_FILE);
+    let current = if path.exists() {
+        app_composition::read(&path)?
+    } else {
+        let legacy = read_launchpad_state_required(&repo_root)?;
+        let mut authoring = exact_authoring_for_blueprint(
+            &legacy.project_name,
+            &legacy.blueprint,
+            &legacy
+                .addons
+                .iter()
+                .map(|addon| addon.name.clone())
+                .collect::<Vec<_>>(),
+            &legacy
+                .capability_packs
+                .iter()
+                .map(|pack| PathBuf::from(&pack.path))
+                .collect::<Vec<_>>(),
+            &options.implementations,
+            &repo_root,
+        )?;
+        apply_exact_recipes(&mut authoring, &options.addons, &options.packs, &repo_root)?;
+        let preview = app_composition::build_composition(authoring.clone())?;
+        if !options.apply {
+            print_exact_composition_impact(None, &preview);
+            println!("Next: rerun with --apply to materialize the App Composition.");
+            return Ok(());
+        }
+        materialize_exact_services(
+            &repo_root,
+            authoring
+                .provenance
+                .blueprint
+                .as_deref()
+                .unwrap_or(&options.blueprint),
+            &options.addons,
+        )?;
+        let composition = app_composition::create(&path, authoring)?;
+        print_exact_composition_impact(None, &composition);
+        return Ok(());
+    };
 
-    if options.write_plan || options.apply {
-        write_json(&repo_root.join(APP_CHANGE_PLAN_FILE), &plan)?;
-        println!("Wrote {}.", repo_root.join(APP_CHANGE_PLAN_FILE).display());
+    if let Some(observed_revision) = options.observed_revision
+        && observed_revision != current.revision
+    {
+        bail!(
+            "App Composition revision conflict: observed revision {observed_revision}, current revision {}",
+            current.revision
+        );
     }
-    print_app_change_plan(&plan);
-    if options.explain {
-        println!();
-        print_app_composition(plan.composition.as_ref().expect("composition exists"));
+    let mut authoring = app_composition::authoring_from_composition(&current);
+    apply_exact_recipes(&mut authoring, &options.addons, &options.packs, &repo_root)?;
+    apply_exact_implementation_overrides(&mut authoring, &options.implementations)?;
+    let preview =
+        app_composition::build_composition_at_revision(authoring.clone(), current.revision + 1)?;
+
+    if !options.apply {
+        print_exact_composition_impact(Some(&current), &preview);
+        if options.write_plan {
+            println!(
+                "No app-change-plan was written: {} is the sole App Composition and lock.",
+                app_composition::APP_COMPOSITION_FILE
+            );
+        }
+        return Ok(());
     }
-    if options.apply {
-        app_apply(AppApplyOptions {
-            dry_run: false,
-            plan: PathBuf::from(APP_CHANGE_PLAN_FILE),
-            repo_root: Some(repo_root),
-        })?;
+
+    if preview.modules == current.modules && preview.provenance == current.provenance {
+        print_exact_composition_impact(Some(&current), &current);
+        println!("App Composition already matches the requested selections.");
+        return Ok(());
     }
+
+    materialize_exact_services(
+        &repo_root,
+        &authoring
+            .provenance
+            .blueprint
+            .clone()
+            .unwrap_or_else(|| options.blueprint.clone()),
+        &options.addons,
+    )?;
+    let next = app_composition::replace(
+        &path,
+        options.observed_revision.unwrap_or(current.revision),
+        authoring,
+    )?;
+    print_exact_composition_impact(Some(&current), &next);
     Ok(())
 }
 
@@ -622,6 +680,339 @@ pub(crate) fn app_compose(options: AppComposeOptions) -> Result<()> {
         return compose_new_app(options, dir);
     }
     compose_existing_app(options)
+}
+
+fn exact_authoring_for_blueprint(
+    app_id: &str,
+    blueprint_name: &str,
+    addons: &[String],
+    packs: &[PathBuf],
+    implementations: &[String],
+    repo_root: &Path,
+) -> Result<app_composition::CompositionAuthoring> {
+    let blueprint = blueprint_by_name(blueprint_name)?;
+    let mut modules = Vec::new();
+    if blueprint.modules.iter().any(|module| {
+        module
+            .dependencies
+            .iter()
+            .any(|dependency| dependency == "auth")
+    }) {
+        modules.push(app_composition::CompositionModuleInput {
+            business_contributions: vec!["auth".to_owned()],
+            dependencies: Vec::new(),
+            implementation: app_composition::ImplementationInput::Linked,
+            module_id: "auth".to_owned(),
+            owner: "lenso/auth".to_owned(),
+            version: "0.1.0".to_owned(),
+        });
+    }
+    for module in &blueprint.modules {
+        add_exact_blueprint_module(&mut modules, module)?;
+    }
+    for addon_name in addons {
+        let addon = addon_by_name(addon_name)?;
+        if !addon
+            .supported_blueprints
+            .iter()
+            .any(|name| name == blueprint_name)
+        {
+            bail!("addon `{addon_name}` does not support blueprint `{blueprint_name}`");
+        }
+        for module in &addon.modules {
+            add_exact_blueprint_module(&mut modules, module)?;
+        }
+    }
+
+    let mut authoring = app_composition::CompositionAuthoring {
+        app_id: app_id.to_owned(),
+        modules,
+        provenance: app_composition::CompositionProvenance {
+            addons: addons.to_vec(),
+            blueprint: Some(blueprint_name.to_owned()),
+            capability_packs: Vec::new(),
+        },
+    };
+    for pack in packs {
+        append_exact_capability_pack(&mut authoring, pack, blueprint_name, repo_root)?;
+    }
+    apply_exact_implementation_overrides(&mut authoring, implementations)?;
+    Ok(authoring)
+}
+
+fn add_exact_blueprint_module(
+    modules: &mut Vec<app_composition::CompositionModuleInput>,
+    module: &BlueprintModule,
+) -> Result<()> {
+    if modules
+        .iter()
+        .any(|existing| existing.module_id == module.name)
+    {
+        bail!("Module `{}` is selected more than once", module.name);
+    }
+    modules.push(app_composition::CompositionModuleInput {
+        business_contributions: module.capabilities.clone(),
+        dependencies: module.dependencies.clone(),
+        implementation: app_composition::ImplementationInput::Service {
+            service_reference: format!("service:{}", module.owner_service),
+        },
+        module_id: module.name.clone(),
+        owner: format!("blueprint:{}", module.owner_service),
+        version: "0.1.0".to_owned(),
+    });
+    Ok(())
+}
+
+fn apply_exact_recipes(
+    authoring: &mut app_composition::CompositionAuthoring,
+    addons: &[String],
+    packs: &[PathBuf],
+    repo_root: &Path,
+) -> Result<()> {
+    let blueprint_name = authoring
+        .provenance
+        .blueprint
+        .as_deref()
+        .unwrap_or(DEFAULT_BLUEPRINT)
+        .to_owned();
+    for addon_name in addons {
+        if authoring
+            .provenance
+            .addons
+            .iter()
+            .any(|existing| existing == addon_name)
+        {
+            bail!("addon `{addon_name}` is already materialized in the App Composition");
+        }
+        let addon = addon_by_name(addon_name)?;
+        if !addon
+            .supported_blueprints
+            .iter()
+            .any(|name| name == &blueprint_name)
+        {
+            bail!("addon `{addon_name}` does not support blueprint `{blueprint_name}`");
+        }
+        for module in &addon.modules {
+            add_exact_blueprint_module(&mut authoring.modules, module)?;
+        }
+        authoring.provenance.addons.push(addon_name.clone());
+    }
+    for pack in packs {
+        append_exact_capability_pack(authoring, pack, &blueprint_name, repo_root)?;
+    }
+    Ok(())
+}
+
+fn append_exact_capability_pack(
+    authoring: &mut app_composition::CompositionAuthoring,
+    requested_path: &Path,
+    blueprint_name: &str,
+    repo_root: &Path,
+) -> Result<()> {
+    let pack_path = capability::resolve_pack_path(repo_root, requested_path);
+    let pack = capability::read_pack(&pack_path)?;
+    if !pack
+        .supports
+        .blueprints
+        .iter()
+        .any(|blueprint| blueprint == blueprint_name)
+    {
+        bail!(
+            "capability pack `{}` does not support blueprint `{blueprint_name}`",
+            pack.name
+        );
+    }
+    if authoring
+        .provenance
+        .capability_packs
+        .iter()
+        .any(|existing| existing == &pack.name)
+    {
+        bail!("capability pack `{}` is already materialized", pack.name);
+    }
+    let service_reference = pack
+        .services
+        .first()
+        .map(|service| format!("service:{}/{}", service.provider, service.service));
+    for module in &pack.modules {
+        let manifest = read_json_value_required(&pack_path.join(&module.manifest))?;
+        let module_id = manifest
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or(&module.name)
+            .to_owned();
+        let contributions = string_array(&manifest, "capabilities");
+        let contributions = if contributions.is_empty() {
+            vec![format!("{}.use", module_id.replace('-', "."))]
+        } else {
+            contributions
+        };
+        let dependencies = string_array(&manifest, "dependencies");
+        if authoring
+            .modules
+            .iter()
+            .any(|existing| existing.module_id == module_id)
+        {
+            bail!("Module `{module_id}` is selected more than once");
+        }
+        authoring
+            .modules
+            .push(app_composition::CompositionModuleInput {
+                business_contributions: contributions,
+                dependencies,
+                implementation: service_reference.as_ref().map_or(
+                    app_composition::ImplementationInput::Linked,
+                    |service_reference| app_composition::ImplementationInput::Service {
+                        service_reference: service_reference.clone(),
+                    },
+                ),
+                module_id,
+                owner: format!("capability:{}", pack.name),
+                version: manifest
+                    .get("version")
+                    .and_then(Value::as_str)
+                    .unwrap_or("0.1.0")
+                    .to_owned(),
+            });
+    }
+    authoring.provenance.capability_packs.push(pack.name);
+    Ok(())
+}
+
+fn apply_exact_implementation_overrides(
+    authoring: &mut app_composition::CompositionAuthoring,
+    overrides: &[String],
+) -> Result<()> {
+    let mut parsed = BTreeMap::new();
+    for value in overrides {
+        let (module_id, implementation) = value.split_once('=').with_context(|| {
+            format!("implementation override `{value}` must be MODULE=linked|service:REF")
+        })?;
+        if module_id.is_empty()
+            || parsed
+                .insert(module_id.to_owned(), implementation)
+                .is_some()
+        {
+            bail!("implementation override `{value}` is duplicated or missing a Module id");
+        }
+    }
+    for (module_id, implementation) in parsed {
+        let module = authoring
+            .modules
+            .iter_mut()
+            .find(|module| module.module_id == module_id)
+            .with_context(|| {
+                format!("implementation override references unknown Module `{module_id}`")
+            })?;
+        module.implementation = if implementation == "linked" {
+            app_composition::ImplementationInput::Linked
+        } else if let Some(service_reference) = implementation.strip_prefix("service:") {
+            app_composition::ImplementationInput::Service {
+                service_reference: format!("service:{service_reference}"),
+            }
+        } else {
+            bail!(
+                "implementation override `{module_id}={implementation}` must use `linked` or `service:REF`"
+            );
+        };
+    }
+    Ok(())
+}
+
+fn materialize_exact_services(
+    repo_root: &Path,
+    blueprint_name: &str,
+    addons: &[String],
+) -> Result<()> {
+    with_current_dir(repo_root, || {
+        if ensure_env_file()? {
+            println!("Prepared .env from .env.example.");
+        }
+        let blueprint = blueprint_by_name(blueprint_name)?;
+        let mut services = blueprint.services;
+        for addon_name in addons {
+            services.extend(addon_by_name(addon_name)?.services);
+        }
+        let mut seen = BTreeMap::new();
+        for service in services {
+            if seen.insert(service.name.clone(), ()).is_some() {
+                continue;
+            }
+            if Path::new(&service_cwd(&service)).is_dir() {
+                upsert_workspace_service(&service)?;
+            } else {
+                create_service_scaffold(&service)?;
+            }
+        }
+        Ok(())
+    })
+}
+
+fn string_array(value: &Value, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn print_exact_composition_impact(
+    before: Option<&app_composition::AppComposition>,
+    after: &app_composition::AppComposition,
+) {
+    println!("Composition Impact Summary");
+    let before_ids = before
+        .map(|composition| {
+            composition
+                .modules
+                .iter()
+                .map(|module| module.module_id.as_str())
+                .collect::<std::collections::BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let added = after
+        .modules
+        .iter()
+        .filter(|module| !before_ids.contains(module.module_id.as_str()))
+        .map(|module| module.module_id.as_str())
+        .collect::<Vec<_>>();
+    println!(
+        "- modules: {}",
+        if added.is_empty() {
+            "no new Module selections".to_owned()
+        } else {
+            format!("added {}", added.join(", "))
+        }
+    );
+    if let Some(before) = before {
+        let changed = after
+            .modules
+            .iter()
+            .filter(|module| {
+                before
+                    .modules
+                    .iter()
+                    .find(|old| old.module_id == module.module_id)
+                    .is_some_and(|old| old.implementation != module.implementation)
+            })
+            .map(|module| module.module_id.as_str())
+            .collect::<Vec<_>>();
+        if !changed.is_empty() {
+            println!("- implementation bindings changed: {}", changed.join(", "));
+        }
+    }
+    let dependency_count = after
+        .modules
+        .iter()
+        .map(|module| module.dependencies.len())
+        .sum::<usize>();
+    println!("- resolved dependencies: {dependency_count}");
+    println!("- revision: {}", after.revision);
+    println!("- content digest: {}", after.content_digest);
+    println!("- lock: {}", app_composition::APP_COMPOSITION_FILE);
 }
 
 pub(crate) fn app_plan(options: AppPlanOptions) -> Result<()> {
@@ -2233,13 +2624,7 @@ fn print_app_change_plan(plan: &AppChangePlanState) {
     }
 }
 
-fn composition_preview_for_new_app(options: &AppComposeOptions) -> Result<AppCompositionState> {
-    let blueprint = blueprint_by_name(&options.blueprint)?;
-    let launchpad = launchpad_state_from_blueprint("new-app", &blueprint);
-    let repo_root = options.dir.as_deref().unwrap_or_else(|| Path::new("."));
-    composition_for_existing_app(repo_root, &launchpad, &options.addons, &options.packs, None)
-}
-
+#[cfg(test)]
 fn composition_for_existing_app(
     repo_root: &Path,
     launchpad: &LaunchpadState,
@@ -2323,7 +2708,7 @@ fn composition_for_existing_app(
     };
 
     Ok(AppCompositionState {
-        protocol: APP_COMPOSITION_PROTOCOL.to_owned(),
+        protocol: app_composition::APP_COMPOSITION_PROTOCOL.to_owned(),
         intent,
         requested_addons: requested,
         applied_addons,
@@ -2336,56 +2721,6 @@ fn composition_for_existing_app(
         service_actions,
         agent_actions,
     })
-}
-
-fn print_app_composition(composition: &AppCompositionState) {
-    println!("App composition: {}", composition.protocol);
-    if let Some(intent) = &composition.intent {
-        println!("intent: {intent}");
-    }
-    println!(
-        "requested addons: {}",
-        list_or_none(&composition.requested_addons)
-    );
-    println!(
-        "applied addons: {}",
-        list_or_none(&composition.applied_addons)
-    );
-    println!(
-        "pending addons: {}",
-        list_or_none(&composition.pending_addons)
-    );
-    println!(
-        "requested packs: {}",
-        list_or_none(&composition.requested_packs)
-    );
-    println!(
-        "applied packs: {}",
-        list_or_none(&composition.applied_packs)
-    );
-    println!(
-        "pending packs: {}",
-        list_or_none(&composition.pending_packs)
-    );
-    for pack in &composition.capability_packs {
-        println!("pack: {} ({}) -> {}", pack.name, pack.status, pack.path);
-    }
-    for fit in &composition.pack_fit {
-        println!("pack fit: {} ({}) -> {}", fit.name, fit.status, fit.path);
-        for issue in &fit.issues {
-            println!("- {issue}");
-        }
-    }
-    for action in &composition.service_actions {
-        if let Some(command) = &action.command {
-            println!("service: {} -> {command}", action.label);
-        }
-    }
-    for action in &composition.agent_actions {
-        if let Some(command) = &action.command {
-            println!("agent: {} -> {command}", action.label);
-        }
-    }
 }
 
 fn list_or_none(items: &[String]) -> String {
@@ -3731,7 +4066,7 @@ mod tests {
                 pack_fit: Vec::new(),
                 pending_addons: vec!["support-sla".to_owned()],
                 pending_packs: Vec::new(),
-                protocol: APP_COMPOSITION_PROTOCOL.to_owned(),
+                protocol: app_composition::APP_COMPOSITION_PROTOCOL.to_owned(),
                 requested_addons: vec!["support-sla".to_owned()],
                 requested_packs: Vec::new(),
                 service_actions: Vec::new(),
@@ -3787,7 +4122,7 @@ mod tests {
                 pack_fit: Vec::new(),
                 pending_addons: Vec::new(),
                 pending_packs: vec!["support-sla".to_owned()],
-                protocol: APP_COMPOSITION_PROTOCOL.to_owned(),
+                protocol: app_composition::APP_COMPOSITION_PROTOCOL.to_owned(),
                 requested_addons: Vec::new(),
                 requested_packs: vec!["support-sla".to_owned()],
                 service_actions: Vec::new(),

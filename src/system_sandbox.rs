@@ -8,7 +8,8 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result};
+use crate::app_composition::{self, ImplementationBinding};
+use anyhow::{Context, Result, bail};
 use lenso_service::{
     ContractSemanticKind, SystemV2Graph, WorkloadRole, check_contract_artifact_value,
     system_v2_graph,
@@ -36,9 +37,14 @@ const SANDBOX_PROTOCOL: &str = "lenso.system-sandbox.v1";
 const PLAN_PROTOCOL: &str = "lenso.system-sandbox-plan.v1";
 const STATE_PROTOCOL: &str = "lenso.system-sandbox-state.v1";
 const OWNER_PROTOCOL: &str = "lenso.system-sandbox-owner.v1";
+const LOCAL_CONTROL_ADAPTER_PROTOCOL: &str = "lenso.local-control-adapter.v1";
+const LOCAL_CONTROL_ADAPTER_PLAN_PROTOCOL: &str = "lenso.local-control-adapter-plan.v1";
+const LOCAL_CONTROL_ADAPTER_DIR: &str = ".lenso/local-control-adapter";
+const WORKSPACE_FILE: &str = "lenso.workspace.json";
 
 #[derive(Debug, Clone)]
 pub(crate) struct SystemDevOptions {
+    pub(crate) adapter_child: bool,
     pub(crate) cleanup: bool,
     pub(crate) dry_run: bool,
     pub(crate) json: bool,
@@ -90,6 +96,8 @@ const fn default_health_timeout_ms() -> u64 {
 #[serde(rename_all = "camelCase")]
 struct SandboxPlan {
     protocol: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    composition_digest: Option<String>,
     system_id: String,
     system_file: PathBuf,
     sandbox_file: PathBuf,
@@ -205,6 +213,18 @@ struct RunningSandbox {
     processes: Vec<OwnedProcess>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalControlAdapterState {
+    protocol: String,
+    app_id: String,
+    composition_digest: String,
+    adapter_pid: Option<u32>,
+    phase: SandboxPhase,
+    sandbox_root: PathBuf,
+    workload_identities: Vec<String>,
+}
+
 pub(crate) async fn dev_system(options: SystemDevOptions) -> Result<()> {
     #[cfg(not(unix))]
     return Err(command_error(
@@ -217,6 +237,8 @@ pub(crate) async fn dev_system(options: SystemDevOptions) -> Result<()> {
     ));
 
     let current = std::env::current_dir().context("resolve current directory")?;
+    validate_options(&options).map_err(|error| command_error(error, options.json))?;
+    let explicit_system_file = options.system_file.is_some();
     let system_file = absolute(
         &current,
         options
@@ -224,6 +246,13 @@ pub(crate) async fn dev_system(options: SystemDevOptions) -> Result<()> {
             .as_deref()
             .unwrap_or(Path::new(DEFAULT_SYSTEM_FILE)),
     );
+    if let Some(composition_file) = exact_composition_path(
+        &current,
+        options.system_file.as_deref(),
+        explicit_system_file,
+    ) {
+        return dev_composition(options, composition_file).await;
+    }
     let system_dir = system_file.parent().unwrap_or(Path::new("."));
     let sandbox_file = absolute(
         system_dir,
@@ -238,7 +267,6 @@ pub(crate) async fn dev_system(options: SystemDevOptions) -> Result<()> {
             options.json,
         )
     })?;
-    validate_options(&options).map_err(|error| command_error(error, options.json))?;
     let system_id = validate_system(&system).map_err(|error| command_error(error, options.json))?;
     let owned_root = system_dir.join(".lenso/system-sandbox").join(system_id);
 
@@ -300,6 +328,566 @@ pub(crate) async fn dev_system(options: SystemDevOptions) -> Result<()> {
         .shutdown()
         .await
         .map_err(|error| command_error(error, options.json))
+}
+
+fn exact_composition_path(
+    current: &Path,
+    explicit_path: Option<&Path>,
+    was_explicit: bool,
+) -> Option<PathBuf> {
+    let candidate = explicit_path.map(|path| absolute(current, path));
+    if was_explicit {
+        return candidate.filter(|path| {
+            path.file_name().and_then(|name| name.to_str())
+                == Some(app_composition::APP_COMPOSITION_FILE)
+        });
+    }
+    let default = current.join(app_composition::APP_COMPOSITION_FILE);
+    default.exists().then_some(default)
+}
+
+async fn dev_composition(options: SystemDevOptions, composition_file: PathBuf) -> Result<()> {
+    if options.sandbox_file.is_some() {
+        return Err(command_error(
+            SandboxError::new(
+                "conflicting_options",
+                "An exact App Composition owns its local runtime plan; --sandbox-file is not used.",
+                "Remove --sandbox-file and run lenso system dev from the App directory.",
+            ),
+            options.json,
+        ));
+    }
+    if options.scenario.is_some() {
+        return Err(command_error(
+            SandboxError::new(
+                "unsupported_option",
+                "Failure Scenarios are only available for an explicit System Sandbox definition.",
+                "Run lenso system dev with lenso.system.json and lenso.system-sandbox.json for scenarios.",
+            ),
+            options.json,
+        ));
+    }
+    let plan = build_composition_plan(&composition_file, options.cleanup)
+        .map_err(|error| command_error(error, options.json))?;
+    if options.adapter_child {
+        return run_composition_adapter_child(plan).await;
+    }
+    let adapter_state_path = adapter_state_path(&plan);
+
+    if options.cleanup {
+        if adapter_state_path.exists() {
+            let adapter_state: LocalControlAdapterState =
+                read_typed(&adapter_state_path, "Local Control Adapter state").map_err(
+                    |error| {
+                        command_error(
+                            input_error("adapter_state_invalid", &adapter_state_path, &error),
+                            options.json,
+                        )
+                    },
+                )?;
+            stop_local_adapter(&adapter_state, &plan)
+                .await
+                .map_err(|error| command_error(error, options.json))?;
+        }
+        cleanup_recorded(&plan.owned_root)
+            .await
+            .map_err(|error| command_error(error, options.json))?;
+        let state = adapter_state_for(&plan, None, SandboxPhase::Stopped);
+        write_adapter_state(&adapter_state_path, &state)
+            .map_err(|error| command_error(error, options.json))?;
+        print_adapter_state(&state, options.json)?;
+        return Ok(());
+    }
+    if options.dry_run {
+        println!("{}", serde_json::to_string_pretty(&plan)?);
+        return Ok(());
+    }
+
+    let starting = adapter_state_for(&plan, None, SandboxPhase::Starting);
+    write_adapter_state(&adapter_state_path, &starting)
+        .map_err(|error| command_error(error, options.json))?;
+    let mut child = start_adapter_child(&composition_file)?;
+    let adapter_state =
+        read_typed::<LocalControlAdapterState>(&adapter_state_path, "Local Control Adapter state")
+            .ok();
+    if !adapter_state.is_some_and(|state| {
+        matches!(
+            state.phase,
+            SandboxPhase::Ready | SandboxPhase::Failed | SandboxPhase::Stopped
+        )
+    }) {
+        let starting = adapter_state_for(&plan, Some(child.id()), SandboxPhase::Starting);
+        write_adapter_state(&adapter_state_path, &starting)
+            .map_err(|error| command_error(error, options.json))?;
+    }
+    let state = wait_for_adapter_ready(&mut child, &adapter_state_path).await?;
+    print_adapter_state(&state, options.json)?;
+    Ok(())
+}
+
+fn build_composition_plan(
+    composition_file: &Path,
+    allow_existing: bool,
+) -> std::result::Result<SandboxPlan, SandboxError> {
+    let composition = app_composition::read(composition_file)
+        .map_err(|error| input_error("app_composition_invalid", composition_file, &error))?;
+    if !is_safe_identity(&composition.app_id) {
+        return Err(SandboxError::new(
+            "unsafe_app_identity",
+            format!(
+                "App identity is not a safe path component: {}",
+                composition.app_id
+            ),
+            "Use only ASCII letters, numbers, dot, underscore, and dash in the App id.",
+        ));
+    }
+    let app_dir = composition_file.parent().unwrap_or(Path::new("."));
+    let workspace_file = app_dir.join(WORKSPACE_FILE);
+    let workspace: Value = read_typed(&workspace_file, "Service workspace")
+        .map_err(|error| input_error("workspace_invalid", &workspace_file, &error))?;
+    if workspace.get("protocol").and_then(Value::as_str) != Some("lenso.service-workspace.v1") {
+        return Err(SandboxError::new(
+            "workspace_invalid",
+            format!(
+                "Unsupported Service workspace protocol in {}.",
+                workspace_file.display()
+            ),
+            "Run lenso service workspace init or regenerate the App services.",
+        ));
+    }
+    let workspace_services = workspace
+        .get("services")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid_definition("Service workspace services must be an array."))?;
+    let mut requested_services = BTreeMap::new();
+    for module in &composition.modules {
+        if let ImplementationBinding::Service { service_reference } = &module.implementation {
+            let service_name = service_name_from_reference(service_reference).ok_or_else(|| {
+                SandboxError::new(
+                    "invalid_service_reference",
+                    format!(
+                        "Could not map Service Reference {service_reference} to a local service."
+                    ),
+                    "Use a stable service:provider/name reference backed by lenso.workspace.json.",
+                )
+            })?;
+            requested_services.insert(service_name, service_reference.clone());
+        }
+    }
+    let system_dir = composition_file.parent().unwrap_or(Path::new("."));
+    let owned_root = system_dir
+        .join(".lenso/system-sandbox")
+        .join(&composition.app_id);
+    validate_owned_root(&owned_root, system_dir)?;
+    if requested_services.is_empty() {
+        if allow_existing {
+            return Ok(SandboxPlan {
+                protocol: LOCAL_CONTROL_ADAPTER_PLAN_PROTOCOL.to_owned(),
+                composition_digest: Some(composition.content_digest),
+                system_id: composition.app_id,
+                system_file: composition_file.to_path_buf(),
+                sandbox_file: composition_file.to_path_buf(),
+                owned_root,
+                services: Vec::new(),
+                workloads: Vec::new(),
+            });
+        }
+        return Err(SandboxError::new(
+            "no_local_workloads",
+            "The App Composition has no service-backed implementation to run locally.",
+            "Select at least one service-backed Module implementation before running lenso system dev.",
+        ));
+    }
+
+    if owned_root.exists() && !allow_existing {
+        return Err(SandboxError::new(
+            "sandbox_already_exists",
+            format!(
+                "Local Control Adapter state already exists: {}",
+                owned_root.display()
+            ),
+            "Run lenso system dev --cleanup before starting another local adapter.",
+        ));
+    }
+
+    let mut services = Vec::new();
+    let mut workloads = Vec::new();
+    for (service_name, service_reference) in requested_services {
+        let service = workspace_services
+            .iter()
+            .find(|service| {
+                service.get("name").and_then(Value::as_str) == Some(service_name.as_str())
+            })
+            .ok_or_else(|| {
+                SandboxError::new(
+                    "workspace_service_missing",
+                    format!(
+                        "Service Reference {service_reference} has no {service_name} entry in {}.",
+                        workspace_file.display()
+                    ),
+                    "Materialize the referenced service into lenso.workspace.json before running the App.",
+                )
+            })?;
+        let command = service
+            .get("command")
+            .and_then(Value::as_str)
+            .filter(|command| !command.trim().is_empty())
+            .map(|command| {
+                command
+                    .split_whitespace()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .ok_or_else(|| {
+                invalid_definition(format!(
+                    "Workspace service {service_name} must declare a command."
+                ))
+            })?;
+        let cwd = service
+            .get("cwd")
+            .and_then(Value::as_str)
+            .filter(|cwd| !cwd.is_empty())
+            .map(|cwd| absolute(system_dir, Path::new(cwd)))
+            .unwrap_or_else(|| system_dir.to_path_buf());
+        if !cwd.is_dir() {
+            return Err(SandboxError::new(
+                "workload_cwd_missing",
+                format!(
+                    "Workspace service {service_name} cwd does not exist: {}",
+                    cwd.display()
+                ),
+                "Create the service directory or correct its workspace cwd.",
+            ));
+        }
+        if command.is_empty() || !command_exists(&command[0], &cwd, &BTreeMap::new()) {
+            return Err(SandboxError::new(
+                "workload_command_missing",
+                format!(
+                    "Workspace service {service_name} executable was not found: {}",
+                    command.first().cloned().unwrap_or_default()
+                ),
+                "Install the service command or correct its workspace command.",
+            ));
+        }
+        let health_url = service
+            .get("readyUrl")
+            .and_then(Value::as_str)
+            .filter(|url| !url.is_empty())
+            .map(str::to_owned);
+        if let Some(url) = &health_url {
+            let parsed = reqwest::Url::parse(url).map_err(|error| {
+                SandboxError::new(
+                    "invalid_workload_url",
+                    format!("Workspace service {service_name} readyUrl is invalid: {error}"),
+                    "Set readyUrl to an absolute HTTP URL.",
+                )
+            })?;
+            if !matches!(parsed.scheme(), "http" | "https") {
+                return Err(SandboxError::new(
+                    "invalid_workload_url",
+                    format!("Workspace service {service_name} readyUrl must use HTTP."),
+                    "Set readyUrl to an absolute HTTP URL.",
+                ));
+            }
+        }
+        let workload_id = format!("{service_name}-api");
+        let identity = format!("local-dev://{}/{service_name}/api", composition.app_id);
+        let store_path = owned_root
+            .join("services")
+            .join(&service_name)
+            .join("store");
+        let mut env = BTreeMap::new();
+        env.insert("LENSO_APP_ID".to_owned(), composition.app_id.clone());
+        env.insert(
+            "LENSO_APP_COMPOSITION_DIGEST".to_owned(),
+            composition.content_digest.clone(),
+        );
+        env.insert("LENSO_SYSTEM_ID".to_owned(), composition.app_id.clone());
+        env.insert("LENSO_SERVICE_ID".to_owned(), service_name.clone());
+        env.insert("LENSO_WORKLOAD_ID".to_owned(), workload_id.clone());
+        env.insert("LENSO_WORKLOAD_IDENTITY".to_owned(), identity.clone());
+        env.insert("LENSO_SERVICE_REFERENCE".to_owned(), service_reference);
+        env.insert(
+            "LENSO_SERVICE_STORE_PATH".to_owned(),
+            store_path.display().to_string(),
+        );
+        services.push(PlannedService {
+            service_id: service_name.clone(),
+            store_path: store_path.clone(),
+        });
+        workloads.push(PlannedWorkload {
+            service_id: service_name,
+            workload_id,
+            role: WorkloadRole::Api,
+            identity,
+            command,
+            scenario_command: Vec::new(),
+            cwd,
+            env,
+            endpoint: None,
+            health_url,
+            health_timeout_ms: service
+                .get("readyTimeoutMs")
+                .and_then(Value::as_u64)
+                .unwrap_or(default_health_timeout_ms()),
+        });
+    }
+
+    Ok(SandboxPlan {
+        protocol: LOCAL_CONTROL_ADAPTER_PLAN_PROTOCOL.to_owned(),
+        composition_digest: Some(composition.content_digest),
+        system_id: composition.app_id,
+        system_file: composition_file.to_path_buf(),
+        sandbox_file: composition_file.to_path_buf(),
+        owned_root,
+        services,
+        workloads,
+    })
+}
+
+fn service_name_from_reference(reference: &str) -> Option<String> {
+    reference
+        .strip_prefix("service:")?
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+}
+
+fn adapter_state_path(plan: &SandboxPlan) -> PathBuf {
+    plan.system_file
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(LOCAL_CONTROL_ADAPTER_DIR)
+        .join(&plan.system_id)
+        .join("state.json")
+}
+
+fn adapter_state_for(
+    plan: &SandboxPlan,
+    adapter_pid: Option<u32>,
+    phase: SandboxPhase,
+) -> LocalControlAdapterState {
+    LocalControlAdapterState {
+        protocol: LOCAL_CONTROL_ADAPTER_PROTOCOL.to_owned(),
+        app_id: plan.system_id.clone(),
+        composition_digest: plan.composition_digest.clone().unwrap_or_default(),
+        adapter_pid,
+        phase,
+        sandbox_root: plan.owned_root.clone(),
+        workload_identities: plan
+            .workloads
+            .iter()
+            .map(|workload| workload.identity.clone())
+            .collect(),
+    }
+}
+
+fn write_adapter_state(
+    path: &Path,
+    state: &LocalControlAdapterState,
+) -> std::result::Result<(), SandboxError> {
+    let parent = path.parent().ok_or_else(|| {
+        SandboxError::new(
+            "adapter_state_write_failed",
+            "Local Control Adapter state has no parent directory.",
+            "Run the command from a writable App directory.",
+        )
+    })?;
+    fs::create_dir_all(parent).map_err(|error| {
+        io_error(
+            "adapter_state_write_failed",
+            "create adapter state directory",
+            &error,
+        )
+    })?;
+    let source = serde_json::to_vec_pretty(state).map_err(|error| {
+        SandboxError::new(
+            "adapter_state_write_failed",
+            error.to_string(),
+            "Inspect the local adapter state and retry.",
+        )
+    })?;
+    let temporary = path.with_file_name(format!(
+        ".{}.tmp-{}",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("state.json"),
+        std::process::id()
+    ));
+    let result = (|| -> std::result::Result<(), SandboxError> {
+        fs::write(&temporary, source).map_err(|error| {
+            io_error("adapter_state_write_failed", "write adapter state", &error)
+        })?;
+        fs::rename(&temporary, path).map_err(|error| {
+            io_error(
+                "adapter_state_write_failed",
+                "atomically replace adapter state",
+                &error,
+            )
+        })
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn start_adapter_child(composition_file: &Path) -> Result<std::process::Child> {
+    let executable = std::env::current_exe().context("resolve lenso executable")?;
+    let app_dir = composition_file.parent().unwrap_or(Path::new("."));
+    std::process::Command::new(executable)
+        .args(["system", "dev", "--adapter-child", "--system-file"])
+        .arg(composition_file)
+        .current_dir(app_dir)
+        .env("LENSO_LOCAL_CONTROL_ADAPTER", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("start Local Control Adapter")
+}
+
+async fn stop_local_adapter(
+    state: &LocalControlAdapterState,
+    plan: &SandboxPlan,
+) -> std::result::Result<(), SandboxError> {
+    if state.protocol != LOCAL_CONTROL_ADAPTER_PROTOCOL
+        || state.app_id != plan.system_id
+        || state.sandbox_root != plan.owned_root
+    {
+        return Err(SandboxError::new(
+            "adapter_state_invalid",
+            "Local Control Adapter state does not belong to this App Composition.",
+            "Inspect the adapter state and remove only state proven to belong to this App.",
+        ));
+    }
+    let Some(pid) = state.adapter_pid else {
+        return Ok(());
+    };
+    if matches!(state.phase, SandboxPhase::Stopped | SandboxPhase::Failed) {
+        return Ok(());
+    }
+    let output = std::process::Command::new("ps")
+        .args(["eww", "-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .map_err(|error| {
+            SandboxError::new(
+                "adapter_cleanup_incomplete",
+                format!("Could not inspect Local Control Adapter process {pid}: {error}"),
+                "Inspect the adapter process and rerun cleanup.",
+            )
+        })?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return Ok(());
+    }
+    let command = String::from_utf8_lossy(&output.stdout);
+    if !command.contains("LENSO_LOCAL_CONTROL_ADAPTER=1") {
+        return Err(SandboxError::new(
+            "adapter_ownership_unproven",
+            format!(
+                "Refusing to stop process {pid} because its Local Control Adapter marker does not match."
+            ),
+            "Inspect the recorded adapter PID and remove only state proven to belong to this App.",
+        ));
+    }
+    terminate_recorded_process(pid).await.map_err(|error| {
+        SandboxError::new(
+            "adapter_cleanup_incomplete",
+            format!("Could not stop Local Control Adapter process {pid}: {error}"),
+            "Stop the recorded adapter process, then rerun cleanup.",
+        )
+    })
+}
+
+async fn wait_for_adapter_ready(
+    child: &mut std::process::Child,
+    state_path: &Path,
+) -> Result<LocalControlAdapterState> {
+    for _ in 0..300 {
+        if state_path.exists() {
+            let state: LocalControlAdapterState =
+                read_typed(state_path, "Local Control Adapter state")?;
+            match state.phase {
+                SandboxPhase::Ready => return Ok(state),
+                SandboxPhase::Failed | SandboxPhase::Stopped => {
+                    bail!("Local Control Adapter stopped during startup")
+                }
+                SandboxPhase::Starting | SandboxPhase::Completed | SandboxPhase::Stopping => {}
+            }
+        }
+        if let Some(status) = child.try_wait().context("observe Local Control Adapter")? {
+            bail!("Local Control Adapter exited during startup with {status}")
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    bail!("Local Control Adapter did not become ready within 30 seconds")
+}
+
+async fn run_composition_adapter_child(plan: SandboxPlan) -> Result<()> {
+    let state_path = adapter_state_path(&plan);
+    let pid = std::process::id();
+    write_adapter_state(
+        &state_path,
+        &adapter_state_for(&plan, Some(pid), SandboxPhase::Starting),
+    )
+    .map_err(|error| command_error(error, false))?;
+    let mut running = match launch(plan.clone(), false).await {
+        Ok(running) => running,
+        Err(error) => {
+            let _ = write_adapter_state(
+                &state_path,
+                &adapter_state_for(&plan, Some(pid), SandboxPhase::Failed),
+            );
+            return Err(command_error(error, false));
+        }
+    };
+    write_adapter_state(
+        &state_path,
+        &adapter_state_for(&running.plan, Some(pid), SandboxPhase::Ready),
+    )
+    .map_err(|error| command_error(error, false))?;
+    if let Err(error) = running.wait_for_stop().await {
+        let error = rollback_launch(&mut running, error).await;
+        let _ = write_adapter_state(
+            &state_path,
+            &adapter_state_for(&running.plan, Some(pid), SandboxPhase::Failed),
+        );
+        return Err(command_error(error, false));
+    }
+    match running.shutdown().await {
+        Ok(()) => {
+            write_adapter_state(
+                &state_path,
+                &adapter_state_for(&running.plan, Some(pid), SandboxPhase::Stopped),
+            )
+            .map_err(|error| command_error(error, false))?;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = write_adapter_state(
+                &state_path,
+                &adapter_state_for(&running.plan, Some(pid), SandboxPhase::Failed),
+            );
+            Err(command_error(error, false))
+        }
+    }
+}
+
+fn print_adapter_state(state: &LocalControlAdapterState, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(state)?);
+        return Ok(());
+    }
+    let phase_value = serde_json::to_value(state.phase)?;
+    let phase = phase_value.as_str().unwrap_or("unknown");
+    println!("Local Control Adapter {}: {phase}", state.app_id);
+    println!("composition digest: {}", state.composition_digest);
+    for identity in &state.workload_identities {
+        println!("workload identity: {identity}");
+    }
+    println!("Next: lenso system dev --cleanup");
+    Ok(())
 }
 
 fn validate_options(options: &SystemDevOptions) -> std::result::Result<(), SandboxError> {
@@ -471,6 +1059,7 @@ fn build_plan(
     }
     Ok(SandboxPlan {
         protocol: PLAN_PROTOCOL.to_owned(),
+        composition_digest: None,
         system_id,
         system_file: system_file.to_path_buf(),
         sandbox_file: sandbox_file.to_path_buf(),
@@ -1230,13 +1819,15 @@ async fn cleanup_recorded(root: &Path) -> std::result::Result<(), SandboxError> 
             "Stop the reported sandbox-owned processes, then rerun cleanup.",
         ));
     }
-    tokio::fs::remove_dir_all(root).await.map_err(|error| {
-        io_error(
+    match tokio::fs::remove_dir_all(root).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_error(
             "cleanup_incomplete",
             "remove the owned sandbox root",
             &error,
-        )
-    })
+        )),
+    }
 }
 
 fn owned_process_ids(token: &str) -> std::result::Result<Vec<u32>, SandboxError> {
