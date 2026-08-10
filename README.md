@@ -257,6 +257,28 @@ lenso system dev --scenario deadline-timeout --json
 lenso system dev --cleanup
 ```
 
+For a new product-shaped application, materialize one exact App Composition
+instead of layering generated state. The blueprint and addons are authoring
+recipes; `lenso.app.json` is the only application composition and lock, with
+immutable Module release digests, implementation bindings, resolved dependency
+selections, and an optimistic revision:
+
+```sh
+lenso app compose ./support-desk --blueprint support-desk --apply
+lenso app compose --repo-root ./support-desk \
+  --implementation support-api=linked \
+  --observed-revision 1 --apply
+lenso system dev --system-file ./support-desk/lenso.app.json --dry-run --json
+lenso system dev --system-file ./support-desk/lenso.app.json
+```
+
+`lenso system dev` realizes service-backed bindings through a persistent Local
+Control Adapter. The coordinator may exit after reporting workload identities;
+the adapter and its explicitly started local workloads remain active. Use
+`lenso system dev --system-file ./support-desk/lenso.app.json --cleanup` to
+stop only the adapter-owned workloads. This path does not create a second App
+lock or copy process commands into `lenso.app.json`.
+
 The System graph remains in `lenso.system.json`. Local-only executable details
 live beside it in `lenso.system-sandbox.json`:
 

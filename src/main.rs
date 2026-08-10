@@ -1,3 +1,4 @@
+mod app_composition;
 mod capability;
 mod console_composition;
 mod console_dev;
@@ -217,6 +218,10 @@ struct AppInspectArgs {
 struct AppAddArgs {
     /// Addon name.
     addon: String,
+
+    /// Expected App Composition revision for the atomic update.
+    #[arg(long)]
+    observed_revision: Option<u64>,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -270,6 +275,14 @@ struct AppComposeArgs {
     /// Print explanation without writing files.
     #[arg(long)]
     explain: bool,
+
+    /// Override a Module implementation. Can be repeated as MODULE=linked or MODULE=service:REF.
+    #[arg(long = "implementation", value_name = "MODULE=linked|service:REF")]
+    implementations: Vec<String>,
+
+    /// Expected App Composition revision for the atomic update.
+    #[arg(long)]
+    observed_revision: Option<u64>,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -645,6 +658,10 @@ struct SystemDevArgs {
     /// Print machine-readable JSON.
     #[arg(long)]
     json: bool,
+
+    /// Internal Local Control Adapter worker mode.
+    #[arg(long, hide = true)]
+    adapter_child: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -3198,7 +3215,10 @@ async fn main() -> anyhow::Result<()> {
                 launchpad::inspect_blueprint(&args.blueprint)?;
             }
             AppCommand::Add(args) => {
-                launchpad::add_app_addon(launchpad::AppAddOptions { addon: args.addon })?;
+                launchpad::add_app_addon(launchpad::AppAddOptions {
+                    addon: args.addon,
+                    observed_revision: args.observed_revision,
+                })?;
             }
             AppCommand::Compose(args) => {
                 launchpad::app_compose(launchpad::AppComposeOptions {
@@ -3207,6 +3227,8 @@ async fn main() -> anyhow::Result<()> {
                     blueprint: args.blueprint,
                     dir: args.dir,
                     explain: args.explain,
+                    implementations: args.implementations,
+                    observed_revision: args.observed_revision,
                     packs: args.packs,
                     repo_root: args.repo_root,
                     write_plan: args.write_plan,
@@ -3457,6 +3479,7 @@ async fn main() -> anyhow::Result<()> {
                     sandbox_file: args.sandbox_file,
                     scenario: args.scenario,
                     system_file: args.system_file,
+                    adapter_child: args.adapter_child,
                 })
                 .await?;
             }
@@ -3935,7 +3958,14 @@ mod tests {
 
     #[test]
     fn parses_app_add() {
-        let cli = Cli::parse_from(["lenso", "app", "add", "support-sla"]);
+        let cli = Cli::parse_from([
+            "lenso",
+            "app",
+            "add",
+            "support-sla",
+            "--observed-revision",
+            "4",
+        ]);
         let Command::App {
             command: AppCommand::Add(args),
         } = cli.command
@@ -3944,6 +3974,7 @@ mod tests {
         };
 
         assert_eq!(args.addon, "support-sla");
+        assert_eq!(args.observed_revision, Some(4));
     }
 
     #[test]
@@ -3988,6 +4019,10 @@ mod tests {
             "support-sla",
             "--addon",
             "customer-profile",
+            "--implementation",
+            "support-api=service:support-api",
+            "--observed-revision",
+            "2",
             "--apply",
         ]);
         let Command::App {
@@ -3999,6 +4034,11 @@ mod tests {
 
         assert_eq!(args.dir, Some(std::path::PathBuf::from("./acme-support")));
         assert_eq!(args.addons, vec!["support-sla", "customer-profile"]);
+        assert_eq!(
+            args.implementations,
+            vec!["support-api=service:support-api"]
+        );
+        assert_eq!(args.observed_revision, Some(2));
         assert!(args.apply);
     }
 

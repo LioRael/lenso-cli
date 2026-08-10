@@ -47,6 +47,13 @@ fn run_json_failure(arguments: &[&str]) -> Value {
     })
 }
 
+fn run_owned(arguments: &[String]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_lenso"))
+        .args(arguments)
+        .output()
+        .unwrap()
+}
+
 fn write_contract_variant(name: &str, fixture: &str, protocol: Option<&str>) -> PathBuf {
     let path = fixture_path(name);
     let mut artifact: Value = serde_json::from_str(fixture).unwrap();
@@ -358,4 +365,247 @@ fn system_check_reports_stable_protocol_errors_as_json() {
         );
         fs::remove_file(path).unwrap();
     }
+}
+
+#[test]
+fn exact_support_desk_composition_is_revision_guarded_and_locally_runnable() {
+    let root = fixture_dir("exact-support-desk");
+    let app = root.join("support-desk");
+    fs::create_dir_all(&root).unwrap();
+
+    let compose = vec![
+        "app".to_owned(),
+        "compose".to_owned(),
+        app.to_string_lossy().into_owned(),
+        "--apply".to_owned(),
+    ];
+    let created = run_owned(&compose);
+    assert!(
+        created.status.success(),
+        "app compose failed: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+
+    let composition_path = app.join("lenso.app.json");
+    let first_source = fs::read(&composition_path).unwrap();
+    let first: Value = serde_json::from_slice(&first_source).unwrap();
+    assert_eq!(first["protocol"], "lenso.app-composition.v1");
+    assert_eq!(first["revision"], 1);
+    assert!(
+        first["contentDigest"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    assert_eq!(first["modules"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        first["modules"][0]["release"]["contentDigest"]
+            .as_str()
+            .unwrap()
+            .len(),
+        71
+    );
+    assert_eq!(first["modules"][1]["dependencies"][0]["version"], "0.1.0");
+    assert_eq!(first["modules"][2]["implementation"]["kind"], "service");
+    assert!(
+        first["modules"][2]["implementation"]["serviceReference"]
+            .as_str()
+            .unwrap()
+            .starts_with("service:")
+    );
+    assert!(!app.join(".lenso.app.json.lock").exists());
+
+    let stale = vec![
+        "app".to_owned(),
+        "compose".to_owned(),
+        "--repo-root".to_owned(),
+        app.to_string_lossy().into_owned(),
+        "--addon".to_owned(),
+        "support-sla".to_owned(),
+        "--apply".to_owned(),
+        "--observed-revision".to_owned(),
+        "0".to_owned(),
+    ];
+    let conflict = run_owned(&stale);
+    assert!(!conflict.status.success());
+    assert!(String::from_utf8_lossy(&conflict.stderr).contains("revision conflict"));
+    assert_eq!(first_source, fs::read(&composition_path).unwrap());
+
+    let plan = vec![
+        "system".to_owned(),
+        "dev".to_owned(),
+        "--system-file".to_owned(),
+        composition_path.to_string_lossy().into_owned(),
+        "--dry-run".to_owned(),
+        "--json".to_owned(),
+    ];
+    let plan_output = run_owned(&plan);
+    assert!(
+        plan_output.status.success(),
+        "system dev dry-run failed: {}",
+        String::from_utf8_lossy(&plan_output.stderr)
+    );
+    let adapter_plan: Value = serde_json::from_slice(&plan_output.stdout).unwrap();
+    assert_eq!(
+        adapter_plan["protocol"],
+        "lenso.local-control-adapter-plan.v1"
+    );
+    assert_eq!(adapter_plan["compositionDigest"], first["contentDigest"]);
+    assert!(
+        adapter_plan["workloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|workload| workload["identity"] == "local-dev://support-desk/support-api/api")
+    );
+    assert!(!app.join("lenso.system.json").exists());
+    assert!(!app.join("lenso.system-sandbox.json").exists());
+
+    let addon = vec![
+        "app".to_owned(),
+        "compose".to_owned(),
+        "--repo-root".to_owned(),
+        app.to_string_lossy().into_owned(),
+        "--addon".to_owned(),
+        "support-sla".to_owned(),
+        "--apply".to_owned(),
+        "--observed-revision".to_owned(),
+        "1".to_owned(),
+    ];
+    let added = run_owned(&addon);
+    assert!(
+        added.status.success(),
+        "adding addon failed: {}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let second: Value = serde_json::from_slice(&fs::read(&composition_path).unwrap()).unwrap();
+    assert_eq!(second["revision"], 2);
+    assert!(
+        second["provenance"]["addons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|addon| addon == "support-sla")
+    );
+
+    let linked = vec![
+        "app".to_owned(),
+        "compose".to_owned(),
+        "--repo-root".to_owned(),
+        app.to_string_lossy().into_owned(),
+        "--implementation".to_owned(),
+        "support-api=linked".to_owned(),
+        "--apply".to_owned(),
+        "--observed-revision".to_owned(),
+        "2".to_owned(),
+    ];
+    let rebound = run_owned(&linked);
+    assert!(
+        rebound.status.success(),
+        "implementation update failed: {}",
+        String::from_utf8_lossy(&rebound.stderr)
+    );
+    let third: Value = serde_json::from_slice(&fs::read(&composition_path).unwrap()).unwrap();
+    assert_eq!(third["revision"], 3);
+    assert_eq!(
+        third["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|module| module["moduleId"] == "support-api")
+            .unwrap()["implementation"]["kind"],
+        "linked"
+    );
+
+    let before_noop = fs::read(&composition_path).unwrap();
+    let noop = run_owned(&[
+        "app".to_owned(),
+        "compose".to_owned(),
+        "--repo-root".to_owned(),
+        app.to_string_lossy().into_owned(),
+        "--implementation".to_owned(),
+        "support-api=linked".to_owned(),
+        "--apply".to_owned(),
+        "--observed-revision".to_owned(),
+        "3".to_owned(),
+    ]);
+    assert!(
+        noop.status.success(),
+        "idempotent composition update failed: {}",
+        String::from_utf8_lossy(&noop.stderr)
+    );
+    assert_eq!(before_noop, fs::read(&composition_path).unwrap());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn local_control_adapter_keeps_workloads_after_coordinator_exits() {
+    let root = fixture_dir("local-control-adapter");
+    let app = root.join("support-desk");
+    fs::create_dir_all(&root).unwrap();
+    let compose = vec![
+        "app".to_owned(),
+        "compose".to_owned(),
+        app.to_string_lossy().into_owned(),
+        "--apply".to_owned(),
+    ];
+    let created = run_owned(&compose);
+    assert!(created.status.success());
+
+    let workspace_path = app.join("lenso.workspace.json");
+    let mut workspace: Value = serde_json::from_slice(&fs::read(&workspace_path).unwrap()).unwrap();
+    for service in workspace["services"].as_array_mut().unwrap() {
+        service["cwd"] = Value::String(".".to_owned());
+        service["command"] = Value::String("sleep 30".to_owned());
+        service["readyUrl"] = Value::String(String::new());
+    }
+    fs::write(
+        &workspace_path,
+        serde_json::to_vec_pretty(&workspace).unwrap(),
+    )
+    .unwrap();
+
+    let start = vec![
+        "system".to_owned(),
+        "dev".to_owned(),
+        "--system-file".to_owned(),
+        app.join("lenso.app.json").to_string_lossy().into_owned(),
+        "--json".to_owned(),
+    ];
+    let started = run_owned(&start);
+    assert!(
+        started.status.success(),
+        "adapter start failed: {}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let state: Value = serde_json::from_slice(&started.stdout).unwrap();
+    assert_eq!(state["protocol"], "lenso.local-control-adapter.v1");
+    assert_eq!(state["phase"], "ready");
+    assert!(state["adapterPid"].as_u64().unwrap() > 0);
+    assert_eq!(state["workloadIdentities"].as_array().unwrap().len(), 2);
+
+    let cleanup = vec![
+        "system".to_owned(),
+        "dev".to_owned(),
+        "--system-file".to_owned(),
+        app.join("lenso.app.json").to_string_lossy().into_owned(),
+        "--cleanup".to_owned(),
+        "--json".to_owned(),
+    ];
+    let stopped = run_owned(&cleanup);
+    assert!(
+        stopped.status.success(),
+        "adapter cleanup failed: {}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    let stopped_state: Value = serde_json::from_slice(&stopped.stdout).unwrap();
+    assert_eq!(stopped_state["phase"], "stopped");
+    let adapter_state_path = app.join(".lenso/local-control-adapter/support-desk/state.json");
+    let adapter_state: Value =
+        serde_json::from_slice(&fs::read(adapter_state_path).unwrap()).unwrap();
+    assert_eq!(adapter_state["phase"], "stopped");
+    assert!(!app.join(".lenso/system-sandbox/support-desk").exists());
+
+    fs::remove_dir_all(root).unwrap();
 }
