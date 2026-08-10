@@ -22,9 +22,12 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0"
+axum = "0.8"
 clap = { version = "4", features = ["derive"] }
+getrandom = "0.4"
 include_dir = "0.7"
 lenso-service = "0.1.4"
+lenso-workload-control = { package = "lenso-service", git = "https://github.com/LioRael/lenso", rev = "42834aa5c603f55f3102877137b9c80abc80a8ca" }
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
 rpassword = "7"
 serde = { version = "1.0", features = ["derive"] }
@@ -32,7 +35,7 @@ serde_json = "1.0"
 sha2 = "0.11"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "json", "uuid"] }
 thiserror = "2"
-tokio = { version = "1.52", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "signal", "time"] }
+tokio = { version = "1.52", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 uuid = { version = "1", features = ["v7"] }
 
 [target.'cfg(unix)'.dependencies]

@@ -279,6 +279,17 @@ the adapter and its explicitly started local workloads remain active. Use
 stop only the adapter-owned workloads. This path does not create a second App
 lock or copy process commands into `lenso.app.json`.
 
+The adapter state under `.lenso/local-control-adapter/<appId>/state.json`
+advertises its `adapterId`, loopback `endpoint`, `workloadControlProtocol`,
+`workloadControlSchemaDigest`, and exact `capabilities`. Without a server-side
+`LENSO_WORKLOAD_CONTROL_TOKEN` override, startup creates an owner-only local
+credential file and records only its `credentialFile` reference; the bearer
+token is never serialized into adapter state or HTTP responses.
+
+The Local Control Adapter advertises and accepts only `suspend` and `resume`.
+Each accepted mutation returns an asynchronous Operation Record identified by
+`operationId`; callers poll that handle for the Adapter's final result.
+
 The System graph remains in `lenso.system.json`. Local-only executable details
 live beside it in `lenso.system-sandbox.json`:
 
