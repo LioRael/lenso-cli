@@ -1,4 +1,11 @@
-use std::{fs, path::PathBuf, process::Command, time::SystemTime};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
+use std::{
+    fs,
+    path::PathBuf,
+    process::Command,
+    time::{Duration, SystemTime},
+};
 
 use lenso_service::{
     LEGACY_SERVICE_V1_FIXTURE_JSON, LEGACY_SYSTEM_V1_FIXTURE_JSON, MIXED_SYSTEM_V2_FIXTURE_JSON,
@@ -52,6 +59,78 @@ fn run_owned(arguments: &[String]) -> std::process::Output {
         .args(arguments)
         .output()
         .unwrap()
+}
+
+async fn observe_local_adapter(
+    client: &reqwest::Client,
+    endpoint: &str,
+    token: &str,
+    workload: &Value,
+) -> Value {
+    let response = client
+        .post(format!("{endpoint}/workload-control/v1/observe"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({
+            "protocol": "lenso.workload-control.v1",
+            "workload": workload.clone()
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    response.json().await.unwrap()
+}
+
+async fn mutate_local_adapter(
+    client: &reqwest::Client,
+    endpoint: &str,
+    token: &str,
+    workload: &Value,
+    revision: &str,
+    key: &str,
+    action: &str,
+) -> Value {
+    let response = client
+        .post(format!("{endpoint}/workload-control/v1/operations"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({
+            "protocol": "lenso.workload-control.v1",
+            "workload": workload,
+            "action": { "kind": action },
+            "observedRevision": revision,
+            "idempotencyKey": key,
+            "actor": { "kind": "operator", "subject": "operator:integration-test" }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+    response.json().await.unwrap()
+}
+
+async fn wait_for_local_adapter_operation(
+    client: &reqwest::Client,
+    endpoint: &str,
+    token: &str,
+    operation_id: &str,
+) -> Value {
+    for _ in 0..200 {
+        let response = client
+            .get(format!(
+                "{endpoint}/workload-control/v1/operations/{operation_id}"
+            ))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let record: Value = response.json().await.unwrap();
+        if matches!(record["phase"].as_str(), Some("succeeded" | "failed")) {
+            return record;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("local adapter operation did not finish")
 }
 
 fn write_contract_variant(name: &str, fixture: &str, protocol: Option<&str>) -> PathBuf {
@@ -539,8 +618,8 @@ fn exact_support_desk_composition_is_revision_guarded_and_locally_runnable() {
     fs::remove_dir_all(root).unwrap();
 }
 
-#[test]
-fn local_control_adapter_keeps_workloads_after_coordinator_exits() {
+#[tokio::test]
+async fn local_control_adapter_keeps_workloads_after_coordinator_exits() {
     let root = fixture_dir("local-control-adapter");
     let app = root.join("support-desk");
     fs::create_dir_all(&root).unwrap();
@@ -554,10 +633,20 @@ fn local_control_adapter_keeps_workloads_after_coordinator_exits() {
     assert!(created.status.success());
 
     let workspace_path = app.join("lenso.workspace.json");
+    let leak_marker = root.join("workload-received-control-token");
+    let workload_script = root.join("workload.sh");
+    fs::write(
+        &workload_script,
+        format!(
+            "if [ -n \"${{LENSO_WORKLOAD_CONTROL_TOKEN:-}}\" ]; then : > '{}'; fi\nexec sleep 30\n",
+            leak_marker.display()
+        ),
+    )
+    .unwrap();
     let mut workspace: Value = serde_json::from_slice(&fs::read(&workspace_path).unwrap()).unwrap();
     for service in workspace["services"].as_array_mut().unwrap() {
         service["cwd"] = Value::String(".".to_owned());
-        service["command"] = Value::String("sleep 30".to_owned());
+        service["command"] = Value::String(format!("sh {}", workload_script.display()));
         service["readyUrl"] = Value::String(String::new());
     }
     fs::write(
@@ -580,10 +669,124 @@ fn local_control_adapter_keeps_workloads_after_coordinator_exits() {
         String::from_utf8_lossy(&started.stderr)
     );
     let state: Value = serde_json::from_slice(&started.stdout).unwrap();
+    assert!(state.get("adapterOwnershipToken").is_none());
+    let adapter_state_path = app.join(".lenso/local-control-adapter/support-desk/state.json");
+    let persisted_ready_state: Value =
+        serde_json::from_slice(&fs::read(&adapter_state_path).unwrap()).unwrap();
+    let adapter_ownership_token = persisted_ready_state["adapterOwnershipToken"]
+        .as_str()
+        .unwrap();
+    assert_eq!(adapter_ownership_token.len(), 64);
+    assert!(
+        adapter_ownership_token
+            .bytes()
+            .all(|byte| { byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte) })
+    );
     assert_eq!(state["protocol"], "lenso.local-control-adapter.v1");
     assert_eq!(state["phase"], "ready");
     assert!(state["adapterPid"].as_u64().unwrap() > 0);
     assert_eq!(state["workloadIdentities"].as_array().unwrap().len(), 2);
+    assert_eq!(state["adapterId"], "workload-control:support-desk");
+    assert_eq!(
+        state["adapterWorkload"],
+        serde_json::json!({
+            "systemId": "support-desk",
+            "serviceId": "lenso-local-control-adapter",
+            "workloadId": "workload-control:support-desk"
+        })
+    );
+    assert_eq!(
+        state["workloadControlProtocol"],
+        "lenso.workload-control.v1"
+    );
+    assert_eq!(
+        state["workloadControlSchemaDigest"],
+        "sha256:d3666bb1fd85576f9af4205dbcc70029acd81462678c47d2b315c40ef1a9161d"
+    );
+    assert_eq!(
+        state["capabilities"],
+        serde_json::json!(["suspend", "resume"])
+    );
+    let credential_file = PathBuf::from(state["credentialFile"].as_str().unwrap());
+    let control_token = fs::read_to_string(&credential_file).unwrap();
+    #[cfg(unix)]
+    assert_eq!(
+        fs::metadata(&credential_file).unwrap().permissions().mode() & 0o077,
+        0
+    );
+    assert!(
+        !serde_json::to_string(&state)
+            .unwrap()
+            .contains(&control_token)
+    );
+
+    let endpoint = state["endpoint"].as_str().unwrap();
+    assert!(endpoint.starts_with("http://127.0.0.1:"));
+    let identity = state["workloadIdentities"][0].as_str().unwrap();
+    let service_id = identity
+        .strip_prefix("local-dev://support-desk/")
+        .and_then(|identity| identity.strip_suffix("/api"))
+        .unwrap();
+    let workload = serde_json::json!({
+        "systemId": "support-desk",
+        "serviceId": service_id,
+        "workloadId": format!("{service_id}-api")
+    });
+    let client = reqwest::Client::new();
+    let unauthorized = client
+        .post(format!("{endpoint}/workload-control/v1/observe"))
+        .json(&serde_json::json!({
+            "protocol": "lenso.workload-control.v1",
+            "workload": workload.clone()
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let running = observe_local_adapter(&client, endpoint, &control_token, &workload).await;
+    assert_eq!(running["state"], "running");
+    let suspend = mutate_local_adapter(
+        &client,
+        endpoint,
+        &control_token,
+        &workload,
+        running["observedRevision"].as_str().unwrap(),
+        "integration-suspend",
+        "suspend",
+    )
+    .await;
+    let suspended = wait_for_local_adapter_operation(
+        &client,
+        endpoint,
+        &control_token,
+        suspend["operationId"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(suspended["phase"], "succeeded");
+    assert_eq!(suspended["result"]["state"], "suspended");
+
+    let suspended_observation =
+        observe_local_adapter(&client, endpoint, &control_token, &workload).await;
+    let resume = mutate_local_adapter(
+        &client,
+        endpoint,
+        &control_token,
+        &workload,
+        suspended_observation["observedRevision"].as_str().unwrap(),
+        "integration-resume",
+        "resume",
+    )
+    .await;
+    let resumed = wait_for_local_adapter_operation(
+        &client,
+        endpoint,
+        &control_token,
+        resume["operationId"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(resumed["phase"], "succeeded");
+    assert_eq!(resumed["result"]["state"], "running");
 
     let cleanup = vec![
         "system".to_owned(),
@@ -601,10 +804,39 @@ fn local_control_adapter_keeps_workloads_after_coordinator_exits() {
     );
     let stopped_state: Value = serde_json::from_slice(&stopped.stdout).unwrap();
     assert_eq!(stopped_state["phase"], "stopped");
-    let adapter_state_path = app.join(".lenso/local-control-adapter/support-desk/state.json");
     let adapter_state: Value =
-        serde_json::from_slice(&fs::read(adapter_state_path).unwrap()).unwrap();
+        serde_json::from_slice(&fs::read(&adapter_state_path).unwrap()).unwrap();
     assert_eq!(adapter_state["phase"], "stopped");
+    assert!(!app.join(".lenso/system-sandbox/support-desk").exists());
+
+    let restarted = Command::new(env!("CARGO_BIN_EXE_lenso"))
+        .args(&start)
+        .env(
+            "LENSO_WORKLOAD_CONTROL_TOKEN",
+            "must-not-reach-managed-workloads",
+        )
+        .output()
+        .unwrap();
+    assert!(
+        restarted.status.success(),
+        "adapter restart with token override failed: {}",
+        String::from_utf8_lossy(&restarted.stderr)
+    );
+    let restarted_state: Value = serde_json::from_slice(&restarted.stdout).unwrap();
+    assert_eq!(restarted_state["phase"], "ready");
+    assert!(restarted_state.get("credentialFile").is_none());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !leak_marker.exists(),
+        "server-side bearer token reached a managed workload"
+    );
+
+    let stopped_again = run_owned(&cleanup);
+    assert!(
+        stopped_again.status.success(),
+        "adapter cleanup after token isolation check failed: {}",
+        String::from_utf8_lossy(&stopped_again.stderr)
+    );
     assert!(!app.join(".lenso/system-sandbox/support-desk").exists());
 
     fs::remove_dir_all(root).unwrap();

@@ -1,15 +1,39 @@
 #[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt as _;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
+    fs::{self, OpenOptions},
+    io::Write as _,
+    net::{Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     process::Stdio,
-    time::Duration,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use crate::app_composition::{self, ImplementationBinding};
+use crate::workload_control_contract::{
+    OperationRecord, WORKLOAD_CONTROL_OBSERVE_PATH, WORKLOAD_CONTROL_OPERATION_PATH,
+    WORKLOAD_CONTROL_OPERATIONS_PATH, WORKLOAD_CONTROL_PROTOCOL, WorkloadControlAction,
+    WorkloadControlAuthority, WorkloadControlAuthorityDecision, WorkloadControlCapability,
+    WorkloadControlError, WorkloadControlErrorCode, WorkloadControlFailure,
+    WorkloadMutationRequest, WorkloadObservation, WorkloadObservationRequest,
+    WorkloadOperationPhase, WorkloadOperationResult, WorkloadOperationalState, WorkloadProtection,
+    WorkloadReference, workload_control_schema_digest,
+};
+#[cfg(test)]
+use crate::workload_control_contract::{WorkloadControlActor, WorkloadControlActorKind};
 use anyhow::{Context, Result, bail};
+use axum::{
+    Json, Router,
+    body::{Body, to_bytes},
+    extract::{Path as AxumPath, State},
+    http::{HeaderMap, Request, StatusCode, header},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+};
 use lenso_service::{
     ContractSemanticKind, SystemV2Graph, WorkloadRole, check_contract_artifact_value,
     system_v2_graph,
@@ -24,7 +48,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::{
     io::{AsyncBufReadExt as _, BufReader},
+    net::TcpListener,
     process::{Child, Command},
+    sync::{Mutex, oneshot},
+    task::JoinHandle,
     time::Instant,
 };
 use uuid::Uuid;
@@ -38,9 +65,21 @@ const PLAN_PROTOCOL: &str = "lenso.system-sandbox-plan.v1";
 const STATE_PROTOCOL: &str = "lenso.system-sandbox-state.v1";
 const OWNER_PROTOCOL: &str = "lenso.system-sandbox-owner.v1";
 const LOCAL_CONTROL_ADAPTER_PROTOCOL: &str = "lenso.local-control-adapter.v1";
+const LOCAL_CONTROL_ADAPTER_STATE_SCHEMA: &str = "lenso.local-control-adapter-state.v2";
+const CONSOLE_SERVICE_ID: &str = "lenso-console";
+const LOCAL_CONTROL_ADAPTER_SERVICE_ID: &str = "lenso-local-control-adapter";
 const LOCAL_CONTROL_ADAPTER_PLAN_PROTOCOL: &str = "lenso.local-control-adapter-plan.v1";
 const LOCAL_CONTROL_ADAPTER_DIR: &str = ".lenso/local-control-adapter";
+const LOCAL_CONTROL_ADAPTER_ENV: &str = "LENSO_LOCAL_CONTROL_ADAPTER";
+const LOCAL_CONTROL_ADAPTER_OWNERSHIP_TOKEN_ENV: &str =
+    "LENSO_LOCAL_CONTROL_ADAPTER_OWNERSHIP_TOKEN";
 const WORKSPACE_FILE: &str = "lenso.workspace.json";
+const WORKLOAD_CONTROL_TOKEN_ENV: &str = "LENSO_WORKLOAD_CONTROL_TOKEN";
+const WORKLOAD_CONTROL_CREDENTIAL_FILE: &str = "credential";
+const WORKLOAD_CONTROL_CREDENTIAL_IGNORE_RULE: &str = "/credential";
+const WORKLOAD_CONTROL_REQUEST_LIMIT: usize = 64 * 1024;
+const WORKLOAD_CONTROL_SCALAR_MAX_LENGTH: usize = 255;
+const WORKLOAD_CONTROL_SAFE_MESSAGE_MAX_LENGTH: usize = 1_024;
 
 #[derive(Debug, Clone)]
 pub(crate) struct SystemDevOptions {
@@ -217,12 +256,1094 @@ struct RunningSandbox {
 #[serde(rename_all = "camelCase")]
 struct LocalControlAdapterState {
     protocol: String,
+    #[serde(default)]
+    schema: String,
+    #[serde(default)]
+    adapter_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    adapter_workload: Option<WorkloadReference>,
     app_id: String,
     composition_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    endpoint: Option<String>,
+    #[serde(default)]
+    workload_control_protocol: String,
+    #[serde(default)]
+    workload_control_schema_digest: String,
+    #[serde(default)]
+    capabilities: BTreeSet<WorkloadControlCapability>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    credential_file: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    adapter_ownership_token: Option<String>,
     adapter_pid: Option<u32>,
     phase: SandboxPhase,
     sandbox_root: PathBuf,
     workload_identities: Vec<String>,
+}
+
+#[derive(Debug)]
+struct LocalControlRuntime {
+    adapter_id: String,
+    control_plane_workloads: BTreeSet<WorkloadReference>,
+    available: bool,
+    workload_states: BTreeMap<WorkloadReference, WorkloadOperationalState>,
+    revisions: BTreeMap<WorkloadReference, String>,
+    operations: BTreeMap<String, OperationRecord>,
+    active_operations: BTreeMap<WorkloadReference, String>,
+    idempotency: BTreeMap<(WorkloadReference, String), IdempotencyEntry>,
+    operation_delay: Duration,
+}
+
+#[derive(Debug, Clone)]
+struct IdempotencyEntry {
+    request: WorkloadMutationRequest,
+    operation_id: String,
+}
+
+#[derive(Debug)]
+struct PreparedOperation {
+    record: OperationRecord,
+    execute: bool,
+}
+
+impl LocalControlRuntime {
+    fn new(running: &RunningSandbox, adapter_id: String, operation_delay: Duration) -> Self {
+        let control_plane_workloads = running
+            .plan
+            .workloads
+            .iter()
+            .filter(|workload| workload.service_id == CONSOLE_SERVICE_ID)
+            .map(|workload| WorkloadReference {
+                system_id: running.plan.system_id.clone(),
+                service_id: workload.service_id.clone(),
+                workload_id: workload.workload_id.clone(),
+            })
+            .chain(std::iter::once(adapter_workload_for(
+                &running.plan,
+                &adapter_id,
+            )))
+            .collect();
+        let workload_states = running
+            .plan
+            .workloads
+            .iter()
+            .enumerate()
+            .map(|(index, workload)| {
+                let reference = WorkloadReference {
+                    system_id: running.plan.system_id.clone(),
+                    service_id: workload.service_id.clone(),
+                    workload_id: workload.workload_id.clone(),
+                };
+                (
+                    reference,
+                    operational_state_for_phase(running.state.workloads[index].phase),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let revisions = workload_states
+            .keys()
+            .cloned()
+            .map(|workload| (workload, new_workload_revision()))
+            .collect();
+        Self {
+            adapter_id,
+            control_plane_workloads,
+            available: true,
+            workload_states,
+            revisions,
+            operations: BTreeMap::new(),
+            active_operations: BTreeMap::new(),
+            idempotency: BTreeMap::new(),
+            operation_delay,
+        }
+    }
+
+    fn observe(
+        &self,
+        workload: &WorkloadReference,
+    ) -> std::result::Result<WorkloadObservation, WorkloadControlHttpError> {
+        if self.control_plane_workloads.contains(workload) {
+            return Ok(WorkloadObservation {
+                protocol: WORKLOAD_CONTROL_PROTOCOL.to_owned(),
+                workload: workload.clone(),
+                state: WorkloadOperationalState::Unknown,
+                observed_revision: None,
+                capabilities: BTreeSet::new(),
+                protection: WorkloadProtection::ControlPlane,
+                active_operation: None,
+                observed_at_unix_ms: unix_time_ms(),
+            });
+        }
+        let state = self
+            .workload_states
+            .get(workload)
+            .copied()
+            .ok_or_else(WorkloadControlHttpError::workload_not_found)?;
+        if !self.available {
+            return Ok(WorkloadObservation {
+                protocol: WORKLOAD_CONTROL_PROTOCOL.to_owned(),
+                workload: workload.clone(),
+                state: WorkloadOperationalState::Unknown,
+                observed_revision: None,
+                capabilities: standard_local_capabilities(),
+                protection: WorkloadProtection::Controllable,
+                active_operation: self.active_operations.get(workload).cloned(),
+                observed_at_unix_ms: unix_time_ms(),
+            });
+        }
+        let revision = self
+            .revisions
+            .get(workload)
+            .expect("every planned Workload has a revision")
+            .clone();
+        Ok(WorkloadObservation {
+            protocol: WORKLOAD_CONTROL_PROTOCOL.to_owned(),
+            workload: workload.clone(),
+            state,
+            observed_revision: Some(revision),
+            capabilities: standard_local_capabilities(),
+            protection: WorkloadProtection::Controllable,
+            active_operation: self.active_operations.get(workload).cloned(),
+            observed_at_unix_ms: unix_time_ms(),
+        })
+    }
+
+    fn prepare_operation(
+        &mut self,
+        request: WorkloadMutationRequest,
+    ) -> std::result::Result<PreparedOperation, WorkloadControlHttpError> {
+        if request.protocol != WORKLOAD_CONTROL_PROTOCOL {
+            return Err(WorkloadControlHttpError::new(
+                StatusCode::CONFLICT,
+                WorkloadControlErrorCode::IncompatibleProtocol,
+                "The Workload Control protocol is not supported by this adapter.",
+            ));
+        }
+        validate_mutation_request(&request)?;
+        if self.control_plane_workloads.contains(&request.workload) {
+            return Err(WorkloadControlHttpError::new(
+                StatusCode::FORBIDDEN,
+                WorkloadControlErrorCode::ProtectedWorkload,
+                "The active Console and Workload Control Adapter cannot be controlled.",
+            ));
+        }
+        if !self.available {
+            return Err(WorkloadControlHttpError::authority_unavailable());
+        }
+        if !self.revisions.contains_key(&request.workload) {
+            return Err(WorkloadControlHttpError::workload_not_found());
+        }
+        if !matches!(
+            request.action,
+            WorkloadControlAction::Suspend | WorkloadControlAction::Resume
+        ) {
+            return Err(WorkloadControlHttpError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                WorkloadControlErrorCode::UnsupportedAction,
+                "The Local Control Adapter supports only suspend and resume.",
+            ));
+        }
+        let idempotency_scope = (request.workload.clone(), request.idempotency_key.clone());
+        if let Some(existing) = self.idempotency.get(&idempotency_scope) {
+            if existing.request == request {
+                let record = self
+                    .operations
+                    .get(&existing.operation_id)
+                    .expect("idempotency records reference an Operation Record")
+                    .clone();
+                return Ok(PreparedOperation {
+                    record,
+                    execute: false,
+                });
+            }
+            return Err(WorkloadControlHttpError::new(
+                StatusCode::CONFLICT,
+                WorkloadControlErrorCode::IdempotencyConflict,
+                "The idempotency key was already used for a different mutation.",
+            )
+            .with_operation(existing.operation_id.clone()));
+        }
+        if self.revisions.get(&request.workload) != Some(&request.observed_revision) {
+            return Err(WorkloadControlHttpError::new(
+                StatusCode::CONFLICT,
+                WorkloadControlErrorCode::StaleRevision,
+                "The observed revision is no longer current.",
+            )
+            .with_current_revision(
+                self.revisions
+                    .get(&request.workload)
+                    .expect("known Workloads have a revision")
+                    .clone(),
+            ));
+        }
+        if let Some(active_operation) = self.active_operations.get(&request.workload) {
+            return Err(WorkloadControlHttpError::new(
+                StatusCode::CONFLICT,
+                WorkloadControlErrorCode::ActiveMutation,
+                "The Workload already has an active mutation.",
+            )
+            .with_active_operation(active_operation.clone()));
+        }
+        let operation_id = format!("wop_{}", Uuid::now_v7());
+        let now = unix_time_ms();
+        let record = OperationRecord {
+            protocol: WORKLOAD_CONTROL_PROTOCOL.to_owned(),
+            operation_id: operation_id.clone(),
+            request: request.clone(),
+            authority: WorkloadControlAuthority {
+                adapter_id: self.adapter_id.clone(),
+                decision: WorkloadControlAuthorityDecision::Accepted,
+            },
+            phase: WorkloadOperationPhase::Accepted,
+            requested_at_unix_ms: now,
+            decided_at_unix_ms: now,
+            updated_at_unix_ms: now,
+            finished_at_unix_ms: None,
+            result: None,
+            failure: None,
+        };
+        self.active_operations
+            .insert(request.workload.clone(), operation_id.clone());
+        self.idempotency.insert(
+            idempotency_scope,
+            IdempotencyEntry {
+                request,
+                operation_id: operation_id.clone(),
+            },
+        );
+        self.operations.insert(operation_id, record.clone());
+        Ok(PreparedOperation {
+            record,
+            execute: true,
+        })
+    }
+
+    fn operation(
+        &self,
+        operation_id: &str,
+    ) -> std::result::Result<OperationRecord, WorkloadControlHttpError> {
+        self.operations.get(operation_id).cloned().ok_or_else(|| {
+            WorkloadControlHttpError::new(
+                StatusCode::NOT_FOUND,
+                WorkloadControlErrorCode::OperationNotFound,
+                "The Workload operation does not exist.",
+            )
+        })
+    }
+}
+
+impl LocalControlRuntime {
+    fn advance_revision(
+        &mut self,
+        workload: &WorkloadReference,
+        state: WorkloadOperationalState,
+    ) -> WorkloadOperationResult {
+        let observed_revision = new_workload_revision();
+        self.revisions
+            .insert(workload.clone(), observed_revision.clone());
+        WorkloadOperationResult {
+            state,
+            observed_revision,
+        }
+    }
+}
+
+async fn execute_workload_operation(
+    runtime: &Arc<Mutex<LocalControlRuntime>>,
+    sandbox: &Arc<Mutex<RunningSandbox>>,
+    operation_id: &str,
+) {
+    let (request, prior_state) = {
+        let mut metadata = runtime.lock().await;
+        let Some(request) = metadata
+            .operations
+            .get(operation_id)
+            .map(|record| record.request.clone())
+        else {
+            return;
+        };
+        let prior_state = metadata
+            .workload_states
+            .get(&request.workload)
+            .copied()
+            .unwrap_or(WorkloadOperationalState::Unknown);
+        if !metadata.available {
+            finish_unavailable_operation(&mut metadata, operation_id, &request, prior_state);
+            return;
+        }
+        if let Some(record) = metadata.operations.get_mut(operation_id) {
+            let executing_at = unix_time_ms().max(record.updated_at_unix_ms);
+            record.phase = WorkloadOperationPhase::Executing;
+            record.updated_at_unix_ms = executing_at;
+        }
+        metadata.workload_states.insert(
+            request.workload.clone(),
+            WorkloadOperationalState::Transitioning,
+        );
+        (request, prior_state)
+    };
+    let (outcome, observed_state) = {
+        let mut running = sandbox.lock().await;
+        let available = runtime.lock().await.available;
+        if !available {
+            let mut metadata = runtime.lock().await;
+            finish_unavailable_operation(&mut metadata, operation_id, &request, prior_state);
+            return;
+        }
+        let outcome = match request.action {
+            WorkloadControlAction::Suspend => {
+                suspend_sandbox_workload(&mut running, &request.workload).await
+            }
+            WorkloadControlAction::Resume => {
+                resume_sandbox_workload(&mut running, &request.workload).await
+            }
+            WorkloadControlAction::Restart | WorkloadControlAction::Scale { .. } => {
+                Err(local_control_failure(
+                    WorkloadControlErrorCode::UnsupportedAction,
+                    "The Local Control Adapter does not support this action.",
+                ))
+            }
+        };
+        let observed_state = running
+            .workload_index(&request.workload)
+            .ok()
+            .map(|index| operational_state_for_phase(running.state.workloads[index].phase))
+            .unwrap_or(WorkloadOperationalState::Failed);
+        (outcome, observed_state)
+    };
+    let mut metadata = runtime.lock().await;
+    let finished_at = unix_time_ms().max(
+        metadata
+            .operations
+            .get(operation_id)
+            .map_or(0, |record| record.updated_at_unix_ms),
+    );
+    let (result, failure) = match outcome {
+        Ok(state) => {
+            metadata
+                .workload_states
+                .insert(request.workload.clone(), state);
+            (
+                Some(metadata.advance_revision(&request.workload, state)),
+                None,
+            )
+        }
+        Err(failure) => {
+            metadata
+                .workload_states
+                .insert(request.workload.clone(), observed_state);
+            if observed_state == WorkloadOperationalState::Unknown {
+                metadata.revisions.remove(&request.workload);
+            } else if observed_state != prior_state {
+                let _ = metadata.advance_revision(&request.workload, observed_state);
+            }
+            (None, Some(failure))
+        }
+    };
+    if let Some(record) = metadata.operations.get_mut(operation_id) {
+        record.updated_at_unix_ms = finished_at;
+        record.finished_at_unix_ms = Some(finished_at);
+        record.phase = if result.is_some() {
+            WorkloadOperationPhase::Succeeded
+        } else {
+            WorkloadOperationPhase::Failed
+        };
+        record.result = result;
+        record.failure = failure;
+    }
+    metadata.active_operations.remove(&request.workload);
+}
+
+fn finish_unavailable_operation(
+    metadata: &mut LocalControlRuntime,
+    operation_id: &str,
+    request: &WorkloadMutationRequest,
+    prior_state: WorkloadOperationalState,
+) {
+    metadata
+        .workload_states
+        .insert(request.workload.clone(), prior_state);
+    if let Some(record) = metadata.operations.get_mut(operation_id) {
+        let finished_at = unix_time_ms().max(record.updated_at_unix_ms);
+        record.phase = WorkloadOperationPhase::Failed;
+        record.updated_at_unix_ms = finished_at;
+        record.finished_at_unix_ms = Some(finished_at);
+        record.result = None;
+        record.failure = Some(local_control_failure(
+            WorkloadControlErrorCode::AuthorityUnavailable,
+            "The Workload Control Adapter stopped before executing the mutation.",
+        ));
+    }
+    metadata.active_operations.remove(&request.workload);
+}
+
+async fn suspend_sandbox_workload(
+    running: &mut RunningSandbox,
+    workload: &WorkloadReference,
+) -> std::result::Result<WorkloadOperationalState, WorkloadControlFailure> {
+    let state_index = running.workload_index(workload)?;
+    if running.state.workloads[state_index].phase == SandboxPhase::Stopped {
+        return Ok(WorkloadOperationalState::Suspended);
+    }
+    let Some(process_index) = running
+        .processes
+        .iter()
+        .position(|process| process.state_index == state_index)
+    else {
+        running.state.workloads[state_index].phase = SandboxPhase::Failed;
+        running.state.workloads[state_index].process_id = None;
+        let _ = persist_state(&running.plan.owned_root, &running.state).await;
+        return Err(local_control_failure(
+            WorkloadControlErrorCode::AuthorityUnavailable,
+            "The owned Workload process is unavailable.",
+        ));
+    };
+    let prior_phase = running.state.workloads[state_index].phase;
+    running.state.workloads[state_index].phase = SandboxPhase::Stopping;
+    if persist_state(&running.plan.owned_root, &running.state)
+        .await
+        .is_err()
+    {
+        running.state.workloads[state_index].phase = prior_phase;
+        return Err(local_control_failure(
+            WorkloadControlErrorCode::AuthorityUnavailable,
+            "The Local Control Adapter could not persist the transition.",
+        ));
+    }
+    let mut process = running.processes.remove(process_index);
+    if stop_owned_child(&mut process.child, process.process_group_id)
+        .await
+        .is_err()
+    {
+        running.state.workloads[state_index].phase = SandboxPhase::Failed;
+        running.processes.insert(process_index, process);
+        let _ = persist_state(&running.plan.owned_root, &running.state).await;
+        return Err(local_control_failure(
+            WorkloadControlErrorCode::AuthorityUnavailable,
+            "The Local Control Adapter could not stop the owned Workload.",
+        ));
+    }
+    running.state.workloads[state_index].phase = SandboxPhase::Stopped;
+    running.state.workloads[state_index].process_id = None;
+    running.endpoints_forget(state_index);
+    persist_state(&running.plan.owned_root, &running.state)
+        .await
+        .map_err(|_| {
+            local_control_failure(
+                WorkloadControlErrorCode::AuthorityUnavailable,
+                "The Local Control Adapter could not persist the suspended state.",
+            )
+        })?;
+    Ok(WorkloadOperationalState::Suspended)
+}
+
+async fn resume_sandbox_workload(
+    running: &mut RunningSandbox,
+    workload: &WorkloadReference,
+) -> std::result::Result<WorkloadOperationalState, WorkloadControlFailure> {
+    let state_index = running.workload_index(workload)?;
+    if running
+        .processes
+        .iter()
+        .any(|process| process.state_index == state_index)
+    {
+        if running.state.workloads[state_index].phase == SandboxPhase::Ready {
+            return Ok(WorkloadOperationalState::Running);
+        }
+        return Err(local_control_failure(
+            WorkloadControlErrorCode::AuthorityUnavailable,
+            "The Local Control Adapter cannot prove the existing Workload process stopped.",
+        ));
+    }
+    running.state.workloads[state_index].phase = SandboxPhase::Starting;
+    running.state.workloads[state_index].process_id = None;
+    if launch_workload(running, state_index, false).await.is_err() {
+        running.state.workloads[state_index].phase = SandboxPhase::Failed;
+        running.state.workloads[state_index].process_id = None;
+        let _ = persist_state(&running.plan.owned_root, &running.state).await;
+        return Err(local_control_failure(
+            WorkloadControlErrorCode::AuthorityUnavailable,
+            "The Local Control Adapter could not relaunch and verify the Workload.",
+        ));
+    }
+    persist_state(&running.plan.owned_root, &running.state)
+        .await
+        .map_err(|_| {
+            local_control_failure(
+                WorkloadControlErrorCode::AuthorityUnavailable,
+                "The Local Control Adapter could not persist the resumed state.",
+            )
+        })?;
+    Ok(WorkloadOperationalState::Running)
+}
+
+impl RunningSandbox {
+    fn workload_index(
+        &self,
+        workload: &WorkloadReference,
+    ) -> std::result::Result<usize, WorkloadControlFailure> {
+        self.state
+            .workloads
+            .iter()
+            .position(|candidate| {
+                workload.system_id == self.plan.system_id
+                    && workload.service_id == candidate.service_id
+                    && workload.workload_id == candidate.workload_id
+            })
+            .ok_or_else(|| {
+                local_control_failure(
+                    WorkloadControlErrorCode::WorkloadNotFound,
+                    "The Workload Reference is not managed by this adapter.",
+                )
+            })
+    }
+
+    fn endpoints_forget(&mut self, state_index: usize) {
+        let state = &self.state.workloads[state_index];
+        self.state.endpoints.retain(|endpoint| {
+            endpoint.service_id != state.service_id || endpoint.workload_id != state.workload_id
+        });
+    }
+}
+
+const fn operational_state_for_phase(phase: SandboxPhase) -> WorkloadOperationalState {
+    match phase {
+        SandboxPhase::Ready => WorkloadOperationalState::Running,
+        SandboxPhase::Stopped => WorkloadOperationalState::Suspended,
+        SandboxPhase::Starting | SandboxPhase::Stopping => WorkloadOperationalState::Transitioning,
+        SandboxPhase::Failed => WorkloadOperationalState::Failed,
+        SandboxPhase::Completed => WorkloadOperationalState::Unknown,
+    }
+}
+
+fn local_control_failure(
+    code: WorkloadControlErrorCode,
+    message: impl Into<String>,
+) -> WorkloadControlFailure {
+    WorkloadControlFailure {
+        code,
+        message: safe_workload_control_message(message),
+    }
+}
+
+fn validate_mutation_request(
+    request: &WorkloadMutationRequest,
+) -> std::result::Result<(), WorkloadControlHttpError> {
+    validate_workload_reference(&request.workload)?;
+    if [
+        request.observed_revision.as_str(),
+        request.idempotency_key.as_str(),
+        request.actor.subject.as_str(),
+    ]
+    .into_iter()
+    .any(|value| !valid_workload_control_scalar(value))
+    {
+        return Err(invalid_workload_control_document(
+            "The Workload mutation does not match the required protocol.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_workload_reference(
+    workload: &WorkloadReference,
+) -> std::result::Result<(), WorkloadControlHttpError> {
+    if [
+        workload.system_id.as_str(),
+        workload.service_id.as_str(),
+        workload.workload_id.as_str(),
+    ]
+    .into_iter()
+    .any(|value| !valid_workload_control_scalar(value))
+    {
+        return Err(invalid_workload_control_document(
+            "The Workload Reference does not match the required protocol.",
+        ));
+    }
+    Ok(())
+}
+
+fn valid_workload_control_scalar(value: &str) -> bool {
+    !value.trim().is_empty() && value.chars().count() <= WORKLOAD_CONTROL_SCALAR_MAX_LENGTH
+}
+
+fn safe_workload_control_message(message: impl Into<String>) -> String {
+    let message = message.into();
+    if !message.trim().is_empty()
+        && message.chars().count() <= WORKLOAD_CONTROL_SAFE_MESSAGE_MAX_LENGTH
+    {
+        message
+    } else {
+        "The Workload Control Adapter could not provide a safe error explanation.".to_owned()
+    }
+}
+
+fn invalid_workload_control_document(message: &'static str) -> WorkloadControlHttpError {
+    WorkloadControlHttpError::new(
+        StatusCode::BAD_REQUEST,
+        WorkloadControlErrorCode::IncompatibleProtocol,
+        message,
+    )
+}
+
+#[derive(Debug)]
+struct WorkloadControlHttpError {
+    status: StatusCode,
+    code: WorkloadControlErrorCode,
+    message: String,
+    operation_id: Option<String>,
+    current_revision: Option<String>,
+    active_operation: Option<String>,
+}
+
+impl WorkloadControlHttpError {
+    fn new(status: StatusCode, code: WorkloadControlErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            code,
+            message: safe_workload_control_message(message),
+            operation_id: None,
+            current_revision: None,
+            active_operation: None,
+        }
+    }
+
+    fn with_operation(mut self, operation_id: String) -> Self {
+        self.operation_id = valid_workload_control_scalar(&operation_id).then_some(operation_id);
+        self
+    }
+
+    fn with_current_revision(mut self, current_revision: String) -> Self {
+        self.current_revision =
+            valid_workload_control_scalar(&current_revision).then_some(current_revision);
+        self
+    }
+
+    fn with_active_operation(mut self, active_operation: String) -> Self {
+        self.active_operation =
+            valid_workload_control_scalar(&active_operation).then_some(active_operation);
+        self
+    }
+
+    fn authority_unavailable() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: WorkloadControlErrorCode::AuthorityUnavailable,
+            message: "The bound Workload Control Adapter is unavailable.".to_owned(),
+            operation_id: None,
+            current_revision: None,
+            active_operation: None,
+        }
+    }
+
+    fn workload_not_found() -> Self {
+        Self::new(
+            StatusCode::NOT_FOUND,
+            WorkloadControlErrorCode::WorkloadNotFound,
+            "The Workload Reference is not managed by this adapter.",
+        )
+    }
+
+    fn into_response(self) -> Response {
+        (
+            self.status,
+            Json(WorkloadControlError {
+                protocol: WORKLOAD_CONTROL_PROTOCOL.to_owned(),
+                code: self.code,
+                message: self.message,
+                operation_id: self.operation_id,
+                current_revision: self.current_revision,
+                active_operation: self.active_operation,
+            }),
+        )
+            .into_response()
+    }
+}
+
+#[derive(Clone)]
+struct WorkloadControlHttpState {
+    runtime: Arc<Mutex<LocalControlRuntime>>,
+    sandbox: Arc<Mutex<RunningSandbox>>,
+    bearer_token: Arc<str>,
+}
+
+#[derive(Debug)]
+struct WorkloadControlServer {
+    local_addr: SocketAddr,
+    runtime: Arc<Mutex<LocalControlRuntime>>,
+    sandbox: Arc<Mutex<RunningSandbox>>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    server_task: Option<JoinHandle<std::result::Result<(), String>>>,
+}
+
+impl WorkloadControlServer {
+    fn endpoint(&self) -> String {
+        format!("http://{}", self.local_addr)
+    }
+
+    #[cfg(test)]
+    const fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+
+    async fn wait_for_stop(&self) -> std::result::Result<(), SandboxError> {
+        loop {
+            tokio::select! {
+                signal = tokio::signal::ctrl_c() => {
+                    signal.map_err(|error| SandboxError::new(
+                        "shutdown_signal_failed",
+                        error.to_string(),
+                        "Stop the adapter with the cleanup command.",
+                    ))?;
+                    return Ok(());
+                }
+                () = tokio::time::sleep(Duration::from_millis(200)) => {
+                    if self.server_task.as_ref().is_some_and(JoinHandle::is_finished) {
+                        self.runtime.lock().await.available = false;
+                        return Err(SandboxError::new(
+                            "adapter_http_failed",
+                            "The Workload Control HTTP task stopped unexpectedly.",
+                            "Restart the Local Control Adapter.",
+                        ));
+                    }
+                    if let Ok(mut sandbox) = self.sandbox.try_lock() {
+                        let observation = sandbox.check_for_unexpected_exit().await;
+                        drop(sandbox);
+                        if let Err(error) = observation {
+                            self.runtime.lock().await.available = false;
+                            return Err(error);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn shutdown(&mut self) -> std::result::Result<(), SandboxError> {
+        self.runtime.lock().await.available = false;
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
+        let http_result = if let Some(server_task) = self.server_task.take() {
+            match server_task.await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(SandboxError::new(
+                    "adapter_http_shutdown_failed",
+                    format!("The Workload Control HTTP task failed: {error}"),
+                    "Stop the Local Control Adapter and retry cleanup.",
+                )),
+                Err(error) => Err(SandboxError::new(
+                    "adapter_http_shutdown_failed",
+                    format!("Could not join the Workload Control HTTP task: {error}"),
+                    "Stop the Local Control Adapter and retry cleanup.",
+                )),
+            }
+        } else {
+            Ok(())
+        };
+        let sandbox_result = self.sandbox.lock().await.shutdown().await;
+        match (http_result, sandbox_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(http), Err(sandbox)) => Err(SandboxError::new(
+                "cleanup_incomplete",
+                format!("{} Cleanup also failed: {}", http.message, sandbox.message),
+                sandbox.next_action,
+            )),
+        }
+    }
+}
+
+async fn start_workload_control_server(
+    running: RunningSandbox,
+    adapter_id: String,
+    bearer_token: String,
+    operation_delay: Duration,
+) -> std::result::Result<WorkloadControlServer, SandboxError> {
+    validate_workload_control_plan(&running.plan, &adapter_id)?;
+    if bearer_token.is_empty() {
+        return Err(SandboxError::new(
+            "adapter_auth_missing",
+            "The Local Control Adapter requires a bearer token.",
+            "Set LENSO_WORKLOAD_CONTROL_TOKEN in the server-side environment.",
+        ));
+    }
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .map_err(|error| {
+            SandboxError::new(
+                "adapter_http_bind_failed",
+                format!("Could not bind the loopback Workload Control endpoint: {error}"),
+                "Confirm that a loopback socket is available and retry.",
+            )
+        })?;
+    let local_addr = listener.local_addr().map_err(|error| {
+        SandboxError::new(
+            "adapter_http_bind_failed",
+            format!("Could not inspect the Workload Control endpoint: {error}"),
+            "Confirm that a loopback socket is available and retry.",
+        )
+    })?;
+    if !local_addr.ip().is_loopback() {
+        return Err(SandboxError::new(
+            "adapter_http_bind_failed",
+            "The Workload Control endpoint did not bind to loopback.",
+            "Bind the Local Control Adapter to loopback only.",
+        ));
+    }
+    let runtime = Arc::new(Mutex::new(LocalControlRuntime::new(
+        &running,
+        adapter_id,
+        operation_delay,
+    )));
+    let sandbox = Arc::new(Mutex::new(running));
+    let router = workload_control_router(WorkloadControlHttpState {
+        runtime: Arc::clone(&runtime),
+        sandbox: Arc::clone(&sandbox),
+        bearer_token: Arc::from(bearer_token),
+    });
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .map_err(|error| error.to_string())
+    });
+    Ok(WorkloadControlServer {
+        local_addr,
+        runtime,
+        sandbox,
+        shutdown_tx: Some(shutdown_tx),
+        server_task: Some(server_task),
+    })
+}
+
+fn workload_control_router(state: WorkloadControlHttpState) -> Router {
+    Router::new()
+        .route(
+            WORKLOAD_CONTROL_OBSERVE_PATH,
+            post(observe_workload_handler),
+        )
+        .route(
+            WORKLOAD_CONTROL_OPERATIONS_PATH,
+            post(submit_workload_operation_handler),
+        )
+        .route(
+            WORKLOAD_CONTROL_OPERATION_PATH,
+            get(get_workload_operation_handler),
+        )
+        .with_state(state)
+}
+
+async fn observe_workload_handler(
+    State(state): State<WorkloadControlHttpState>,
+    request: Request<Body>,
+) -> Response {
+    if let Err(error) = require_workload_control_bearer(&request, &state.bearer_token) {
+        return error.into_response();
+    }
+    let request = match parse_workload_control_json::<WorkloadObservationRequest>(request).await {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    if request.protocol != WORKLOAD_CONTROL_PROTOCOL {
+        return WorkloadControlHttpError::new(
+            StatusCode::CONFLICT,
+            WorkloadControlErrorCode::IncompatibleProtocol,
+            "The Workload Control protocol is not supported by this adapter.",
+        )
+        .into_response();
+    }
+    if let Err(error) = validate_workload_reference(&request.workload) {
+        return error.into_response();
+    }
+    match state.runtime.lock().await.observe(&request.workload) {
+        Ok(observation) => Json(observation).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn submit_workload_operation_handler(
+    State(state): State<WorkloadControlHttpState>,
+    request: Request<Body>,
+) -> Response {
+    if let Err(error) = require_workload_control_bearer(&request, &state.bearer_token) {
+        return error.into_response();
+    }
+    let request = match parse_workload_mutation_request(request).await {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    let (prepared, delay) = {
+        let mut runtime = state.runtime.lock().await;
+        let delay = runtime.operation_delay;
+        match runtime.prepare_operation(request) {
+            Ok(prepared) => (prepared, delay),
+            Err(error) => return error.into_response(),
+        }
+    };
+    if prepared.execute {
+        let runtime = Arc::clone(&state.runtime);
+        let sandbox = Arc::clone(&state.sandbox);
+        let operation_id = prepared.record.operation_id.clone();
+        tokio::spawn(async move {
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            } else {
+                tokio::task::yield_now().await;
+            }
+            execute_workload_operation(&runtime, &sandbox, &operation_id).await;
+        });
+    }
+    (StatusCode::ACCEPTED, Json(prepared.record)).into_response()
+}
+
+async fn get_workload_operation_handler(
+    State(state): State<WorkloadControlHttpState>,
+    AxumPath(operation_id): AxumPath<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = require_workload_control_bearer_headers(&headers, &state.bearer_token) {
+        return error.into_response();
+    }
+    match state.runtime.lock().await.operation(&operation_id) {
+        Ok(record) => Json(record).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+fn require_workload_control_bearer(
+    request: &Request<Body>,
+    expected: &str,
+) -> std::result::Result<(), WorkloadControlHttpError> {
+    require_workload_control_bearer_headers(request.headers(), expected)
+}
+
+fn require_workload_control_bearer_headers(
+    headers: &HeaderMap,
+    expected: &str,
+) -> std::result::Result<(), WorkloadControlHttpError> {
+    let authorized = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|token| token == expected);
+    if authorized {
+        Ok(())
+    } else {
+        Err(WorkloadControlHttpError::new(
+            StatusCode::UNAUTHORIZED,
+            WorkloadControlErrorCode::Unauthenticated,
+            "A valid server-side bearer token is required.",
+        ))
+    }
+}
+
+async fn parse_workload_control_json<T: serde::de::DeserializeOwned>(
+    request: Request<Body>,
+) -> std::result::Result<T, WorkloadControlHttpError> {
+    let bytes = read_workload_control_body(request).await?;
+    serde_json::from_slice(&bytes).map_err(|_| {
+        WorkloadControlHttpError::new(
+            StatusCode::BAD_REQUEST,
+            WorkloadControlErrorCode::IncompatibleProtocol,
+            "The Workload Control request body does not match the required schema.",
+        )
+    })
+}
+
+async fn parse_workload_mutation_request(
+    request: Request<Body>,
+) -> std::result::Result<WorkloadMutationRequest, WorkloadControlHttpError> {
+    let bytes = read_workload_control_body(request).await?;
+    let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
+        WorkloadControlHttpError::new(
+            StatusCode::BAD_REQUEST,
+            WorkloadControlErrorCode::IncompatibleProtocol,
+            "The Workload Control request body does not match the required schema.",
+        )
+    })?;
+    validate_workload_control_action_shape(&value)?;
+    if value.pointer("/action/kind").and_then(Value::as_str) == Some("scale")
+        && value
+            .pointer("/action/targetCapacity")
+            .and_then(Value::as_u64)
+            == Some(0)
+    {
+        return Err(WorkloadControlHttpError::new(
+            StatusCode::BAD_REQUEST,
+            WorkloadControlErrorCode::InvalidCapacity,
+            "Scale target capacity must be greater than zero.",
+        ));
+    }
+    serde_json::from_value(value).map_err(|_| {
+        WorkloadControlHttpError::new(
+            StatusCode::BAD_REQUEST,
+            WorkloadControlErrorCode::IncompatibleProtocol,
+            "The Workload Control request body does not match the required schema.",
+        )
+    })
+}
+
+fn validate_workload_control_action_shape(
+    document: &Value,
+) -> std::result::Result<(), WorkloadControlHttpError> {
+    let Some(action) = document.get("action").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    let Some(kind) = action.get("kind").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let exact_fields = match kind {
+        "suspend" | "resume" | "restart" => action.len() == 1,
+        "scale" => action.len() == 2 && action.contains_key("targetCapacity"),
+        _ => true,
+    };
+    if exact_fields {
+        Ok(())
+    } else {
+        Err(invalid_workload_control_document(
+            "The Workload Control action contains fields outside its required schema.",
+        ))
+    }
+}
+
+async fn read_workload_control_body(
+    request: Request<Body>,
+) -> std::result::Result<axum::body::Bytes, WorkloadControlHttpError> {
+    to_bytes(request.into_body(), WORKLOAD_CONTROL_REQUEST_LIMIT)
+        .await
+        .map_err(|_| {
+            WorkloadControlHttpError::new(
+                StatusCode::BAD_REQUEST,
+                WorkloadControlErrorCode::IncompatibleProtocol,
+                "The Workload Control request body is invalid.",
+            )
+        })
+}
+
+fn standard_local_capabilities() -> BTreeSet<WorkloadControlCapability> {
+    BTreeSet::from([
+        WorkloadControlCapability::Suspend,
+        WorkloadControlCapability::Resume,
+    ])
+}
+
+fn new_workload_revision() -> String {
+    format!("wrev_{}", Uuid::now_v7())
+}
+
+fn unix_time_ms() -> u64 {
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
 }
 
 pub(crate) async fn dev_system(options: SystemDevOptions) -> Result<()> {
@@ -392,7 +1513,7 @@ async fn dev_composition(options: SystemDevOptions, composition_file: PathBuf) -
         cleanup_recorded(&plan.owned_root)
             .await
             .map_err(|error| command_error(error, options.json))?;
-        let state = adapter_state_for(&plan, None, SandboxPhase::Stopped);
+        let state = adapter_state_for(&plan, None, SandboxPhase::Stopped, None);
         write_adapter_state(&adapter_state_path, &state)
             .map_err(|error| command_error(error, options.json))?;
         print_adapter_state(&state, options.json)?;
@@ -402,11 +1523,20 @@ async fn dev_composition(options: SystemDevOptions, composition_file: PathBuf) -
         println!("{}", serde_json::to_string_pretty(&plan)?);
         return Ok(());
     }
+    validate_workload_control_plan(&plan, &adapter_id_for(&plan))
+        .map_err(|error| command_error(error, options.json))?;
 
-    let starting = adapter_state_for(&plan, None, SandboxPhase::Starting);
+    let adapter_ownership_token =
+        new_adapter_ownership_token().map_err(|error| command_error(error, options.json))?;
+    let starting = adapter_state_for(
+        &plan,
+        None,
+        SandboxPhase::Starting,
+        Some(&adapter_ownership_token),
+    );
     write_adapter_state(&adapter_state_path, &starting)
         .map_err(|error| command_error(error, options.json))?;
-    let mut child = start_adapter_child(&composition_file)?;
+    let mut child = start_adapter_child(&composition_file, &adapter_ownership_token)?;
     let adapter_state =
         read_typed::<LocalControlAdapterState>(&adapter_state_path, "Local Control Adapter state")
             .ok();
@@ -416,11 +1546,17 @@ async fn dev_composition(options: SystemDevOptions, composition_file: PathBuf) -
             SandboxPhase::Ready | SandboxPhase::Failed | SandboxPhase::Stopped
         )
     }) {
-        let starting = adapter_state_for(&plan, Some(child.id()), SandboxPhase::Starting);
+        let starting = adapter_state_for(
+            &plan,
+            Some(child.id()),
+            SandboxPhase::Starting,
+            Some(&adapter_ownership_token),
+        );
         write_adapter_state(&adapter_state_path, &starting)
             .map_err(|error| command_error(error, options.json))?;
     }
-    let state = wait_for_adapter_ready(&mut child, &adapter_state_path).await?;
+    let state =
+        wait_for_adapter_ready(&mut child, &adapter_state_path, &adapter_ownership_token).await?;
     print_adapter_state(&state, options.json)?;
     Ok(())
 }
@@ -663,15 +1799,83 @@ fn adapter_state_path(plan: &SandboxPlan) -> PathBuf {
         .join("state.json")
 }
 
+fn adapter_credential_path(plan: &SandboxPlan) -> PathBuf {
+    adapter_state_path(plan).with_file_name(WORKLOAD_CONTROL_CREDENTIAL_FILE)
+}
+
+fn adapter_id_for(plan: &SandboxPlan) -> String {
+    format!("workload-control:{}", plan.system_id)
+}
+
+fn adapter_workload_for(plan: &SandboxPlan, adapter_id: &str) -> WorkloadReference {
+    WorkloadReference {
+        system_id: plan.system_id.clone(),
+        service_id: LOCAL_CONTROL_ADAPTER_SERVICE_ID.to_owned(),
+        workload_id: adapter_id.to_owned(),
+    }
+}
+
+fn validate_workload_control_plan(
+    plan: &SandboxPlan,
+    adapter_id: &str,
+) -> std::result::Result<(), SandboxError> {
+    let valid_workloads = plan.workloads.iter().all(|workload| {
+        [
+            plan.system_id.as_str(),
+            workload.service_id.as_str(),
+            workload.workload_id.as_str(),
+        ]
+        .into_iter()
+        .all(valid_workload_control_scalar)
+    });
+    if !valid_workload_control_scalar(adapter_id) || !valid_workloads {
+        return Err(SandboxError::new(
+            "workload_control_identity_invalid",
+            "The local plan contains an identity that Workload Control v1 cannot represent.",
+            "Use non-blank System, Service, Workload, and Adapter identities of at most 255 characters.",
+        ));
+    }
+    Ok(())
+}
+
 fn adapter_state_for(
     plan: &SandboxPlan,
     adapter_pid: Option<u32>,
     phase: SandboxPhase,
+    adapter_ownership_token: Option<&str>,
 ) -> LocalControlAdapterState {
+    adapter_state_with_control(
+        plan,
+        adapter_pid,
+        phase,
+        None,
+        workload_control_credential_reference(plan),
+        adapter_ownership_token,
+    )
+}
+
+fn adapter_state_with_control(
+    plan: &SandboxPlan,
+    adapter_pid: Option<u32>,
+    phase: SandboxPhase,
+    endpoint: Option<String>,
+    credential_file: Option<PathBuf>,
+    adapter_ownership_token: Option<&str>,
+) -> LocalControlAdapterState {
+    let authority_id = adapter_id_for(plan);
     LocalControlAdapterState {
         protocol: LOCAL_CONTROL_ADAPTER_PROTOCOL.to_owned(),
+        schema: LOCAL_CONTROL_ADAPTER_STATE_SCHEMA.to_owned(),
+        adapter_workload: Some(adapter_workload_for(plan, &authority_id)),
+        adapter_id: authority_id,
         app_id: plan.system_id.clone(),
         composition_digest: plan.composition_digest.clone().unwrap_or_default(),
+        endpoint,
+        workload_control_protocol: WORKLOAD_CONTROL_PROTOCOL.to_owned(),
+        workload_control_schema_digest: workload_control_schema_digest(),
+        capabilities: standard_local_capabilities(),
+        credential_file,
+        adapter_ownership_token: adapter_ownership_token.map(str::to_owned),
         adapter_pid,
         phase,
         sandbox_root: plan.owned_root.clone(),
@@ -681,6 +1885,248 @@ fn adapter_state_for(
             .map(|workload| workload.identity.clone())
             .collect(),
     }
+}
+
+fn workload_control_credential_reference(plan: &SandboxPlan) -> Option<PathBuf> {
+    std::env::var(WORKLOAD_CONTROL_TOKEN_ENV)
+        .ok()
+        .filter(|token| !token.is_empty())
+        .is_none()
+        .then(|| adapter_credential_path(plan))
+}
+
+fn new_adapter_ownership_token() -> std::result::Result<String, SandboxError> {
+    random_hex_token().map_err(|_| {
+        SandboxError::new(
+            "adapter_ownership_token_failed",
+            "The operating system could not generate Local Control Adapter ownership.",
+            "Restore the operating system random source and restart the adapter.",
+        )
+    })
+}
+
+fn random_hex_token() -> std::result::Result<String, getrandom::Error> {
+    let mut random = [0_u8; 32];
+    getrandom::fill(&mut random)?;
+    let mut token = String::with_capacity(random.len() * 2);
+    for byte in random {
+        std::fmt::Write::write_fmt(&mut token, format_args!("{byte:02x}"))
+            .expect("writing to a String cannot fail");
+    }
+    Ok(token)
+}
+
+fn adapter_ownership_token_from_env() -> std::result::Result<String, SandboxError> {
+    let token = std::env::var(LOCAL_CONTROL_ADAPTER_OWNERSHIP_TOKEN_ENV).map_err(|_| {
+        SandboxError::new(
+            "adapter_ownership_unproven",
+            "The Local Control Adapter child has no App-specific ownership token.",
+            "Start the adapter through lenso system dev.",
+        )
+    })?;
+    if !valid_adapter_ownership_token(&token) {
+        return Err(SandboxError::new(
+            "adapter_ownership_unproven",
+            "The Local Control Adapter child has an invalid App-specific ownership token.",
+            "Start the adapter through lenso system dev.",
+        ));
+    }
+    Ok(token)
+}
+
+fn valid_adapter_ownership_token(token: &str) -> bool {
+    token.len() == 64
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+struct WorkloadControlCredential {
+    token: String,
+    file: Option<PathBuf>,
+}
+
+fn resolve_workload_control_credential(
+    plan: &SandboxPlan,
+    token_override: Option<String>,
+) -> std::result::Result<WorkloadControlCredential, SandboxError> {
+    if let Some(token) = token_override.filter(|token| !token.is_empty()) {
+        return Ok(WorkloadControlCredential { token, file: None });
+    }
+    let path = adapter_credential_path(plan);
+    let parent = path.parent().ok_or_else(|| {
+        SandboxError::new(
+            "adapter_credential_write_failed",
+            "The Workload Control credential file has no parent directory.",
+            "Run the adapter from a writable App directory.",
+        )
+    })?;
+    fs::create_dir_all(parent).map_err(|error| {
+        io_error(
+            "adapter_credential_write_failed",
+            "create the Workload Control credential directory",
+            &error,
+        )
+    })?;
+    ensure_workload_control_credential_ignored(parent)?;
+    if path.exists() {
+        ensure_owner_only_credential(&path)?;
+        let token = fs::read_to_string(&path).map_err(|error| {
+            io_error(
+                "adapter_credential_invalid",
+                "read the Workload Control credential",
+                &error,
+            )
+        })?;
+        if token.len() < 32 || token.trim() != token {
+            return Err(SandboxError::new(
+                "adapter_credential_invalid",
+                "The Workload Control credential file is invalid.",
+                "Remove only the local adapter credential file and restart the adapter.",
+            ));
+        }
+        return Ok(WorkloadControlCredential {
+            token,
+            file: Some(path),
+        });
+    }
+    let token = random_hex_token().map_err(|_| {
+        SandboxError::new(
+            "adapter_credential_write_failed",
+            "The operating system could not generate a Workload Control credential.",
+            "Restore the operating system random source and restart the adapter.",
+        )
+    })?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(&path).map_err(|error| {
+        io_error(
+            "adapter_credential_write_failed",
+            "create the Workload Control credential",
+            &error,
+        )
+    })?;
+    file.write_all(token.as_bytes()).map_err(|error| {
+        io_error(
+            "adapter_credential_write_failed",
+            "write the Workload Control credential",
+            &error,
+        )
+    })?;
+    file.sync_all().map_err(|error| {
+        io_error(
+            "adapter_credential_write_failed",
+            "flush the Workload Control credential",
+            &error,
+        )
+    })?;
+    ensure_owner_only_credential(&path)?;
+    Ok(WorkloadControlCredential {
+        token,
+        file: Some(path),
+    })
+}
+
+fn ensure_workload_control_credential_ignored(
+    credential_dir: &Path,
+) -> std::result::Result<(), SandboxError> {
+    let ignore_path = credential_dir.join(".gitignore");
+    let existing = match fs::symlink_metadata(&ignore_path) {
+        Ok(metadata) if metadata.file_type().is_file() => fs::read_to_string(&ignore_path)
+            .map_err(|error| {
+                io_error(
+                    "adapter_credential_ignore_failed",
+                    "read the local adapter ignore boundary",
+                    &error,
+                )
+            })?,
+        Ok(_) => {
+            return Err(SandboxError::new(
+                "adapter_credential_ignore_failed",
+                "The local adapter ignore boundary is not a regular file.",
+                "Replace only the local adapter .gitignore path with a regular file and retry.",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(io_error(
+                "adapter_credential_ignore_failed",
+                "inspect the local adapter ignore boundary",
+                &error,
+            ));
+        }
+    };
+    if existing
+        .lines()
+        .any(|line| line == WORKLOAD_CONTROL_CREDENTIAL_IGNORE_RULE)
+    {
+        return Ok(());
+    }
+
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    let mut file = options.open(&ignore_path).map_err(|error| {
+        io_error(
+            "adapter_credential_ignore_failed",
+            "open the local adapter ignore boundary",
+            &error,
+        )
+    })?;
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        file.write_all(b"\n").map_err(|error| {
+            io_error(
+                "adapter_credential_ignore_failed",
+                "separate the local adapter ignore rule",
+                &error,
+            )
+        })?;
+    }
+    file.write_all(
+        format!(
+            "# Generated by Lenso: never commit the local Workload Control credential.\n{WORKLOAD_CONTROL_CREDENTIAL_IGNORE_RULE}\n"
+        )
+        .as_bytes(),
+    )
+    .map_err(|error| {
+        io_error(
+            "adapter_credential_ignore_failed",
+            "write the local adapter ignore rule",
+            &error,
+        )
+    })?;
+    file.sync_all().map_err(|error| {
+        io_error(
+            "adapter_credential_ignore_failed",
+            "flush the local adapter ignore boundary",
+            &error,
+        )
+    })
+}
+
+fn ensure_owner_only_credential(path: &Path) -> std::result::Result<(), SandboxError> {
+    #[cfg(unix)]
+    {
+        let mode = fs::metadata(path)
+            .map_err(|error| {
+                io_error(
+                    "adapter_credential_invalid",
+                    "inspect the Workload Control credential",
+                    &error,
+                )
+            })?
+            .permissions()
+            .mode();
+        if mode & 0o077 != 0 {
+            return Err(SandboxError::new(
+                "adapter_credential_invalid",
+                "The Workload Control credential file is accessible by another user.",
+                "Restrict the credential file to owner read/write access and retry.",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn write_adapter_state(
@@ -733,14 +2179,21 @@ fn write_adapter_state(
     result
 }
 
-fn start_adapter_child(composition_file: &Path) -> Result<std::process::Child> {
+fn start_adapter_child(
+    composition_file: &Path,
+    adapter_ownership_token: &str,
+) -> Result<std::process::Child> {
     let executable = std::env::current_exe().context("resolve lenso executable")?;
     let app_dir = composition_file.parent().unwrap_or(Path::new("."));
     std::process::Command::new(executable)
         .args(["system", "dev", "--adapter-child", "--system-file"])
         .arg(composition_file)
         .current_dir(app_dir)
-        .env("LENSO_LOCAL_CONTROL_ADAPTER", "1")
+        .env(LOCAL_CONTROL_ADAPTER_ENV, "1")
+        .env(
+            LOCAL_CONTROL_ADAPTER_OWNERSHIP_TOKEN_ENV,
+            adapter_ownership_token,
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -768,6 +2221,19 @@ async fn stop_local_adapter(
     if matches!(state.phase, SandboxPhase::Stopped | SandboxPhase::Failed) {
         return Ok(());
     }
+    let Some(adapter_ownership_token) = state
+        .adapter_ownership_token
+        .as_deref()
+        .filter(|token| valid_adapter_ownership_token(token))
+    else {
+        return Err(SandboxError::new(
+            "adapter_ownership_unproven",
+            format!(
+                "Refusing to stop process {pid} because its App-specific adapter ownership is missing or invalid."
+            ),
+            "Inspect the recorded adapter PID and remove only state proven to belong to this App.",
+        ));
+    };
     let output = std::process::Command::new("ps")
         .args(["eww", "-p", &pid.to_string(), "-o", "command="])
         .output()
@@ -782,11 +2248,19 @@ async fn stop_local_adapter(
         return Ok(());
     }
     let command = String::from_utf8_lossy(&output.stdout);
-    if !command.contains("LENSO_LOCAL_CONTROL_ADAPTER=1") {
+    let generic_marker = format!("{LOCAL_CONTROL_ADAPTER_ENV}=1");
+    let ownership_marker =
+        format!("{LOCAL_CONTROL_ADAPTER_OWNERSHIP_TOKEN_ENV}={adapter_ownership_token}");
+    let has_marker = |expected: &str| {
+        command
+            .split_ascii_whitespace()
+            .any(|segment| segment == expected)
+    };
+    if !has_marker(&generic_marker) || !has_marker(&ownership_marker) {
         return Err(SandboxError::new(
             "adapter_ownership_unproven",
             format!(
-                "Refusing to stop process {pid} because its Local Control Adapter marker does not match."
+                "Refusing to stop process {pid} because its App-specific Local Control Adapter ownership does not match."
             ),
             "Inspect the recorded adapter PID and remove only state proven to belong to this App.",
         ));
@@ -803,11 +2277,15 @@ async fn stop_local_adapter(
 async fn wait_for_adapter_ready(
     child: &mut std::process::Child,
     state_path: &Path,
+    adapter_ownership_token: &str,
 ) -> Result<LocalControlAdapterState> {
     for _ in 0..300 {
         if state_path.exists() {
             let state: LocalControlAdapterState =
                 read_typed(state_path, "Local Control Adapter state")?;
+            if state.adapter_ownership_token.as_deref() != Some(adapter_ownership_token) {
+                bail!("Local Control Adapter ownership changed during startup")
+            }
             match state.phase {
                 SandboxPhase::Ready => return Ok(state),
                 SandboxPhase::Failed | SandboxPhase::Stopped => {
@@ -827,39 +2305,140 @@ async fn wait_for_adapter_ready(
 async fn run_composition_adapter_child(plan: SandboxPlan) -> Result<()> {
     let state_path = adapter_state_path(&plan);
     let pid = std::process::id();
+    let adapter_ownership_token =
+        adapter_ownership_token_from_env().map_err(|error| command_error(error, false))?;
+    validate_workload_control_plan(&plan, &adapter_id_for(&plan))
+        .map_err(|error| command_error(error, false))?;
+    let credential =
+        resolve_workload_control_credential(&plan, std::env::var(WORKLOAD_CONTROL_TOKEN_ENV).ok())
+            .map_err(|error| command_error(error, false))?;
     write_adapter_state(
         &state_path,
-        &adapter_state_for(&plan, Some(pid), SandboxPhase::Starting),
+        &adapter_state_with_control(
+            &plan,
+            Some(pid),
+            SandboxPhase::Starting,
+            None,
+            credential.file.clone(),
+            Some(&adapter_ownership_token),
+        ),
     )
     .map_err(|error| command_error(error, false))?;
-    let mut running = match launch(plan.clone(), false).await {
+    let running = match launch(plan.clone(), false).await {
         Ok(running) => running,
         Err(error) => {
             let _ = write_adapter_state(
                 &state_path,
-                &adapter_state_for(&plan, Some(pid), SandboxPhase::Failed),
+                &adapter_state_with_control(
+                    &plan,
+                    Some(pid),
+                    SandboxPhase::Failed,
+                    None,
+                    credential.file,
+                    Some(&adapter_ownership_token),
+                ),
             );
             return Err(command_error(error, false));
         }
     };
-    write_adapter_state(
-        &state_path,
-        &adapter_state_for(&running.plan, Some(pid), SandboxPhase::Ready),
+    let mut server = match start_workload_control_server(
+        running,
+        adapter_id_for(&plan),
+        credential.token,
+        Duration::ZERO,
     )
-    .map_err(|error| command_error(error, false))?;
-    if let Err(error) = running.wait_for_stop().await {
-        let error = rollback_launch(&mut running, error).await;
+    .await
+    {
+        Ok(server) => server,
+        Err(error) => {
+            let _ = cleanup_recorded(&plan.owned_root).await;
+            let _ = write_adapter_state(
+                &state_path,
+                &adapter_state_with_control(
+                    &plan,
+                    Some(pid),
+                    SandboxPhase::Failed,
+                    None,
+                    credential.file,
+                    Some(&adapter_ownership_token),
+                ),
+            );
+            return Err(command_error(error, false));
+        }
+    };
+    let endpoint = server.endpoint();
+    if let Err(original) = write_adapter_state(
+        &state_path,
+        &adapter_state_with_control(
+            &plan,
+            Some(pid),
+            SandboxPhase::Ready,
+            Some(endpoint.clone()),
+            credential.file.clone(),
+            Some(&adapter_ownership_token),
+        ),
+    ) {
+        let error = match server.shutdown().await {
+            Ok(()) => original,
+            Err(cleanup) => SandboxError::new(
+                "cleanup_incomplete",
+                format!(
+                    "{} Cleanup also failed: {}",
+                    original.message, cleanup.message
+                ),
+                cleanup.next_action,
+            ),
+        };
         let _ = write_adapter_state(
             &state_path,
-            &adapter_state_for(&running.plan, Some(pid), SandboxPhase::Failed),
+            &adapter_state_with_control(
+                &plan,
+                Some(pid),
+                SandboxPhase::Failed,
+                None,
+                credential.file,
+                Some(&adapter_ownership_token),
+            ),
         );
         return Err(command_error(error, false));
     }
-    match running.shutdown().await {
+    if let Err(original) = server.wait_for_stop().await {
+        let error = match server.shutdown().await {
+            Ok(()) => original,
+            Err(cleanup) => SandboxError::new(
+                "cleanup_incomplete",
+                format!(
+                    "{} Cleanup also failed: {}",
+                    original.message, cleanup.message
+                ),
+                cleanup.next_action,
+            ),
+        };
+        let _ = write_adapter_state(
+            &state_path,
+            &adapter_state_with_control(
+                &plan,
+                Some(pid),
+                SandboxPhase::Failed,
+                Some(endpoint),
+                credential.file,
+                Some(&adapter_ownership_token),
+            ),
+        );
+        return Err(command_error(error, false));
+    }
+    match server.shutdown().await {
         Ok(()) => {
             write_adapter_state(
                 &state_path,
-                &adapter_state_for(&running.plan, Some(pid), SandboxPhase::Stopped),
+                &adapter_state_with_control(
+                    &plan,
+                    Some(pid),
+                    SandboxPhase::Stopped,
+                    None,
+                    credential.file,
+                    Some(&adapter_ownership_token),
+                ),
             )
             .map_err(|error| command_error(error, false))?;
             Ok(())
@@ -867,7 +2446,14 @@ async fn run_composition_adapter_child(plan: SandboxPlan) -> Result<()> {
         Err(error) => {
             let _ = write_adapter_state(
                 &state_path,
-                &adapter_state_for(&running.plan, Some(pid), SandboxPhase::Failed),
+                &adapter_state_with_control(
+                    &plan,
+                    Some(pid),
+                    SandboxPhase::Failed,
+                    Some(endpoint),
+                    credential.file,
+                    Some(&adapter_ownership_token),
+                ),
             );
             Err(command_error(error, false))
         }
@@ -876,13 +2462,28 @@ async fn run_composition_adapter_child(plan: SandboxPlan) -> Result<()> {
 
 fn print_adapter_state(state: &LocalControlAdapterState, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(state)?);
+        let mut document = serde_json::to_value(state)?;
+        if let Some(fields) = document.as_object_mut() {
+            fields.remove("adapterOwnershipToken");
+        }
+        println!("{}", serde_json::to_string_pretty(&document)?);
         return Ok(());
     }
     let phase_value = serde_json::to_value(state.phase)?;
     let phase = phase_value.as_str().unwrap_or("unknown");
     println!("Local Control Adapter {}: {phase}", state.app_id);
+    println!("adapter id: {}", state.adapter_id);
     println!("composition digest: {}", state.composition_digest);
+    println!(
+        "workload control: {} ({})",
+        state.workload_control_protocol, state.workload_control_schema_digest
+    );
+    if let Some(endpoint) = &state.endpoint {
+        println!("endpoint: {endpoint}");
+    }
+    if let Some(credential_file) = &state.credential_file {
+        println!("credential file: {}", credential_file.display());
+    }
     for identity in &state.workload_identities {
         println!("workload identity: {identity}");
     }
@@ -1463,6 +3064,9 @@ async fn launch_workload(
             "LENSO_SANDBOX_OWNERSHIP_TOKEN",
             &running.state.ownership_token,
         )
+        .env_remove(LOCAL_CONTROL_ADAPTER_ENV)
+        .env_remove(LOCAL_CONTROL_ADAPTER_OWNERSHIP_TOKEN_ENV)
+        .env_remove(WORKLOAD_CONTROL_TOKEN_ENV)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -1656,34 +3260,39 @@ impl RunningSandbox {
                     return Ok(());
                 }
                 () = tokio::time::sleep(Duration::from_millis(200)) => {
-                    for process in &mut self.processes {
-                        if let Some(status) = process.child.try_wait().map_err(|error| {
-                            SandboxError::new(
-                                "process_status_failed",
-                                error.to_string(),
-                                "Inspect the sandbox state and correlated logs, then run cleanup.",
-                            )
-                        })? {
-                            let (service_id, workload_id) = {
-                                let workload = &mut self.state.workloads[process.state_index];
-                                workload.phase = SandboxPhase::Failed;
-                                workload.process_id = None;
-                                (workload.service_id.clone(), workload.workload_id.clone())
-                            };
-                            self.state.phase = SandboxPhase::Failed;
-                            let _ = persist_state(&self.plan.owned_root, &self.state).await;
-                            return Err(SandboxError::new(
-                                "process_exited",
-                                format!(
-                                    "Workload {service_id}/{workload_id} exited unexpectedly with {status}."
-                                ),
-                                "Inspect the correlated logs, fix the Workload, and restart the sandbox.",
-                            ));
-                        }
-                    }
+                    self.check_for_unexpected_exit().await?;
                 }
             }
         }
+    }
+
+    async fn check_for_unexpected_exit(&mut self) -> std::result::Result<(), SandboxError> {
+        for process in &mut self.processes {
+            if let Some(status) = process.child.try_wait().map_err(|error| {
+                SandboxError::new(
+                    "process_status_failed",
+                    error.to_string(),
+                    "Inspect the sandbox state and correlated logs, then run cleanup.",
+                )
+            })? {
+                let (service_id, workload_id) = {
+                    let workload = &mut self.state.workloads[process.state_index];
+                    workload.phase = SandboxPhase::Failed;
+                    workload.process_id = None;
+                    (workload.service_id.clone(), workload.workload_id.clone())
+                };
+                self.state.phase = SandboxPhase::Failed;
+                let _ = persist_state(&self.plan.owned_root, &self.state).await;
+                return Err(SandboxError::new(
+                    "process_exited",
+                    format!(
+                        "Workload {service_id}/{workload_id} exited unexpectedly with {status}."
+                    ),
+                    "Inspect the correlated logs, fix the Workload, and restart the sandbox.",
+                ));
+            }
+        }
+        Ok(())
     }
 
     async fn shutdown(&mut self) -> std::result::Result<(), SandboxError> {
@@ -2349,6 +3958,96 @@ mod tests {
         fs::remove_dir_all(root).ok();
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn adapter_cleanup_refuses_a_stale_pid_owned_by_another_app_adapter() {
+        let root = test_root("adapter-stale-pid");
+        fs::create_dir_all(&root).unwrap();
+        let plan = build_plan(
+            &system_fixture(),
+            &sandbox_fixture(false),
+            &root.join(DEFAULT_SYSTEM_FILE),
+            &root.join(DEFAULT_SANDBOX_FILE),
+        )
+        .unwrap();
+        let mut app_b_system = system_fixture();
+        app_b_system["systemId"] = Value::String("billing-platform".to_owned());
+        let app_b_plan = build_plan(
+            &app_b_system,
+            &sandbox_fixture(false),
+            &root.join("billing-system.json"),
+            &root.join("billing-sandbox.json"),
+        )
+        .unwrap();
+        let stale_owner_token = "a".repeat(64);
+        let other_owner_token = "b".repeat(64);
+        let mut stale_adapter_process = std::process::Command::new("sleep")
+            .arg("30")
+            .env(LOCAL_CONTROL_ADAPTER_ENV, "1")
+            .env(
+                LOCAL_CONTROL_ADAPTER_OWNERSHIP_TOKEN_ENV,
+                &stale_owner_token,
+            )
+            .spawn()
+            .unwrap();
+        let mut other_adapter_process = std::process::Command::new("sleep")
+            .arg("30")
+            .env(LOCAL_CONTROL_ADAPTER_ENV, "1")
+            .env(
+                LOCAL_CONTROL_ADAPTER_OWNERSHIP_TOKEN_ENV,
+                &other_owner_token,
+            )
+            .spawn()
+            .unwrap();
+        stale_adapter_process.kill().unwrap();
+        stale_adapter_process.wait().unwrap();
+
+        let stale_app_a_state: LocalControlAdapterState = serde_json::from_value(
+            serde_json::to_value(adapter_state_with_control(
+                &plan,
+                Some(other_adapter_process.id()),
+                SandboxPhase::Ready,
+                Some("http://127.0.0.1:43210".to_owned()),
+                None,
+                Some(&stale_owner_token),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let other_app_state = adapter_state_with_control(
+            &app_b_plan,
+            Some(other_adapter_process.id()),
+            SandboxPhase::Ready,
+            Some("http://127.0.0.1:43211".to_owned()),
+            None,
+            Some(&other_owner_token),
+        );
+        assert_ne!(stale_app_a_state.app_id, other_app_state.app_id);
+        assert_ne!(
+            stale_app_a_state.adapter_ownership_token,
+            other_app_state.adapter_ownership_token
+        );
+
+        let mut missing_ownership_state = stale_app_a_state.clone();
+        missing_ownership_state.adapter_ownership_token = None;
+        let missing_ownership_result = stop_local_adapter(&missing_ownership_state, &plan).await;
+        let result = stop_local_adapter(&stale_app_a_state, &plan).await;
+        let other_adapter_survived = other_adapter_process.try_wait().unwrap().is_none();
+        let _ = other_adapter_process.kill();
+        let _ = other_adapter_process.wait();
+        fs::remove_dir_all(root).ok();
+
+        assert_eq!(
+            missing_ownership_result.unwrap_err().code,
+            "adapter_ownership_unproven"
+        );
+        assert_eq!(result.unwrap_err().code, "adapter_ownership_unproven");
+        assert!(
+            other_adapter_survived,
+            "cleanup stopped another App's adapter"
+        );
+    }
+
     #[tokio::test]
     async fn recorded_cleanup_stops_owned_process_groups() {
         let root = test_root("recorded-cleanup");
@@ -2391,6 +4090,1085 @@ mod tests {
             .unwrap();
 
         assert!(!process_group_exists(process_group_id).unwrap());
+    }
+
+    #[tokio::test]
+    async fn workload_control_observe_requires_bearer_and_never_leaks_process_identity() {
+        let root = test_root("workload-control-observe");
+        fs::create_dir_all(&root).unwrap();
+        let plan = build_plan(
+            &system_fixture(),
+            &sandbox_fixture(false),
+            &root.join(DEFAULT_SYSTEM_FILE),
+            &root.join(DEFAULT_SANDBOX_FILE),
+        )
+        .unwrap();
+        let running = launch(plan, false).await.unwrap();
+        let mut server = start_workload_control_server(
+            running,
+            "workload-control:support-platform".to_owned(),
+            "server-side-secret".to_owned(),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+        let client = reqwest::Client::new();
+        let observe_url = format!("{}/workload-control/v1/observe", server.endpoint());
+        let request = serde_json::json!({
+            "protocol": WORKLOAD_CONTROL_PROTOCOL,
+            "workload": {
+                "systemId": "support-platform",
+                "serviceId": "support",
+                "workloadId": "support-api"
+            }
+        });
+
+        assert!(server.local_addr().ip().is_loopback());
+        let unauthorized = client
+            .post(&observe_url)
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            unauthorized.json::<Value>().await.unwrap()["code"],
+            "unauthenticated"
+        );
+
+        let malformed = client
+            .post(&observe_url)
+            .bearer_auth("server-side-secret")
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body("{")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(malformed.status(), reqwest::StatusCode::BAD_REQUEST);
+        let malformed: Value = malformed.json().await.unwrap();
+        assert_eq!(malformed["code"], "incompatible_protocol");
+        assert!(malformed.get("state").is_none());
+
+        let mut invalid_reference = request.clone();
+        invalid_reference["workload"]["serviceId"] = Value::String("   ".to_owned());
+        let invalid_reference = client
+            .post(&observe_url)
+            .bearer_auth("server-side-secret")
+            .json(&invalid_reference)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(invalid_reference.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            invalid_reference.json::<Value>().await.unwrap()["code"],
+            "incompatible_protocol"
+        );
+
+        let response = client
+            .post(observe_url)
+            .bearer_auth("server-side-secret")
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let source = response.text().await.unwrap();
+        let observation: Value = serde_json::from_str(&source).unwrap();
+        assert_eq!(observation["protocol"], WORKLOAD_CONTROL_PROTOCOL);
+        assert_eq!(observation["state"], "running");
+        assert!(observation["observedRevision"].is_string());
+        assert!(observation["observedAtUnixMs"].is_u64());
+        assert!(observation["activeOperation"].is_null());
+        assert_eq!(
+            observation["capabilities"],
+            serde_json::json!(["suspend", "resume"])
+        );
+        assert!(!source.contains("processId"));
+        assert!(!source.contains("adapterPid"));
+        assert!(!source.contains("ownershipToken"));
+        assert!(!source.contains("server-side-secret"));
+
+        server.shutdown().await.unwrap();
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn workload_control_suspends_and_resumes_only_the_target_through_async_operations() {
+        let root = test_root("workload-control-suspend-resume");
+        fs::create_dir_all(&root).unwrap();
+        let plan = build_plan(
+            &system_fixture(),
+            &sandbox_fixture(false),
+            &root.join(DEFAULT_SYSTEM_FILE),
+            &root.join(DEFAULT_SANDBOX_FILE),
+        )
+        .unwrap();
+        let running = launch(plan, false).await.unwrap();
+        let mut server = start_workload_control_server(
+            running,
+            "workload-control:support-platform".to_owned(),
+            "control-token".to_owned(),
+            Duration::from_millis(5),
+        )
+        .await
+        .unwrap();
+        let client = reqwest::Client::new();
+        let target = serde_json::json!({
+            "systemId": "support-platform",
+            "serviceId": "support",
+            "workloadId": "support-api"
+        });
+        let other = serde_json::json!({
+            "systemId": "support-platform",
+            "serviceId": "notifications",
+            "workloadId": "notifications-api"
+        });
+        let target_before = observe_workload(&client, server.endpoint(), &target).await;
+        let other_before = observe_workload(&client, server.endpoint(), &other).await;
+
+        let suspended = submit_workload_operation(
+            &client,
+            server.endpoint(),
+            &target,
+            target_before["observedRevision"].as_str().unwrap(),
+            "suspend-support",
+            "suspend",
+        )
+        .await;
+        assert_eq!(suspended["phase"], "accepted");
+        let suspend_record = wait_for_workload_operation(
+            &client,
+            server.endpoint(),
+            suspended["operationId"].as_str().unwrap(),
+        )
+        .await;
+        assert_eq!(suspend_record["phase"], "succeeded");
+        assert_eq!(suspend_record["authority"]["decision"], "accepted");
+        assert_eq!(suspend_record["result"]["state"], "suspended");
+        let target_suspended = observe_workload(&client, server.endpoint(), &target).await;
+        let other_during_suspend = observe_workload(&client, server.endpoint(), &other).await;
+        assert_eq!(target_suspended["state"], "suspended");
+        assert_ne!(
+            target_suspended["observedRevision"],
+            target_before["observedRevision"]
+        );
+        assert_eq!(other_during_suspend["state"], "running");
+        assert_eq!(
+            other_during_suspend["observedRevision"],
+            other_before["observedRevision"]
+        );
+
+        let resumed = submit_workload_operation(
+            &client,
+            server.endpoint(),
+            &target,
+            target_suspended["observedRevision"].as_str().unwrap(),
+            "resume-support",
+            "resume",
+        )
+        .await;
+        let resume_record = wait_for_workload_operation(
+            &client,
+            server.endpoint(),
+            resumed["operationId"].as_str().unwrap(),
+        )
+        .await;
+        assert_eq!(resume_record["phase"], "succeeded");
+        assert_eq!(resume_record["result"]["state"], "running");
+        let target_resumed = observe_workload(&client, server.endpoint(), &target).await;
+        let other_after_resume = observe_workload(&client, server.endpoint(), &other).await;
+        assert_eq!(target_resumed["state"], "running");
+        assert_eq!(other_after_resume["state"], "running");
+        for response in [suspend_record, resume_record, target_resumed] {
+            let source = serde_json::to_string(&response).unwrap();
+            assert!(!source.contains("processId"));
+            assert!(!source.contains("health"));
+        }
+
+        server.shutdown().await.unwrap();
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn workload_control_stop_failure_blocks_resume_without_launching_a_duplicate() {
+        let root = test_root("workload-control-failure-revision");
+        fs::create_dir_all(&root).unwrap();
+        let plan = build_plan(
+            &system_fixture(),
+            &sandbox_fixture(false),
+            &root.join(DEFAULT_SYSTEM_FILE),
+            &root.join(DEFAULT_SANDBOX_FILE),
+        )
+        .unwrap();
+        let running = launch(plan, false).await.unwrap();
+        let mut server = start_workload_control_server(
+            running,
+            "workload-control:support-platform".to_owned(),
+            "control-token".to_owned(),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+        let client = reqwest::Client::new();
+        let target_reference = WorkloadReference {
+            system_id: "support-platform".to_owned(),
+            service_id: "support".to_owned(),
+            workload_id: "support-api".to_owned(),
+        };
+        let target = serde_json::to_value(&target_reference).unwrap();
+        let before = observe_workload(&client, server.endpoint(), &target).await;
+        let original_process_group_id = {
+            let mut sandbox = server.sandbox.lock().await;
+            let state_index = sandbox.workload_index(&target_reference).unwrap();
+            let process_index = sandbox
+                .processes
+                .iter()
+                .position(|process| process.state_index == state_index)
+                .unwrap();
+            let original_process_group_id = sandbox.processes[process_index].process_group_id;
+            sandbox.processes[process_index].process_group_id = u32::MAX;
+            original_process_group_id
+        };
+
+        let accepted = submit_workload_operation(
+            &client,
+            server.endpoint(),
+            &target,
+            before["observedRevision"].as_str().unwrap(),
+            "stop-failure",
+            "suspend",
+        )
+        .await;
+        let failed = wait_for_workload_operation(
+            &client,
+            server.endpoint(),
+            accepted["operationId"].as_str().unwrap(),
+        )
+        .await;
+        assert_eq!(failed["phase"], "failed");
+        assert_eq!(failed["failure"]["code"], "authority_unavailable");
+        let after = observe_workload(&client, server.endpoint(), &target).await;
+        assert_eq!(after["state"], "failed");
+        assert_ne!(after["observedRevision"], before["observedRevision"]);
+
+        let resume = submit_workload_operation(
+            &client,
+            server.endpoint(),
+            &target,
+            after["observedRevision"].as_str().unwrap(),
+            "resume-after-stop-failure",
+            "resume",
+        )
+        .await;
+        let resume_record = wait_for_workload_operation(
+            &client,
+            server.endpoint(),
+            resume["operationId"].as_str().unwrap(),
+        )
+        .await;
+        let owned_process_count = {
+            let mut sandbox = server.sandbox.lock().await;
+            let state_index = sandbox.workload_index(&target_reference).unwrap();
+            let count = sandbox
+                .processes
+                .iter()
+                .filter(|process| process.state_index == state_index)
+                .count();
+            sandbox
+                .processes
+                .iter_mut()
+                .find(|process| process.process_group_id == u32::MAX)
+                .unwrap()
+                .process_group_id = original_process_group_id;
+            count
+        };
+
+        server.shutdown().await.unwrap();
+        fs::remove_dir_all(root).ok();
+
+        assert_eq!(resume_record["phase"], "failed");
+        assert_eq!(resume_record["failure"]["code"], "authority_unavailable");
+        assert_eq!(
+            owned_process_count, 1,
+            "resume launched a duplicate process"
+        );
+    }
+
+    #[tokio::test]
+    async fn workload_control_enforces_idempotency_revision_and_one_active_mutation() {
+        let root = test_root("workload-control-concurrency");
+        fs::create_dir_all(&root).unwrap();
+        let plan = build_plan(
+            &system_fixture(),
+            &sandbox_fixture(false),
+            &root.join(DEFAULT_SYSTEM_FILE),
+            &root.join(DEFAULT_SANDBOX_FILE),
+        )
+        .unwrap();
+        let running = launch(plan, false).await.unwrap();
+        let mut server = start_workload_control_server(
+            running,
+            "workload-control:support-platform".to_owned(),
+            "control-token".to_owned(),
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap();
+        let client = reqwest::Client::new();
+        let target = serde_json::json!({
+            "systemId": "support-platform",
+            "serviceId": "support",
+            "workloadId": "support-api"
+        });
+        let observed = observe_workload(&client, server.endpoint(), &target).await;
+        let revision = observed["observedRevision"].as_str().unwrap();
+
+        let first = post_workload_operation(
+            &client,
+            server.endpoint(),
+            &target,
+            revision,
+            "same-key",
+            serde_json::json!({ "kind": "suspend" }),
+        )
+        .await;
+        assert_eq!(first.status(), reqwest::StatusCode::ACCEPTED);
+        let first: Value = first.json().await.unwrap();
+
+        let retry = post_workload_operation(
+            &client,
+            server.endpoint(),
+            &target,
+            revision,
+            "same-key",
+            serde_json::json!({ "kind": "suspend" }),
+        )
+        .await;
+        assert_eq!(retry.status(), reqwest::StatusCode::ACCEPTED);
+        let retry: Value = retry.json().await.unwrap();
+        assert_eq!(retry["operationId"], first["operationId"]);
+
+        let conflict = post_workload_operation(
+            &client,
+            server.endpoint(),
+            &target,
+            revision,
+            "same-key",
+            serde_json::json!({ "kind": "resume" }),
+        )
+        .await;
+        assert_eq!(conflict.status(), reqwest::StatusCode::CONFLICT);
+        let conflict: Value = conflict.json().await.unwrap();
+        assert_eq!(conflict["code"], "idempotency_conflict");
+        assert_eq!(conflict["operationId"], first["operationId"]);
+
+        let active = post_workload_operation(
+            &client,
+            server.endpoint(),
+            &target,
+            revision,
+            "different-key",
+            serde_json::json!({ "kind": "suspend" }),
+        )
+        .await;
+        assert_eq!(active.status(), reqwest::StatusCode::CONFLICT);
+        let active: Value = active.json().await.unwrap();
+        assert_eq!(active["code"], "active_mutation");
+        assert_eq!(active["activeOperation"], first["operationId"]);
+
+        let completed = wait_for_workload_operation(
+            &client,
+            server.endpoint(),
+            first["operationId"].as_str().unwrap(),
+        )
+        .await;
+        assert_eq!(completed["phase"], "succeeded");
+
+        let completed_retry = post_workload_operation(
+            &client,
+            server.endpoint(),
+            &target,
+            revision,
+            "same-key",
+            serde_json::json!({ "kind": "suspend" }),
+        )
+        .await;
+        assert_eq!(completed_retry.status(), reqwest::StatusCode::ACCEPTED);
+        assert_eq!(
+            completed_retry.json::<Value>().await.unwrap()["operationId"],
+            first["operationId"]
+        );
+
+        let stale = post_workload_operation(
+            &client,
+            server.endpoint(),
+            &target,
+            revision,
+            "stale-key",
+            serde_json::json!({ "kind": "resume" }),
+        )
+        .await;
+        assert_eq!(stale.status(), reqwest::StatusCode::CONFLICT);
+        let stale: Value = stale.json().await.unwrap();
+        assert_eq!(stale["code"], "stale_revision");
+        assert_eq!(
+            stale["currentRevision"],
+            completed["result"]["observedRevision"]
+        );
+
+        let suspended = observe_workload(&client, server.endpoint(), &target).await;
+        let operation_count = server.runtime.lock().await.operations.len();
+        for (idempotency_key, action) in [
+            (
+                "suspend-extra-field",
+                serde_json::json!({ "kind": "suspend", "targetCapacity": 2 }),
+            ),
+            (
+                "restart-extra-field",
+                serde_json::json!({ "kind": "restart", "providerId": "local" }),
+            ),
+            (
+                "resume-extra-field",
+                serde_json::json!({ "kind": "resume", "providerId": "local" }),
+            ),
+            (
+                "scale-snake-case",
+                serde_json::json!({ "kind": "scale", "target_capacity": 2 }),
+            ),
+            (
+                "scale-extra-field",
+                serde_json::json!({ "kind": "scale", "targetCapacity": 2, "replicas": 2 }),
+            ),
+        ] {
+            let malformed = post_workload_operation(
+                &client,
+                server.endpoint(),
+                &target,
+                suspended["observedRevision"].as_str().unwrap(),
+                idempotency_key,
+                action,
+            )
+            .await;
+            assert_eq!(malformed.status(), reqwest::StatusCode::BAD_REQUEST);
+            assert_eq!(
+                malformed.json::<Value>().await.unwrap()["code"],
+                "incompatible_protocol"
+            );
+        }
+        assert_eq!(
+            server.runtime.lock().await.operations.len(),
+            operation_count
+        );
+
+        let unsupported = post_workload_operation(
+            &client,
+            server.endpoint(),
+            &target,
+            suspended["observedRevision"].as_str().unwrap(),
+            "restart-key",
+            serde_json::json!({ "kind": "restart" }),
+        )
+        .await;
+        assert_eq!(
+            unsupported.status(),
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            unsupported.json::<Value>().await.unwrap()["code"],
+            "unsupported_action"
+        );
+        let unsupported_scale = post_workload_operation(
+            &client,
+            server.endpoint(),
+            &target,
+            suspended["observedRevision"].as_str().unwrap(),
+            "scale-key",
+            serde_json::json!({ "kind": "scale", "targetCapacity": 2 }),
+        )
+        .await;
+        assert_eq!(
+            unsupported_scale.status(),
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            unsupported_scale.json::<Value>().await.unwrap()["code"],
+            "unsupported_action"
+        );
+        let invalid_capacity = post_workload_operation(
+            &client,
+            server.endpoint(),
+            &target,
+            suspended["observedRevision"].as_str().unwrap(),
+            "invalid-scale-key",
+            serde_json::json!({ "kind": "scale", "targetCapacity": 0 }),
+        )
+        .await;
+        assert_eq!(invalid_capacity.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            invalid_capacity.json::<Value>().await.unwrap()["code"],
+            "invalid_capacity"
+        );
+        assert_eq!(
+            server.runtime.lock().await.operations.len(),
+            operation_count
+        );
+
+        server.shutdown().await.unwrap();
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn workload_control_reports_unknown_without_queueing_and_protects_control_plane() {
+        let root = test_root("workload-control-unavailable-protected");
+        fs::create_dir_all(&root).unwrap();
+        let plan = build_plan(
+            &system_fixture(),
+            &sandbox_fixture(false),
+            &root.join(DEFAULT_SYSTEM_FILE),
+            &root.join(DEFAULT_SANDBOX_FILE),
+        )
+        .unwrap();
+        let mut running = launch(plan, false).await.unwrap();
+        let template_index = running
+            .plan
+            .workloads
+            .iter()
+            .position(|workload| workload.workload_id == "support-api")
+            .unwrap();
+        for (service_id, workload_id) in [
+            ("lenso-console", "console-runtime"),
+            ("support", "lenso-console"),
+            ("workload-control:support-platform", "business-api"),
+            ("lenso-local-control-adapter", "business-api"),
+        ] {
+            let mut planned = running.plan.workloads[template_index].clone();
+            planned.service_id = service_id.to_owned();
+            planned.workload_id = workload_id.to_owned();
+            planned.identity = format!("local-dev://support-platform/{service_id}/{workload_id}");
+            let mut state = running.state.workloads[template_index].clone();
+            state.service_id = service_id.to_owned();
+            state.workload_id = workload_id.to_owned();
+            state.identity = planned.identity.clone();
+            state.process_id = None;
+            running.plan.workloads.push(planned);
+            running.state.workloads.push(state);
+        }
+        let mut server = start_workload_control_server(
+            running,
+            "workload-control:support-platform".to_owned(),
+            "control-token".to_owned(),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+        let client = reqwest::Client::new();
+        let target = serde_json::json!({
+            "systemId": "support-platform",
+            "serviceId": "support",
+            "workloadId": "support-api"
+        });
+        let before = observe_workload(&client, server.endpoint(), &target).await;
+        server.runtime.lock().await.available = false;
+
+        let unavailable = observe_workload(&client, server.endpoint(), &target).await;
+        assert_eq!(unavailable["state"], "unknown");
+        assert!(unavailable.get("observedRevision").is_none());
+        let rejected = post_workload_operation(
+            &client,
+            server.endpoint(),
+            &target,
+            before["observedRevision"].as_str().unwrap(),
+            "must-not-queue",
+            serde_json::json!({ "kind": "suspend" }),
+        )
+        .await;
+        assert_eq!(rejected.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        let rejected: Value = rejected.json().await.unwrap();
+        assert_eq!(rejected["code"], "authority_unavailable");
+        assert!(rejected.get("state").is_none());
+
+        server.runtime.lock().await.available = true;
+        let restored = observe_workload(&client, server.endpoint(), &target).await;
+        assert_eq!(restored["state"], "running");
+        assert_eq!(restored["observedRevision"], before["observedRevision"]);
+        assert!(restored["activeOperation"].is_null());
+
+        for false_positive in [
+            serde_json::json!({
+                "systemId": "support-platform",
+                "serviceId": "support",
+                "workloadId": "lenso-console"
+            }),
+            serde_json::json!({
+                "systemId": "support-platform",
+                "serviceId": "workload-control:support-platform",
+                "workloadId": "business-api"
+            }),
+            serde_json::json!({
+                "systemId": "support-platform",
+                "serviceId": "lenso-local-control-adapter",
+                "workloadId": "business-api"
+            }),
+        ] {
+            let observation = observe_workload(&client, server.endpoint(), &false_positive).await;
+            assert_eq!(observation["protection"], "controllable");
+            assert_eq!(observation["state"], "running");
+            assert!(observation["observedRevision"].is_string());
+        }
+
+        for protected in [
+            serde_json::json!({
+                "systemId": "support-platform",
+                "serviceId": "lenso-console",
+                "workloadId": "console-runtime"
+            }),
+            serde_json::json!({
+                "systemId": "support-platform",
+                "serviceId": "lenso-local-control-adapter",
+                "workloadId": "workload-control:support-platform"
+            }),
+        ] {
+            let observation = observe_workload(&client, server.endpoint(), &protected).await;
+            assert_eq!(observation["protection"], "control_plane");
+            assert_eq!(observation["state"], "unknown");
+            assert!(observation.get("observedRevision").is_none());
+            let response = post_workload_operation(
+                &client,
+                server.endpoint(),
+                &protected,
+                "protected-revision",
+                "protected-key",
+                serde_json::json!({ "kind": "suspend" }),
+            )
+            .await;
+            assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+            assert_eq!(
+                response.json::<Value>().await.unwrap()["code"],
+                "protected_workload"
+            );
+        }
+
+        server.shutdown().await.unwrap();
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn generated_workload_control_credential_is_owner_only_and_state_contains_only_its_reference() {
+        let root = test_root("workload-control-credential");
+        fs::create_dir_all(&root).unwrap();
+        let plan = build_plan(
+            &system_fixture(),
+            &sandbox_fixture(false),
+            &root.join(DEFAULT_SYSTEM_FILE),
+            &root.join(DEFAULT_SANDBOX_FILE),
+        )
+        .unwrap();
+
+        let credential = resolve_workload_control_credential(&plan, None).unwrap();
+        let credential_file = credential.file.clone().unwrap();
+        assert_eq!(
+            fs::read_to_string(&credential_file).unwrap(),
+            credential.token
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&credential_file).unwrap().permissions().mode() & 0o077,
+            0
+        );
+        let state = adapter_state_with_control(
+            &plan,
+            Some(1234),
+            SandboxPhase::Ready,
+            Some("http://127.0.0.1:43210".to_owned()),
+            credential.file,
+            Some(&"a".repeat(64)),
+        );
+        let document = serde_json::to_value(&state).unwrap();
+        assert_eq!(
+            document["workloadControlSchemaDigest"],
+            "sha256:d3666bb1fd85576f9af4205dbcc70029acd81462678c47d2b315c40ef1a9161d"
+        );
+        assert_eq!(
+            document["adapterWorkload"],
+            serde_json::json!({
+                "systemId": "support-platform",
+                "serviceId": "lenso-local-control-adapter",
+                "workloadId": "workload-control:support-platform"
+            })
+        );
+        let source = serde_json::to_string(&document).unwrap();
+        assert!(source.contains("credentialFile"));
+        assert!(!source.contains(&credential.token));
+        assert_eq!(document["adapterOwnershipToken"], "a".repeat(64));
+
+        let overridden =
+            resolve_workload_control_credential(&plan, Some("console-server-token".to_owned()))
+                .unwrap();
+        assert!(overridden.file.is_none());
+        let overridden_state = adapter_state_with_control(
+            &plan,
+            Some(1234),
+            SandboxPhase::Ready,
+            Some("http://127.0.0.1:43210".to_owned()),
+            overridden.file,
+            Some(&"b".repeat(64)),
+        );
+        let overridden_source = serde_json::to_string(&overridden_state).unwrap();
+        assert!(!overridden_source.contains("credentialFile"));
+        assert!(!overridden_source.contains(&overridden.token));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn generated_workload_control_credential_is_ignored_without_overwriting_user_rules() {
+        let root = test_root("workload-control-credential-ignore");
+        fs::create_dir_all(&root).unwrap();
+        let plan = build_plan(
+            &system_fixture(),
+            &sandbox_fixture(false),
+            &root.join(DEFAULT_SYSTEM_FILE),
+            &root.join(DEFAULT_SANDBOX_FILE),
+        )
+        .unwrap();
+        let credential_path = adapter_credential_path(&plan);
+        let ignore_path = credential_path.parent().unwrap().join(".gitignore");
+        fs::create_dir_all(ignore_path.parent().unwrap()).unwrap();
+        let user_rules = "# user-owned rules\n/user-cache\n";
+        fs::write(&ignore_path, user_rules).unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let credential = resolve_workload_control_credential(&plan, None).unwrap();
+        let ignore_source = fs::read_to_string(&ignore_path).unwrap();
+        assert!(ignore_source.starts_with(user_rules));
+        assert!(ignore_source.lines().any(|line| line == "/credential"));
+        assert!(
+            std::process::Command::new("git")
+                .args(["add", "--all"])
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let status = std::process::Command::new("git")
+            .args(["status", "--short", "--untracked-files=all"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(status.status.success());
+        let status = String::from_utf8(status.stdout).unwrap();
+        assert!(!status.contains("/credential"));
+        assert!(!status.contains(&credential.token));
+        let relative_credential = credential_path.strip_prefix(&root).unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["check-ignore", "--quiet", "--"])
+                .arg(relative_credential)
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let tracked = std::process::Command::new("git")
+            .args(["ls-files", "--cached", "--"])
+            .arg(relative_credential)
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(tracked.status.success());
+        assert!(tracked.stdout.is_empty());
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn workload_control_bearer_is_not_inherited_by_workloads() {
+        let root = test_root("workload-control-secret-boundary");
+        fs::create_dir_all(&root).unwrap();
+        let mut plan = build_plan(
+            &system_fixture(),
+            &sandbox_fixture(false),
+            &root.join(DEFAULT_SYSTEM_FILE),
+            &root.join(DEFAULT_SANDBOX_FILE),
+        )
+        .unwrap();
+        let leak_marker = root.join("workload-received-adapter-secret");
+        let workload = plan
+            .workloads
+            .iter_mut()
+            .find(|workload| workload.role != WorkloadRole::Migration)
+            .unwrap();
+        workload.env.insert(
+            WORKLOAD_CONTROL_TOKEN_ENV.to_owned(),
+            "must-not-reach-workload".to_owned(),
+        );
+        workload.env.insert(
+            LOCAL_CONTROL_ADAPTER_ENV.to_owned(),
+            "must-not-reach-workload".to_owned(),
+        );
+        workload.env.insert(
+            LOCAL_CONTROL_ADAPTER_OWNERSHIP_TOKEN_ENV.to_owned(),
+            "must-not-reach-workload".to_owned(),
+        );
+        workload.command = vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            format!(
+                "if [ -n \"$LENSO_WORKLOAD_CONTROL_TOKEN\" ] || [ -n \"$LENSO_LOCAL_CONTROL_ADAPTER\" ] || [ -n \"$LENSO_LOCAL_CONTROL_ADAPTER_OWNERSHIP_TOKEN\" ]; then : > '{}'; fi; exec sleep 30",
+                leak_marker.display()
+            ),
+        ];
+
+        let mut running = launch(plan, false).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!leak_marker.exists());
+        running.shutdown().await.unwrap();
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn workload_control_request_scalars_use_the_shared_unicode_bound() {
+        let mut request = WorkloadMutationRequest {
+            protocol: WORKLOAD_CONTROL_PROTOCOL.to_owned(),
+            workload: WorkloadReference {
+                system_id: "support-platform".to_owned(),
+                service_id: "support".to_owned(),
+                workload_id: "support-api".to_owned(),
+            },
+            action: WorkloadControlAction::Suspend,
+            observed_revision: "revision".to_owned(),
+            idempotency_key: "idempotency-key".to_owned(),
+            actor: WorkloadControlActor {
+                kind: WorkloadControlActorKind::Operator,
+                subject: "operator:test".to_owned(),
+            },
+        };
+
+        request.workload.service_id = "界".repeat(255);
+        request.observed_revision = "界".repeat(255);
+        request.idempotency_key = "界".repeat(255);
+        request.actor.subject = "界".repeat(255);
+        assert!(validate_mutation_request(&request).is_ok());
+
+        for invalid in [" ".to_owned(), "界".repeat(256)] {
+            request.observed_revision = invalid.clone();
+            assert!(validate_mutation_request(&request).is_err());
+            request.observed_revision = "revision".to_owned();
+
+            request.idempotency_key = invalid.clone();
+            assert!(validate_mutation_request(&request).is_err());
+            request.idempotency_key = "idempotency-key".to_owned();
+
+            request.actor.subject = invalid;
+            assert!(validate_mutation_request(&request).is_err());
+            request.actor.subject = "operator:test".to_owned();
+        }
+    }
+
+    #[tokio::test]
+    async fn workload_operation_remains_observable_and_rejects_conflict_during_real_execution() {
+        let root = test_root("workload-control-executing");
+        fs::create_dir_all(&root).unwrap();
+        let mut definition = sandbox_fixture(false);
+        let target_definition = definition
+            .services
+            .iter_mut()
+            .find(|service| service.service_id == "support")
+            .unwrap()
+            .workloads
+            .iter_mut()
+            .find(|workload| workload.workload_id == "support-api")
+            .unwrap();
+        target_definition.command = vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            "trap '' TERM; while :; do sleep 1; done".to_owned(),
+        ];
+        let plan = build_plan(
+            &system_fixture(),
+            &definition,
+            &root.join(DEFAULT_SYSTEM_FILE),
+            &root.join(DEFAULT_SANDBOX_FILE),
+        )
+        .unwrap();
+        let running = launch(plan, false).await.unwrap();
+        let mut server = start_workload_control_server(
+            running,
+            "workload-control:support-platform".to_owned(),
+            "control-token".to_owned(),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+        let client = reqwest::Client::new();
+        let target = serde_json::json!({
+            "systemId": "support-platform",
+            "serviceId": "support",
+            "workloadId": "support-api"
+        });
+        let observed = observe_workload(&client, server.endpoint(), &target).await;
+        let revision = observed["observedRevision"].as_str().unwrap();
+        let accepted = post_workload_operation(
+            &client,
+            server.endpoint(),
+            &target,
+            revision,
+            "slow-suspend",
+            serde_json::json!({ "kind": "suspend" }),
+        )
+        .await;
+        let accepted: Value = accepted.json().await.unwrap();
+        let operation_id = accepted["operationId"].as_str().unwrap();
+        let active_observation = observe_workload(&client, server.endpoint(), &target).await;
+        let active_operation = active_observation["activeOperation"].as_str().unwrap();
+        assert_eq!(active_operation, operation_id);
+        assert!(valid_workload_control_scalar(active_operation));
+
+        let executing = tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                let response = client
+                    .get(format!(
+                        "{}/workload-control/v1/operations/{operation_id}",
+                        server.endpoint()
+                    ))
+                    .bearer_auth("control-token")
+                    .send()
+                    .await
+                    .unwrap();
+                let record: Value = response.json().await.unwrap();
+                if record["phase"] == "executing" {
+                    break record;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("executing Operation Record must remain observable");
+        assert_eq!(executing["phase"], "executing");
+        let conflict = tokio::time::timeout(
+            Duration::from_millis(250),
+            post_workload_operation(
+                &client,
+                server.endpoint(),
+                &target,
+                revision,
+                "must-not-queue",
+                serde_json::json!({ "kind": "suspend" }),
+            ),
+        )
+        .await
+        .expect("same-Workload conflict must not wait behind process control");
+        assert_eq!(conflict.status(), reqwest::StatusCode::CONFLICT);
+        assert_eq!(
+            conflict.json::<Value>().await.unwrap()["code"],
+            "active_mutation"
+        );
+
+        let completed = wait_for_workload_operation(&client, server.endpoint(), operation_id).await;
+        assert_eq!(completed["phase"], "succeeded");
+        server.shutdown().await.unwrap();
+        fs::remove_dir_all(root).ok();
+    }
+
+    async fn observe_workload(
+        client: &reqwest::Client,
+        endpoint: String,
+        workload: &Value,
+    ) -> Value {
+        let response = client
+            .post(format!("{endpoint}/workload-control/v1/observe"))
+            .bearer_auth("control-token")
+            .json(&serde_json::json!({
+                "protocol": WORKLOAD_CONTROL_PROTOCOL,
+                "workload": workload
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        response.json().await.unwrap()
+    }
+
+    async fn submit_workload_operation(
+        client: &reqwest::Client,
+        endpoint: String,
+        workload: &Value,
+        observed_revision: &str,
+        idempotency_key: &str,
+        capability: &str,
+    ) -> Value {
+        let response = post_workload_operation(
+            client,
+            endpoint,
+            workload,
+            observed_revision,
+            idempotency_key,
+            serde_json::json!({ "kind": capability }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+        response.json().await.unwrap()
+    }
+
+    async fn post_workload_operation(
+        client: &reqwest::Client,
+        endpoint: String,
+        workload: &Value,
+        observed_revision: &str,
+        idempotency_key: &str,
+        action: Value,
+    ) -> reqwest::Response {
+        client
+            .post(format!("{endpoint}/workload-control/v1/operations"))
+            .bearer_auth("control-token")
+            .json(&serde_json::json!({
+                "protocol": WORKLOAD_CONTROL_PROTOCOL,
+                "workload": workload,
+                "observedRevision": observed_revision,
+                "idempotencyKey": idempotency_key,
+                "action": action,
+                "actor": {
+                    "kind": "operator",
+                    "subject": "operator:test"
+                }
+            }))
+            .send()
+            .await
+            .unwrap()
+    }
+
+    async fn wait_for_workload_operation(
+        client: &reqwest::Client,
+        endpoint: String,
+        operation_id: &str,
+    ) -> Value {
+        for _ in 0..200 {
+            let response = client
+                .get(format!(
+                    "{endpoint}/workload-control/v1/operations/{operation_id}"
+                ))
+                .bearer_auth("control-token")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let record: Value = response.json().await.unwrap();
+            if matches!(
+                record["phase"].as_str(),
+                Some("succeeded" | "failed" | "denied")
+            ) {
+                return record;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("Workload operation did not reach a terminal phase")
     }
 
     fn sandbox_fixture(fail_migration: bool) -> SandboxDefinition {
