@@ -565,7 +565,7 @@ fn compose_new_app(options: AppComposeOptions, dir: PathBuf) -> Result<()> {
 
     let current_dir = std::env::current_dir().context("resolve current directory")?;
     let target = absolutize_from(&current_dir, &dir);
-    host::init(&target.to_string_lossy(), Some(&project_name), false)?;
+    host::init_quiet(&target.to_string_lossy(), Some(&project_name), false)?;
     with_current_dir(&dir, || {
         materialize_exact_services(Path::new("."), &options.blueprint, &options.addons)?;
         app_composition::create(Path::new(app_composition::APP_COMPOSITION_FILE), authoring)?;
@@ -1575,6 +1575,7 @@ fn create_service_scaffold(service: &BlueprintService) -> Result<()> {
         no_workspace: false,
         output_dir: Some(PathBuf::from("services")),
         port: service.port,
+        print_guidance: false,
         workspace_file: None,
     })
 }

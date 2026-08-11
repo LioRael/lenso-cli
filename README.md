@@ -10,22 +10,42 @@ npm install -g @lenso/cli
 cargo install lenso-cli
 ```
 
-## Scaffold a host application
+## Application lifecycle
 
 ```sh
-lenso host init my-app
-cd my-app
-cp .env.example .env
-lenso serve
+lenso app compose ./support-desk \
+  --blueprint support-desk \
+  --implementation support-api=linked \
+  --apply
+cd support-desk
+lenso system dev
 ```
 
-The package name defaults to the target directory name and can be overridden with
-`--name`. Pass `--force` to scaffold into a non-empty directory.
+`lenso app compose` writes the exact `lenso.app.json` App Composition and lock.
+Its `--apply` flag atomically materializes that composition in the same command;
+it is not a separate lifecycle stage and does not create a plan artifact. The
+public application path is Compose, Run locally, Connect, and Status. Connect
+and Status happen in Lenso Console through a signed enrollment exchange. The
+CLI does not select an environment, deploy the application, release it, or
+connect it to Console.
 
-## Install Lenso Console
+`lenso system check` remains a contract-validation command. `lenso host init`
+and `lenso serve` remain lower-level host development tools, not alternative
+application lifecycle stages.
+
+The former App Plan, Apply, Verify, Diff, Repair, Next, Upgrade, and Explain
+commands and the former System Init, AddService, AddModule, Plan, Diff, Apply,
+Doctor, Release, Runbook, and Graph commands are no longer public entrypoints.
+`lenso app compose` also no longer accepts `--write-plan`, `--explain`, or
+`--addon`. Its surviving `--apply` option is only the atomic materialization
+flag described above, not an Apply stage.
+
+## Provision Lenso Console independently
 
 Lenso Console is installed as an independent Service, not embedded into a
-business Service. Obtain an official GitHub-attested Console Release Manifest,
+business Service. Provisioning Console is separate from connecting an
+application and does not grant Console production deployment or release
+authority. Obtain an official GitHub-attested Console Release Manifest,
 review the deterministic plan, and then approve that exact plan digest:
 
 ```sh
@@ -258,10 +278,10 @@ lenso system dev --cleanup
 ```
 
 For a new product-shaped application, materialize one exact App Composition
-instead of layering generated state. The blueprint and addons are authoring
-recipes; `lenso.app.json` is the only application composition and lock, with
-immutable Module release digests, implementation bindings, resolved dependency
-selections, and an optimistic revision:
+instead of layering generated state. The blueprint and implementation overrides
+are composition inputs; `lenso.app.json` is the only application composition
+and lock, with immutable Module release digests, implementation bindings,
+resolved dependency selections, and an optimistic revision:
 
 ```sh
 lenso app compose ./support-desk --blueprint support-desk --apply

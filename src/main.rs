@@ -7,10 +7,14 @@ mod console_operator;
 mod delivery;
 mod ga;
 mod host;
+// Retired app-lifecycle internals stay private so existing generated state can still be read.
+#[allow(dead_code)]
 mod launchpad;
 mod module;
 mod operator;
 mod service;
+// Retired System mutation helpers remain internal while the public CLI exposes only dev/check.
+#[allow(dead_code)]
 mod system;
 mod system_sandbox;
 mod workload_control_contract;
@@ -34,12 +38,12 @@ struct Cli {
 enum Command {
     /// Start a Lenso host project locally.
     Serve(ServeArgs),
-    /// Create Launchpad-ready Lenso applications.
+    /// Compose Lenso applications.
     App {
         #[command(subcommand)]
         command: AppCommand,
     },
-    /// Run and inspect a Launchpad development environment.
+    /// Inspect local application status.
     Dev {
         #[command(subcommand)]
         command: DevCommand,
@@ -74,7 +78,7 @@ enum Command {
         #[command(subcommand)]
         command: OperatorCommand,
     },
-    /// Manage a multi-service Lenso system manifest.
+    /// Run and validate a local Lenso System.
     System {
         #[command(subcommand)]
         command: SystemCommand,
@@ -167,32 +171,20 @@ struct GaFailureEvaluateArgs {
 
 #[derive(Debug, Subcommand)]
 enum AppCommand {
-    /// Create a Lenso application from a Launchpad blueprint.
+    /// Create a Lenso application from a product blueprint.
+    #[command(hide = true)]
     Create(AppCreateArgs),
     /// List built-in product blueprints.
+    #[command(hide = true)]
     List,
     /// Inspect a built-in product blueprint.
+    #[command(hide = true)]
     Inspect(AppInspectArgs),
-    /// Add a built-in addon to the current Launchpad app.
+    /// Add a built-in extension to the current application.
+    #[command(hide = true)]
     Add(AppAddArgs),
-    /// Compose a Launchpad app from a blueprint and addons.
+    /// Compose an exact Lenso App Composition.
     Compose(AppComposeArgs),
-    /// Plan safe generated app changes before applying them.
-    Plan(AppPlanArgs),
-    /// Check whether generated app state matches the current blueprint.
-    Upgrade(AppUpgradeArgs),
-    /// Apply a previously written app change plan.
-    Apply(AppApplyArgs),
-    /// Print the next useful app lifecycle command.
-    Next(AppNextArgs),
-    /// Explain generated-state, module, and service actions.
-    Explain(AppExplainArgs),
-    /// Verify a generated Launchpad app and optionally write App Proof.
-    Verify(AppVerifyArgs),
-    /// Compare the generated app state with its blueprint and addons.
-    Diff(AppDiffArgs),
-    /// Repair safe generated app state drift.
-    Repair(AppRepairArgs),
 }
 
 #[derive(Debug, Args, Clone)]
@@ -200,7 +192,7 @@ struct AppCreateArgs {
     /// Directory that receives the generated application.
     dir: std::path::PathBuf,
 
-    /// Launchpad blueprint name.
+    /// Product blueprint name.
     #[arg(long, default_value = "support-desk")]
     blueprint: String,
 
@@ -226,25 +218,6 @@ struct AppAddArgs {
 }
 
 #[derive(Debug, Args, Clone)]
-struct AppPlanArgs {
-    /// Lenso host repository root.
-    #[arg(long)]
-    repo_root: Option<std::path::PathBuf>,
-
-    /// Include a built-in addon in the plan. Can be repeated.
-    #[arg(long = "addon")]
-    addons: Vec<String>,
-
-    /// Include a local capability pack in the plan. Can be repeated.
-    #[arg(long = "pack")]
-    packs: Vec<std::path::PathBuf>,
-
-    /// Write .lenso/app-change-plan.json.
-    #[arg(long)]
-    write_plan: bool,
-}
-
-#[derive(Debug, Args, Clone)]
 struct AppComposeArgs {
     /// New app directory. Omit when composing an existing app with --repo-root.
     dir: Option<std::path::PathBuf>,
@@ -253,29 +226,17 @@ struct AppComposeArgs {
     #[arg(long)]
     repo_root: Option<std::path::PathBuf>,
 
-    /// Launchpad blueprint name for new apps.
+    /// Product blueprint name for new apps.
     #[arg(long, default_value = "support-desk")]
     blueprint: String,
-
-    /// Addon to compose into the app. Can be repeated.
-    #[arg(long = "addon")]
-    addons: Vec<String>,
 
     /// Local capability pack to compose into the app. Can be repeated.
     #[arg(long = "pack")]
     packs: Vec<std::path::PathBuf>,
 
-    /// Apply safe generated app changes.
+    /// Atomically materialize the exact App Composition.
     #[arg(long)]
     apply: bool,
-
-    /// Write .lenso/app-change-plan.json.
-    #[arg(long)]
-    write_plan: bool,
-
-    /// Print explanation without writing files.
-    #[arg(long)]
-    explain: bool,
 
     /// Override a Module implementation. Can be repeated as MODULE=linked or MODULE=service:REF.
     #[arg(long = "implementation", value_name = "MODULE=linked|service:REF")]
@@ -286,91 +247,18 @@ struct AppComposeArgs {
     observed_revision: Option<u64>,
 }
 
-#[derive(Debug, Args, Clone)]
-struct AppUpgradeArgs {
-    /// Lenso host repository root.
-    #[arg(long)]
-    repo_root: Option<std::path::PathBuf>,
-
-    /// Exit with an error when generated app changes are pending.
-    #[arg(long)]
-    check: bool,
-
-    /// Write .lenso/app-change-plan.json.
-    #[arg(long)]
-    write_plan: bool,
-}
-
-#[derive(Debug, Args, Clone)]
-struct AppApplyArgs {
-    /// App change plan file.
-    plan: std::path::PathBuf,
-
-    /// Lenso host repository root.
-    #[arg(long)]
-    repo_root: Option<std::path::PathBuf>,
-
-    /// Print planned changes without writing files.
-    #[arg(long)]
-    dry_run: bool,
-}
-
-#[derive(Debug, Args, Clone)]
-struct AppNextArgs {
-    /// Lenso host repository root.
-    #[arg(long)]
-    repo_root: Option<std::path::PathBuf>,
-
-    /// Include live readiness guidance when supported by existing state.
-    #[arg(long)]
-    live: bool,
-}
-
-#[derive(Debug, Args, Clone)]
-struct AppExplainArgs {
-    /// Lenso host repository root.
-    #[arg(long)]
-    repo_root: Option<std::path::PathBuf>,
-}
-
-#[derive(Debug, Args, Clone)]
-struct AppVerifyArgs {
-    /// Lenso host repository root.
-    #[arg(long)]
-    repo_root: Option<std::path::PathBuf>,
-
-    /// Write .lenso/app-proof.json.
-    #[arg(long)]
-    write_proof: bool,
-}
-
-#[derive(Debug, Args, Clone)]
-struct AppDiffArgs {
-    /// Lenso host repository root.
-    #[arg(long)]
-    repo_root: Option<std::path::PathBuf>,
-}
-
-#[derive(Debug, Args, Clone)]
-struct AppRepairArgs {
-    /// Lenso host repository root.
-    #[arg(long)]
-    repo_root: Option<std::path::PathBuf>,
-
-    /// Print planned safe repairs without writing files.
-    #[arg(long)]
-    dry_run: bool,
-}
-
 #[derive(Debug, Subcommand)]
 enum DevCommand {
     /// Start services and host for local development.
+    #[command(hide = true)]
     Up(DevUpArgs),
-    /// Inspect the generated Launchpad state.
+    /// Inspect local application status.
     Status(DevStatusArgs),
-    /// Diagnose Launchpad local development readiness.
+    /// Diagnose local development state.
+    #[command(hide = true)]
     Doctor(DevDoctorArgs),
     /// Explain how to stop the foreground dev process.
+    #[command(hide = true)]
     Stop,
 }
 
@@ -429,7 +317,7 @@ struct DevDoctorArgs {
 
 #[derive(Debug, Subcommand)]
 enum AgentCommand {
-    /// Print Launchpad, system, and workspace context for an agent.
+    /// Print application, system, and workspace context for an agent.
     Context(AgentContextArgs),
     /// Print agent context with a task appended.
     Task(AgentTaskArgs),
@@ -444,10 +332,6 @@ struct AgentContextArgs {
     /// Write the context to a file instead of stdout.
     #[arg(long)]
     output: Option<std::path::PathBuf>,
-
-    /// Include .lenso/app-change-plan.json composition context.
-    #[arg(long)]
-    from_app_plan: bool,
 
     /// Scope handoff to one module when known.
     #[arg(long = "for-module")]
@@ -471,10 +355,6 @@ struct AgentTaskArgs {
     #[arg(long)]
     output: Option<std::path::PathBuf>,
 
-    /// Include .lenso/app-change-plan.json composition context.
-    #[arg(long)]
-    from_app_plan: bool,
-
     /// Scope handoff to one module when known.
     #[arg(long = "for-module")]
     for_module: Option<String>,
@@ -497,7 +377,7 @@ enum CapabilityCommand {
         #[command(subcommand)]
         command: CapabilityLibraryCommand,
     },
-    /// Check whether a capability pack fits the current Launchpad app.
+    /// Check whether a capability pack fits the current App Composition.
     Fit(CapabilityFitArgs),
 }
 
@@ -526,7 +406,7 @@ struct CapabilityInitArgs {
     #[arg(long, default_value = "ts")]
     lang: String,
 
-    /// Supported Launchpad blueprint. Can be repeated.
+    /// Supported product blueprint. Can be repeated.
     #[arg(long = "for-blueprint")]
     for_blueprint: Vec<String>,
 }
@@ -604,32 +484,6 @@ struct CapabilityFitArgs {
 enum SystemCommand {
     /// Launch a clusterless local multi-Service System Sandbox.
     Dev(SystemDevArgs),
-    /// Create a lenso.system.json file.
-    Init(SystemInitArgs),
-    /// Add or update a service in lenso.system.json.
-    AddService(SystemAddServiceArgs),
-    /// Add or update a module in lenso.system.json.
-    AddModule(SystemAddModuleArgs),
-    /// Build the service system rollout and setup plan.
-    Plan(SystemPlanArgs),
-    /// Compare lenso.system.json with host-local state.
-    Diff(SystemDiffArgs),
-    /// Apply safe host-local state from lenso.system.json.
-    Apply(SystemApplyArgs),
-    /// Diagnose system graph and host-local drift.
-    Doctor(SystemDoctorArgs),
-    /// Plan, check, apply, promote, and roll back system releases.
-    Release {
-        #[command(subcommand)]
-        command: SystemReleaseCommand,
-    },
-    /// Generate, check, and record system runbooks.
-    Runbook {
-        #[command(subcommand)]
-        command: SystemRunbookCommand,
-    },
-    /// Print the service/module dependency graph.
-    Graph(SystemGraphArgs),
     /// Validate the service system graph.
     Check(SystemCheckArgs),
 }
@@ -648,7 +502,7 @@ struct SystemDevArgs {
     #[arg(long, value_name = "SCENARIO_ID")]
     scenario: Option<String>,
 
-    /// Validate and print the exact plan without allocating or starting anything.
+    /// Validate and print the exact local launch preview without allocating or starting anything.
     #[arg(long)]
     dry_run: bool,
 
@@ -663,369 +517,6 @@ struct SystemDevArgs {
     /// Internal Local Control Adapter worker mode.
     #[arg(long, hide = true)]
     adapter_child: bool,
-}
-
-#[derive(Debug, Args, Clone)]
-struct SystemInitArgs {
-    /// Service system name.
-    name: String,
-
-    /// Environment name. Can be repeated.
-    #[arg(long = "env")]
-    environments: Vec<String>,
-
-    /// Service system file.
-    #[arg(long)]
-    system_file: Option<std::path::PathBuf>,
-
-    /// Replace an existing service system file.
-    #[arg(long)]
-    force: bool,
-}
-
-#[derive(Debug, Args, Clone)]
-struct SystemAddServiceArgs {
-    /// Service name.
-    name: String,
-
-    /// Runtime target, such as local, docker, kubernetes, operator, or external.
-    #[arg(long, default_value = "local")]
-    target: String,
-
-    /// Module owned by this service. Can be repeated.
-    #[arg(long = "module")]
-    modules: Vec<String>,
-
-    /// Service directory.
-    #[arg(long)]
-    cwd: Option<std::path::PathBuf>,
-
-    /// Service language label.
-    #[arg(long)]
-    lang: Option<String>,
-
-    /// Service start command for workspace planning.
-    #[arg(long)]
-    command: Option<String>,
-
-    /// Service readiness URL for workspace planning.
-    #[arg(long)]
-    ready_url: Option<String>,
-
-    /// Service manifest path.
-    #[arg(long)]
-    manifest: Option<String>,
-
-    /// Service system file.
-    #[arg(long)]
-    system_file: Option<std::path::PathBuf>,
-}
-
-#[derive(Debug, Args, Clone)]
-struct SystemAddModuleArgs {
-    /// Module name.
-    name: String,
-
-    /// Install target, such as host or service:support.
-    #[arg(long = "to")]
-    install_to: Option<String>,
-
-    /// Capability provided by this module. Can be repeated.
-    #[arg(long = "capability")]
-    capabilities: Vec<String>,
-
-    /// Capability required by this module. Can be repeated.
-    #[arg(long = "dependency")]
-    dependencies: Vec<String>,
-
-    /// Service system file.
-    #[arg(long)]
-    system_file: Option<std::path::PathBuf>,
-}
-
-#[derive(Debug, Args, Clone)]
-struct SystemPlanArgs {
-    /// Service system file.
-    #[arg(long)]
-    system_file: Option<std::path::PathBuf>,
-
-    /// Fail when the system graph has issues.
-    #[arg(long)]
-    check: bool,
-
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Debug, Args, Clone)]
-struct SystemDiffArgs {
-    /// Service system file.
-    #[arg(long)]
-    system_file: Option<std::path::PathBuf>,
-
-    /// Lenso host repository root.
-    #[arg(long)]
-    repo_root: Option<std::path::PathBuf>,
-
-    /// Fail when drift or graph issues exist.
-    #[arg(long)]
-    check: bool,
-
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Debug, Args, Clone)]
-struct SystemApplyArgs {
-    /// Service system file.
-    #[arg(long)]
-    system_file: Option<std::path::PathBuf>,
-
-    /// Lenso host repository root.
-    #[arg(long)]
-    repo_root: Option<std::path::PathBuf>,
-
-    /// Preview changes without writing files.
-    #[arg(long)]
-    dry_run: bool,
-
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Debug, Args, Clone)]
-struct SystemDoctorArgs {
-    /// Service system file.
-    #[arg(long)]
-    system_file: Option<std::path::PathBuf>,
-
-    /// Lenso host repository root.
-    #[arg(long)]
-    repo_root: Option<std::path::PathBuf>,
-
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Debug, Subcommand)]
-enum SystemReleaseCommand {
-    /// Create a system release plan.
-    Plan(SystemReleasePlanArgs),
-    /// Check a system release plan.
-    Check(SystemReleaseCheckArgs),
-    /// Apply a system release plan to host-local history.
-    Apply(SystemReleaseApplyArgs),
-    /// Create a system promotion plan.
-    Promote(SystemReleasePromoteArgs),
-    /// Create a system rollback plan.
-    Rollback(SystemReleaseRollbackArgs),
-    /// List applied system releases.
-    History(SystemReleaseHistoryArgs),
-}
-
-#[derive(Debug, Subcommand)]
-enum SystemRunbookCommand {
-    /// Generate a system runbook from a system release plan.
-    Generate(SystemRunbookGenerateArgs),
-    /// Check a system runbook.
-    Check(SystemRunbookCheckArgs),
-    /// Record a system runbook in host-local history.
-    Record(SystemRunbookRecordArgs),
-    /// List recorded system runbooks.
-    History(SystemRunbookHistoryArgs),
-    /// Diagnose system runbook state.
-    Doctor(SystemRunbookDoctorArgs),
-}
-
-#[derive(Debug, Args, Clone)]
-struct SystemReleasePlanArgs {
-    /// Target environment.
-    #[arg(long = "env")]
-    environment_name: String,
-
-    /// Service system file.
-    #[arg(long)]
-    system_file: Option<std::path::PathBuf>,
-
-    /// Lenso host repository root.
-    #[arg(long)]
-    repo_root: Option<std::path::PathBuf>,
-
-    /// Output plan file.
-    #[arg(long)]
-    output: Option<std::path::PathBuf>,
-
-    /// Allow deployment drift in the target environment.
-    #[arg(long)]
-    allow_drift: bool,
-
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Debug, Args, Clone)]
-struct SystemReleaseCheckArgs {
-    /// System release plan file.
-    plan_file: std::path::PathBuf,
-
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Debug, Args, Clone)]
-struct SystemReleaseApplyArgs {
-    /// System release plan file.
-    plan_file: std::path::PathBuf,
-
-    /// Lenso host repository root.
-    #[arg(long)]
-    repo_root: Option<std::path::PathBuf>,
-
-    /// Preview without writing history.
-    #[arg(long)]
-    dry_run: bool,
-
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Debug, Args, Clone)]
-struct SystemReleasePromoteArgs {
-    /// Source environment.
-    #[arg(long = "from")]
-    from_environment: String,
-
-    /// Target environment.
-    #[arg(long = "to")]
-    to_environment: String,
-
-    /// Service system file.
-    #[arg(long)]
-    system_file: Option<std::path::PathBuf>,
-
-    /// Lenso host repository root.
-    #[arg(long)]
-    repo_root: Option<std::path::PathBuf>,
-
-    /// Output plan file.
-    #[arg(long)]
-    output: Option<std::path::PathBuf>,
-
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Debug, Args, Clone)]
-struct SystemReleaseRollbackArgs {
-    /// Target environment.
-    #[arg(long = "env")]
-    environment_name: String,
-
-    /// Service system file.
-    #[arg(long)]
-    system_file: Option<std::path::PathBuf>,
-
-    /// Lenso host repository root.
-    #[arg(long)]
-    repo_root: Option<std::path::PathBuf>,
-
-    /// Output plan file.
-    #[arg(long)]
-    output: Option<std::path::PathBuf>,
-
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Debug, Args, Clone)]
-struct SystemReleaseHistoryArgs {
-    /// Lenso host repository root.
-    #[arg(long)]
-    repo_root: Option<std::path::PathBuf>,
-
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Debug, Args, Clone)]
-struct SystemRunbookGenerateArgs {
-    /// System release plan file.
-    release_plan_file: std::path::PathBuf,
-
-    /// Output runbook file.
-    #[arg(long)]
-    output: Option<std::path::PathBuf>,
-
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Debug, Args, Clone)]
-struct SystemRunbookCheckArgs {
-    /// System runbook file.
-    runbook_file: std::path::PathBuf,
-
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Debug, Args, Clone)]
-struct SystemRunbookRecordArgs {
-    /// System runbook file.
-    runbook_file: std::path::PathBuf,
-
-    /// Lenso host repository root.
-    #[arg(long)]
-    repo_root: Option<std::path::PathBuf>,
-
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Debug, Args, Clone)]
-struct SystemRunbookHistoryArgs {
-    /// Lenso host repository root.
-    #[arg(long)]
-    repo_root: Option<std::path::PathBuf>,
-
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Debug, Args, Clone)]
-struct SystemRunbookDoctorArgs {
-    /// Lenso host repository root.
-    #[arg(long)]
-    repo_root: Option<std::path::PathBuf>,
-
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
-}
-
-#[derive(Debug, Args, Clone)]
-struct SystemGraphArgs {
-    /// Service system file.
-    #[arg(long)]
-    system_file: Option<std::path::PathBuf>,
-
-    /// Print machine-readable JSON.
-    #[arg(long)]
-    json: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -3223,66 +2714,16 @@ async fn main() -> anyhow::Result<()> {
             }
             AppCommand::Compose(args) => {
                 launchpad::app_compose(launchpad::AppComposeOptions {
-                    addons: args.addons,
+                    addons: Vec::new(),
                     apply: args.apply,
                     blueprint: args.blueprint,
                     dir: args.dir,
-                    explain: args.explain,
+                    explain: false,
                     implementations: args.implementations,
                     observed_revision: args.observed_revision,
                     packs: args.packs,
                     repo_root: args.repo_root,
-                    write_plan: args.write_plan,
-                })?;
-            }
-            AppCommand::Plan(args) => {
-                launchpad::app_plan(launchpad::AppPlanOptions {
-                    addons: args.addons,
-                    packs: args.packs,
-                    repo_root: args.repo_root,
-                    write_plan: args.write_plan,
-                })?;
-            }
-            AppCommand::Upgrade(args) => {
-                launchpad::app_upgrade(launchpad::AppUpgradeOptions {
-                    check: args.check,
-                    repo_root: args.repo_root,
-                    write_plan: args.write_plan,
-                })?;
-            }
-            AppCommand::Apply(args) => {
-                launchpad::app_apply(launchpad::AppApplyOptions {
-                    dry_run: args.dry_run,
-                    plan: args.plan,
-                    repo_root: args.repo_root,
-                })?;
-            }
-            AppCommand::Next(args) => {
-                launchpad::app_next(launchpad::AppNextOptions {
-                    live: args.live,
-                    repo_root: args.repo_root,
-                })?;
-            }
-            AppCommand::Explain(args) => {
-                launchpad::app_explain(launchpad::AppExplainOptions {
-                    repo_root: args.repo_root,
-                })?;
-            }
-            AppCommand::Verify(args) => {
-                launchpad::app_verify(launchpad::AppVerifyOptions {
-                    repo_root: args.repo_root,
-                    write_proof: args.write_proof,
-                })?;
-            }
-            AppCommand::Diff(args) => {
-                launchpad::app_diff(launchpad::AppDiffOptions {
-                    repo_root: args.repo_root,
-                })?;
-            }
-            AppCommand::Repair(args) => {
-                launchpad::app_repair(launchpad::AppRepairOptions {
-                    dry_run: args.dry_run,
-                    repo_root: args.repo_root,
+                    write_plan: false,
                 })?;
             }
         },
@@ -3321,7 +2762,7 @@ async fn main() -> anyhow::Result<()> {
                 launchpad::agent_context(launchpad::AgentContextOptions {
                     for_capability: args.for_capability,
                     for_module: args.for_module,
-                    from_app_plan: args.from_app_plan,
+                    from_app_plan: false,
                     output: args.output,
                     repo_root: args.repo_root,
                     task: None,
@@ -3331,7 +2772,7 @@ async fn main() -> anyhow::Result<()> {
                 launchpad::agent_context(launchpad::AgentContextOptions {
                     for_capability: args.for_capability,
                     for_module: args.for_module,
-                    from_app_plan: args.from_app_plan,
+                    from_app_plan: false,
                     output: args.output,
                     repo_root: args.repo_root,
                     task: Some(args.task),
@@ -3483,158 +2924,6 @@ async fn main() -> anyhow::Result<()> {
                     adapter_child: args.adapter_child,
                 })
                 .await?;
-            }
-            SystemCommand::Init(args) => {
-                system::init_system(system::SystemInitOptions {
-                    environments: args.environments,
-                    force: args.force,
-                    name: args.name,
-                    system_file: args.system_file,
-                })?;
-            }
-            SystemCommand::AddService(args) => {
-                system::add_system_service(system::SystemAddServiceOptions {
-                    command: args.command,
-                    cwd: args.cwd,
-                    lang: args.lang,
-                    manifest: args.manifest,
-                    modules: args.modules,
-                    name: args.name,
-                    ready_url: args.ready_url,
-                    system_file: args.system_file,
-                    target: args.target,
-                })?;
-            }
-            SystemCommand::AddModule(args) => {
-                system::add_system_module(system::SystemAddModuleOptions {
-                    capabilities: args.capabilities,
-                    dependencies: args.dependencies,
-                    install_to: args.install_to,
-                    name: args.name,
-                    system_file: args.system_file,
-                })?;
-            }
-            SystemCommand::Plan(args) => {
-                system::plan_system(system::SystemPlanOptions {
-                    check: args.check,
-                    json: args.json,
-                    system_file: args.system_file,
-                })?;
-            }
-            SystemCommand::Diff(args) => {
-                system::diff_system(system::SystemDiffOptions {
-                    check: args.check,
-                    json: args.json,
-                    repo_root: args.repo_root,
-                    system_file: args.system_file,
-                })?;
-            }
-            SystemCommand::Apply(args) => {
-                system::apply_system(system::SystemApplyOptions {
-                    dry_run: args.dry_run,
-                    json: args.json,
-                    repo_root: args.repo_root,
-                    system_file: args.system_file,
-                })?;
-            }
-            SystemCommand::Doctor(args) => {
-                system::doctor_system(system::SystemDoctorOptions {
-                    json: args.json,
-                    repo_root: args.repo_root,
-                    system_file: args.system_file,
-                })?;
-            }
-            SystemCommand::Release { command } => match command {
-                SystemReleaseCommand::Plan(args) => {
-                    system::plan_system_release(system::SystemReleasePlanOptions {
-                        allow_drift: args.allow_drift,
-                        environment_name: args.environment_name,
-                        json: args.json,
-                        output: args.output,
-                        repo_root: args.repo_root,
-                        source_environment: None,
-                        system_file: args.system_file,
-                    })?;
-                }
-                SystemReleaseCommand::Check(args) => {
-                    system::check_system_release(system::SystemReleaseCheckOptions {
-                        json: args.json,
-                        plan_file: args.plan_file,
-                    })?;
-                }
-                SystemReleaseCommand::Apply(args) => {
-                    system::apply_system_release(system::SystemReleaseApplyOptions {
-                        dry_run: args.dry_run,
-                        json: args.json,
-                        plan_file: args.plan_file,
-                        repo_root: args.repo_root,
-                    })?;
-                }
-                SystemReleaseCommand::Promote(args) => {
-                    system::promote_system_release(system::SystemReleasePromoteOptions {
-                        from_environment: args.from_environment,
-                        json: args.json,
-                        output: args.output,
-                        repo_root: args.repo_root,
-                        system_file: args.system_file,
-                        to_environment: args.to_environment,
-                    })?;
-                }
-                SystemReleaseCommand::Rollback(args) => {
-                    system::rollback_system_release(system::SystemReleaseRollbackOptions {
-                        environment_name: args.environment_name,
-                        json: args.json,
-                        output: args.output,
-                        repo_root: args.repo_root,
-                        system_file: args.system_file,
-                    })?;
-                }
-                SystemReleaseCommand::History(args) => {
-                    system::history_system_release(system::SystemReleaseHistoryOptions {
-                        json: args.json,
-                        repo_root: args.repo_root,
-                    })?;
-                }
-            },
-            SystemCommand::Runbook { command } => match command {
-                SystemRunbookCommand::Generate(args) => {
-                    system::generate_system_runbook(system::SystemRunbookGenerateOptions {
-                        json: args.json,
-                        output: args.output,
-                        release_plan_file: args.release_plan_file,
-                    })?;
-                }
-                SystemRunbookCommand::Check(args) => {
-                    system::check_system_runbook(system::SystemRunbookCheckOptions {
-                        json: args.json,
-                        runbook_file: args.runbook_file,
-                    })?;
-                }
-                SystemRunbookCommand::Record(args) => {
-                    system::record_system_runbook(system::SystemRunbookRecordOptions {
-                        json: args.json,
-                        repo_root: args.repo_root,
-                        runbook_file: args.runbook_file,
-                    })?;
-                }
-                SystemRunbookCommand::History(args) => {
-                    system::history_system_runbook(system::SystemRunbookHistoryOptions {
-                        json: args.json,
-                        repo_root: args.repo_root,
-                    })?;
-                }
-                SystemRunbookCommand::Doctor(args) => {
-                    system::doctor_system_runbook(system::SystemRunbookDoctorOptions {
-                        json: args.json,
-                        repo_root: args.repo_root,
-                    })?;
-                }
-            },
-            SystemCommand::Graph(args) => {
-                system::graph_system(system::SystemGraphOptions {
-                    json: args.json,
-                    system_file: args.system_file,
-                })?;
             }
             SystemCommand::Check(args) => {
                 system::plan_system(system::SystemPlanOptions {
@@ -3880,6 +3169,183 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory as _;
+
+    fn subcommand_help(name: &str) -> String {
+        let mut command = Cli::command();
+        command
+            .find_subcommand_mut(name)
+            .unwrap_or_else(|| panic!("missing `{name}` command"))
+            .render_long_help()
+            .to_string()
+    }
+
+    #[test]
+    fn public_app_help_exposes_compose_without_retired_lifecycle() {
+        let help = subcommand_help("app");
+
+        assert!(help.contains("  compose"));
+        for hidden in ["  create", "  list", "  inspect", "  add"] {
+            assert!(
+                !help.contains(hidden),
+                "app help still advertises `{}`:\n{help}",
+                hidden.trim()
+            );
+        }
+        for retired in [
+            "  plan",
+            "  upgrade",
+            "  apply",
+            "  next",
+            "  explain",
+            "  verify",
+            "  diff",
+            "  repair",
+        ] {
+            assert!(
+                !help.contains(retired),
+                "app help still exposes `{}`:\n{help}",
+                retired.trim()
+            );
+        }
+        assert!(!help.contains("Launchpad"));
+
+        for retired in [
+            "plan", "upgrade", "apply", "next", "explain", "verify", "diff", "repair",
+        ] {
+            assert!(Cli::try_parse_from(["lenso", "app", retired]).is_err());
+        }
+        assert!(Cli::try_parse_from(["lenso", "agent", "context", "--from-app-plan"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "lenso",
+                "agent",
+                "task",
+                "inspect the app",
+                "--from-app-plan",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn app_compose_keeps_atomic_materialization_without_legacy_plan_flags() {
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("app")
+            .expect("app command")
+            .find_subcommand_mut("compose")
+            .expect("app compose command")
+            .render_long_help()
+            .to_string();
+
+        assert!(help.contains("--apply"));
+        assert!(help.contains("Atomically materialize"));
+        for retired in ["--addon", "--write-plan", "--explain", "Launchpad"] {
+            assert!(
+                !help.contains(retired),
+                "app compose help still exposes `{retired}`:\n{help}"
+            );
+        }
+
+        let cli = Cli::try_parse_from([
+            "lenso",
+            "app",
+            "compose",
+            "./support-desk",
+            "--blueprint",
+            "support-desk",
+            "--pack",
+            "./fixtures/support-desk",
+            "--implementation",
+            "support-api=linked",
+            "--apply",
+        ])
+        .expect("public compose command");
+        let Command::App {
+            command: AppCommand::Compose(args),
+        } = cli.command
+        else {
+            panic!("expected app compose");
+        };
+        assert!(args.apply);
+        assert_eq!(args.packs.len(), 1);
+        assert_eq!(args.implementations, vec!["support-api=linked"]);
+
+        for retired in ["--addon", "--write-plan", "--explain"] {
+            assert!(
+                Cli::try_parse_from(["lenso", "app", "compose", "./support-desk", retired,])
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn public_system_help_exposes_local_run_and_validation_only() {
+        let help = subcommand_help("system");
+
+        assert!(help.contains("  dev"));
+        assert!(help.contains("  check"));
+        for retired in [
+            "  init",
+            "  add-service",
+            "  add-module",
+            "  plan",
+            "  diff",
+            "  apply",
+            "  doctor",
+            "  release",
+            "  runbook",
+            "  graph",
+        ] {
+            assert!(
+                !help.contains(retired),
+                "system help still exposes `{}`:\n{help}",
+                retired.trim()
+            );
+        }
+
+        for retired in [
+            "init",
+            "add-service",
+            "add-module",
+            "plan",
+            "diff",
+            "apply",
+            "doctor",
+            "release",
+            "runbook",
+            "graph",
+        ] {
+            assert!(Cli::try_parse_from(["lenso", "system", retired]).is_err());
+        }
+
+        let mut command = Cli::command();
+        let dev_help = command
+            .find_subcommand_mut("system")
+            .expect("system command")
+            .find_subcommand_mut("dev")
+            .expect("system dev command")
+            .render_long_help()
+            .to_string();
+        assert!(dev_help.contains("exact local launch preview"));
+        assert!(!dev_help.contains("exact plan"));
+    }
+
+    #[test]
+    fn public_dev_help_exposes_status_only() {
+        let help = subcommand_help("dev");
+
+        assert!(help.contains("  status"));
+        for retired in ["  up", "  doctor", "  stop"] {
+            assert!(
+                !help.contains(retired),
+                "dev help still exposes `{}`:\n{help}",
+                retired.trim()
+            );
+        }
+        assert!(!help.contains("Launchpad"));
+    }
 
     #[test]
     fn parses_service_create_ts() {
@@ -3979,166 +3445,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_app_plan_write_plan() {
-        let cli = Cli::parse_from([
-            "lenso",
-            "app",
-            "plan",
-            "--addon",
-            "support-sla",
-            "--pack",
-            "./capabilities/support-sla",
-            "--addon",
-            "customer-profile",
-            "--write-plan",
-        ]);
-        let Command::App {
-            command: AppCommand::Plan(args),
-        } = cli.command
-        else {
-            panic!("expected app plan");
-        };
-
-        assert!(args.write_plan);
-        assert_eq!(args.addons, vec!["support-sla", "customer-profile"]);
-        assert_eq!(
-            args.packs,
-            vec![std::path::PathBuf::from("./capabilities/support-sla")]
-        );
-    }
-
-    #[test]
-    fn parses_app_compose_new_app_with_two_addons() {
-        let cli = Cli::parse_from([
-            "lenso",
-            "app",
-            "compose",
-            "./acme-support",
-            "--blueprint",
-            "support-desk",
-            "--addon",
-            "support-sla",
-            "--addon",
-            "customer-profile",
-            "--implementation",
-            "support-api=service:support-api",
-            "--observed-revision",
-            "2",
-            "--apply",
-        ]);
-        let Command::App {
-            command: AppCommand::Compose(args),
-        } = cli.command
-        else {
-            panic!("expected app compose");
-        };
-
-        assert_eq!(args.dir, Some(std::path::PathBuf::from("./acme-support")));
-        assert_eq!(args.addons, vec!["support-sla", "customer-profile"]);
-        assert_eq!(
-            args.implementations,
-            vec!["support-api=service:support-api"]
-        );
-        assert_eq!(args.observed_revision, Some(2));
-        assert!(args.apply);
-    }
-
-    #[test]
-    fn parses_app_compose_pack() {
-        let cli = Cli::parse_from([
-            "lenso",
-            "app",
-            "compose",
-            "./acme-support",
-            "--blueprint",
-            "support-desk",
-            "--pack",
-            "./capabilities/support-sla",
-            "--write-plan",
-        ]);
-        let Command::App {
-            command: AppCommand::Compose(args),
-        } = cli.command
-        else {
-            panic!("expected app compose");
-        };
-
-        assert_eq!(
-            args.packs,
-            vec![std::path::PathBuf::from("./capabilities/support-sla")]
-        );
-        assert!(args.write_plan);
-    }
-
-    #[test]
-    fn parses_app_next_live() {
-        let cli = Cli::parse_from(["lenso", "app", "next", "--live"]);
-        let Command::App {
-            command: AppCommand::Next(args),
-        } = cli.command
-        else {
-            panic!("expected app next");
-        };
-
-        assert!(args.live);
-    }
-
-    #[test]
-    fn parses_app_explain_repo_root() {
-        let cli = Cli::parse_from(["lenso", "app", "explain", "--repo-root", "./acme"]);
-        let Command::App {
-            command: AppCommand::Explain(args),
-        } = cli.command
-        else {
-            panic!("expected app explain");
-        };
-
-        assert_eq!(args.repo_root, Some(std::path::PathBuf::from("./acme")));
-    }
-
-    #[test]
-    fn parses_app_upgrade_check() {
-        let cli = Cli::parse_from(["lenso", "app", "upgrade", "--check"]);
-        let Command::App {
-            command: AppCommand::Upgrade(args),
-        } = cli.command
-        else {
-            panic!("expected app upgrade");
-        };
-
-        assert!(args.check);
-    }
-
-    #[test]
-    fn parses_app_apply_dry_run() {
-        let cli = Cli::parse_from([
-            "lenso",
-            "app",
-            "apply",
-            ".lenso/app-change-plan.json",
-            "--dry-run",
-        ]);
-        let Command::App {
-            command: AppCommand::Apply(args),
-        } = cli.command
-        else {
-            panic!("expected app apply");
-        };
-
-        assert!(args.dry_run);
-        assert_eq!(
-            args.plan,
-            std::path::PathBuf::from(".lenso/app-change-plan.json")
-        );
-    }
-
-    #[test]
-    fn parses_agent_task_from_app_plan_for_module() {
+    fn parses_agent_task_for_module() {
         let cli = Cli::parse_from([
             "lenso",
             "agent",
             "task",
-            "--from-app-plan",
             "--for-module",
             "support-ticket",
             "add private notes",
@@ -4150,7 +3461,6 @@ mod tests {
             panic!("expected agent task");
         };
 
-        assert!(args.from_app_plan);
         assert_eq!(args.for_module, Some("support-ticket".to_owned()));
     }
 
@@ -4172,45 +3482,6 @@ mod tests {
         };
 
         assert_eq!(args.for_capability.as_deref(), Some("support-sla"));
-    }
-
-    #[test]
-    fn parses_app_verify() {
-        let cli = Cli::parse_from(["lenso", "app", "verify", "--write-proof"]);
-        let Command::App {
-            command: AppCommand::Verify(args),
-        } = cli.command
-        else {
-            panic!("expected app verify");
-        };
-
-        assert!(args.write_proof);
-    }
-
-    #[test]
-    fn parses_app_diff() {
-        let cli = Cli::parse_from(["lenso", "app", "diff"]);
-        let Command::App {
-            command: AppCommand::Diff(args),
-        } = cli.command
-        else {
-            panic!("expected app diff");
-        };
-
-        assert!(args.repo_root.is_none());
-    }
-
-    #[test]
-    fn parses_app_repair_dry_run() {
-        let cli = Cli::parse_from(["lenso", "app", "repair", "--dry-run"]);
-        let Command::App {
-            command: AppCommand::Repair(args),
-        } = cli.command
-        else {
-            panic!("expected app repair");
-        };
-
-        assert!(args.dry_run);
     }
 
     #[test]
