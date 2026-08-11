@@ -343,7 +343,9 @@ fn validate_service_reference(reference: &str) -> Result<()> {
     let Some(value) = reference.strip_prefix("service:") else {
         bail!("Service-backed implementation must use a stable `service:` reference");
     };
+    let segments = value.split('/').collect::<Vec<_>>();
     if value.is_empty()
+        || segments.len() != 2
         || reference.contains("://")
         || reference.chars().any(char::is_whitespace)
         || reference.contains('@')
@@ -574,7 +576,7 @@ mod tests {
                     business_contributions: vec!["support.tickets.read".to_owned()],
                     dependencies: vec!["identity".to_owned()],
                     implementation: ImplementationInput::Service {
-                        service_reference: "service:support-ticket".to_owned(),
+                        service_reference: "service:support-desk/support-ticket".to_owned(),
                     },
                 },
                 CompositionModuleInput {
@@ -602,7 +604,7 @@ mod tests {
         assert_eq!(
             composition.modules[1].implementation,
             ImplementationBinding::Service {
-                service_reference: "service:support-ticket".to_owned()
+                service_reference: "service:support-desk/support-ticket".to_owned()
             }
         );
         assert_eq!(composition.modules[1].dependencies[0].module_id, "identity");

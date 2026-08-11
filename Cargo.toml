@@ -27,6 +27,8 @@ clap = { version = "4", features = ["derive"] }
 getrandom = "0.4"
 include_dir = "0.7"
 lenso-service = "0.1.4"
+lenso-contracts = "0.4.0"
+lenso-module-management = "0.2.0"
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
 rpassword = "7"
 schemars = "1"

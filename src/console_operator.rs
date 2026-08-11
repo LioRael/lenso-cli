@@ -14,14 +14,23 @@ use uuid::Uuid;
 const CONSOLE_ADMIN_USER_SCOPES_KEY: &str = "auth.console_admin_user_scopes";
 const RUNTIME_CONFIG_SERVICE: &str = "*";
 const BOOTSTRAP_ACTOR: &str = "lenso-cli:console-operator-bootstrap";
+const CONFIGURE_ACTOR: &str = "lenso-cli:console-operator-configure";
 const BOOTSTRAP_LOCK: &str = "lenso-console:operator-bootstrap";
 const MINIMUM_OPERATOR_SCOPES: &[&str] = &[
+    "auth.sessions.read",
+    "auth.sessions.revoke",
+    "auth.users.manage",
     "auth.users.read",
     "auth_password.credentials.write",
     "console.admin",
     "console.artifacts.manage",
+    "console.module.business.read",
+    "console.module.business.write",
     "console.system-registry.read",
     "console.system-registry.revoke",
+    "console.system.connect",
+    "console.system.read",
+    "runtime.stories.read",
 ];
 
 #[derive(Debug, Clone)]
@@ -31,6 +40,15 @@ pub struct BootstrapOperatorOptions {
     pub env_file: Option<PathBuf>,
     pub password_file: Option<PathBuf>,
     pub password_stdin: bool,
+    pub user_id: Option<String>,
+    pub identifier: Option<String>,
+    pub scopes: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConfigureOperatorOptions {
+    pub console_root: Option<PathBuf>,
+    pub env_file: Option<PathBuf>,
     pub user_id: Option<String>,
     pub identifier: Option<String>,
     pub scopes: Vec<String>,
@@ -79,6 +97,41 @@ pub async fn bootstrap_operator(options: BootstrapOperatorOptions) -> Result<()>
     tx.commit().await.context("commit operator bootstrap")?;
 
     eprintln!("Bootstrapped Lenso Console operator {user_id}.");
+    eprintln!("Stored {CONSOLE_ADMIN_USER_SCOPES_KEY}: {stored}");
+    eprintln!("Restart the Console API and Worker for the operator grant to apply.");
+    Ok(())
+}
+
+/// Idempotently ensure that an existing Console user has the complete current
+/// Operator scope set while preserving unrelated users and extra scopes.
+pub async fn configure_operator(options: ConfigureOperatorOptions) -> Result<()> {
+    let console_root = options
+        .console_root
+        .as_deref()
+        .unwrap_or_else(|| Path::new("."));
+    let service_root = console_service_root(console_root);
+    let database_url = console_database_url(&service_root, options.env_file.as_deref())?;
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .context("connect to the Lenso Console Service Store")?;
+    verify_console_service_store(&pool).await?;
+
+    let mut tx = pool.begin().await.context("begin operator configuration")?;
+    lock_operator_bootstrap(&mut tx).await?;
+    let old_value = load_operator_grants(&mut tx).await?;
+    let mut grants = decode_operator_grants(old_value.clone())?;
+    let user_id = resolve_operator_user_id(&mut tx, options.user_id, options.identifier).await?;
+    let mut scopes = grants.remove(&user_id).unwrap_or_default();
+    scopes.extend(operator_scopes(options.scopes));
+    scopes.sort();
+    scopes.dedup();
+    grants.insert(user_id.clone(), scopes);
+    let stored = write_operator_grants(&mut tx, old_value, grants, CONFIGURE_ACTOR).await?;
+    tx.commit().await.context("commit operator configuration")?;
+
+    eprintln!("Configured Lenso Console operator {user_id}.");
     eprintln!("Stored {CONSOLE_ADMIN_USER_SCOPES_KEY}: {stored}");
     eprintln!("Restart the Console API and Worker for the operator grant to apply.");
     Ok(())
@@ -370,6 +423,15 @@ async fn write_initial_operator(
     scopes: &[String],
 ) -> Result<Value> {
     let grants = BTreeMap::from([(user_id.to_owned(), scopes.to_vec())]);
+    write_operator_grants(tx, old_value, grants, BOOTSTRAP_ACTOR).await
+}
+
+async fn write_operator_grants(
+    tx: &mut Transaction<'_, Postgres>,
+    old_value: Option<Value>,
+    grants: BTreeMap<String, Vec<String>>,
+    actor: &str,
+) -> Result<Value> {
     let next_value = serde_json::to_value(grants).context("encode Console operator grants")?;
     sqlx::query(
         r"
@@ -382,7 +444,7 @@ async fn write_initial_operator(
     .bind(RUNTIME_CONFIG_SERVICE)
     .bind(CONSOLE_ADMIN_USER_SCOPES_KEY)
     .bind(&next_value)
-    .bind(BOOTSTRAP_ACTOR)
+    .bind(actor)
     .execute(&mut **tx)
     .await
     .context("write initial Console operator grant")?;
@@ -398,7 +460,7 @@ async fn write_initial_operator(
         .bind(CONSOLE_ADMIN_USER_SCOPES_KEY)
         .bind(&old_value)
         .bind(&next_value)
-        .bind(BOOTSTRAP_ACTOR),
+        .bind(actor),
     )
     .await
     .context("audit initial Console operator grant")?;
@@ -444,12 +506,19 @@ mod tests {
                 "runtime.stories.read".to_owned(),
             ]),
             [
+                "auth.sessions.read",
+                "auth.sessions.revoke",
+                "auth.users.manage",
                 "auth.users.read",
                 "auth_password.credentials.write",
                 "console.admin",
                 "console.artifacts.manage",
+                "console.module.business.read",
+                "console.module.business.write",
                 "console.system-registry.read",
                 "console.system-registry.revoke",
+                "console.system.connect",
+                "console.system.read",
                 "runtime.stories.read",
             ]
         );
