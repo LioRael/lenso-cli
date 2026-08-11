@@ -1,5 +1,11 @@
 ## lenso-cli@0.2.16
 
+## 0.4.0
+
+### Minor Changes
+
+- 40c27c2: Generate Provider V1 TypeScript services, install exact Provider Module releases into Host runtime inputs, preserve qualified Service identities in local plans, configure complete Operator scopes, and apply signed Console connection bundles through one public command.
+
 ## 0.3.0
 
 ### Minor Changes
