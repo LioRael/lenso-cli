@@ -31,9 +31,13 @@ business implementation.
 5. **Run locally.** Start the exact composition through `lenso system dev` and
    its Local Control Adapter. Keep runtime commands and credentials outside the
    App Composition.
-6. **Connect.** Connect the exact System topology and Management Binding through
-   the authenticated Console Service API. Console does not create, release, or
-   deploy Workloads.
+6. **Connect.** Inspect `lenso console connect --help`. Apply one reviewed
+   `lenso.console-connect.v1` bundle containing the signed enrollment receipts,
+   optional exact Console artifact effect, and digest-bound System Connection.
+   Finish only when the command returns a connected projection. If the current
+   runtime cannot produce that bundle, report the missing producer instead of
+   writing a project-specific signing script or editing Console storage.
+   Console does not create, release, or deploy Workloads.
 7. **Status.** Follow [App verification](references/app-verification.md).
    Finish when the first useful workflow passes and Console reports direct
    System, Service, Module, Surface, and Workload states with reasons.

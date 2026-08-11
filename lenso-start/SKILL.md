@@ -26,8 +26,12 @@ human-invoked index; the selected authoring skill owns the implementation.
    - linked Module extraction -> `lenso-module-extraction`
    - live failure diagnosis or recovery plan -> `lenso-incident-recovery`
    - crate, npm, image, tag, or repository release -> `lenso-reviewed-release`
-3. Name a secondary skill only when the request genuinely spans its boundary.
-4. Tell the user the next observable result, not a copied version or command.
+3. Verify the selected skill exists in the active skill catalog. If it is
+   absent, stop the route and update the public pack from `LioRael/lenso`;
+   legacy names such as `lenso-service-module-authoring` are not substitutes
+   for the current workflow.
+4. Name a secondary skill only when the request genuinely spans its boundary.
+5. Tell the user the next observable result, not a copied version or command.
 
 The route is complete when one primary skill and its expected completion
 state are unambiguous. If two routes still compete, ask only the boundary
