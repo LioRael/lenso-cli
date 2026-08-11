@@ -218,6 +218,36 @@ existing identity with `--identifier` or `--user-id`. Restart the Console API
 and Worker after bootstrapping. Business Service users and Auth state are never
 modified.
 
+After upgrading the CLI, reconcile an existing Operator with the current
+minimum scopes idempotently:
+
+```sh
+lenso console operator configure \
+  --console-root ../lenso-console \
+  --identifier admin@example.com
+```
+
+This preserves unrelated operators and explicit extra scopes while adding the
+System read/connect, artifact reconciliation, Surface Gateway, Auth, and Story
+capabilities required by the current Console workflow.
+
+Apply prepared signed connection evidence through one public, idempotent CLI
+entrypoint instead of a sequence of custom HTTP calls:
+
+```sh
+LENSO_CONSOLE_TOKEN='<operator-session-token>' \
+  lenso console connect \
+  --console-url http://127.0.0.1:3030 \
+  --bundle .lenso/console-connect.json
+```
+
+The `lenso.console-connect.v1` bundle contains signed enrollment receipts, an
+optional exact `console_composition` artifact effect, and the digest-bound
+System Connection request. The command reuses existing enrollments, reconciles
+artifacts, connects the System, and fails unless Console returns `connected`.
+Use `--token-file` with a private regular file for non-interactive operation;
+tokens and signing material are never printed or stored in the bundle.
+
 The generated host depends on the crates.io `lenso` crate with the `host`
 feature, which is the current narrow host API for booting API, worker, and
 migration entrypoints. See
@@ -420,10 +450,34 @@ Workloads, move data, or change authority. Use `--repo-root` and
 `--modules-root` when the Module sources are not under the current repository's
 default `modules/` directory.
 
-Generated TS and Rust services also support `--check-release` to print the
-development module release descriptor before packaging.
-Before handing a service to another app or deployment pipeline, package-check
-the project and then emit a local service artifact:
+Generated TypeScript services expose the current Provider contract directly:
+
+```sh
+pnpm check
+pnpm module:release > lenso.module-release.json
+pnpm start
+```
+
+`pnpm start` serves the exact `lenso.provider.v1` descriptor, invocation,
+recovery, and acknowledgement endpoints. The descriptor digests are the same
+ones emitted in `lenso.module-release.json`.
+
+Install that release into the Host runtime inputs with the Provider URL, not
+the legacy Service discovery URL:
+
+```sh
+lenso module install ./lenso.module-release.json \
+  --base-url http://127.0.0.1:4100/lenso/provider/v1 \
+  --repo-root ../my-lenso-host
+```
+
+This writes `lenso.modules.json`, `lenso.modules.lock.json`, the Module Planning
+Context, and the local Service Installation Set consumed by Host startup. It
+does not write `SERVICE_MODULES` or treat an old install ledger as runtime
+truth.
+
+Before handing a legacy Service manifest to another app or deployment
+pipeline, package-check the project and emit a compatibility package:
 
 ```sh
 cd ../services/support-suite-provider
@@ -437,31 +491,29 @@ The package artifact contains the canonical `lenso.service.json`,
 `modules/<module>/lenso.module-release.json` file for each provided module.
 The service package records the provider name, version, and provided module
 names; each module release is the business-module install entrypoint.
-Operators can install a provider directly. For a local package artifact, still
-pass the runtime service base URL:
+Compatibility packages remain available for older Service discovery consumers:
 
 ```sh
 lenso service install dist/lenso-service/support-suite-provider/lenso.service-package.json \
   --base-url http://127.0.0.1:4100/lenso/service/v1
 ```
 
-Install and manage a Module through the stable lifecycle commands:
+Install current Provider Modules from an exact release. The endpoint must end
+in `/lenso/provider/v1`:
 
 ```sh
-lenso module install dist/lenso-service/support-suite-provider/modules/support-ticket/lenso.module-release.json \
-  --base-url http://127.0.0.1:4100/lenso/service/v1
-lenso module disable support-ticket
-lenso module remove support-ticket
-lenso module doctor support-ticket
+lenso module install ./lenso.module-release.json \
+  --base-url http://127.0.0.1:4100/lenso/provider/v1
 ```
 
-`lenso.module-release.v1` is the module release channel. It records the module
-name, version, capabilities, source, and optional provider pointer. V11 keeps
-`lenso module install` as the unified business-capability entrypoint:
+`lenso.module-release.v1` is the current Module release channel. It records a
+fully qualified Module ID, canonical Manifest digest, exact delivery, governing
+contract digests, and optional release-bound `console_ui_esm` artifact.
 
-- `source: service` resolves to a provider service package or service manifest.
-- `source: linked` enables linked Rust code in the host.
-- `source: bundled` enables a host-bundled module.
+- Service delivery resolves to a locked Provider export and Service Installation.
+- Linked delivery resolves to an immutable crate release and Host binding.
+- A Console Surface exists only when the same exact release carries a
+  `console_ui_esm` artifact and Console has reconciled its receipt.
 
 `lenso service install` remains the lower-level provider/process command. It
 connects a service, but it does not mean every module inside that service is
@@ -490,24 +542,13 @@ longer copies packages into a Console checkout or maintains extension registries
 ## Install a module
 
 ```sh
-lenso module install auth
-lenso module install auth-password
-lenso module install auth-oidc
-lenso module install auth-device
+lenso module install ./releases/auth/lenso.module-release.json
+lenso module install ./releases/auth-password/lenso.module-release.json
 ```
 
-`module install` reads `source` from the module descriptor when one is present.
-When the reference is a module name, the CLI resolves it from the official
-catalog at `https://catalog.lenso.dev/v1/modules.json` unless `--catalog-url`
-points at another registry. If the primary official catalog endpoint is
-temporarily blocked by edge security, the CLI falls back to the official
-workers.dev mirror at `https://lenso-catalog.lenso.workers.dev/v1/modules.json`.
-For V5 service-backed modules, `module install <name>` is the business-capability
-entrypoint: the catalog resolves the provider service, installs it when needed,
-then enables the requested module.
-For module releases, `module install <module-release.json>` resolves the
-release by source, then records `moduleRelease` provenance in
-`.lenso/module-installs.json` where the source supports a receipt.
+Prefer an exact Module Release reference. Name-based catalog entries are accepted
+only as a compatibility path and may describe a legacy linked install; they do
+not prove that a current Console Surface artifact exists.
 
 Install a service directly when you have a workspace service name or manifest
 reference:
@@ -525,12 +566,11 @@ also infer `--base-url`; package artifacts outside that workspace still need
 `--base-url` so the host records the runtime service endpoint rather than the
 file path.
 
-Service installs update `SERVICE_MODULES` and record `.lenso/module-installs.json`
-in one step. Console UI artifacts remain immutable members of their Module
-Release and are bound only by an applied Console Service Composition. Linked modules update the
-host `Cargo.toml`, `src/lib.rs`, `.env` toggle, and the same install receipt
-from the descriptor's `linked` section. `module add` remains a compatibility
-alias for service installs.
+Exact Provider installs update the App Module lock and local Service
+Installation Set in one step. Console UI artifacts remain immutable members of
+their Module Release and are bound only by an applied Console composition.
+Legacy linked descriptors still update host source and their compatibility
+receipt, but that receipt is not an App Composition or a Surface grant.
 
 Legacy `lenso module install <manifest-url>` still works for one compatibility
 window, but prints a deprecation warning. Use `lenso service install <manifest>`
@@ -631,11 +671,9 @@ lenso service doctor billing --json
 lenso service check billing --json
 ```
 
-The doctor reads `SERVICE_MODULES`, `.lenso/module-installs.json`, and
-`.lenso/module-services.json`. It reports whether the service is
-installed, configured, whether an HTTP manifest is reachable, whether managed
-service `readyUrl` endpoints are ready, and which stale `.lock`/`.pid` files
-may be blocking a host-started service.
+The legacy doctor still reports compatibility Service discovery state. For a
+current Provider, verify `lenso.modules.lock.json`, the local Service
+Installation Set, and the live `/lenso/provider/v1` descriptor at Host startup.
 
 Export declared service processes as a Compose fragment when handing the
 service to deployment tooling:

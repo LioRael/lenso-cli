@@ -433,7 +433,9 @@ fn exact_support_desk_composition_is_revision_guarded_and_locally_runnable() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|workload| workload["identity"] == "local-dev://support-desk/support-api/api")
+            .any(|workload| {
+                workload["identity"] == "local-dev://support-desk/support-desk/support-api/api"
+            })
     );
     assert!(!app.join("lenso.system.json").exists());
     assert!(!app.join("lenso.system-sandbox.json").exists());
@@ -598,10 +600,11 @@ async fn local_control_adapter_keeps_workloads_after_coordinator_exits() {
         .strip_prefix("local-dev://support-desk/")
         .and_then(|identity| identity.strip_suffix("/api"))
         .unwrap();
+    let workload_name = service_id.rsplit('/').next().unwrap();
     let workload = serde_json::json!({
         "systemId": "support-desk",
         "serviceId": service_id,
-        "workloadId": format!("{service_id}-api")
+        "workloadId": format!("{workload_name}-api")
     });
     let client = reqwest::Client::new();
     let unauthorized = client

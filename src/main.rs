@@ -1,6 +1,7 @@
 mod app_composition;
 mod capability;
 mod console_composition;
+mod console_connection;
 mod console_dev;
 mod console_installation;
 mod console_operator;
@@ -631,10 +632,58 @@ struct ConsoleOperatorBootstrapArgs {
     scopes: Vec<String>,
 }
 
+#[derive(Debug, Args, Clone)]
+struct ConsoleOperatorConfigureArgs {
+    /// Lenso Console repository root. Defaults to the current directory.
+    #[arg(long)]
+    console_root: Option<std::path::PathBuf>,
+
+    /// Environment file to read for `DATABASE_URL`.
+    #[arg(long)]
+    env_file: Option<std::path::PathBuf>,
+
+    /// Existing Auth user id, such as `usr_abc`.
+    #[arg(long)]
+    user_id: Option<String>,
+
+    /// Existing password-auth identifier, such as an email address.
+    #[arg(long)]
+    identifier: Option<String>,
+
+    /// Additional scope to preserve beyond the current Operator minimum.
+    #[arg(long = "scope")]
+    scopes: Vec<String>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ConsoleConnectArgs {
+    /// Exact signed enrollment, artifact, and System connection bundle.
+    #[arg(long)]
+    bundle: std::path::PathBuf,
+
+    /// Console Service base URL. HTTPS is required outside loopback.
+    #[arg(long)]
+    console_url: String,
+
+    /// Private regular file containing the Console operator bearer token.
+    #[arg(long)]
+    token_file: Option<std::path::PathBuf>,
+
+    /// Environment variable containing the Console operator bearer token.
+    #[arg(long, default_value = "LENSO_CONSOLE_TOKEN")]
+    token_env: String,
+
+    /// Print the final System Connection as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
 #[derive(Debug, Subcommand)]
 enum ConsoleOperatorCommand {
     /// Bootstrap the first operator in an independent Lenso Console Service.
     Bootstrap(ConsoleOperatorBootstrapArgs),
+    /// Ensure an existing operator has the complete current scope set.
+    Configure(ConsoleOperatorConfigureArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -677,6 +726,8 @@ enum ConsoleCommand {
         #[command(subcommand)]
         command: ConsoleOperatorCommand,
     },
+    /// Apply one exact signed enrollment/artifact/System connection bundle.
+    Connect(ConsoleConnectArgs),
     /// Plan or apply the Console Service's own Module composition.
     Composition {
         #[command(subcommand)]
@@ -2515,6 +2566,18 @@ impl From<&ConsoleOperatorBootstrapArgs> for console_operator::BootstrapOperator
     }
 }
 
+impl From<&ConsoleOperatorConfigureArgs> for console_operator::ConfigureOperatorOptions {
+    fn from(args: &ConsoleOperatorConfigureArgs) -> Self {
+        Self {
+            console_root: args.console_root.clone(),
+            env_file: args.env_file.clone(),
+            identifier: args.identifier.clone(),
+            scopes: args.scopes.clone(),
+            user_id: args.user_id.clone(),
+        }
+    }
+}
+
 impl From<&ConsoleChangeArgs> for console_installation::ChangeOptions {
     fn from(args: &ConsoleChangeArgs) -> Self {
         Self {
@@ -2854,7 +2917,20 @@ async fn main() -> anyhow::Result<()> {
                 ConsoleOperatorCommand::Bootstrap(args) => {
                     console_operator::bootstrap_operator((&args).into()).await?;
                 }
+                ConsoleOperatorCommand::Configure(args) => {
+                    console_operator::configure_operator((&args).into()).await?;
+                }
             },
+            ConsoleCommand::Connect(args) => {
+                console_connection::connect(console_connection::ConnectOptions {
+                    bundle: args.bundle,
+                    console_url: args.console_url,
+                    json: args.json,
+                    token_env: args.token_env,
+                    token_file: args.token_file,
+                })
+                .await?;
+            }
             ConsoleCommand::Composition { command } => match command {
                 ConsoleCompositionCommand::Plan(args) => {
                     console_composition::plan(console_composition::PlanOptions {

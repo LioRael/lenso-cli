@@ -46,6 +46,7 @@ use nix::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 use tokio::{
     io::{AsyncBufReadExt as _, BufReader},
     net::TcpListener,
@@ -1649,6 +1650,13 @@ fn build_composition_plan(
     let mut services = Vec::new();
     let mut workloads = Vec::new();
     for (service_name, service_reference) in requested_services {
+        let service_id = service_id_from_reference(&service_reference).ok_or_else(|| {
+            SandboxError::new(
+                "invalid_service_reference",
+                format!("Could not preserve Service identity from {service_reference}."),
+                "Use a stable service:namespace/name reference.",
+            )
+        })?;
         let service = workspace_services
             .iter()
             .find(|service| {
@@ -1727,10 +1735,15 @@ fn build_composition_plan(
             }
         }
         let workload_id = format!("{service_name}-api");
-        let identity = format!("local-dev://{}/{service_name}/api", composition.app_id);
+        let identity = format!("local-dev://{}/{service_id}/api", composition.app_id);
+        let service_store_key = format!(
+            "{}-{}",
+            service_name,
+            &sha256_hex(service_id.as_bytes())[..16]
+        );
         let store_path = owned_root
             .join("services")
-            .join(&service_name)
+            .join(service_store_key)
             .join("store");
         let mut env = BTreeMap::new();
         env.insert("LENSO_APP_ID".to_owned(), composition.app_id.clone());
@@ -1739,7 +1752,7 @@ fn build_composition_plan(
             composition.content_digest.clone(),
         );
         env.insert("LENSO_SYSTEM_ID".to_owned(), composition.app_id.clone());
-        env.insert("LENSO_SERVICE_ID".to_owned(), service_name.clone());
+        env.insert("LENSO_SERVICE_ID".to_owned(), service_id.clone());
         env.insert("LENSO_WORKLOAD_ID".to_owned(), workload_id.clone());
         env.insert("LENSO_WORKLOAD_IDENTITY".to_owned(), identity.clone());
         env.insert("LENSO_SERVICE_REFERENCE".to_owned(), service_reference);
@@ -1748,11 +1761,11 @@ fn build_composition_plan(
             store_path.display().to_string(),
         );
         services.push(PlannedService {
-            service_id: service_name.clone(),
+            service_id: service_id.clone(),
             store_path: store_path.clone(),
         });
         workloads.push(PlannedWorkload {
-            service_id: service_name,
+            service_id,
             workload_id,
             role: WorkloadRole::Api,
             identity,
@@ -1788,6 +1801,25 @@ fn service_name_from_reference(reference: &str) -> Option<String> {
         .next()
         .filter(|name| !name.is_empty())
         .map(str::to_owned)
+}
+
+fn service_id_from_reference(reference: &str) -> Option<String> {
+    reference
+        .strip_prefix("service:")
+        .filter(|service_id| {
+            let mut parts = service_id.split('/');
+            parts.next().is_some_and(|part| !part.is_empty())
+                && parts.next().is_some_and(|part| !part.is_empty())
+                && parts.next().is_none()
+        })
+        .map(str::to_owned)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn adapter_state_path(plan: &SandboxPlan) -> PathBuf {
@@ -3674,6 +3706,19 @@ fn print_status(system_id: &str, phase: SandboxPhase, json: bool) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_composition_preserves_qualified_service_identity() {
+        assert_eq!(
+            service_id_from_reference("service:lenso-taste/taste-profile-service").as_deref(),
+            Some("lenso-taste/taste-profile-service")
+        );
+        assert_eq!(
+            service_name_from_reference("service:lenso-taste/taste-profile-service").as_deref(),
+            Some("taste-profile-service")
+        );
+        assert!(service_id_from_reference("service:taste-profile-service").is_none());
+    }
 
     #[test]
     fn plan_is_deterministic_and_orders_services_then_workload_roles() {

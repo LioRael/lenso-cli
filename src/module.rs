@@ -6,6 +6,22 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
+use lenso_contracts::{
+    CatalogAction, DeclaredCompatibilityState, ModuleDelivery, ModuleEligibility,
+    ModuleEligibilityState, ModuleLifecycleState, ModuleRelease, ModuleVerificationCell,
+    ServiceResponsibilityProfile, VerificationEvaluation, VerificationOperation, VerificationState,
+    digest_json,
+};
+use lenso_module_management::{
+    APPLICATION_MODULE_LOCK_PROTOCOL, DESIRED_MODULE_COMPOSITION_PROTOCOL,
+    DesiredModuleComposition, DesiredModuleSelection, EndpointBinding, EndpointCachePolicy,
+    EndpointResolverSource, EndpointSelectionPolicy, InstalledServiceExport,
+    InstalledServiceRelease, MODULE_PLANNING_CONTEXT_PROTOCOL, ManagedDeliveryKind,
+    ModuleGraphResolver, ModulePlanningContext, ModuleResolutionCandidate, ModuleResolutionRequest,
+    ModuleRootChange, SERVICE_INSTALLATION_SET_PROTOCOL, ServiceDesiredMode, ServiceIdentityPolicy,
+    ServiceInstallation, ServiceInstallationSet, ServiceLifecycleBinding, ServiceReference,
+    ServiceTransportBinding, StaticEndpointDeclaration,
+};
 use lenso_service::check_contract_artifact_value;
 use serde_json::{Map, Value, json};
 
@@ -645,6 +661,9 @@ pub async fn install_module(
         && let Some(loaded) = read_install_descriptor(module_reference).await?
     {
         let descriptor = loaded.value;
+        if is_exact_module_release_descriptor(&descriptor) {
+            return install_exact_provider_release(&descriptor, module_reference, &options);
+        }
         if is_module_release_descriptor(&descriptor) {
             return install_module_descriptor(
                 &descriptor,
@@ -714,6 +733,336 @@ pub async fn install_module(
         ModuleSource::Service => add_service_module(module_reference, options).await,
         ModuleSource::Linked => install_linked_module(module_reference, options),
     }
+}
+
+fn is_exact_module_release_descriptor(value: &Value) -> bool {
+    value.get("protocol").and_then(Value::as_str) == Some("lenso.module-release.v1")
+        && value.get("module_id").is_some()
+        && value.get("manifest_digest").is_some()
+        && value.get("delivery").is_some()
+}
+
+fn install_exact_provider_release(
+    value: &Value,
+    release_reference: &str,
+    options: &ServiceModuleInstallOptions,
+) -> Result<()> {
+    let release: ModuleRelease =
+        serde_json::from_value(value.clone()).context("decode exact Module Release")?;
+    let issues = release.validate();
+    if !issues.is_empty() {
+        bail!("Exact Module Release is invalid: {issues:?}");
+    }
+    let ModuleDelivery::Service(delivery) = &release.delivery else {
+        bail!("Exact local runtime installation currently requires Service delivery");
+    };
+    if delivery.responsibility_profile != ServiceResponsibilityProfile::Provider {
+        bail!("Use the Autonomous Service workflow for an autonomous Module release");
+    }
+    let endpoint = options
+        .base_url
+        .as_deref()
+        .context("Exact Provider installation requires --base-url <lenso.provider.v1 URL>")?;
+    let endpoint = local_provider_endpoint(endpoint)?;
+    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
+    let application_id = application_id(&repo_root)?;
+    let system_id = application_id.clone();
+    let environment_id = "local".to_owned();
+    let release_digest = digest_json(&release).context("digest exact Module Release")?;
+    let context_path = repo_root.join(".lenso/module-planning-context.json");
+    let desired_path = repo_root.join("lenso.modules.json");
+    let lock_path = repo_root.join("lenso.modules.lock.json");
+    let installations_path = repo_root.join(".lenso/environments/local/service-installations.json");
+    let existing_context = read_optional_json::<ModulePlanningContext>(&context_path)?;
+    let catalog_snapshot_digest = existing_context
+        .as_ref()
+        .map(|context| context.catalog_snapshot_digest.clone())
+        .unwrap_or(digest_json(&json!({
+            "applicationId": application_id,
+            "kind": "local-module-catalog",
+            "protocol": "lenso.local-module-catalog.v1"
+        }))?);
+    let trust_policy_digest = existing_context
+        .as_ref()
+        .map(|context| context.trust_policy_digest.clone())
+        .unwrap_or(digest_json(
+            &json!({ "policy": "local-unverified", "protocol": "lenso.local-trust-policy.v1" }),
+        )?);
+    let compatibility_evidence_digest = existing_context
+        .as_ref()
+        .map(|context| context.compatibility_evidence_digest.clone())
+        .unwrap_or(digest_json(
+            &json!({ "protocol": "lenso.local-compatibility.v1", "status": "unchecked" }),
+        )?);
+    let candidate = local_provider_candidate(
+        release.clone(),
+        release_digest.clone(),
+        catalog_snapshot_digest.clone(),
+    );
+    let mut candidates = existing_context
+        .as_ref()
+        .map(|context| context.candidates.clone())
+        .unwrap_or_default();
+    candidates.retain(|existing| existing.release.module_id != release.module_id);
+    candidates.push(candidate);
+    let current_desired = read_optional_json::<DesiredModuleComposition>(&desired_path)?.unwrap_or(
+        DesiredModuleComposition {
+            protocol: DESIRED_MODULE_COMPOSITION_PROTOCOL.to_owned(),
+            application_id: application_id.clone(),
+            revision: 0,
+            selected: Vec::new(),
+            local_overrides: Vec::new(),
+        },
+    );
+    let current_lock = read_optional_json(&lock_path)?;
+    let resolution = ModuleGraphResolver
+        .resolve(&ModuleResolutionRequest {
+            current_desired,
+            current_lock,
+            change: ModuleRootChange::Install {
+                selection: DesiredModuleSelection {
+                    module_id: release.module_id.clone(),
+                    version_requirement: format!("={}", release.version),
+                    optional_requirements: Vec::new(),
+                    exact_release_digest: Some(release_digest.clone()),
+                    delivery_preference: Some(ManagedDeliveryKind::Provider),
+                },
+            },
+            catalog_snapshot_digest: catalog_snapshot_digest.clone(),
+            trust_policy_digest: trust_policy_digest.clone(),
+            resolver_version: "lenso-cli-local-provider.v1".to_owned(),
+            candidates: candidates.clone(),
+        })
+        .map_err(|error| anyhow!(error))?;
+    if resolution.target_lock.protocol != APPLICATION_MODULE_LOCK_PROTOCOL {
+        bail!("Module resolver produced an unsupported Application Module Lock");
+    }
+    let previous_installations = read_optional_json::<ServiceInstallationSet>(&installations_path)?
+        .unwrap_or_else(|| ServiceInstallationSet::empty(&system_id, &environment_id));
+    let mut installations = previous_installations.clone();
+    installations.protocol = SERVICE_INSTALLATION_SET_PROTOCOL.to_owned();
+    installations.revision = installations.revision.saturating_add(1);
+    installations.previous_state_digest = (previous_installations.revision > 0)
+        .then(|| digest_json(&previous_installations))
+        .transpose()?;
+    let service_ref = ServiceReference {
+        service_id: delivery.service_id.clone(),
+        system_id: system_id.clone(),
+    };
+    let installation = ServiceInstallation {
+        service_ref: service_ref.clone(),
+        profile: ServiceResponsibilityProfile::Provider,
+        desired_mode: ServiceDesiredMode::Active,
+        service_release: InstalledServiceRelease {
+            digest: delivery.service_release_digest.clone(),
+            immutable_locator: format!(
+                "local://{}@{}",
+                delivery.service_id, delivery.service_release_digest
+            ),
+            version: delivery.service_release_version.clone(),
+        },
+        exports: vec![InstalledServiceExport {
+            contract_digests: delivery.contract_digests.clone(),
+            export_key: delivery.export.clone(),
+            manifest_digest: release.manifest_digest.clone(),
+            module_id: release.module_id.clone(),
+            module_release_digest: release_digest.clone(),
+            module_version: release.version.clone(),
+        }],
+        config_bindings: Vec::new(),
+        endpoint_binding: EndpointBinding {
+            allowed_bindings: vec![ServiceTransportBinding::ProviderHttpJson],
+            binding_id: format!("{}-local-provider", delivery.service_id.replace('/', "-")),
+            cache_policy: EndpointCachePolicy {
+                maximum_age_seconds: 30,
+                stale_if_source_unavailable_seconds: Some(60),
+            },
+            identity_policy: ServiceIdentityPolicy {
+                audience: format!("service:{application_id}-host"),
+                credential_references: Vec::new(),
+                principal: format!("service:{}", delivery.service_id),
+                trust_profile: "local_loopback".to_owned(),
+            },
+            resolver_source: EndpointResolverSource::Static {
+                endpoints: vec![StaticEndpointDeclaration {
+                    address: endpoint,
+                    binding: ServiceTransportBinding::ProviderHttpJson,
+                    failure_domain: Some("local-machine".to_owned()),
+                    priority: 0,
+                    region: Some("local".to_owned()),
+                    weight: 1,
+                }],
+            },
+            selection_policy: EndpointSelectionPolicy::default(),
+            service_ref: service_ref.clone(),
+        },
+        lifecycle_binding: ServiceLifecycleBinding::External {
+            deployment_reference: format!("local://{}", delivery.service_id),
+            observation_adapter_id: "lenso-local-control-adapter".to_owned(),
+            operation_adapter_id: None,
+        },
+    };
+    installations
+        .services
+        .retain(|existing| existing.service_ref != service_ref);
+    installations.services.push(installation);
+    installations
+        .services
+        .sort_by(|left, right| left.service_ref.cmp(&right.service_ref));
+    let context = ModulePlanningContext {
+        application_id: application_id.clone(),
+        candidates,
+        cargo_offline: true,
+        catalog_snapshot_digest,
+        compatibility_evidence_digest,
+        environment_id,
+        expected_target_revision: installations.revision,
+        protocol: MODULE_PLANNING_CONTEXT_PROTOCOL.to_owned(),
+        resolver_version: "lenso-cli-local-provider.v1".to_owned(),
+        service_deployments: Vec::new(),
+        system_id,
+        trust_policy_digest,
+    };
+    if options.dry_run {
+        println!("Exact Provider install dry run:");
+        println!(
+            "- Module: {} {} ({release_digest})",
+            release.module_id, release.version
+        );
+        println!("- Provider: {}", delivery.service_id);
+        println!(
+            "- Endpoint: {}",
+            options.base_url.as_deref().unwrap_or_default()
+        );
+        return Ok(());
+    }
+    let mut writes = PendingWrites::new();
+    queue_exact_json(&mut writes, desired_path, &resolution.target_desired)?;
+    queue_exact_json(&mut writes, lock_path, &resolution.target_lock)?;
+    queue_exact_json(&mut writes, context_path, &context)?;
+    queue_exact_json(&mut writes, installations_path, &installations)?;
+    queue_exact_json(
+        &mut writes,
+        repo_root.join(format!(".lenso/module-releases/{release_digest}.json")),
+        &release,
+    )?;
+    write_pending_files(&writes)?;
+    println!(
+        "Installed exact Provider Module {} {} ({release_digest}).",
+        release.module_id, release.version
+    );
+    println!("Provider runtime will be verified at Host startup: {release_reference}");
+    Ok(())
+}
+
+fn local_provider_endpoint(value: &str) -> Result<String> {
+    let url = reqwest::Url::parse(value).context("parse --base-url")?;
+    if url.scheme() != "http"
+        || !url.host_str().is_some_and(|host| {
+            host == "localhost"
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        })
+        || url.path().trim_end_matches('/') != "/lenso/provider/v1"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        bail!("Local Provider --base-url must be a loopback HTTP /lenso/provider/v1 URL");
+    }
+    Ok(value.trim_end_matches('/').to_owned())
+}
+
+fn application_id(repo_root: &Path) -> Result<String> {
+    let composition = repo_root.join("lenso.app.json");
+    if composition.is_file() {
+        let value = read_json(&composition)?;
+        return value
+            .get("appId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(ToOwned::to_owned)
+            .context("lenso.app.json appId is required");
+    }
+    repo_root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .context("could not infer application identity")
+}
+
+fn local_provider_candidate(
+    release: ModuleRelease,
+    release_digest: String,
+    catalog_snapshot_digest: String,
+) -> ModuleResolutionCandidate {
+    let verification = VerificationEvaluation {
+        reason_code: "local_unverified_provider".to_owned(),
+        receipt_digests: Vec::new(),
+        state: VerificationState::Unknown,
+    };
+    ModuleResolutionCandidate {
+        catalog_snapshot_digest,
+        eligibility: ModuleEligibility {
+            action: CatalogAction::Install,
+            declared_compatibility: DeclaredCompatibilityState::Unknown,
+            lifecycle: ModuleLifecycleState::default(),
+            reason_codes: vec!["local_unverified_provider".to_owned()],
+            snapshot_age_seconds: 0,
+            snapshot_fresh: true,
+            state: ModuleEligibilityState::EligibleWithWarning,
+            verification,
+        },
+        release,
+        release_digest: release_digest.clone(),
+        verification_cell: ModuleVerificationCell {
+            architecture: std::env::consts::ARCH.to_owned(),
+            cargo_version: "local".to_owned(),
+            cli_version: env!("CARGO_PKG_VERSION").to_owned(),
+            console_artifact_digest: None,
+            console_host_api_version: None,
+            console_lock_digest: None,
+            delivery_digest: release_digest.clone(),
+            features: Vec::new(),
+            host_version: "local".to_owned(),
+            lenso_version: "local".to_owned(),
+            management_engine_version: "0.2.0".to_owned(),
+            module_release_digest: release_digest,
+            node_version: None,
+            operation: VerificationOperation::FreshInstall,
+            os: std::env::consts::OS.to_owned(),
+            package_manager_version: None,
+            protocol_digests: Vec::new(),
+            runner_image_digest: digest_json(&json!({ "runner": "local" })).expect("static digest"),
+            rust_version: "local".to_owned(),
+            source_release_digest: None,
+            starter_digest: digest_json(&json!({ "starter": "local" })).expect("static digest"),
+            store_engine: "postgres".to_owned(),
+            store_version: "local".to_owned(),
+            target: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+        },
+    }
+}
+
+fn read_optional_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    serde_json::from_slice(&fs::read(path).with_context(|| format!("read {}", path.display()))?)
+        .with_context(|| format!("parse {}", path.display()))
+        .map(Some)
+}
+
+fn queue_exact_json<T: serde::Serialize>(
+    writes: &mut PendingWrites,
+    path: PathBuf,
+    value: &T,
+) -> Result<()> {
+    let mut source = serde_json::to_string_pretty(value)?;
+    source.push('\n');
+    queue_write(writes, path, source);
+    Ok(())
 }
 
 fn should_resolve_service_catalog_entry(source: ModuleSource) -> bool {
@@ -922,6 +1271,12 @@ fn linked_catalog_descriptor(
         return Ok(descriptor);
     }
     if let Some(descriptor) = builtin_linked_module_descriptor(module_name) {
+        let mut descriptor = descriptor;
+        if entry.get("consolePackages").is_some()
+            && let Some(object) = descriptor.as_object_mut()
+        {
+            object.insert("retiredConsolePackages".to_owned(), Value::Bool(true));
+        }
         return Ok(descriptor);
     }
     if entry.get("linked").is_some() {
@@ -1291,7 +1646,6 @@ async fn add_service_module_with_context(
         println!("- rerun with --run-install-commands to execute manifest install commands");
     }
     println!("- restart the API and worker");
-
     Ok(())
 }
 
@@ -1703,6 +2057,19 @@ async fn install_linked_module_descriptor(
     println!("Next steps:");
     println!("- cargo run --bin migrate");
     println!("- restart the API and worker");
+    if descriptor
+        .get("retiredConsolePackages")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        println!("Warning: the catalog entry exposes retired Console packages.");
+        println!(
+            "- This compatibility install enables linked backend code only; it does not install a current console_ui_esm Surface."
+        );
+        println!(
+            "- Use an exact lenso.module-release.v1 artifact with console_ui_artifact for Console UI."
+        );
+    }
 
     Ok(())
 }
@@ -8923,10 +9290,10 @@ async fn read_install_descriptor(reference: &str) -> Result<Option<LoadedJsonRef
     }
 
     let descriptor = read_json_reference_with_provenance(reference).await?;
-    Ok(
-        (descriptor.value.get("source").is_some() && !is_service_manifest(&descriptor.value))
-            .then_some(descriptor),
-    )
+    Ok((is_exact_module_release_descriptor(&descriptor.value)
+        || is_module_release_descriptor(&descriptor.value)
+        || (descriptor.value.get("source").is_some() && !is_service_manifest(&descriptor.value)))
+    .then_some(descriptor))
 }
 
 fn builtin_linked_module_descriptor(reference: &str) -> Option<Value> {
@@ -9778,6 +10145,99 @@ fn write_json(path: &Path, value: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn exact_provider_install_writes_host_runtime_inputs() {
+        let root = std::env::temp_dir().join(format!(
+            "lenso-cli-exact-provider-install-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("lenso.app.json"),
+            serde_json::to_vec_pretty(&json!({
+                "appId": "taste",
+                "protocol": "lenso.app-composition.v1"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let manifest = json!({
+            "capabilities": ["taste/profile.read"],
+            "console": [],
+            "console_contributions": [],
+            "console_slots": [],
+            "http_routes": [{
+                "capability": "taste/profile.read",
+                "display_name": "Read service status",
+                "method": "GET",
+                "path": "/status",
+                "story_title": "Service status read"
+            }],
+            "module_id": "taste/profile",
+            "protocol": "lenso.module-manifest.v1",
+            "story_display": []
+        });
+        let manifest_digest = digest_json(&manifest).unwrap();
+        let release = json!({
+            "compatibility": {},
+            "delivery": {
+                "kind": "service",
+                "service_id": "taste/profile-service",
+                "service_release_version": "0.1.0",
+                "service_release_digest": digest_json(&json!({"release": "taste-profile-service@0.1.0"})).unwrap(),
+                "export": "taste/profile",
+                "responsibility_profile": "provider",
+                "contract_digests": [digest_json(&json!({"protocol": "lenso.provider-http.v1"})).unwrap()]
+            },
+            "manifest": manifest,
+            "manifest_digest": manifest_digest,
+            "module_id": "taste/profile",
+            "protocol": "lenso.module-release.v1",
+            "version": "0.1.0"
+        });
+
+        let release_path = root.join("lenso.module-release.json");
+        fs::write(&release_path, serde_json::to_vec_pretty(&release).unwrap()).unwrap();
+        install_module(
+            release_path.to_str().unwrap(),
+            ServiceModuleInstallOptions {
+                allow_incompatible: false,
+                base_url: Some("http://127.0.0.1:4110/lenso/provider/v1".to_owned()),
+                catalog_url: None,
+                dry_run: false,
+                env_file: None,
+                install_profiles: Vec::new(),
+                module_services_file: None,
+                repo_root: Some(root.clone()),
+                run_install_commands: false,
+                source: "service".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let lock: Value =
+            serde_json::from_slice(&fs::read(root.join("lenso.modules.lock.json")).unwrap())
+                .unwrap();
+        assert_eq!(lock["modules"][0]["module_id"], "taste/profile");
+        let installations: Value = serde_json::from_slice(
+            &fs::read(root.join(".lenso/environments/local/service-installations.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            installations["services"][0]["service_ref"]["service_id"],
+            "taste/profile-service"
+        );
+        assert_eq!(
+            installations["services"][0]["endpoint_binding"]["resolver_source"]["endpoints"][0]["address"],
+            "http://127.0.0.1:4110/lenso/provider/v1"
+        );
+        assert!(!root.join(".lenso/module-installs.json").exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn generated_console_scaffold_uses_the_framework_esm_contract() {

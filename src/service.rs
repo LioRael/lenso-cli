@@ -1171,6 +1171,7 @@ fn create_ts_service(options: ServiceCreateOptions) -> Result<()> {
         options.dry_run,
         options.print_guidance,
         "pnpm install",
+        true,
     )
 }
 
@@ -1208,6 +1209,7 @@ fn create_rust_service(options: ServiceCreateOptions) -> Result<()> {
         options.dry_run,
         options.print_guidance,
         "cargo check",
+        false,
     )
 }
 
@@ -1217,6 +1219,7 @@ fn finish_service_create(
     dry_run: bool,
     print_guidance: bool,
     check_command: &str,
+    provider_v1: bool,
 ) -> Result<()> {
     if dry_run {
         println!("Service dry run:");
@@ -1236,25 +1239,18 @@ fn finish_service_create(
     println!("- {check_command}");
     println!("- lenso service verify");
     println!("- lenso service package --check");
-    println!(
-        "- {}",
-        local_service_install_command(&scaffold.service_name, &scaffold.repo_root_display)
-    );
-    println!(
-        "- lenso service release plan {} ./dist/lenso-service/{}/lenso.service-package.json --repo-root {} --output .lenso/{}.release-plan.json",
-        scaffold.service_name,
-        scaffold.service_name,
-        scaffold.repo_root_display,
-        scaffold.service_name
-    );
-    println!(
-        "- lenso service policy check .lenso/{}.release-plan.json --fail-on breaking",
-        scaffold.service_name
-    );
-    println!(
-        "- lenso service release apply .lenso/{}.release-plan.json --repo-root {}",
-        scaffold.service_name, scaffold.repo_root_display
-    );
+    if provider_v1 {
+        println!("- pnpm module:release > lenso.module-release.json");
+        println!(
+            "- lenso module install ./lenso.module-release.json --base-url http://127.0.0.1:{}/lenso/provider/v1 --repo-root {}",
+            scaffold.service_port, scaffold.repo_root_display
+        );
+    } else {
+        println!(
+            "- {}",
+            local_service_install_command(&scaffold.service_name, &scaffold.repo_root_display)
+        );
+    }
     if let Some(note) = &scaffold.publish_note {
         println!("- {note}");
     }
@@ -1275,6 +1271,7 @@ struct ServiceScaffold {
     service_cwd: String,
     service_kit_dependency: String,
     service_label: String,
+    service_id: String,
     service_name: String,
     service_port: u16,
     service_status_url: String,
@@ -1298,7 +1295,10 @@ fn service_scaffold(options: &ServiceCreateOptions) -> Result<ServiceScaffold> {
     if target_dir.exists() {
         bail!("Service directory already exists: {}", target_dir.display());
     }
-    let module_name = provided_module_name(&service_name);
+    let module_slug = provided_module_name(&service_name);
+    let namespace = service_namespace(&current_dir);
+    let module_name = format!("{namespace}/{module_slug}");
+    let service_id = format!("{namespace}/{service_name}");
     let dependencies = service_dependencies();
     let local_service_base_url = format!("http://127.0.0.1:{}/lenso/service/v1", options.port);
     Ok(ServiceScaffold {
@@ -1313,7 +1313,8 @@ fn service_scaffold(options: &ServiceCreateOptions) -> Result<ServiceScaffold> {
         repo_root_display: current_dir.to_string_lossy().to_string(),
         service_cwd: json_string(&display_relative(&current_dir, &target_dir)),
         service_kit_dependency: dependencies.service_kit_dependency,
-        service_label: label_from_slug(&module_name),
+        service_label: label_from_slug(&module_slug),
+        service_id,
         service_name,
         service_port: options.port,
         service_status_url: format!("{local_service_base_url}/status"),
@@ -1335,6 +1336,7 @@ fn queue_template(
 fn render_template(template: &str, scaffold: &ServiceScaffold) -> String {
     template
         .replace("{{service_name}}", &scaffold.service_name)
+        .replace("{{service_id}}", &scaffold.service_id)
         .replace("{{service_label}}", &scaffold.service_label)
         .replace("{{service_port}}", &scaffold.service_port.to_string())
         .replace(
@@ -1377,7 +1379,7 @@ fn service_dependencies() -> ServiceDependencyPlan {
             publish_note: Some(
                 "@lenso/service-kit and lenso-service must be published, or replace dependencies with local paths.".to_owned(),
             ),
-            service_kit_dependency: json_string("0.1.1"),
+            service_kit_dependency: json_string("^0.4.0"),
         };
     };
 
@@ -1450,6 +1452,16 @@ fn provided_module_name(service_name: &str) -> String {
         .filter(|name| !name.is_empty())
         .unwrap_or(service_name)
         .to_owned()
+}
+
+fn service_namespace(repo_root: &Path) -> String {
+    let app_id = fs::read(repo_root.join("lenso.app.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|value| value.get("appId")?.as_str().map(ToOwned::to_owned))
+        .map(|value| slugify(&value))
+        .filter(|value| !value.is_empty());
+    app_id.unwrap_or_else(|| "local".to_owned())
 }
 
 fn slugify(value: &str) -> String {
@@ -1534,15 +1546,16 @@ mod tests {
             crate_name: "support_suite_provider".to_owned(),
             lenso_service_dependency: "lenso-service = \"0.1.0\"".to_owned(),
             local_service_base_url: "http://127.0.0.1:4110/lenso/service/v1".to_owned(),
-            module_name: "support-suite".to_owned(),
+            module_name: "local/support-suite".to_owned(),
             output_root: PathBuf::from("/tmp/services"),
             package_name: "support-suite-provider".to_owned(),
             pnpm_workspace_overrides: String::new(),
             publish_note: None,
             repo_root_display: "/tmp/host".to_owned(),
             service_cwd: json_string("../services/support-suite-provider"),
-            service_kit_dependency: json_string("0.1.1"),
+            service_kit_dependency: json_string("^0.4.0"),
             service_label: "Support Suite".to_owned(),
+            service_id: "local/support-suite-provider".to_owned(),
             service_name: "support-suite-provider".to_owned(),
             service_port: 4110,
             service_status_url: "http://127.0.0.1:4110/lenso/service/v1/status".to_owned(),
@@ -1815,8 +1828,11 @@ mod tests {
             &scaffold(),
         );
 
-        assert!(ts_service.contains("defineModuleRelease"));
+        assert!(ts_service.contains("lenso.module-release.v1"));
+        assert!(ts_service.contains("providerV1"));
         assert!(ts_server.contains("--check-release"));
+        assert!(ts_server.contains("LENSO_LOCAL_ENROLLMENT_TOKEN"));
+        assert!(ts_server.contains("providerCore"));
         assert!(rust_server.contains("fn module_release()"));
         assert!(rust_server.contains("--check-release"));
     }
@@ -1949,7 +1965,8 @@ mod tests {
             &scaffold,
         );
         assert!(ts_package_json.contains("\"service:package\""));
-        assert!(ts_package_json.contains("\"service:release-plan\""));
+        assert!(ts_package_json.contains("\"module:release\""));
+        assert!(!ts_package_json.contains("service:release-plan"));
         assert!(ts_package_json.contains("\"service:verify\""));
         for template in [
             include_str!("../templates/service-ts/package.json.tmpl"),

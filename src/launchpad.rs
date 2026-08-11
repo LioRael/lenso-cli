@@ -708,7 +708,7 @@ fn exact_authoring_for_blueprint(
         });
     }
     for module in &blueprint.modules {
-        add_exact_blueprint_module(&mut modules, module)?;
+        add_exact_blueprint_module(&mut modules, module, app_id)?;
     }
     for addon_name in addons {
         let addon = addon_by_name(addon_name)?;
@@ -720,7 +720,7 @@ fn exact_authoring_for_blueprint(
             bail!("addon `{addon_name}` does not support blueprint `{blueprint_name}`");
         }
         for module in &addon.modules {
-            add_exact_blueprint_module(&mut modules, module)?;
+            add_exact_blueprint_module(&mut modules, module, app_id)?;
         }
     }
 
@@ -743,6 +743,7 @@ fn exact_authoring_for_blueprint(
 fn add_exact_blueprint_module(
     modules: &mut Vec<app_composition::CompositionModuleInput>,
     module: &BlueprintModule,
+    app_id: &str,
 ) -> Result<()> {
     if modules
         .iter()
@@ -754,7 +755,7 @@ fn add_exact_blueprint_module(
         business_contributions: module.capabilities.clone(),
         dependencies: module.dependencies.clone(),
         implementation: app_composition::ImplementationInput::Service {
-            service_reference: format!("service:{}", module.owner_service),
+            service_reference: format!("service:{app_id}/{}", module.owner_service),
         },
         module_id: module.name.clone(),
         owner: format!("blueprint:{}", module.owner_service),
@@ -793,7 +794,8 @@ fn apply_exact_recipes(
             bail!("addon `{addon_name}` does not support blueprint `{blueprint_name}`");
         }
         for module in &addon.modules {
-            add_exact_blueprint_module(&mut authoring.modules, module)?;
+            let app_id = authoring.app_id.clone();
+            add_exact_blueprint_module(&mut authoring.modules, module, &app_id)?;
         }
         authoring.provenance.addons.push(addon_name.clone());
     }
@@ -907,6 +909,11 @@ fn apply_exact_implementation_overrides(
         module.implementation = if implementation == "linked" {
             app_composition::ImplementationInput::Linked
         } else if let Some(service_reference) = implementation.strip_prefix("service:") {
+            let service_reference = if service_reference.contains('/') {
+                service_reference.to_owned()
+            } else {
+                format!("{}/{service_reference}", authoring.app_id)
+            };
             app_composition::ImplementationInput::Service {
                 service_reference: format!("service:{service_reference}"),
             }
@@ -1280,6 +1287,7 @@ pub(crate) fn agent_context(options: AgentContextOptions) -> Result<()> {
     let state = read_launchpad_state_optional(&repo_root)?;
     let system = read_json_value_optional(&repo_root.join(SYSTEM_FILE))?;
     let workspace = read_json_value_optional(&repo_root.join(WORKSPACE_FILE))?;
+    let app_composition = read_json_value_optional(&repo_root.join("lenso.app.json"))?;
     let doctor = read_json_value_optional(&repo_root.join(DEV_DOCTOR_FILE))?;
     let proof = read_app_proof_state_optional(&repo_root)?;
     let change_plan = if options.from_app_plan || options.for_capability.is_some() {
@@ -1291,6 +1299,7 @@ pub(crate) fn agent_context(options: AgentContextOptions) -> Result<()> {
         state.as_ref(),
         system.as_ref(),
         workspace.as_ref(),
+        app_composition.as_ref(),
         doctor.as_ref(),
         proof.as_ref(),
         change_plan.as_ref(),
@@ -3255,6 +3264,7 @@ fn agent_context_markdown(
     state: Option<&LaunchpadState>,
     system: Option<&Value>,
     workspace: Option<&Value>,
+    app_composition: Option<&Value>,
     doctor: Option<&Value>,
     proof: Option<&AppProofState>,
     change_plan: Option<&AppChangePlanState>,
@@ -3319,6 +3329,15 @@ fn agent_context_markdown(
     output.push_str("- Host owns auth, runtime queues, retries, outbox, Runtime Story, and Technical Operations.\n");
     output.push_str("- Services are out-of-process providers that expose service manifests, routes, runtime functions, event handlers, and admin actions.\n");
     output.push_str("- Modules live inside services or the host; generated Launchpad JSON is control-plane state, not a hand-authored module contract.\n\n");
+
+    output.push_str("## Authoring Workflow\n\n");
+    output.push_str("- Route current Provider Service work through `lenso-service-authoring`.\n");
+    output.push_str("- If that skill is absent, update the Lenso skill pack before editing; the legacy `lenso-service-module-authoring` workflow is not a substitute.\n");
+    output.push_str("- Use exact `lenso.provider.v1` descriptors and Module Releases; do not restore `SERVICE_MODULES` or hand-written Provider adapters.\n\n");
+
+    output.push_str("## App Composition\n\n");
+    push_json_block(&mut output, app_composition)?;
+    output.push('\n');
 
     if let Some(capability) = for_capability {
         output.push_str("## Capability Scope\n\n");
@@ -3999,9 +4018,19 @@ mod tests {
             status: "ready".to_owned(),
         };
 
-        let markdown =
-            agent_context_markdown(None, None, None, None, Some(&proof), None, None, None, None)
-                .unwrap();
+        let markdown = agent_context_markdown(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&proof),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         assert!(markdown.contains("## App Proof"));
         assert!(markdown.contains("Status: ready"));
@@ -4033,6 +4062,7 @@ mod tests {
         };
 
         let markdown = agent_context_markdown(
+            None,
             None,
             None,
             None,
@@ -4081,6 +4111,7 @@ mod tests {
         };
         let markdown = agent_context_markdown(
             Some(&launchpad),
+            None,
             None,
             None,
             None,
@@ -4142,6 +4173,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some(&plan),
             Some("support-sla"),
             None,
@@ -4164,6 +4196,7 @@ mod tests {
             Some(&state),
             Some(&support_desk_system("support-desk")),
             Some(&json!({"protocol": "lenso.service-workspace.v1", "services": []})),
+            None,
             None,
             None,
             None,
@@ -4192,6 +4225,7 @@ mod tests {
         });
         let markdown = agent_context_markdown(
             Some(&state),
+            None,
             None,
             None,
             Some(&doctor),
