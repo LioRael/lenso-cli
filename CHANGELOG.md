@@ -1,5 +1,17 @@
 ## lenso-cli@0.2.16
 
+## 0.3.0
+
+### Minor Changes
+
+- 5ca5c67: Simplify the public application lifecycle to Compose, Run locally, Connect, and
+  Status. Remove the retired App Plan, Apply, Verify, Diff, Repair, Next, Upgrade,
+  and Explain commands; the App Compose `--write-plan`, `--explain`, and `--addon`
+  options; and the retired System Init, AddService, AddModule, Plan, Diff, Apply,
+  Doctor, Release, Runbook, and Graph commands. Keep `app compose --apply` only as
+  one atomic materialization flag, not a lifecycle stage.
+- dfb1168: Add a typed local Workload Control adapter for observing, suspending, and resuming managed workloads with fail-closed process ownership and local credential handling.
+
 ## 0.2.17
 
 ### Patch Changes
