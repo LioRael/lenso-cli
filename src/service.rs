@@ -23,6 +23,7 @@ pub(crate) struct ServiceCreateOptions {
     pub(crate) no_workspace: bool,
     pub(crate) output_dir: Option<PathBuf>,
     pub(crate) port: u16,
+    pub(crate) print_guidance: bool,
     pub(crate) workspace_file: Option<PathBuf>,
 }
 
@@ -98,6 +99,7 @@ impl From<&ServiceCreateArgs> for ServiceCreateOptions {
             no_workspace: args.no_workspace,
             output_dir: args.output_dir.clone(),
             port: args.port,
+            print_guidance: true,
             workspace_file: args.workspace_file.clone(),
         }
     }
@@ -1163,7 +1165,13 @@ fn create_ts_service(options: ServiceCreateOptions) -> Result<()> {
         &scaffold,
     );
     queue_service_workspace_update(&mut pending_writes, &scaffold, &options, "ts", "pnpm start")?;
-    finish_service_create(&scaffold, pending_writes, options.dry_run, "pnpm install")
+    finish_service_create(
+        &scaffold,
+        pending_writes,
+        options.dry_run,
+        options.print_guidance,
+        "pnpm install",
+    )
 }
 
 fn create_rust_service(options: ServiceCreateOptions) -> Result<()> {
@@ -1194,13 +1202,20 @@ fn create_rust_service(options: ServiceCreateOptions) -> Result<()> {
         "rust",
         "cargo run",
     )?;
-    finish_service_create(&scaffold, pending_writes, options.dry_run, "cargo check")
+    finish_service_create(
+        &scaffold,
+        pending_writes,
+        options.dry_run,
+        options.print_guidance,
+        "cargo check",
+    )
 }
 
 fn finish_service_create(
     scaffold: &ServiceScaffold,
     pending_writes: PendingWrites,
     dry_run: bool,
+    print_guidance: bool,
     check_command: &str,
 ) -> Result<()> {
     if dry_run {
@@ -1213,6 +1228,9 @@ fn finish_service_create(
 
     write_pending_files(&pending_writes)?;
     println!("Created service {}.", scaffold.service_name);
+    if !print_guidance {
+        return Ok(());
+    }
     println!("Next steps:");
     println!("- cd {}", scaffold.target_dir_display);
     println!("- {check_command}");

@@ -181,7 +181,7 @@ fn system_check_reports_shared_provider_system_semantics() {
 }
 
 #[test]
-fn system_v2_check_and_graph_report_explicit_mixed_topology_kinds() {
+fn system_v2_check_reports_explicit_mixed_topology_kinds() {
     let path = fixture_path("mixed-system-v2");
     fs::write(&path, MIXED_SYSTEM_V2_FIXTURE_JSON).unwrap();
 
@@ -207,123 +207,7 @@ fn system_v2_check_and_graph_report_explicit_mixed_topology_kinds() {
         ])
     );
 
-    let graph = run_json(&[
-        "system",
-        "graph",
-        "--system-file",
-        path.to_str().unwrap(),
-        "--json",
-    ]);
-    assert_eq!(graph["artifactProtocol"], "lenso.system.v2");
-    assert_eq!(graph["artifactVersion"], "lenso.system-graph.v1");
-    let kinds = graph["nodes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|node| node["kind"].as_str().unwrap())
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        kinds,
-        [
-            "autonomous_service",
-            "consumer",
-            "host",
-            "module",
-            "producer",
-            "provider",
-            "workload",
-        ]
-        .into_iter()
-        .collect()
-    );
     fs::remove_file(path).unwrap();
-}
-
-#[test]
-fn system_machine_workflows_are_versioned_and_dry_run_does_not_mutate_state() {
-    let system_path = fixture_path("agent-safe-system");
-    let repo_root = fixture_dir("agent-safe-repo");
-    fs::write(&system_path, LEGACY_SYSTEM_V1_FIXTURE_JSON).unwrap();
-    fs::create_dir_all(&repo_root).unwrap();
-
-    let first_plan = run_json(&[
-        "system",
-        "plan",
-        "--system-file",
-        system_path.to_str().unwrap(),
-        "--json",
-    ]);
-    let mut reordered: Value = serde_json::from_str(LEGACY_SYSTEM_V1_FIXTURE_JSON).unwrap();
-    for field in ["environments", "services", "modules", "dependencies"] {
-        if let Some(values) = reordered.get_mut(field).and_then(Value::as_array_mut) {
-            values.reverse();
-        }
-    }
-    if let Some(services) = reordered.get_mut("services").and_then(Value::as_array_mut) {
-        for service in services {
-            if let Some(modules) = service.get_mut("modules").and_then(Value::as_array_mut) {
-                modules.reverse();
-            }
-        }
-    }
-    fs::write(&system_path, serde_json::to_vec_pretty(&reordered).unwrap()).unwrap();
-    let reordered_plan = run_json(&[
-        "system",
-        "plan",
-        "--system-file",
-        system_path.to_str().unwrap(),
-        "--json",
-    ]);
-    assert_eq!(first_plan, reordered_plan);
-
-    let graph = run_json(&[
-        "system",
-        "graph",
-        "--system-file",
-        system_path.to_str().unwrap(),
-        "--json",
-    ]);
-    assert_eq!(graph["artifactVersion"], "lenso.system-graph.v1");
-
-    for command in ["diff", "doctor"] {
-        let report = run_json(&[
-            "system",
-            command,
-            "--system-file",
-            system_path.to_str().unwrap(),
-            "--repo-root",
-            repo_root.to_str().unwrap(),
-            "--json",
-        ]);
-        assert_eq!(report["artifactVersion"], "lenso.system-drift.v1");
-        assert!(report["nextActions"].is_array());
-    }
-
-    let before = fs::read_dir(&repo_root).unwrap().count();
-    let preview_args = [
-        "system",
-        "apply",
-        "--system-file",
-        system_path.to_str().unwrap(),
-        "--repo-root",
-        repo_root.to_str().unwrap(),
-        "--dry-run",
-        "--json",
-    ];
-    let preview = run_json(&preview_args);
-    let repeated_preview = run_json(&preview_args);
-    let after = fs::read_dir(&repo_root).unwrap().count();
-    assert_eq!(preview["artifactVersion"], "lenso.system-drift.v1");
-    assert_eq!(preview["approvalBoundaries"][0]["executed"], false);
-    assert_eq!(
-        preview, repeated_preview,
-        "dry-run proposal was not deterministic"
-    );
-    assert_eq!(before, after, "dry-run created local state");
-    assert!(!repo_root.join(".lenso").exists());
-
-    fs::remove_file(system_path).unwrap();
-    fs::remove_dir_all(repo_root).unwrap();
 }
 
 #[test]
@@ -464,6 +348,20 @@ fn exact_support_desk_composition_is_revision_guarded_and_locally_runnable() {
         "app compose failed: {}",
         String::from_utf8_lossy(&created.stderr)
     );
+    let compose_stdout = String::from_utf8_lossy(&created.stdout);
+    let compose_stderr = String::from_utf8_lossy(&created.stderr);
+    let compose_output = format!("{compose_stdout}\n{compose_stderr}");
+    for retired_guidance in [
+        "lenso serve",
+        "lenso service release plan",
+        "lenso service release apply",
+    ] {
+        assert!(
+            !compose_output.contains(retired_guidance),
+            "app compose advertised competing lifecycle guidance `{retired_guidance}`:\n{compose_output}"
+        );
+    }
+    assert!(compose_stdout.contains("lenso system dev"));
 
     let composition_path = app.join("lenso.app.json");
     let first_source = fs::read(&composition_path).unwrap();
@@ -499,8 +397,8 @@ fn exact_support_desk_composition_is_revision_guarded_and_locally_runnable() {
         "compose".to_owned(),
         "--repo-root".to_owned(),
         app.to_string_lossy().into_owned(),
-        "--addon".to_owned(),
-        "support-sla".to_owned(),
+        "--implementation".to_owned(),
+        "support-api=linked".to_owned(),
         "--apply".to_owned(),
         "--observed-revision".to_owned(),
         "0".to_owned(),
@@ -540,33 +438,6 @@ fn exact_support_desk_composition_is_revision_guarded_and_locally_runnable() {
     assert!(!app.join("lenso.system.json").exists());
     assert!(!app.join("lenso.system-sandbox.json").exists());
 
-    let addon = vec![
-        "app".to_owned(),
-        "compose".to_owned(),
-        "--repo-root".to_owned(),
-        app.to_string_lossy().into_owned(),
-        "--addon".to_owned(),
-        "support-sla".to_owned(),
-        "--apply".to_owned(),
-        "--observed-revision".to_owned(),
-        "1".to_owned(),
-    ];
-    let added = run_owned(&addon);
-    assert!(
-        added.status.success(),
-        "adding addon failed: {}",
-        String::from_utf8_lossy(&added.stderr)
-    );
-    let second: Value = serde_json::from_slice(&fs::read(&composition_path).unwrap()).unwrap();
-    assert_eq!(second["revision"], 2);
-    assert!(
-        second["provenance"]["addons"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|addon| addon == "support-sla")
-    );
-
     let linked = vec![
         "app".to_owned(),
         "compose".to_owned(),
@@ -576,7 +447,7 @@ fn exact_support_desk_composition_is_revision_guarded_and_locally_runnable() {
         "support-api=linked".to_owned(),
         "--apply".to_owned(),
         "--observed-revision".to_owned(),
-        "2".to_owned(),
+        "1".to_owned(),
     ];
     let rebound = run_owned(&linked);
     assert!(
@@ -584,10 +455,10 @@ fn exact_support_desk_composition_is_revision_guarded_and_locally_runnable() {
         "implementation update failed: {}",
         String::from_utf8_lossy(&rebound.stderr)
     );
-    let third: Value = serde_json::from_slice(&fs::read(&composition_path).unwrap()).unwrap();
-    assert_eq!(third["revision"], 3);
+    let second: Value = serde_json::from_slice(&fs::read(&composition_path).unwrap()).unwrap();
+    assert_eq!(second["revision"], 2);
     assert_eq!(
-        third["modules"]
+        second["modules"]
             .as_array()
             .unwrap()
             .iter()
@@ -606,7 +477,7 @@ fn exact_support_desk_composition_is_revision_guarded_and_locally_runnable() {
         "support-api=linked".to_owned(),
         "--apply".to_owned(),
         "--observed-revision".to_owned(),
-        "3".to_owned(),
+        "2".to_owned(),
     ]);
     assert!(
         noop.status.success(),

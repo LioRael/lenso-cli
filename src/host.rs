@@ -21,6 +21,19 @@ struct Rewrites {
 
 /// Scaffold a new Lenso host application into `dir`.
 pub fn init(dir: &str, name: Option<&str>, force: bool) -> Result<()> {
+    init_with_output(dir, name, force, true)
+}
+
+pub(crate) fn init_quiet(dir: &str, name: Option<&str>, force: bool) -> Result<()> {
+    init_with_output(dir, name, force, false)
+}
+
+fn init_with_output(
+    dir: &str,
+    name: Option<&str>,
+    force: bool,
+    print_guidance: bool,
+) -> Result<()> {
     let target = PathBuf::from(dir);
     let default_name = target
         .file_name()
@@ -39,7 +52,9 @@ pub fn init(dir: &str, name: Option<&str>, force: bool) -> Result<()> {
     prepare_target(&target, force)?;
     extract(&TEMPLATE_DIR, &target, PathBuf::new(), &rewrites)?;
 
-    print_next_steps(&target, &package_name);
+    if print_guidance {
+        print_next_steps(&target, &package_name);
+    }
     Ok(())
 }
 
