@@ -30,5 +30,5 @@ human-invoked index; the selected authoring skill owns the implementation.
 4. Tell the user the next observable result, not a copied version or command.
 
 The route is complete when one primary skill and its expected completion
-evidence are unambiguous. If two routes still compete, ask only the boundary
+state are unambiguous. If two routes still compete, ask only the boundary
 question that separates them.

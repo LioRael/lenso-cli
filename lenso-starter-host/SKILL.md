@@ -11,7 +11,7 @@ Keep business behavior out of the host shell.
 ## Workflow
 
 1. **Resolve the host.** Determine whether this is a new scaffold, a generated
-   Launchpad app, or an existing custom host. Inspect the current `lenso host
+   composed App, or an existing custom host. Inspect the current `lenso host
    --help` and `lenso serve --help`. Finish when the owning repository and
    generated versus user-owned files are known.
 2. **Confirm the boundary.** Read [host boundary](references/host-boundary.md).
@@ -25,8 +25,8 @@ Keep business behavior out of the host shell.
    repository-owned commands. Start migration before API and Worker when the
    generated project requires it. Finish when startup output identifies the
    actual database, ports, loaded Modules, and declared Services.
-5. **Prove the host.** Follow [verification](references/verification.md).
-   Finish when a focused check proves the binaries compile, one real host path
+5. **Verify the host.** Follow [verification](references/verification.md).
+   Finish when a focused check confirms the binaries compile, one real host path
    crosses the composition boundary, and the configured Console Service can
    observe the intended capability.
 

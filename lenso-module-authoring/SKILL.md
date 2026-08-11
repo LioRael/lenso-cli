@@ -1,6 +1,6 @@
 ---
 name: lenso-module-authoring
-description: Create, implement, or change a linked Rust Lenso Module whose business boundary is already known, including its ModuleManifest, routes, data surfaces, actions, runtime functions, Events, lifecycle work, dependencies, and Console declaration. Use business planning first when ownership is still unclear.
+description: Create, implement, or change a linked Rust Lenso Module whose business boundary is already known, including its ModuleManifest, Business API routes, runtime functions, Events, lifecycle work, dependencies, and Console Surface declaration. Use business planning first when ownership is still unclear.
 ---
 
 # Lenso Module Authoring
@@ -24,12 +24,12 @@ behavior behind narrow host bindings.
    generated agent handoff and preserve generated versus user-owned files.
 4. **Declare only real surfaces.** Follow
    [manifest and surfaces](references/manifest-and-surfaces.md). Add routes,
-   schema-admin data, actions, runtime functions, Events, lifecycle work,
-   configuration, dependencies, and Console metadata only when corresponding
-   behavior exists. Finish when manifest lint has no invented or empty surface.
+   runtime functions, Events, lifecycle work, configuration, dependencies, and
+   Console metadata only when corresponding behavior exists. Finish when
+   manifest lint has no invented or empty Surface.
 5. **Implement vertical behavior.** Follow
    [behavior and collaboration](references/behavior-and-collaboration.md).
-   Keep input validation, storage, business rules, and emitted evidence inside
+   Keep input validation, storage, business rules, and runtime records inside
    the owning capability. Register cross-cutting wiring only in the host's
    composition root.
 6. **Delegate distinct Console UI work.** When the change needs a new or
@@ -41,10 +41,10 @@ behavior behind narrow host bindings.
    freshness and architecture checks. Never hand-edit generated output.
 8. **Verify the capability.** Follow [verification](references/verification.md).
    Finish when one focused path fails without the Module wiring, all changed
-   declarations are exercised, and expected Console evidence is named.
+   declarations are exercised, and expected Console state is named.
 
 ## Report
 
 Return the Module owner, first useful workflow, declarations added or changed,
-collaboration seams, generated artifacts, focused checks, Console evidence,
+collaboration seams, generated artifacts, focused checks, Console state,
 and delivery state.

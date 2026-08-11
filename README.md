@@ -23,7 +23,7 @@ model-facing descriptions so an agent can discover them from a concrete task.
 | --- | --- |
 | `lenso-start` | Choose the smallest applicable Lenso workflow. |
 | `lenso-business-planning` | Turn a product idea into owned capabilities and a first useful slice. |
-| `lenso-app-composition` | Create or evolve a Launchpad app, blueprint, addon, or capability pack. |
+| `lenso-app-composition` | Compose or evolve an exact App from a blueprint, addon, or capability pack. |
 | `lenso-starter-host` | Create or repair a thin runnable Lenso host. |
 | `lenso-module-authoring` | Build a linked Rust Module after its boundary is known. |
 | `lenso-service-authoring` | Build an out-of-process service that provides Modules. |
@@ -39,6 +39,6 @@ model-facing descriptions so an agent can discover them from a concrete task.
 ## Authoring rule
 
 Each `SKILL.md` owns the ordered workflow and completion criteria. Branch-only
-material lives in that skill's `references/` directory. Current commands,
-versions, package exports, and repository scripts remain environment-owned:
-inspect them at execution time instead of copying them into a skill.
+material lives in that skill's `references/` directory. Inspect current
+commands, versions, package exports, and repository scripts at execution time
+instead of copying them into a skill.
