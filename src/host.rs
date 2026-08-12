@@ -603,10 +603,17 @@ fn print_next_steps(target: &Path, package_name: &str) {
     );
     eprintln!();
     eprintln!("Next steps:");
-    eprintln!("  cd {}", target.display());
-    eprintln!("  lenso dev up");
-    eprintln!();
-    eprintln!("Install a service with `lenso service install <service-name-or-manifest>`.");
+    for step in host_next_steps(target) {
+        eprintln!("  {step}");
+    }
+}
+
+fn host_next_steps(target: &Path) -> Vec<String> {
+    vec![
+        format!("cd {}", target.display()),
+        "lenso service create my-service --lang ts --output-dir services".to_owned(),
+        "lenso dev up".to_owned(),
+    ]
 }
 
 #[cfg(test)]
@@ -650,6 +657,16 @@ mod tests {
         let input = b"lenso_starter_host::host_composition()";
         let out = rewrite_bin_source(input, &rewrites);
         assert_eq!(out, "billing_svc::host_composition()");
+    }
+
+    #[test]
+    fn starter_guidance_uses_the_workspace_driven_dev_path() {
+        let steps = host_next_steps(Path::new("taste"));
+
+        assert_eq!(steps[0], "cd taste");
+        assert!(steps[1].starts_with("lenso service create "));
+        assert_eq!(steps[2], "lenso dev up");
+        assert!(steps.iter().all(|step| !step.contains("service install")));
     }
 
     #[test]

@@ -1458,6 +1458,7 @@ fn create_ts_service(options: ServiceCreateOptions) -> Result<()> {
         options.print_guidance,
         "pnpm install",
         true,
+        !options.no_workspace,
     )
 }
 
@@ -1502,6 +1503,7 @@ fn create_rust_service(options: ServiceCreateOptions) -> Result<()> {
         options.print_guidance,
         "cargo check",
         false,
+        !options.no_workspace,
     )
 }
 
@@ -1512,6 +1514,7 @@ fn finish_service_create(
     print_guidance: bool,
     check_command: &str,
     provider_v1: bool,
+    workspace_registered: bool,
 ) -> Result<()> {
     if dry_run {
         println!("Service dry run:");
@@ -1522,31 +1525,64 @@ fn finish_service_create(
     }
 
     write_pending_files(&pending_writes)?;
-    println!("Created service {}.", scaffold.service_name);
+    if workspace_registered {
+        println!(
+            "Created service {} and registered it in the local Service workspace.",
+            scaffold.service_name
+        );
+    } else {
+        println!("Created service {}.", scaffold.service_name);
+    }
     if !print_guidance {
         return Ok(());
     }
     println!("Next steps:");
-    println!("- cd {}", scaffold.target_dir_display);
-    println!("- {check_command}");
-    println!("- lenso service verify");
-    println!("- lenso service package --check");
-    if provider_v1 {
-        println!("- pnpm module:release > lenso.module-release.json");
-        println!(
-            "- lenso module install ./lenso.module-release.json --base-url http://127.0.0.1:{}/lenso/provider/v1 --repo-root {}",
-            scaffold.service_port, scaffold.repo_root_display
-        );
-    } else {
-        println!(
-            "- {}",
-            local_service_install_command(&scaffold.service_name, &scaffold.repo_root_display)
-        );
-    }
-    if let Some(note) = &scaffold.publish_note {
-        println!("- {note}");
+    for step in service_create_guidance(scaffold, check_command, provider_v1, workspace_registered)
+    {
+        println!("- {step}");
     }
     Ok(())
+}
+
+fn service_create_guidance(
+    scaffold: &ServiceScaffold,
+    check_command: &str,
+    provider_v1: bool,
+    workspace_registered: bool,
+) -> Vec<String> {
+    let mut steps = if workspace_registered {
+        vec![
+            format!(
+                "implement the generated Service contract and handlers in {}/src",
+                scaffold.target_dir_display
+            ),
+            "lenso dev up".to_owned(),
+        ]
+    } else {
+        let mut standalone_steps = vec![
+            format!("cd {}", scaffold.target_dir_display),
+            check_command.to_owned(),
+            "lenso service verify".to_owned(),
+            "lenso service package --check".to_owned(),
+        ];
+        if provider_v1 {
+            standalone_steps.push("pnpm module:release > lenso.module-release.json".to_owned());
+            standalone_steps.push(format!(
+                "lenso module install ./lenso.module-release.json --base-url http://127.0.0.1:{}/lenso/provider/v1 --repo-root {}",
+                scaffold.service_port, scaffold.repo_root_display
+            ));
+        } else {
+            standalone_steps.push(local_service_install_command(
+                &scaffold.service_name,
+                &scaffold.repo_root_display,
+            ));
+        }
+        standalone_steps
+    };
+    if let Some(note) = &scaffold.publish_note {
+        steps.push(note.clone());
+    }
+    steps
 }
 
 #[derive(Debug)]
@@ -1864,6 +1900,27 @@ mod tests {
             "lenso service install support-suite-provider --repo-root /tmp/host"
         );
         assert!(!command.contains("--base-url"));
+    }
+
+    #[test]
+    fn workspace_service_guidance_uses_dev_up_without_manual_installation() {
+        let steps = service_create_guidance(&scaffold(), "pnpm install", true, true);
+
+        assert!(steps.iter().any(|step| step == "lenso dev up"));
+        assert!(steps.iter().any(|step| step.contains("/src")));
+        assert!(steps.iter().all(|step| !step.contains("pnpm install")));
+        assert!(steps.iter().all(|step| !step.contains("module install")));
+        assert!(steps.iter().all(|step| !step.contains("module:release")));
+    }
+
+    #[test]
+    fn standalone_service_guidance_keeps_explicit_installation_steps() {
+        let steps = service_create_guidance(&scaffold(), "pnpm install", true, false);
+
+        assert!(steps.iter().any(|step| step == "pnpm install"));
+        assert!(steps.iter().any(|step| step.contains("module:release")));
+        assert!(steps.iter().any(|step| step.contains("module install")));
+        assert!(steps.iter().all(|step| step != "lenso dev up"));
     }
 
     #[test]
