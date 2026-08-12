@@ -1,5 +1,11 @@
 ## lenso-cli@0.2.16
 
+## 0.6.2
+
+### Patch Changes
+
+- 19822d5: Give generated TypeScript Services enough time to pass dependency safety checks during a cold local startup.
+
 ## 0.6.1
 
 ### Patch Changes
