@@ -116,7 +116,7 @@ export const service = defineService({
         cwd: {{service_cwd}},
         readyUrl: "{{service_status_url}}",
         autoStart: true,
-        readyTimeoutMs: 10000,
+        readyTimeoutMs: 30000,
       },
     ],
   },

@@ -15,6 +15,7 @@ const SERVICE_WORKSPACE_PROTOCOL: &str = "lenso.service-workspace.v1";
 const DEFAULT_SERVICE_WORKSPACE_FILE: &str = "lenso.workspace.json";
 const LEGACY_SERVICE_WORKSPACE_FILE: &str = ".lenso/services.json";
 const SERVICE_WORKSPACE_CHECK_TIMEOUT_MS: u64 = 2_000;
+const DEFAULT_SERVICE_READY_TIMEOUT_MS: u64 = 30_000;
 const RUST_SERVICE_READY_TIMEOUT_MS: u64 = 300_000;
 
 #[derive(Debug, Clone)]
@@ -1114,7 +1115,7 @@ const fn default_auto_start() -> bool {
 }
 
 const fn default_ready_timeout_ms() -> u64 {
-    10_000
+    DEFAULT_SERVICE_READY_TIMEOUT_MS
 }
 
 async fn service_package_plan(options: &ServicePackageOptions) -> Result<ServicePackagePlan> {
@@ -2117,7 +2118,7 @@ mod tests {
         assert_eq!(manifest["install"]["services"][0]["autoStart"], json!(true));
         assert_eq!(
             manifest["install"]["services"][0]["readyTimeoutMs"],
-            json!(10_000)
+            json!(DEFAULT_SERVICE_READY_TIMEOUT_MS)
         );
     }
 
@@ -2219,6 +2220,7 @@ mod tests {
         assert!(ts_service.contains("const moduleExport = \"support-suite\";"));
         assert!(ts_service.contains("export: moduleExport"));
         assert!(ts_service.contains("exportKey: moduleExport"));
+        assert!(ts_service.contains("readyTimeoutMs: 30000"));
         assert!(ts_server.contains("--check-release"));
         assert!(ts_server.contains("LENSO_LOCAL_ENROLLMENT_TOKEN"));
         assert!(ts_server.contains("providerCore"));
