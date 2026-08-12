@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -14,11 +15,13 @@ const SERVICE_WORKSPACE_PROTOCOL: &str = "lenso.service-workspace.v1";
 const DEFAULT_SERVICE_WORKSPACE_FILE: &str = "lenso.workspace.json";
 const LEGACY_SERVICE_WORKSPACE_FILE: &str = ".lenso/services.json";
 const SERVICE_WORKSPACE_CHECK_TIMEOUT_MS: u64 = 2_000;
+const RUST_SERVICE_READY_TIMEOUT_MS: u64 = 300_000;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ServiceCreateOptions {
     pub(crate) dry_run: bool,
     pub(crate) lang: ServiceLanguage,
+    pub(crate) local_framework_root: Option<PathBuf>,
     pub(crate) name: String,
     pub(crate) no_workspace: bool,
     pub(crate) output_dir: Option<PathBuf>,
@@ -90,11 +93,27 @@ pub(crate) struct ServiceWorkspaceInstallReference {
     pub(crate) manifest_reference: String,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct LocalWorkspaceEnrollment {
+    pub(crate) name: String,
+    pub(crate) base_url: String,
+    pub(crate) bearer_token: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DiscoveredWorkspaceService {
+    pub(crate) base_url: String,
+    pub(crate) bearer_token: String,
+    pub(crate) core: Value,
+    pub(crate) provider: Value,
+}
+
 impl From<&ServiceCreateArgs> for ServiceCreateOptions {
     fn from(args: &ServiceCreateArgs) -> Self {
         Self {
             dry_run: args.dry_run,
             lang: args.lang,
+            local_framework_root: args.local_framework_root.clone(),
             name: args.name.clone(),
             no_workspace: args.no_workspace,
             output_dir: args.output_dir.clone(),
@@ -143,21 +162,259 @@ pub(crate) async fn dev_service(options: ServiceDevOptions) -> Result<()> {
         .repo_root
         .as_deref()
         .unwrap_or_else(|| Path::new("."));
-    if !options.no_workspace {
-        start_service_workspace_services(repo_root, options.workspace_file.as_deref()).await?;
+    host::ensure_local_environment(repo_root)?;
+    let mut started = Vec::new();
+    let result = async {
+        if !options.no_workspace {
+            prepare_local_workspace_enrollments(repo_root, options.workspace_file.as_deref())?;
+            start_service_workspace_services_tracked(
+                repo_root,
+                options.workspace_file.as_deref(),
+                &mut started,
+            )
+            .await?;
+        }
+        module::start_declared_module_services_tracked(
+            options.repo_root.as_deref(),
+            options.module_services_file.as_deref(),
+            &mut started,
+        )
+        .await?;
+        let mut host_process = host::start(
+            options.repo_root.as_deref(),
+            options.skip_db,
+            options.skip_migrate,
+            options.separate_worker,
+        )
+        .await?;
+        loop {
+            tokio::select! {
+                signal = tokio::signal::ctrl_c() => {
+                    signal.context("listen for Ctrl-C")?;
+                    return Ok(());
+                }
+                () = tokio::time::sleep(Duration::from_millis(500)) => {
+                    host_process.check()?;
+                    module::check_started_module_services(&mut started)?;
+                }
+            }
+        }
     }
-    module::start_declared_module_services(
-        options.repo_root.as_deref(),
-        options.module_services_file.as_deref(),
-    )
-    .await?;
-    host::serve(
-        options.repo_root.as_deref(),
-        options.skip_db,
-        options.skip_migrate,
-        options.separate_worker,
-    )
-    .await
+    .await;
+    let cleanup = module::stop_started_module_services(&mut started).await;
+    match (result, cleanup) {
+        (Err(error), Err(cleanup)) => {
+            eprintln!("Local Service cleanup also failed: {cleanup:#}");
+            Err(error)
+        }
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), cleanup) => cleanup,
+    }
+}
+
+pub(crate) fn prepare_local_workspace_enrollments(
+    repo_root: &Path,
+    workspace_file: Option<&Path>,
+) -> Result<Vec<LocalWorkspaceEnrollment>> {
+    let path = service_workspace_read_path_from(repo_root, workspace_file);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let workspace = read_service_workspace(&path)?;
+    let workspace_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut enrollments = Vec::new();
+    for service in workspace
+        .services
+        .into_iter()
+        .filter(|service| service.auto_start)
+    {
+        let service_dir = absolutize_from(workspace_dir, Path::new(&service.cwd));
+        ensure_workspace_service_dependencies(&service, &service_dir)?;
+        let env_file = service_dir.join(".env.local");
+        let bearer_token = local_enrollment_token(&env_file)?;
+        let base_url = service_origin(&service.ready_url)?;
+        enrollments.push(LocalWorkspaceEnrollment {
+            name: service.name,
+            base_url,
+            bearer_token,
+        });
+    }
+    Ok(enrollments)
+}
+
+pub(crate) async fn discover_local_workspace_services(
+    enrollments: &[LocalWorkspaceEnrollment],
+) -> Result<Vec<DiscoveredWorkspaceService>> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .context("build local Service discovery client")?;
+    let mut discovered = Vec::with_capacity(enrollments.len());
+    for enrollment in enrollments {
+        let core_url = format!("{}/system-plane/v1", enrollment.base_url);
+        let core = client
+            .get(&core_url)
+            .bearer_auth(&enrollment.bearer_token)
+            .send()
+            .await
+            .with_context(|| format!("discover {} System Plane Core", enrollment.name))?
+            .error_for_status()
+            .with_context(|| {
+                format!(
+                    "{} does not expose an enrollable local System Plane",
+                    enrollment.name
+                )
+            })?
+            .json::<Value>()
+            .await
+            .with_context(|| format!("decode {} System Plane Core", enrollment.name))?;
+        let provider_url = format!("{}/lenso/provider/v1", enrollment.base_url);
+        let provider = client
+            .get(&provider_url)
+            .send()
+            .await
+            .with_context(|| format!("discover {} Provider descriptor", enrollment.name))?
+            .error_for_status()
+            .with_context(|| format!("{} does not expose lenso.provider.v1", enrollment.name))?
+            .json::<Value>()
+            .await
+            .with_context(|| format!("decode {} Provider descriptor", enrollment.name))?;
+        let core_service_id = core
+            .get("serviceId")
+            .and_then(Value::as_str)
+            .context("System Plane Core serviceId is required")?;
+        let provider_service_id = provider
+            .get("serviceId")
+            .and_then(Value::as_str)
+            .context("Provider descriptor serviceId is required")?;
+        if core_service_id != provider_service_id {
+            bail!(
+                "{} System Plane and Provider identities differ",
+                enrollment.name
+            );
+        }
+        discovered.push(DiscoveredWorkspaceService {
+            base_url: enrollment.base_url.clone(),
+            bearer_token: enrollment.bearer_token.clone(),
+            core,
+            provider,
+        });
+    }
+    Ok(discovered)
+}
+
+fn ensure_workspace_service_dependencies(
+    service: &ServiceWorkspaceService,
+    service_dir: &Path,
+) -> Result<()> {
+    if service.lang != "ts" || service_dir.join("node_modules/.modules.yaml").is_file() {
+        return Ok(());
+    }
+    let args = service_dependency_install_args(service_dir);
+    eprintln!("$ pnpm {}", args.join(" "));
+    let status = Command::new("pnpm")
+        .args(&args)
+        .current_dir(service_dir)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .with_context(|| format!("install {} dependencies", service.name))?;
+    if !status.success() {
+        bail!(
+            "{} dependency installation exited with {status}",
+            service.name
+        );
+    }
+    Ok(())
+}
+
+fn service_dependency_install_args(service_dir: &Path) -> Vec<&'static str> {
+    if service_dir.join("pnpm-lock.yaml").is_file() {
+        vec!["install", "--frozen-lockfile"]
+    } else {
+        vec!["install", "--no-frozen-lockfile"]
+    }
+}
+
+fn local_enrollment_token(path: &Path) -> Result<String> {
+    let existing = fs::read_to_string(path)
+        .ok()
+        .and_then(|source| dotenv_local_value(&source, "LENSO_LOCAL_ENROLLMENT_TOKEN"))
+        .filter(|value| value.len() >= 32 && !value.chars().any(char::is_whitespace));
+    let token = existing.unwrap_or(random_private_token()?);
+    let source = fs::read_to_string(path).unwrap_or_default();
+    let source = upsert_local_env_value(&source, "LENSO_LOCAL_ENROLLMENT_TOKEN", &token);
+    write_private_file(path, source.as_bytes())?;
+    Ok(token)
+}
+
+fn random_private_token() -> Result<String> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).context("generate local enrollment token")?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn service_origin(value: &str) -> Result<String> {
+    let mut url = reqwest::Url::parse(value).context("parse Service ready URL")?;
+    if url.scheme() != "http"
+        || !url.host_str().is_some_and(|host| {
+            host == "localhost"
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        })
+    {
+        bail!("local Service ready URL must use loopback HTTP");
+    }
+    url.set_path("");
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url.as_str().trim_end_matches('/').to_owned())
+}
+
+fn dotenv_local_value(source: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}=");
+    source.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix(&prefix)
+            .map(|value| value.trim_matches(['\'', '"']).to_owned())
+    })
+}
+
+fn upsert_local_env_value(source: &str, key: &str, value: &str) -> String {
+    let prefix = format!("{key}=");
+    let mut found = false;
+    let mut lines = source
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with(&prefix) {
+                found = true;
+                format!("{prefix}{value}")
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>();
+    if !found {
+        lines.push(format!("{prefix}{value}"));
+    }
+    format!("{}\n", lines.join("\n"))
+}
+
+fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create directory {}", parent.display()))?;
+    }
+    fs::write(path, contents).with_context(|| format!("write {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("protect {}", path.display()))?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn package_service(options: ServicePackageOptions) -> Result<()> {
@@ -397,9 +654,10 @@ pub(crate) fn export_service_workspace(options: ServiceWorkspaceExportOptions) -
     Ok(())
 }
 
-async fn start_service_workspace_services(
+pub(crate) async fn start_service_workspace_services_tracked(
     repo_root: &Path,
     workspace_file: Option<&Path>,
+    started: &mut Vec<module::StartedModuleService>,
 ) -> Result<()> {
     let path = service_workspace_read_path_from(repo_root, workspace_file);
     if !path.exists() {
@@ -415,7 +673,8 @@ async fn start_service_workspace_services(
     );
     let state = service_workspace_module_services_json(&workspace);
     write_file(&state_path, json_string_pretty(&state)?.as_bytes())?;
-    module::start_declared_module_services(Some(repo_root), Some(&state_path)).await
+    module::start_declared_module_services_tracked(Some(repo_root), Some(&state_path), started)
+        .await
 }
 
 async fn check_service_workspace_service(
@@ -615,7 +874,11 @@ fn queue_service_workspace_update(
             command: command.to_owned(),
             ready_url: scaffold.service_status_url.clone(),
             auto_start: true,
-            ready_timeout_ms: default_ready_timeout_ms(),
+            ready_timeout_ms: if lang == "rust" {
+                RUST_SERVICE_READY_TIMEOUT_MS
+            } else {
+                default_ready_timeout_ms()
+            },
             modules: vec![scaffold.module_name.clone()],
         },
     );
@@ -1136,6 +1399,12 @@ fn create_ts_service(options: ServiceCreateOptions) -> Result<()> {
     let mut pending_writes = PendingWrites::new();
     queue_template(
         &mut pending_writes,
+        scaffold.target_dir.join(".gitignore"),
+        include_str!("../templates/service-ts/.gitignore"),
+        &scaffold,
+    );
+    queue_template(
+        &mut pending_writes,
         scaffold.target_dir.join("package.json"),
         include_str!("../templates/service-ts/package.json.tmpl"),
         &scaffold,
@@ -1178,6 +1447,12 @@ fn create_ts_service(options: ServiceCreateOptions) -> Result<()> {
 fn create_rust_service(options: ServiceCreateOptions) -> Result<()> {
     let scaffold = service_scaffold(&options)?;
     let mut pending_writes = PendingWrites::new();
+    queue_template(
+        &mut pending_writes,
+        scaffold.target_dir.join(".gitignore"),
+        include_str!("../templates/service-rust/.gitignore"),
+        &scaffold,
+    );
     queue_template(
         &mut pending_writes,
         scaffold.target_dir.join("Cargo.toml"),
@@ -1262,6 +1537,7 @@ struct ServiceScaffold {
     crate_name: String,
     lenso_service_dependency: String,
     local_service_base_url: String,
+    module_export: String,
     module_name: String,
     output_root: PathBuf,
     package_name: String,
@@ -1299,12 +1575,13 @@ fn service_scaffold(options: &ServiceCreateOptions) -> Result<ServiceScaffold> {
     let namespace = service_namespace(&current_dir);
     let module_name = format!("{namespace}/{module_slug}");
     let service_id = format!("{namespace}/{service_name}");
-    let dependencies = service_dependencies();
+    let dependencies = service_dependencies(options.local_framework_root.as_deref())?;
     let local_service_base_url = format!("http://127.0.0.1:{}/lenso/service/v1", options.port);
     Ok(ServiceScaffold {
         crate_name: snake_case(&service_name),
         lenso_service_dependency: dependencies.lenso_service_dependency,
         local_service_base_url: local_service_base_url.clone(),
+        module_export: module_slug.clone(),
         module_name: module_name.clone(),
         output_root,
         package_name: service_name.clone(),
@@ -1344,6 +1621,7 @@ fn render_template(template: &str, scaffold: &ServiceScaffold) -> String {
             &scaffold.local_service_base_url,
         )
         .replace("{{service_status_url}}", &scaffold.service_status_url)
+        .replace("{{module_export}}", &scaffold.module_export)
         .replace("{{module_name}}", &scaffold.module_name)
         .replace("{{package_name}}", &scaffold.package_name)
         .replace("{{crate_name}}", &scaffold.crate_name)
@@ -1371,45 +1649,38 @@ struct ServiceDependencyPlan {
     service_kit_dependency: String,
 }
 
-fn service_dependencies() -> ServiceDependencyPlan {
-    let Some(framework_root) = find_framework_root() else {
-        return ServiceDependencyPlan {
-            lenso_service_dependency: "lenso-service = \"0.1.0\"".to_owned(),
+fn service_dependencies(local_framework_root: Option<&Path>) -> Result<ServiceDependencyPlan> {
+    let Some(framework_root) = local_framework_root else {
+        return Ok(ServiceDependencyPlan {
+            lenso_service_dependency: "lenso-service = \"0.1\"".to_owned(),
             pnpm_workspace_overrides: String::new(),
-            publish_note: Some(
-                "@lenso/service-kit and lenso-service must be published, or replace dependencies with local paths.".to_owned(),
-            ),
+            publish_note: None,
             service_kit_dependency: json_string("^0.4.0"),
-        };
+        });
     };
 
+    let current_dir = std::env::current_dir().context("resolve current directory")?;
+    let framework_root = absolutize_from(&current_dir, framework_root);
     let service_kit = framework_root.join("lenso/sdk/typescript/packages/service-kit");
     let lenso_service = framework_root.join("lenso/crates/lenso-service");
-    ServiceDependencyPlan {
+    if !service_kit.is_dir() || !lenso_service.is_dir() {
+        bail!(
+            "local framework root {} must contain lenso/sdk/typescript/packages/service-kit and lenso/crates/lenso-service",
+            framework_root.display()
+        );
+    }
+    Ok(ServiceDependencyPlan {
         lenso_service_dependency: format!(
             "lenso-service = {{ path = \"{}\" }}",
             toml_string(&lenso_service)
         ),
         pnpm_workspace_overrides: String::new(),
-        publish_note: None,
+        publish_note: Some(
+            "Local framework dependencies are enabled; use published dependencies before publishing the Service."
+                .to_owned(),
+        ),
         service_kit_dependency: json_string(&format!("file:{}", service_kit.display())),
-    }
-}
-
-fn find_framework_root() -> Option<PathBuf> {
-    let mut current = std::env::current_dir().ok()?;
-    loop {
-        if current
-            .join("lenso/sdk/typescript/packages/service-kit")
-            .is_dir()
-            && current.join("lenso/crates/lenso-service").is_dir()
-        {
-            return Some(current);
-        }
-        if !current.pop() {
-            return None;
-        }
-    }
+    })
 }
 
 fn json_string(value: &str) -> String {
@@ -1546,6 +1817,7 @@ mod tests {
             crate_name: "support_suite_provider".to_owned(),
             lenso_service_dependency: "lenso-service = \"0.1.0\"".to_owned(),
             local_service_base_url: "http://127.0.0.1:4110/lenso/service/v1".to_owned(),
+            module_export: "support-suite".to_owned(),
             module_name: "local/support-suite".to_owned(),
             output_root: PathBuf::from("/tmp/services"),
             package_name: "support-suite-provider".to_owned(),
@@ -1796,7 +2068,7 @@ mod tests {
         assert_eq!(manifest["install"]["services"][0]["autoStart"], json!(true));
         assert_eq!(
             manifest["install"]["services"][0]["readyTimeoutMs"],
-            json!(10_000)
+            json!(RUST_SERVICE_READY_TIMEOUT_MS)
         );
     }
 
@@ -1810,6 +2082,20 @@ mod tests {
                 .expect("manifest should parse");
 
             assert_eq!(manifest["protocol"], "lenso.service.v1");
+        }
+    }
+
+    #[test]
+    fn generated_service_manifests_describe_the_status_route() {
+        for template in [
+            include_str!("../templates/service-ts/lenso.service.json.tmpl"),
+            include_str!("../templates/service-rust/lenso.service.json.tmpl"),
+        ] {
+            let manifest: Value = serde_json::from_str(&render_template(template, &scaffold()))
+                .expect("manifest should parse");
+
+            assert_eq!(manifest["modules"][0]["http_routes"][0]["method"], "GET");
+            assert_eq!(manifest["modules"][0]["http_routes"][0]["path"], "/status");
         }
     }
 
@@ -1830,6 +2116,10 @@ mod tests {
 
         assert!(ts_service.contains("lenso.module-release.v1"));
         assert!(ts_service.contains("providerV1"));
+        assert!(ts_service.contains("const moduleId = \"local/support-suite\";"));
+        assert!(ts_service.contains("const moduleExport = \"support-suite\";"));
+        assert!(ts_service.contains("export: moduleExport"));
+        assert!(ts_service.contains("exportKey: moduleExport"));
         assert!(ts_server.contains("--check-release"));
         assert!(ts_server.contains("LENSO_LOCAL_ENROLLMENT_TOKEN"));
         assert!(ts_server.contains("providerCore"));
@@ -1978,6 +2268,48 @@ mod tests {
         ] {
             assert_no_template_tokens(&render_template(template, &scaffold));
         }
+    }
+
+    #[test]
+    fn published_dependencies_are_the_default() {
+        let dependencies = service_dependencies(None).unwrap();
+
+        assert_eq!(dependencies.service_kit_dependency, "\"^0.4.0\"");
+        assert_eq!(
+            dependencies.lenso_service_dependency,
+            "lenso-service = \"0.1\""
+        );
+        assert!(dependencies.publish_note.is_none());
+    }
+
+    #[test]
+    fn first_typescript_start_creates_a_lockfile_then_requires_it() {
+        let root = test_dir("service-dependency-install");
+        fs::create_dir_all(&root).unwrap();
+        assert_eq!(
+            service_dependency_install_args(&root),
+            vec!["install", "--no-frozen-lockfile"]
+        );
+        fs::write(root.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+        assert_eq!(
+            service_dependency_install_args(&root),
+            vec!["install", "--frozen-lockfile"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_dependencies_require_an_explicit_framework_root() {
+        let root = test_dir("explicit-framework-root");
+        fs::create_dir_all(root.join("lenso/sdk/typescript/packages/service-kit")).unwrap();
+        fs::create_dir_all(root.join("lenso/crates/lenso-service")).unwrap();
+
+        let dependencies = service_dependencies(Some(&root)).unwrap();
+
+        assert!(dependencies.service_kit_dependency.contains("file:"));
+        assert!(dependencies.lenso_service_dependency.contains("path ="));
+        assert!(dependencies.publish_note.is_some());
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn assert_no_template_tokens(source: &str) {

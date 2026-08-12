@@ -1580,6 +1580,7 @@ fn create_service_scaffold(service: &BlueprintService) -> Result<()> {
     service::create_service(service::ServiceCreateOptions {
         dry_run: false,
         lang: service.lang,
+        local_framework_root: None,
         name: service.name.clone(),
         no_workspace: false,
         output_dir: Some(PathBuf::from("services")),

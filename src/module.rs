@@ -1097,7 +1097,7 @@ fn catalog_service_manifest_reference_for_module<'a>(
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .any(|module| module.get("name").and_then(Value::as_str) == Some(module_name));
+            .any(|module| service_manifest_module_name(module) == Some(module_name));
 
     (entry_name_matches || provided_module_matches)
         .then(|| catalog_service_manifest_reference(entry))
@@ -2656,6 +2656,12 @@ pub async fn logs_module_service(options: ModuleServiceLogsOptions) -> Result<()
 }
 
 pub async fn start_module_service(options: ModuleServiceStartOptions) -> Result<()> {
+    start_module_service_with_outcome(options).await.map(|_| ())
+}
+
+async fn start_module_service_with_outcome(
+    options: ModuleServiceStartOptions,
+) -> Result<Option<StartedModuleService>> {
     let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
     let module_services_path =
         resolve_module_services_file_path(&repo_root, options.module_services_file.as_deref());
@@ -2668,7 +2674,7 @@ pub async fn start_module_service(options: ModuleServiceStartOptions) -> Result<
         .context("build module service HTTP client")?;
     if provider_service_ready_url(&client, &service.ready_url).await {
         println!("{}/{} already ready", module_name, service.name);
-        return Ok(());
+        return Ok(None);
     }
 
     let services_state_dir = module_services_path
@@ -2707,13 +2713,20 @@ pub async fn start_module_service(options: ModuleServiceStartOptions) -> Result<
         .try_clone()
         .with_context(|| format!("clone service log {}", log_file_path.display()))?;
     // ponytail: local dev process control; a real supervisor belongs in deployment tooling.
-    let mut child = shell_command(&service.command)
+    let mut command = shell_command(&service.command);
+    command
         .current_dir(cwd)
         .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(stderr_log))
+        .stderr(Stdio::from(stderr_log));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
+    let mut child = command
         .spawn()
         .with_context(|| format!("start service {}/{}", module_name, service.name))?;
-    write_service_lock(&lock_file_path)?;
+    write_service_lock(&lock_file_path, child.id())?;
     write_file(&pid_file_path, format!("{}\n", child.id()).as_bytes())?;
     println!(
         "Started service {}/{} with pid {}. Logs: {}",
@@ -2731,26 +2744,99 @@ pub async fn start_module_service(options: ModuleServiceStartOptions) -> Result<
         &pid_file_path,
     )
     .await?;
+    Ok(Some(StartedModuleService {
+        module_name,
+        service_name: service.name,
+        child,
+        lock_file_path,
+        pid_file_path,
+    }))
+}
+
+#[derive(Debug)]
+pub(crate) struct StartedModuleService {
+    module_name: String,
+    service_name: String,
+    child: Child,
+    lock_file_path: PathBuf,
+    pid_file_path: PathBuf,
+}
+
+impl StartedModuleService {
+    fn check(&mut self) -> Result<()> {
+        if let Some(status) = self
+            .child
+            .try_wait()
+            .with_context(|| format!("check service {}/{}", self.module_name, self.service_name))?
+        {
+            let _ = fs::remove_file(&self.pid_file_path);
+            let _ = fs::remove_file(&self.lock_file_path);
+            bail!(
+                "service {}/{} exited with {status}",
+                self.module_name,
+                self.service_name
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn stop(mut self) -> Result<()> {
+        terminate_service_process_group(&mut self.child)
+            .await
+            .with_context(|| format!("stop service {}/{}", self.module_name, self.service_name))?;
+        let _ = self.child.wait();
+        let _ = fs::remove_file(&self.pid_file_path);
+        let _ = fs::remove_file(&self.lock_file_path);
+        println!(
+            "Stopped service {}/{}.",
+            self.module_name, self.service_name
+        );
+        Ok(())
+    }
+}
+
+pub(crate) fn check_started_module_services(started: &mut [StartedModuleService]) -> Result<()> {
+    for service in started {
+        service.check()?;
+    }
     Ok(())
 }
 
-pub async fn start_declared_module_services(
+pub(crate) async fn stop_started_module_services(
+    started: &mut Vec<StartedModuleService>,
+) -> Result<()> {
+    let mut first_error = None;
+    while let Some(service) = started.pop() {
+        if let Err(error) = service.stop().await
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+pub(crate) async fn start_declared_module_services_tracked(
     repo_root: Option<&Path>,
     module_services_file: Option<&Path>,
+    started: &mut Vec<StartedModuleService>,
 ) -> Result<()> {
     let repo_root = repo_root.unwrap_or_else(|| Path::new("."));
     let module_services_path = resolve_module_services_file_path(repo_root, module_services_file);
     let states = read_service_module_service_states(&module_services_path)?;
     for state in states {
         for service in state.services {
-            if service.auto_start {
-                start_module_service(ModuleServiceStartOptions {
-                    module_name: state.module_name.clone(),
-                    service_name: service.name.clone(),
-                    module_services_file: Some(module_services_path.clone()),
-                    repo_root: Some(repo_root.to_path_buf()),
-                })
-                .await?;
+            if service.auto_start
+                && let Some(service) =
+                    start_module_service_with_outcome(ModuleServiceStartOptions {
+                        module_name: state.module_name.clone(),
+                        service_name: service.name.clone(),
+                        module_services_file: Some(module_services_path.clone()),
+                        repo_root: Some(repo_root.to_path_buf()),
+                    })
+                    .await?
+            {
+                started.push(service);
             }
         }
     }
@@ -2877,7 +2963,7 @@ fn service_process_label(auto_start: bool) -> &'static str {
     if auto_start { "host-started" } else { "manual" }
 }
 
-fn write_service_lock(lock_file_path: &Path) -> Result<()> {
+fn write_service_lock(lock_file_path: &Path, process_group_id: u32) -> Result<()> {
     if let Some(parent) = lock_file_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("create directory {}", parent.display()))?;
@@ -2889,8 +2975,60 @@ fn write_service_lock(lock_file_path: &Path) -> Result<()> {
         .with_context(|| format!("create {}", lock_file_path.display()))?;
     write_file(
         lock_file_path,
-        format!("owner_pid={}\n", std::process::id()).as_bytes(),
+        format!("protocol=lenso.local-service-process.v1\nprocess_group_id={process_group_id}\n")
+            .as_bytes(),
     )
+}
+
+#[cfg(unix)]
+async fn terminate_service_process_group(child: &mut Child) -> Result<()> {
+    use nix::errno::Errno;
+    use nix::sys::signal::{Signal, killpg};
+    use nix::unistd::Pid;
+
+    let process_group_id = child.id();
+    let raw = i32::try_from(process_group_id).context("service process id does not fit i32")?;
+    let group = Pid::from_raw(raw);
+    match killpg(group, Signal::SIGTERM) {
+        Ok(()) | Err(Errno::ESRCH) => {}
+        Err(error) => return Err(error.into()),
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if child
+            .try_wait()
+            .context("check local Service process after SIGTERM")?
+            .is_some()
+        {
+            return Ok(());
+        }
+        match killpg(group, None) {
+            Err(Errno::ESRCH) => return Ok(()),
+            Ok(()) | Err(Errno::EPERM) if Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Ok(()) | Err(Errno::EPERM) => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    match killpg(group, Signal::SIGKILL) {
+        Ok(()) | Err(Errno::ESRCH) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(not(unix))]
+async fn terminate_service_process_group(child: &mut Child) -> Result<()> {
+    let process_group_id = child.id();
+    let status = Command::new("taskkill")
+        .args(["/PID", &process_group_id.to_string(), "/T", "/F"])
+        .status()
+        .context("stop local Service process tree")?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("taskkill failed for pid {process_group_id}")
+    }
 }
 
 pub async fn check_service_manifest_reference(
@@ -2979,7 +3117,7 @@ pub async fn check_service_manifest_reference(
         .ok_or_else(|| anyhow!("Service manifest modules must be an array"))?;
     let mut module_names = modules
         .iter()
-        .filter_map(|module| module.get("name").and_then(Value::as_str))
+        .filter_map(service_manifest_module_name)
         .collect::<Vec<_>>();
     module_names.sort_unstable();
     module_names.dedup();
@@ -3251,7 +3389,7 @@ fn service_manifest_operations(manifest: &Value, filter: Option<&str>) -> Vec<Va
         .into_iter()
         .flatten()
     {
-        let Some(module_name) = module.get("name").and_then(Value::as_str) else {
+        let Some(module_name) = service_manifest_module_name(module) else {
             continue;
         };
         for route in module
@@ -6320,7 +6458,7 @@ fn service_module_name_set(manifest: &Value) -> BTreeSet<String> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|module| module.get("name").and_then(Value::as_str))
+        .filter_map(service_manifest_module_name)
         .map(ToOwned::to_owned)
         .collect()
 }
@@ -6330,7 +6468,7 @@ fn service_module<'a>(manifest: &'a Value, module_name: &str) -> Option<&'a Valu
         .get("modules")
         .and_then(Value::as_array)?
         .iter()
-        .find(|module| module.get("name").and_then(Value::as_str) == Some(module_name))
+        .find(|module| service_manifest_module_name(module) == Some(module_name))
 }
 
 fn service_module_string_set(manifest: &Value, module_name: &str, key: &str) -> BTreeSet<String> {
@@ -7365,7 +7503,7 @@ fn ensure_module_release_matches_service_manifest(
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .find(|module| module.get("name").and_then(Value::as_str) == Some(release_name))
+        .find(|module| service_manifest_module_name(module) == Some(release_name))
         .ok_or_else(|| {
             anyhow!("Module release `{release_name}` is not provided by service `{service_name}`")
         })?;
@@ -7484,7 +7622,7 @@ fn ensure_service_package_matches_manifest(
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|module| module.get("name").and_then(Value::as_str))
+        .filter_map(service_manifest_module_name)
         .map(str::trim)
         .collect::<BTreeSet<_>>();
     if package_modules != service_modules {
@@ -7533,7 +7671,9 @@ fn validate_service_manifest(manifest: Value) -> Result<Value> {
         if !module.is_object() {
             bail!("Service manifest modules entries must be objects");
         }
-        let module_name = string_field(module, "name")?.trim();
+        let module_name = service_manifest_module_name(module)
+            .map(str::trim)
+            .ok_or_else(|| anyhow!("Service manifest module name or module_id is required"))?;
         if module_name.is_empty() {
             bail!("Service manifest module name is required");
         }
@@ -7550,6 +7690,14 @@ fn validate_service_manifest(manifest: Value) -> Result<Value> {
         )?;
     }
     Ok(manifest)
+}
+
+fn service_manifest_module_name(module: &Value) -> Option<&str> {
+    module
+        .get("name")
+        .or_else(|| module.get("module_id"))
+        .or_else(|| module.get("moduleId"))
+        .and_then(Value::as_str)
 }
 
 fn validate_service_provider(manifest: &Value) -> Result<()> {
@@ -7676,6 +7824,11 @@ fn service_module_install_manifests(
             let object = module_manifest
                 .as_object_mut()
                 .ok_or_else(|| anyhow!("Service manifest modules entries must be objects"))?;
+            if !object.contains_key("name")
+                && let Some(module_id) = object.get("module_id").cloned()
+            {
+                object.insert("name".to_owned(), module_id);
+            }
             object.insert("source".to_owned(), json!("service"));
             object
                 .entry("version".to_owned())
@@ -9134,8 +9287,7 @@ async fn wait_for_started_module_service_ready(
             .try_wait()
             .with_context(|| format!("check service {}/{}", module_name, service.name))?
         {
-            let _ = fs::remove_file(pid_file_path);
-            let _ = fs::remove_file(lock_file_path);
+            cleanup_failed_started_service(child, lock_file_path, pid_file_path);
             bail!(
                 "service {}/{} exited before ready: {status}",
                 module_name,
@@ -9143,6 +9295,7 @@ async fn wait_for_started_module_service_ready(
             );
         }
         if Instant::now() >= deadline {
+            cleanup_failed_started_service(child, lock_file_path, pid_file_path);
             bail!(
                 "service {}/{} did not become ready at {} within {}ms",
                 module_name,
@@ -9152,6 +9305,33 @@ async fn wait_for_started_module_service_ready(
             );
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn cleanup_failed_started_service(child: &mut Child, lock_file_path: &Path, pid_file_path: &Path) {
+    force_stop_started_service(child);
+    let _ = fs::remove_file(pid_file_path);
+    let _ = fs::remove_file(lock_file_path);
+}
+
+#[cfg(unix)]
+fn force_stop_started_service(child: &mut Child) {
+    use nix::sys::signal::{Signal, killpg};
+    use nix::unistd::Pid;
+
+    if !matches!(child.try_wait(), Ok(Some(_))) {
+        if let Ok(raw) = i32::try_from(child.id()) {
+            let _ = killpg(Pid::from_raw(raw), Signal::SIGKILL);
+        }
+        let _ = child.wait();
+    }
+}
+
+#[cfg(not(unix))]
+fn force_stop_started_service(child: &mut Child) {
+    if !matches!(child.try_wait(), Ok(Some(_))) {
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
 
@@ -10145,6 +10325,41 @@ fn write_json(path: &Path, value: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stopping_a_started_service_reaps_its_process_group_and_state() {
+        use std::os::unix::process::CommandExt as _;
+
+        let root = std::env::temp_dir().join(format!(
+            "lenso-cli-started-service-stop-{}",
+            uuid::Uuid::now_v7()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let lock_file_path = root.join("service.lock");
+        let pid_file_path = root.join("service.pid");
+
+        let mut command = shell_command("sleep 60");
+        command.process_group(0);
+        let child = command.spawn().unwrap();
+        write_service_lock(&lock_file_path, child.id()).unwrap();
+        write_file(&pid_file_path, format!("{}\n", child.id()).as_bytes()).unwrap();
+
+        StartedModuleService {
+            module_name: "taste-service".to_owned(),
+            service_name: "taste-service".to_owned(),
+            child,
+            lock_file_path: lock_file_path.clone(),
+            pid_file_path: pid_file_path.clone(),
+        }
+        .stop()
+        .await
+        .unwrap();
+
+        assert!(!lock_file_path.exists());
+        assert!(!pid_file_path.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[tokio::test]
     async fn exact_provider_install_writes_host_runtime_inputs() {
@@ -12460,7 +12675,10 @@ mod tests {
             &manifest_path,
             &json!({
                 "modules": [
-                    { "name": "support-ticket" }
+                    {
+                        "module_id": "support/support-ticket",
+                        "protocol": "lenso.module-manifest.v1"
+                    }
                 ],
                 "name": "support-suite-provider",
                 "protocol": "lenso.service.v1",
