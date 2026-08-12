@@ -205,10 +205,14 @@ lenso dev up --console-root ../lenso-console
 The first run securely prompts for the local Operator password. Automation can
 pass `--operator-password-file` with an owner-only regular file. The command
 creates loopback-only enrollment evidence, starts and migrates both Stores,
-builds the Console, configures or reuses the durable Operator, reconciles
-Module-owned UI artifacts, and connects the exact topology. Ctrl-C stops the
-Host, Console, and only the Services started by that invocation. Story is a
-Console-owned linked surface; it does not require a separate Module install.
+builds the Console, installs every workspace Provider export from its exact
+Module Release, configures or reuses the durable Operator, reconciles
+Module-owned UI artifacts, and connects the exact topology. Provider releases
+and Service Installation state are written before the authoritative Host starts,
+so `connected` and a callable Host business route refer to the same locked
+export. Ctrl-C stops the Host, Console, and only the Services started by that
+invocation. Story is a Console-owned linked surface; it does not require a
+separate Module install.
 
 After installing and starting the independent Lenso Console Service, create its
 first password user and bootstrap that user as the first Console Operator from
