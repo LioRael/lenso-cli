@@ -1,5 +1,11 @@
 ## lenso-cli@0.2.16
 
+## 0.6.3
+
+### Patch Changes
+
+- a0cfb36: Allow a freshly created PostgreSQL container to finish its cold initialization before starting the Host.
+
 ## 0.6.2
 
 ### Patch Changes
