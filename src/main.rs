@@ -251,7 +251,7 @@ struct AppComposeArgs {
 
 #[derive(Debug, Subcommand)]
 enum DevCommand {
-    /// Start the local Host and Services, optionally with a connected Console.
+    /// Start the local Host, Services, and a connected Console.
     Up(DevUpArgs),
     /// Inspect local application status.
     Status(DevStatusArgs),
@@ -293,9 +293,13 @@ struct DevUpArgs {
     #[arg(long)]
     separate_worker: bool,
 
-    /// Start, configure, and connect a local Console Service from this checkout.
+    /// Use this Console source checkout instead of the pinned local image.
     #[arg(long, value_name = "PATH")]
     console_root: Option<std::path::PathBuf>,
+
+    /// Start only the Host and Services without the local Console.
+    #[arg(long, conflicts_with = "console_root")]
+    no_console: bool,
 
     /// Password identifier for the idempotent local Console operator.
     #[arg(long, default_value = "admin@lenso.local")]
@@ -907,7 +911,7 @@ struct ConsoleDoctorArgs {
 
 #[derive(Debug, Args, Clone)]
 struct ConsoleDevArgs {
-    /// Console repository root. Defaults to the current repository.
+    /// Use this Console source checkout instead of the pinned local image.
     #[arg(long = "console-root")]
     console_root: Option<std::path::PathBuf>,
 }
@@ -2808,13 +2812,10 @@ async fn main() -> anyhow::Result<()> {
         },
         Command::Dev { command } => match command {
             DevCommand::Up(args) => {
-                if let Some(console_root) = args.console_root {
-                    console_local::dev_up(console_local::DevConsoleOptions {
-                        console_root,
+                if args.no_console {
+                    service::dev_service(service::ServiceDevOptions {
                         module_services_file: args.module_services_file,
                         no_workspace: args.no_workspace,
-                        operator_identifier: args.operator_identifier,
-                        operator_password_file: args.operator_password_file,
                         repo_root: args.repo_root,
                         separate_worker: args.separate_worker,
                         skip_db: args.skip_db,
@@ -2823,9 +2824,12 @@ async fn main() -> anyhow::Result<()> {
                     })
                     .await?;
                 } else {
-                    service::dev_service(service::ServiceDevOptions {
+                    console_local::dev_up(console_local::DevConsoleOptions {
+                        console_root: args.console_root,
                         module_services_file: args.module_services_file,
                         no_workspace: args.no_workspace,
+                        operator_identifier: args.operator_identifier,
+                        operator_password_file: args.operator_password_file,
                         repo_root: args.repo_root,
                         separate_worker: args.separate_worker,
                         skip_db: args.skip_db,
@@ -2985,7 +2989,8 @@ async fn main() -> anyhow::Result<()> {
             ConsoleCommand::Dev(args) => {
                 console_dev::run_console_dev(console_dev::ConsoleDevOptions {
                     console_root: args.console_root,
-                })?;
+                })
+                .await?;
             }
         },
         Command::Ga { command } => match command {
@@ -3640,9 +3645,43 @@ mod tests {
             Some(std::path::Path::new("../lenso-console"))
         );
         assert_eq!(args.operator_identifier, "operator@example.com");
+        assert!(!args.no_console);
         assert_eq!(
             args.operator_password_file.as_deref(),
             Some(std::path::Path::new(".lenso/operator-password"))
+        );
+    }
+
+    #[test]
+    fn dev_up_starts_console_by_default_and_allows_an_explicit_opt_out() {
+        let cli = Cli::parse_from(["lenso", "dev", "up"]);
+        let Command::Dev {
+            command: DevCommand::Up(defaults),
+        } = cli.command
+        else {
+            panic!("expected dev up");
+        };
+        assert!(!defaults.no_console);
+        assert!(defaults.console_root.is_none());
+
+        let cli = Cli::parse_from(["lenso", "dev", "up", "--no-console"]);
+        let Command::Dev {
+            command: DevCommand::Up(host_only),
+        } = cli.command
+        else {
+            panic!("expected dev up");
+        };
+        assert!(host_only.no_console);
+        assert!(
+            Cli::try_parse_from([
+                "lenso",
+                "dev",
+                "up",
+                "--no-console",
+                "--console-root",
+                "../lenso-console",
+            ])
+            .is_err()
         );
     }
 

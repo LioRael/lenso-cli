@@ -32,7 +32,7 @@ const CONSOLE_KEY_ID: &str = "console-local-1";
 
 #[derive(Debug, Clone)]
 pub(crate) struct DevConsoleOptions {
-    pub(crate) console_root: PathBuf,
+    pub(crate) console_root: Option<PathBuf>,
     pub(crate) module_services_file: Option<PathBuf>,
     pub(crate) no_workspace: bool,
     pub(crate) operator_identifier: String,
@@ -207,7 +207,13 @@ struct ManagementPolicy {
 
 pub(crate) async fn dev_up(options: DevConsoleOptions) -> Result<()> {
     let mut started = Vec::new();
-    let result = dev_up_inner(options, &mut started).await;
+    let result = tokio::select! {
+        signal = tokio::signal::ctrl_c() => {
+            signal.context("listen for Ctrl-C")?;
+            Ok(())
+        }
+        result = dev_up_inner(options, &mut started) => result,
+    };
     let cleanup = module::stop_started_module_services(&mut started).await;
     match (result, cleanup) {
         (Err(error), Err(cleanup)) => {
@@ -224,7 +230,11 @@ async fn dev_up_inner(
     started: &mut Vec<module::StartedModuleService>,
 ) -> Result<()> {
     let repo_root = absolute_existing(options.repo_root.as_deref().unwrap_or(Path::new(".")))?;
-    let console_root = absolute_existing(&options.console_root)?;
+    let console_root = options
+        .console_root
+        .as_deref()
+        .map(absolute_existing)
+        .transpose()?;
     let host_env = host::ensure_local_environment(&repo_root)?;
     let system_id = local_system_id(&repo_root)?;
     let host_service_id = host::dotenv_value(&repo_root, "SERVICE_NAME")
@@ -362,7 +372,8 @@ async fn dev_up_inner(
         "LENSO_MODULE_LENSO_SYSTEM_REGISTRY__ENROLLMENT_TRUST".to_owned(),
         serde_json::to_string(&trust).context("encode local Console enrollment trust")?,
     )]);
-    let console_runtime = console_dev::prepare_console_dev(Some(&console_root), &environment)?;
+    let console_runtime =
+        console_dev::prepare_console_dev(console_root.as_deref(), Some(&repo_root), &environment)?;
     let mut console_process = console_dev::spawn_console_dev(&console_runtime)?;
     wait_for_http(
         &format!("{}health/ready", console_runtime.url),
@@ -374,7 +385,7 @@ async fn dev_up_inner(
 
     let operator =
         console_operator::ensure_local_operator(console_operator::LocalOperatorOptions {
-            console_root: console_root.clone(),
+            console_root: console_runtime.root.clone(),
             console_url: console_runtime.url.clone(),
             env_file: console_runtime.env_file.clone(),
             identifier: options.operator_identifier,
@@ -427,17 +438,10 @@ async fn dev_up_inner(
     eprintln!();
     eprintln!("Press Ctrl-C to stop Host, Console, and Services started by this command.");
     loop {
-        tokio::select! {
-            signal = tokio::signal::ctrl_c() => {
-                signal.context("listen for Ctrl-C")?;
-                return Ok(());
-            }
-            () = tokio::time::sleep(Duration::from_millis(500)) => {
-                host_process.check()?;
-                console_process.check()?;
-                module::check_started_module_services(started)?;
-            }
-        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        host_process.check()?;
+        console_process.check()?;
+        module::check_started_module_services(started)?;
     }
 }
 

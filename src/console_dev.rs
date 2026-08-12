@@ -2,32 +2,36 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use sha2::{Digest as _, Sha256};
+
+const LOCAL_CONSOLE_IMAGE: &str = "ghcr.io/liorael/lenso-console@sha256:17a13080be00c62126caac6ca54866ffd0ecda8fc30586d6b98fbafb9ca0a753";
 
 #[derive(Debug, Clone)]
 pub struct ConsoleDevOptions {
     pub console_root: Option<PathBuf>,
 }
 
-pub fn run_console_dev(options: ConsoleDevOptions) -> Result<()> {
-    let runtime = prepare_console_dev(options.console_root.as_deref(), &BTreeMap::new())?;
+pub async fn run_console_dev(options: ConsoleDevOptions) -> Result<()> {
+    let runtime = prepare_console_dev(options.console_root.as_deref(), None, &BTreeMap::new())?;
     eprintln!(
         "Console local environment is ready at {}.",
         runtime.url.trim_end_matches('/')
     );
     let mut process = spawn_console_dev(&runtime)?;
     loop {
-        if process
-            .child
-            .try_wait()
-            .context("check Console Service process")?
-            .is_some()
-        {
-            return process.check();
+        tokio::select! {
+            signal = tokio::signal::ctrl_c() => {
+                signal.context("listen for Ctrl-C")?;
+                process.stop();
+                return Ok(());
+            }
+            () = tokio::time::sleep(Duration::from_millis(500)) => {
+                process.check()?;
+            }
         }
-        std::thread::sleep(std::time::Duration::from_millis(500));
     }
 }
 
@@ -36,32 +40,104 @@ pub(crate) struct ConsoleDevRuntime {
     pub(crate) root: PathBuf,
     pub(crate) env_file: PathBuf,
     pub(crate) url: String,
+    backend: ConsoleDevBackend,
     launch_environment: BTreeMap<String, String>,
+}
+
+#[derive(Clone)]
+enum ConsoleDevBackend {
+    Source,
+    Container {
+        compose_file: PathBuf,
+        project: String,
+    },
 }
 
 #[derive(Debug)]
 pub(crate) struct ConsoleDevProcess {
-    child: Child,
+    process: ConsoleDevProcessKind,
+}
+
+#[derive(Debug)]
+enum ConsoleDevProcessKind {
+    Source(Child),
+    Container {
+        compose_file: PathBuf,
+        env_file: PathBuf,
+        project: String,
+        root: PathBuf,
+        stopped: bool,
+        last_check: Instant,
+    },
 }
 
 impl ConsoleDevProcess {
     pub(crate) fn check(&mut self) -> Result<()> {
-        if let Some(status) = self
-            .child
-            .try_wait()
-            .context("check Console Service process")?
-        {
-            bail!("Console Service exited with {status}");
+        match &mut self.process {
+            ConsoleDevProcessKind::Source(child) => {
+                if let Some(status) = child.try_wait().context("check Console Service process")? {
+                    bail!("Console Service exited with {status}");
+                }
+            }
+            ConsoleDevProcessKind::Container {
+                compose_file,
+                env_file,
+                project,
+                root,
+                stopped,
+                last_check,
+            } if !*stopped => {
+                if last_check.elapsed() < Duration::from_secs(2) {
+                    return Ok(());
+                }
+                let output = compose_output(
+                    root,
+                    env_file,
+                    compose_file,
+                    project,
+                    &["ps", "--status", "running", "--services", "console"],
+                )?;
+                if output.trim() != "console" {
+                    bail!("Console Service container is not running");
+                }
+                *last_check = Instant::now();
+            }
+            ConsoleDevProcessKind::Container { .. } => {}
         }
         Ok(())
     }
 
     pub(crate) fn stop(&mut self) {
-        if matches!(self.child.try_wait(), Ok(Some(_))) {
-            return;
+        match &mut self.process {
+            ConsoleDevProcessKind::Source(child) => {
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    return;
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            ConsoleDevProcessKind::Container {
+                compose_file,
+                env_file,
+                project,
+                root,
+                stopped,
+                ..
+            } => {
+                if *stopped {
+                    return;
+                }
+                let _ = run_compose(
+                    root,
+                    env_file,
+                    compose_file,
+                    project,
+                    &["stop", "console"],
+                    "Console Service",
+                );
+                *stopped = true;
+            }
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
         eprintln!("Stopped Console Service.");
     }
 }
@@ -74,9 +150,21 @@ impl Drop for ConsoleDevProcess {
 
 pub(crate) fn prepare_console_dev(
     console_root: Option<&Path>,
+    runtime_root: Option<&Path>,
     environment: &BTreeMap<String, String>,
 ) -> Result<ConsoleDevRuntime> {
-    let root = resolve_console_root(console_root)?;
+    let default_root = match runtime_root {
+        Some(root) => root.to_path_buf(),
+        None => std::env::current_dir().context("read current directory")?,
+    };
+    if console_root.is_none() && !is_console_root(&default_root) {
+        return prepare_container_console_dev(&default_root, environment);
+    }
+    let root = if let Some(root) = console_root {
+        validate_console_root(root.to_path_buf())?
+    } else {
+        validate_console_root(default_root)?
+    };
     let service_root = root.join("service");
     let env_file = ensure_local_environment(&service_root)?;
     update_local_environment(&env_file, environment)?;
@@ -89,11 +177,36 @@ pub(crate) fn prepare_console_dev(
         root,
         url: console_url(&env_file)?,
         env_file,
+        backend: ConsoleDevBackend::Source,
         launch_environment: environment.clone(),
     })
 }
 
 pub(crate) fn spawn_console_dev(runtime: &ConsoleDevRuntime) -> Result<ConsoleDevProcess> {
+    if let ConsoleDevBackend::Container {
+        compose_file,
+        project,
+    } = &runtime.backend
+    {
+        run_compose(
+            &runtime.root,
+            &runtime.env_file,
+            compose_file,
+            project,
+            &["up", "--detach", "--wait", "console"],
+            "Console Service",
+        )?;
+        return Ok(ConsoleDevProcess {
+            process: ConsoleDevProcessKind::Container {
+                compose_file: compose_file.clone(),
+                env_file: runtime.env_file.clone(),
+                project: project.clone(),
+                root: runtime.root.clone(),
+                stopped: false,
+                last_check: Instant::now(),
+            },
+        });
+    }
     let executable = runtime.root.join("service/target/debug").join(format!(
         "lenso-console-serve{}",
         std::env::consts::EXE_SUFFIX
@@ -107,7 +220,226 @@ pub(crate) fn spawn_console_dev(runtime: &ConsoleDevRuntime) -> Result<ConsoleDe
         .stderr(Stdio::inherit())
         .spawn()
         .with_context(|| format!("start Console Service in {}", runtime.root.display()))?;
-    Ok(ConsoleDevProcess { child })
+    Ok(ConsoleDevProcess {
+        process: ConsoleDevProcessKind::Source(child),
+    })
+}
+
+fn prepare_container_console_dev(
+    host_root: &Path,
+    environment: &BTreeMap<String, String>,
+) -> Result<ConsoleDevRuntime> {
+    let root = host_root.join(".lenso/console-service");
+    fs::create_dir_all(&root)
+        .with_context(|| format!("create local Console runtime {}", root.display()))?;
+    let env_file = root.join(".env");
+    ensure_container_environment(&env_file, environment)?;
+    let compose_file = root.join("compose.yml");
+    fs::write(
+        &compose_file,
+        container_compose_document(
+            environment.contains_key("LENSO_MODULE_LENSO_SYSTEM_REGISTRY__ENROLLMENT_TRUST"),
+        ),
+    )
+    .with_context(|| {
+        format!(
+            "write local Console Compose file {}",
+            compose_file.display()
+        )
+    })?;
+    let project = console_compose_project(&root);
+    run_compose(
+        &root,
+        &env_file,
+        &compose_file,
+        &project,
+        &["up", "--detach", "--wait", "postgres"],
+        "Console Postgres",
+    )?;
+    run_compose(
+        &root,
+        &env_file,
+        &compose_file,
+        &project,
+        &["run", "--rm", "migrate"],
+        "Console migrations",
+    )?;
+    eprintln!("Pinned Console image ready: {LOCAL_CONSOLE_IMAGE}");
+    Ok(ConsoleDevRuntime {
+        root,
+        url: console_url(&env_file)?,
+        env_file,
+        backend: ConsoleDevBackend::Container {
+            compose_file,
+            project,
+        },
+        launch_environment: BTreeMap::new(),
+    })
+}
+
+fn ensure_container_environment(path: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
+    let mut source = if path.is_file() {
+        fs::read_to_string(path)
+            .with_context(|| format!("read local Console environment {}", path.display()))?
+    } else {
+        let postgres = crate::host::reserve_loopback_port(55_433)?;
+        let http = crate::host::reserve_loopback_port(3_030)?;
+        let postgres_port = postgres.local_addr()?.port();
+        let http_port = http.local_addr()?.port();
+        let password = random_secret()?;
+        format!(
+            "CONSOLE_DATABASE_URL=postgres://lenso_console:{password}@127.0.0.1:{postgres_port}/lenso_console\nDATABASE_URL=postgres://lenso_console:{password}@127.0.0.1:{postgres_port}/lenso_console\nPOSTGRES_PASSWORD={password}\nPOSTGRES_HOST_PORT={postgres_port}\nCONSOLE_HTTP_PORT={http_port}\nHTTP_PORT={http_port}\nCONSOLE_PUBLIC_ORIGIN=http://127.0.0.1:{http_port}\nCONSOLE_RECOVERY_MODE=normal\n"
+        )
+    };
+    for (key, value) in environment {
+        source = upsert_env_value(&source, key, value);
+    }
+    fs::write(path, source)
+        .with_context(|| format!("write local Console environment {}", path.display()))?;
+    make_private(path)
+}
+
+fn random_secret() -> Result<String> {
+    let mut bytes = [0_u8; 24];
+    getrandom::fill(&mut bytes).context("generate local Console database secret")?;
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    Ok(encoded)
+}
+
+fn container_compose_document(include_enrollment_trust: bool) -> String {
+    let enrollment_trust = if include_enrollment_trust {
+        "      LENSO_MODULE_LENSO_SYSTEM_REGISTRY__ENROLLMENT_TRUST: ${LENSO_MODULE_LENSO_SYSTEM_REGISTRY__ENROLLMENT_TRUST:?set enrollment trust}\n"
+    } else {
+        ""
+    };
+    format!(
+        r#"services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      - POSTGRES_DB=lenso_console
+      - POSTGRES_PASSWORD
+      - POSTGRES_USER=lenso_console
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lenso_console -d lenso_console"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+    ports:
+      - "127.0.0.1:${{POSTGRES_HOST_PORT:?set POSTGRES_HOST_PORT}}:5432"
+    volumes:
+      - console-database:/var/lib/postgresql
+  migrate:
+    image: {LOCAL_CONSOLE_IMAGE}
+    command: ["/usr/local/bin/lenso-console-migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment: &console-environment
+      APP_ENV: production
+      CORS_ALLOWED_ORIGINS: ${{CONSOLE_PUBLIC_ORIGIN:?set CONSOLE_PUBLIC_ORIGIN}}
+      CONSOLE_RECOVERY_MODE: normal
+      DATABASE_URL: postgres://lenso_console:${{POSTGRES_PASSWORD}}@postgres:5432/lenso_console
+      LENSO_COMPOSITION_PROFILE: core
+      LENSO_MODULE_PLATFORM_STORY_ENABLED: "false"
+{enrollment_trust}
+      LOG_FORMAT: json
+      SERVICE_NAME: lenso-console
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
+  console:
+    image: {LOCAL_CONSOLE_IMAGE}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment: *console-environment
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:3030/health/ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+    ports:
+      - "127.0.0.1:${{CONSOLE_HTTP_PORT:?set CONSOLE_HTTP_PORT}}:3030"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
+    volumes:
+      - console-artifacts:/opt/lenso-console/artifacts
+volumes:
+  console-artifacts:
+  console-database:
+"#
+    )
+}
+
+fn run_compose(
+    root: &Path,
+    env_file: &Path,
+    compose_file: &Path,
+    project: &str,
+    args: &[&str],
+    subject: &str,
+) -> Result<()> {
+    eprintln!(
+        "$ docker compose --project-name {project} {}",
+        args.join(" ")
+    );
+    let status = Command::new("docker")
+        .args(["compose", "--project-name", project, "--env-file"])
+        .arg(env_file)
+        .args(["--file"])
+        .arg(compose_file)
+        .args(args)
+        .current_dir(root)
+        .status()
+        .with_context(|| {
+            format!(
+                "run Docker Compose for {subject} in {}; start a Docker-compatible runtime or use --console-root with a Console source checkout",
+                root.display()
+            )
+        })?;
+    if !status.success() {
+        bail!("{subject} exited with {status}");
+    }
+    Ok(())
+}
+
+fn compose_output(
+    root: &Path,
+    env_file: &Path,
+    compose_file: &Path,
+    project: &str,
+    args: &[&str],
+) -> Result<String> {
+    let output = Command::new("docker")
+        .args(["compose", "--project-name", project, "--env-file"])
+        .arg(env_file)
+        .args(["--file"])
+        .arg(compose_file)
+        .args(args)
+        .current_dir(root)
+        .output()
+        .context("inspect local Console Service container")?;
+    if !output.status.success() {
+        bail!(
+            "inspect local Console Service container exited with {}",
+            output.status
+        );
+    }
+    String::from_utf8(output.stdout).context("decode local Console Service status")
 }
 
 fn build_console_service(root: &Path) -> Result<()> {
@@ -328,17 +660,6 @@ fn run_command(
     Ok(())
 }
 
-pub(crate) fn resolve_console_root(explicit: Option<&Path>) -> Result<PathBuf> {
-    if let Some(root) = explicit {
-        return validate_console_root(root.to_path_buf());
-    }
-    let cwd = std::env::current_dir().context("read current directory")?;
-    if is_console_root(&cwd) {
-        return Ok(cwd);
-    }
-    bail!("could not find the Console repository; pass --console-root")
-}
-
 fn validate_console_root(root: PathBuf) -> Result<PathBuf> {
     if is_console_root(&root) {
         Ok(root)
@@ -379,5 +700,25 @@ mod tests {
             console_compose_project(Path::new("/tmp/console-a")),
             console_compose_project(Path::new("/tmp/console-b"))
         );
+    }
+
+    #[test]
+    fn container_runtime_pins_the_console_release_and_isolates_state() {
+        let compose = container_compose_document(true);
+
+        assert!(compose.contains(LOCAL_CONSOLE_IMAGE));
+        assert!(compose.contains("postgres:18-alpine"));
+        assert!(compose.contains("/usr/local/bin/lenso-console-migrate"));
+        assert!(compose.contains("console-database:/var/lib/postgresql"));
+        assert!(compose.contains("console-artifacts:/opt/lenso-console/artifacts"));
+        assert!(compose.contains("127.0.0.1:${POSTGRES_HOST_PORT"));
+        assert!(compose.contains("127.0.0.1:${CONSOLE_HTTP_PORT"));
+        assert!(compose.contains("127.0.0.1:3030/health/ready"));
+        assert!(compose.contains("LENSO_MODULE_PLATFORM_STORY_ENABLED: \"false\""));
+        assert!(!compose.contains(":latest"));
+        assert!(compose.contains("LENSO_MODULE_LENSO_SYSTEM_REGISTRY__ENROLLMENT_TRUST"));
+
+        let standalone = container_compose_document(false);
+        assert!(!standalone.contains("LENSO_MODULE_LENSO_SYSTEM_REGISTRY__ENROLLMENT_TRUST"));
     }
 }

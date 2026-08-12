@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use reqwest::{Client, StatusCode, Url, redirect::Policy};
@@ -42,6 +43,7 @@ pub async fn connect(options: ConnectOptions) -> Result<()> {
     let token = operator_token(options.token_file.as_deref(), &options.token_env)?;
     let client = Client::builder()
         .redirect(Policy::none())
+        .timeout(Duration::from_secs(10))
         .build()
         .context("build Console connection client")?;
 

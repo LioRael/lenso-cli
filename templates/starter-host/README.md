@@ -27,12 +27,17 @@ cargo run --bin api
 cargo run --bin worker
 ```
 
-To run the Host, service workspace, and an independent Console checkout as one
-local System, use `lenso dev up --console-root /path/to/lenso-console`. The CLI
+To run the Host, service workspace, and the released Console Service as one
+local System, use `lenso dev up`. The CLI
 creates a private loopback-only enrollment, starts the Console database and
 service, bootstraps the first Console Operator when needed, and connects the
 exact local topology. No enrollment receipt or topology JSON needs to be
 written by hand.
+
+Framework contributors can replace the pinned Console image with a source
+checkout using `lenso dev up --console-root /path/to/lenso-console`. Use
+`--no-console` only when intentionally running the Host and workspace Services
+without Console.
 
 On the first `lenso dev up`, the CLI creates `.env` and selects available
 loopback ports when 5432 or 3000 is already in use. An existing `.env` remains
