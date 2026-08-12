@@ -1,5 +1,11 @@
 ## lenso-cli@0.2.16
 
+## 0.6.0
+
+### Minor Changes
+
+- e6095ea: Install exact workspace Provider releases during `lenso dev up` and keep generated Service manifests package-compatible.
+
 ## 0.5.0
 
 ### Minor Changes
