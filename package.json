@@ -1,6 +1,6 @@
 {
   "name": "@lenso/cli",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Lenso command-line interface for scaffolding and operating Lenso backend projects.",
   "license": "MIT",
   "homepage": "https://github.com/LioRael/lenso-cli",
