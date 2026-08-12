@@ -1,5 +1,11 @@
 ## lenso-cli@0.2.16
 
+## 0.7.0
+
+### Minor Changes
+
+- 302ccd1: Start the released Console Service by default with `lenso dev up`, while retaining explicit source-checkout and no-Console overrides.
+
 ## 0.6.3
 
 ### Patch Changes
