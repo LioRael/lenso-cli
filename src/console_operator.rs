@@ -3,6 +3,7 @@ use std::fs;
 use std::io::{self, IsTerminal, Read};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use reqwest::{Client, Url, redirect::Policy};
@@ -437,6 +438,7 @@ async fn request_password_session(
         .with_context(|| format!("build Console password {action} URL"))?;
     let client = Client::builder()
         .redirect(Policy::none())
+        .timeout(Duration::from_secs(10))
         .build()
         .context("build Console Auth client")?;
     let response = client

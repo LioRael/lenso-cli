@@ -199,13 +199,13 @@ command:
 
 ```sh
 cd ./my-lenso-host
-lenso dev up --console-root ../lenso-console
+lenso dev up
 ```
 
 The first run securely prompts for the local Operator password. Automation can
 pass `--operator-password-file` with an owner-only regular file. The command
 creates loopback-only enrollment evidence, starts and migrates both Stores,
-builds the Console, installs every workspace Provider export from its exact
+starts the pinned Console release, installs every workspace Provider export from its exact
 Module Release, configures or reuses the durable Operator, reconciles
 Module-owned UI artifacts, and connects the exact topology. Provider releases
 and Service Installation state are written before the authoritative Host starts,
@@ -213,6 +213,12 @@ so `connected` and a callable Host business route refer to the same locked
 export. Ctrl-C stops the Host, Console, and only the Services started by that
 invocation. Story is a Console-owned linked surface; it does not require a
 separate Module install.
+
+By default, the CLI runs the released Console Service from an immutable,
+multi-architecture OCI image and keeps its database and UI artifacts under
+`.lenso/console-service`. Framework contributors can replace it with a source
+checkout using `--console-root /path/to/lenso-console`. Use `--no-console` only
+when intentionally running the Host and workspace Services without Console.
 
 After installing and starting the independent Lenso Console Service, create its
 first password user and bootstrap that user as the first Console Operator from
@@ -552,16 +558,17 @@ dependencies explicitly with `lenso service create --local-framework-root PATH`.
 
 ### Console and Module UI development
 
-Run the complete local Console Service from its repository:
+Run the released local Console Service independently:
 
 ```sh
-lenso console dev --console-root ../lenso-console
+lenso console dev
 ```
 
-On first run, this command creates `service/.env` with available loopback ports,
-installs missing workspace dependencies, starts an isolated Postgres Compose
-project, applies migrations, and then serves the complete Console. Existing
-`service/.env` files remain authoritative.
+On first run, this command creates `.lenso/console-service/.env` with available
+loopback ports, starts an isolated Postgres Compose project, applies migrations,
+and serves the digest-pinned multi-architecture Console image. Existing local
+state remains authoritative. Console contributors can instead pass
+`--console-root ../lenso-console` to build and run a source checkout.
 
 Run the Console UI artifact owned by the current Module:
 

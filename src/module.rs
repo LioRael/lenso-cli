@@ -1035,7 +1035,9 @@ pub(crate) fn install_exact_provider_release_with_candidates(
         "Installed exact Provider Module {} {} ({release_digest}).",
         release.module_id, release.version
     );
-    println!("Provider runtime will be verified at Host startup: {release_reference}");
+    println!(
+        "Provider runtime compatibility will be checked at Host startup; local source remains unattested: {release_reference}"
+    );
     Ok(true)
 }
 
@@ -1082,7 +1084,7 @@ fn local_release_candidate(
     catalog_snapshot_digest: String,
 ) -> ModuleResolutionCandidate {
     let verification = VerificationEvaluation {
-        reason_code: "local_unverified_provider".to_owned(),
+        reason_code: "local_runtime_unattested_provider".to_owned(),
         receipt_digests: Vec::new(),
         state: VerificationState::Unknown,
     };
@@ -1092,7 +1094,7 @@ fn local_release_candidate(
             action: CatalogAction::Install,
             declared_compatibility: DeclaredCompatibilityState::Unknown,
             lifecycle: ModuleLifecycleState::default(),
-            reason_codes: vec!["local_unverified_provider".to_owned()],
+            reason_codes: vec!["local_runtime_unattested_provider".to_owned()],
             snapshot_age_seconds: 0,
             snapshot_fresh: true,
             state: ModuleEligibilityState::EligibleWithWarning,
