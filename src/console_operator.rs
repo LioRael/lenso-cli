@@ -16,6 +16,7 @@ const RUNTIME_CONFIG_SERVICE: &str = "*";
 const BOOTSTRAP_ACTOR: &str = "lenso-cli:console-operator-bootstrap";
 const CONFIGURE_ACTOR: &str = "lenso-cli:console-operator-configure";
 const BOOTSTRAP_LOCK: &str = "lenso-console:operator-bootstrap";
+const LOCAL_RECOVERY_ACTOR: &str = "local_recovery";
 const MINIMUM_OPERATOR_SCOPES: &[&str] = &[
     "auth.sessions.read",
     "auth.sessions.revoke",
@@ -63,6 +64,22 @@ struct PasswordRegistration {
 #[derive(Debug, Deserialize)]
 struct PasswordSessionResponse {
     user_id: String,
+    token: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LocalOperatorOptions {
+    pub(crate) console_root: PathBuf,
+    pub(crate) console_url: String,
+    pub(crate) env_file: PathBuf,
+    pub(crate) identifier: String,
+    pub(crate) password_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LocalOperatorSession {
+    pub(crate) user_id: String,
+    pub(crate) token: String,
 }
 
 /// Bootstrap the first operator in an independent Lenso Console Service.
@@ -83,6 +100,7 @@ pub async fn bootstrap_operator(options: BootstrapOperatorOptions) -> Result<()>
 
     let mut tx = pool.begin().await.context("begin operator bootstrap")?;
     lock_operator_bootstrap(&mut tx).await?;
+    ensure_no_existing_console_administrator(&mut tx).await?;
     let old_value = load_operator_grants(&mut tx).await?;
     ensure_no_existing_operator(&decode_operator_grants(old_value.clone())?)?;
 
@@ -93,10 +111,19 @@ pub async fn bootstrap_operator(options: BootstrapOperatorOptions) -> Result<()>
         resolve_operator_user_id(&mut tx, options.user_id, options.identifier).await?
     };
     let scopes = operator_scopes(options.scopes);
+    insert_console_administrator(
+        &mut tx,
+        &user_id,
+        "superadmin",
+        "local_recovery",
+        LOCAL_RECOVERY_ACTOR,
+    )
+    .await?;
     let stored = write_initial_operator(&mut tx, old_value, &user_id, &scopes).await?;
     tx.commit().await.context("commit operator bootstrap")?;
 
     eprintln!("Bootstrapped Lenso Console operator {user_id}.");
+    eprintln!("Stored Console Access authority: superadmin.");
     eprintln!("Stored {CONSOLE_ADMIN_USER_SCOPES_KEY}: {stored}");
     eprintln!("Restart the Console API and Worker for the operator grant to apply.");
     Ok(())
@@ -123,6 +150,7 @@ pub async fn configure_operator(options: ConfigureOperatorOptions) -> Result<()>
     let old_value = load_operator_grants(&mut tx).await?;
     let mut grants = decode_operator_grants(old_value.clone())?;
     let user_id = resolve_operator_user_id(&mut tx, options.user_id, options.identifier).await?;
+    let administrator_role = ensure_console_administrator(&mut tx, &user_id).await?;
     let mut scopes = grants.remove(&user_id).unwrap_or_default();
     scopes.extend(operator_scopes(options.scopes));
     scopes.sort();
@@ -132,9 +160,78 @@ pub async fn configure_operator(options: ConfigureOperatorOptions) -> Result<()>
     tx.commit().await.context("commit operator configuration")?;
 
     eprintln!("Configured Lenso Console operator {user_id}.");
+    eprintln!("Stored Console Access authority: {administrator_role}.");
     eprintln!("Stored {CONSOLE_ADMIN_USER_SCOPES_KEY}: {stored}");
     eprintln!("Restart the Console API and Worker for the operator grant to apply.");
     Ok(())
+}
+
+/// Create or reuse one password identity and make it a durable local Console
+/// operator. This is intentionally idempotent for `lenso dev up` restarts.
+pub(crate) async fn ensure_local_operator(
+    options: LocalOperatorOptions,
+) -> Result<LocalOperatorSession> {
+    let service_root = console_service_root(&options.console_root);
+    let database_url = console_database_url(&service_root, Some(&options.env_file))?;
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .context("connect to the local Lenso Console Service Store")?;
+    verify_console_service_store(&pool).await?;
+
+    let identifier = normalize_identifier(&options.identifier)?;
+    let console_url = secure_console_url(&options.console_url)?;
+    let existing_user_id = sqlx::query_scalar::<_, String>(
+        "select user_id from auth.identities where provider = 'password' and provider_subject = $1",
+    )
+    .bind(&identifier)
+    .fetch_optional(&pool)
+    .await
+    .with_context(|| format!("find local Console password identity `{identifier}`"))?;
+    let password = if existing_user_id.is_some() {
+        read_existing_password(options.password_file.as_deref())?
+    } else {
+        read_password(options.password_file.as_deref(), false)?
+    };
+    let registration = PasswordRegistration {
+        console_url,
+        identifier,
+        password,
+    };
+    let session = if existing_user_id.is_some() {
+        request_password_session(registration, "/v1/auth/password/login", "login").await?
+    } else {
+        request_password_session(registration, "/v1/auth/password/register", "registration").await?
+    };
+    if existing_user_id
+        .as_deref()
+        .is_some_and(|existing| existing != session.user_id)
+    {
+        bail!("Console password identity changed while preparing the local operator");
+    }
+
+    let mut tx = pool.begin().await.context("begin local operator setup")?;
+    lock_operator_bootstrap(&mut tx).await?;
+    let old_value = load_operator_grants(&mut tx).await?;
+    let mut grants = decode_operator_grants(old_value.clone())?;
+    let administrator_role = ensure_console_administrator(&mut tx, &session.user_id).await?;
+    let mut scopes = grants.remove(&session.user_id).unwrap_or_default();
+    scopes.extend(operator_scopes(Vec::new()));
+    scopes.sort();
+    scopes.dedup();
+    grants.insert(session.user_id.clone(), scopes);
+    write_operator_grants(&mut tx, old_value, grants, CONFIGURE_ACTOR).await?;
+    tx.commit().await.context("commit local operator setup")?;
+
+    eprintln!(
+        "Local Console operator ready: {} ({administrator_role}).",
+        session.user_id
+    );
+    Ok(LocalOperatorSession {
+        user_id: session.user_id,
+        token: session.token,
+    })
 }
 
 fn console_database_url(service_root: &Path, env_file: Option<&Path>) -> Result<String> {
@@ -149,15 +246,18 @@ fn console_database_url(service_root: &Path, env_file: Option<&Path>) -> Result<
 }
 
 async fn verify_console_service_store(pool: &sqlx::PgPool) -> Result<()> {
-    let registry = sqlx::query_scalar::<_, Option<String>>(
-        "select to_regclass('console.managed_services')::text",
+    let (registry, administrators) = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+        "select to_regclass('console.managed_services')::text,
+                to_regclass('console.console_administrators')::text",
     )
     .fetch_one(pool)
     .await
     .context("inspect Console Service Store identity")?;
-    if registry.as_deref() != Some("console.managed_services") {
+    if registry.as_deref() != Some("console.managed_services")
+        || administrators.as_deref() != Some("console.console_administrators")
+    {
         bail!(
-            "target database is not a Lenso Console Service Store: mandatory System Registry state is missing"
+            "target database is not a current Lenso Console Service Store: mandatory System Registry or Console Access state is missing"
         );
     }
     Ok(())
@@ -227,6 +327,19 @@ fn prompt_password() -> Result<String> {
         bail!("Console operator passwords do not match");
     }
     validate_password(password)
+}
+
+fn read_existing_password(password_file: Option<&Path>) -> Result<String> {
+    if let Some(path) = password_file {
+        return read_password_file(path);
+    }
+    if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+        bail!("interactive password input requires a terminal; use --operator-password-file");
+    }
+    validate_password(
+        rpassword::prompt_password("Console operator password: ")
+            .context("read Console operator password")?,
+    )
 }
 
 fn secure_console_url(value: &str) -> Result<Url> {
@@ -306,10 +419,22 @@ fn validate_password(password: String) -> Result<String> {
 }
 
 async fn register_password_user(registration: PasswordRegistration) -> Result<String> {
+    Ok(
+        request_password_session(registration, "/v1/auth/password/register", "registration")
+            .await?
+            .user_id,
+    )
+}
+
+async fn request_password_session(
+    registration: PasswordRegistration,
+    path: &str,
+    action: &str,
+) -> Result<PasswordSessionResponse> {
     let endpoint = registration
         .console_url
-        .join("/v1/auth/password/register")
-        .context("build Console password registration URL")?;
+        .join(path)
+        .with_context(|| format!("build Console password {action} URL"))?;
     let client = Client::builder()
         .redirect(Policy::none())
         .build()
@@ -322,21 +447,24 @@ async fn register_password_user(registration: PasswordRegistration) -> Result<St
         }))
         .send()
         .await
-        .context("register password user through the Console Auth Module")?;
+        .with_context(|| format!("perform password {action} through the Console Auth Module"))?;
     if !response.status().is_success() {
         bail!(
-            "Console Auth password registration failed with HTTP {}",
+            "Console Auth password {action} failed with HTTP {}",
             response.status()
         );
     }
     let response = response
         .json::<PasswordSessionResponse>()
         .await
-        .context("decode Console Auth password registration response")?;
+        .with_context(|| format!("decode Console Auth password {action} response"))?;
     if response.user_id.trim().is_empty() {
         bail!("Console Auth returned an empty user id");
     }
-    Ok(response.user_id)
+    if response.token.trim().is_empty() || response.token.chars().any(char::is_whitespace) {
+        bail!("Console Auth returned an invalid session token");
+    }
+    Ok(response)
 }
 
 async fn lock_operator_bootstrap(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
@@ -357,6 +485,78 @@ async fn load_operator_grants(tx: &mut Transaction<'_, Postgres>) -> Result<Opti
     .fetch_optional(&mut **tx)
     .await
     .context("load current Console operator grants")
+}
+
+async fn ensure_no_existing_console_administrator(
+    tx: &mut Transaction<'_, Postgres>,
+) -> Result<()> {
+    let count = console_administrator_count(tx).await?;
+    if count > 0 {
+        bail!(
+            "the Lenso Console already has an administrator; use `lenso console operator configure` for an existing Auth user"
+        );
+    }
+    Ok(())
+}
+
+async fn console_administrator_count(tx: &mut Transaction<'_, Postgres>) -> Result<i64> {
+    sqlx::query_scalar::<_, i64>("select count(*) from console.console_administrators")
+        .fetch_one(&mut **tx)
+        .await
+        .context("count Console administrators")
+}
+
+async fn insert_console_administrator(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: &str,
+    role: &str,
+    source: &str,
+    created_by: &str,
+) -> Result<()> {
+    sqlx::query(
+        "insert into console.console_administrators
+            (user_id, role, source, created_by, created_at)
+         values ($1, $2, $3, $4, now())",
+    )
+    .bind(user_id)
+    .bind(role)
+    .bind(source)
+    .bind(created_by)
+    .execute(&mut **tx)
+    .await
+    .context("store durable Console administrator authority")?;
+    Ok(())
+}
+
+async fn ensure_console_administrator(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: &str,
+) -> Result<String> {
+    if let Some(role) = sqlx::query_scalar::<_, String>(
+        "select role from console.console_administrators where user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .context("load Console administrator authority")?
+    {
+        return Ok(role);
+    }
+
+    let existing_count = console_administrator_count(tx).await?;
+    let (role, source, created_by) = new_console_administrator_authority(existing_count);
+    insert_console_administrator(tx, user_id, role, source, created_by).await?;
+    Ok(role.to_owned())
+}
+
+fn new_console_administrator_authority(
+    existing_count: i64,
+) -> (&'static str, &'static str, &'static str) {
+    if existing_count == 0 {
+        ("superadmin", "local_recovery", LOCAL_RECOVERY_ACTOR)
+    } else {
+        ("administrator", "administrative", CONFIGURE_ACTOR)
+    }
 }
 
 async fn resolve_operator_user_id(
@@ -580,6 +780,22 @@ mod tests {
         let error = ensure_no_existing_operator(&existing).unwrap_err();
         assert!(error.to_string().contains("already has an operator"));
         assert!(ensure_no_existing_operator(&BTreeMap::new()).is_ok());
+    }
+
+    #[test]
+    fn first_durable_console_operator_is_superadmin() {
+        assert_eq!(
+            new_console_administrator_authority(0),
+            ("superadmin", "local_recovery", "local_recovery")
+        );
+        assert_eq!(
+            new_console_administrator_authority(1),
+            (
+                "administrator",
+                "administrative",
+                "lenso-cli:console-operator-configure"
+            )
+        );
     }
 
     #[test]

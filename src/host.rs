@@ -1,4 +1,5 @@
 use std::fs;
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -65,6 +66,65 @@ pub async fn serve(
     skip_migrate: bool,
     separate_worker: bool,
 ) -> Result<()> {
+    let mut processes = start(repo_root, skip_db, skip_migrate, separate_worker).await?;
+
+    loop {
+        tokio::select! {
+            signal = tokio::signal::ctrl_c() => {
+                signal.context("listen for Ctrl-C")?;
+                return Ok(());
+            }
+            () = tokio::time::sleep(Duration::from_millis(500)) => {
+                processes.check()?;
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct HostDevProcesses {
+    api_label: &'static str,
+    api: Child,
+    worker: Option<Child>,
+}
+
+impl HostDevProcesses {
+    pub(crate) fn check(&mut self) -> Result<()> {
+        if let Some(status) = self
+            .api
+            .try_wait()
+            .with_context(|| format!("check {} process", self.api_label))?
+        {
+            bail!("{} exited with {status}", self.api_label);
+        }
+        if let Some(worker) = self.worker.as_mut()
+            && let Some(status) = worker.try_wait().context("check worker process")?
+        {
+            bail!("worker exited with {status}");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn stop(&mut self) {
+        stop_child(self.api_label, &mut self.api);
+        if let Some(worker) = self.worker.as_mut() {
+            stop_child("worker", worker);
+        }
+    }
+}
+
+impl Drop for HostDevProcesses {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+pub(crate) async fn start(
+    repo_root: Option<&Path>,
+    skip_db: bool,
+    skip_migrate: bool,
+    separate_worker: bool,
+) -> Result<HostDevProcesses> {
     let repo_root = repo_root.unwrap_or_else(|| Path::new("."));
     ensure_host_root(repo_root)?;
 
@@ -78,40 +138,18 @@ pub async fn serve(
 
     let embedded_worker = !separate_worker && has_bin(repo_root, "serve");
     let api_label = if embedded_worker { "api+worker" } else { "api" };
-    let mut api = spawn_cargo_bin(repo_root, if embedded_worker { "serve" } else { "api" })?;
-    let mut worker = if embedded_worker {
+    let api = spawn_cargo_bin(repo_root, if embedded_worker { "serve" } else { "api" })?;
+    let worker = if embedded_worker {
         None
     } else {
         Some(spawn_cargo_bin(repo_root, "worker")?)
     };
     print_serve_ready(repo_root);
-
-    loop {
-        tokio::select! {
-            signal = tokio::signal::ctrl_c() => {
-                signal.context("listen for Ctrl-C")?;
-                stop_child(api_label, &mut api);
-                if let Some(worker) = worker.as_mut() {
-                    stop_child("worker", worker);
-                }
-                return Ok(());
-            }
-            () = tokio::time::sleep(Duration::from_millis(500)) => {
-                if let Some(status) = api.try_wait().with_context(|| format!("check {api_label} process"))? {
-                    if let Some(worker) = worker.as_mut() {
-                        stop_child("worker", worker);
-                    }
-                    bail!("{api_label} exited with {status}");
-                }
-                if let Some(worker) = worker.as_mut() {
-                    if let Some(status) = worker.try_wait().context("check worker process")? {
-                        stop_child(api_label, &mut api);
-                        bail!("worker exited with {status}");
-                    }
-                }
-            }
-        }
-    }
+    Ok(HostDevProcesses {
+        api_label,
+        api,
+        worker,
+    })
 }
 
 async fn wait_for_database(repo_root: &Path, timeout: Duration) -> Result<()> {
@@ -169,6 +207,67 @@ fn ensure_host_root(repo_root: &Path) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn ensure_local_environment(repo_root: &Path) -> Result<PathBuf> {
+    ensure_host_root(repo_root)?;
+    let env_file = repo_root.join(".env");
+    if !env_file.is_file() {
+        let example = repo_root.join(".env.example");
+        let source = fs::read_to_string(&example)
+            .with_context(|| format!("read Host environment template {}", example.display()))?;
+        let postgres = reserve_loopback_port(5_432)?;
+        let http = reserve_loopback_port(3_000)?;
+        let rendered = render_local_environment(
+            &source,
+            postgres.local_addr()?.port(),
+            http.local_addr()?.port(),
+        );
+        fs::write(&env_file, rendered)
+            .with_context(|| format!("create Host environment {}", env_file.display()))?;
+        eprintln!("Created Host local environment {}.", env_file.display());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&env_file, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("protect Host environment {}", env_file.display()))?;
+    }
+    Ok(env_file)
+}
+
+fn render_local_environment(source: &str, postgres_port: u16, http_port: u16) -> String {
+    let source = upsert_env_value(source, "POSTGRES_HOST_PORT", &postgres_port.to_string());
+    upsert_env_value(&source, "HTTP_PORT", &http_port.to_string())
+}
+
+fn upsert_env_value(source: &str, key: &str, value: &str) -> String {
+    let prefix = format!("{key}=");
+    let mut found = false;
+    let mut lines = source
+        .lines()
+        .map(|line| {
+            if line.starts_with(&prefix) {
+                found = true;
+                format!("{prefix}{value}")
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>();
+    if !found {
+        lines.push(format!("{prefix}{value}"));
+    }
+    format!("{}\n", lines.join("\n"))
+}
+
+pub(crate) fn reserve_loopback_port(preferred: u16) -> Result<TcpListener> {
+    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, preferred));
+    let port_is_reachable = TcpStream::connect_timeout(&address, Duration::from_millis(50)).is_ok();
+    if !port_is_reachable && let Ok(listener) = TcpListener::bind(address) {
+        return Ok(listener);
+    }
+    TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).context("reserve an available local Host port")
+}
+
 fn has_bin(repo_root: &Path, bin: &str) -> bool {
     repo_root
         .join("src")
@@ -189,7 +288,7 @@ fn print_serve_ready(repo_root: &Path) {
     eprintln!("Press Ctrl-C to stop.");
 }
 
-fn serve_base_url(repo_root: &Path) -> String {
+pub(crate) fn serve_base_url(repo_root: &Path) -> String {
     let env_host = std::env::var("HTTP_HOST").ok();
     let env_port = std::env::var("HTTP_PORT").ok();
     serve_base_url_with(repo_root, env_host.as_deref(), env_port.as_deref())
@@ -209,7 +308,7 @@ fn serve_base_url_with(repo_root: &Path, env_host: Option<&str>, env_port: Optio
     format!("http://{}:{}", browser_host(&host), port.trim())
 }
 
-fn dotenv_value(repo_root: &Path, key: &str) -> Option<String> {
+pub(crate) fn dotenv_value(repo_root: &Path, key: &str) -> Option<String> {
     dotenv_value_from_path(&repo_root.join(".env"), key)
 }
 
@@ -308,23 +407,54 @@ fn run(repo_root: &Path, program: &str, args: &[&str]) -> Result<()> {
 fn spawn_cargo_bin(repo_root: &Path, bin: &str) -> Result<Child> {
     let args = cargo_run_args(bin);
     eprintln!("$ cargo {}", args.join(" "));
-    Command::new("cargo")
+    let mut command = Command::new("cargo");
+    command
         .args(args)
         .current_dir(repo_root)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .with_context(|| format!("start {bin}"))
+        .stderr(Stdio::inherit());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
+    command.spawn().with_context(|| format!("start {bin}"))
 }
 
 fn stop_child(label: &str, child: &mut Child) {
     if matches!(child.try_wait(), Ok(Some(_))) {
         return;
     }
-    let _ = child.kill();
+    terminate_child_process_tree(child);
     let _ = child.wait();
     eprintln!("Stopped {label}.");
+}
+
+#[cfg(unix)]
+fn terminate_child_process_tree(child: &mut Child) {
+    use nix::sys::signal::{Signal, killpg};
+    use nix::unistd::Pid;
+
+    if let Ok(raw) = i32::try_from(child.id()) {
+        let group = Pid::from_raw(raw);
+        let _ = killpg(group, Signal::SIGTERM);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = killpg(group, Signal::SIGKILL);
+    } else {
+        let _ = child.kill();
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate_child_process_tree(child: &mut Child) {
+    let _ = child.kill();
 }
 
 /// Convert a package name to its Cargo library crate name (`-` becomes `_`).
@@ -386,6 +516,7 @@ fn extract(dir: &Dir, target: &Path, rel: PathBuf, rewrites: &Rewrites) -> Resul
 fn rewrite_for(rel: &Path) -> RewriteKind {
     match rel.to_str() {
         Some("Cargo.toml.tmpl") => RewriteKind::Manifest,
+        Some(".env.example") => RewriteKind::Environment,
         Some(p) if p.starts_with("src/bin/") && p.ends_with(".rs") => RewriteKind::BinSource,
         _ => RewriteKind::None,
     }
@@ -395,6 +526,7 @@ fn rewrite_for(rel: &Path) -> RewriteKind {
 enum RewriteKind {
     None,
     Manifest,
+    Environment,
     BinSource,
 }
 
@@ -430,12 +562,21 @@ fn write_file(contents: &[u8], kind: RewriteKind, out: &Path, rewrites: &Rewrite
 
     let bytes: Vec<u8> = match kind {
         RewriteKind::Manifest => rewrite_cargo_toml(contents, rewrites)?.into_bytes(),
+        RewriteKind::Environment => rewrite_environment(contents, rewrites)?.into_bytes(),
         RewriteKind::BinSource => rewrite_bin_source(contents, rewrites).into_bytes(),
         RewriteKind::None => contents.to_vec(),
     };
 
     fs::write(out, bytes).with_context(|| format!("write {}", out.display()))?;
     Ok(())
+}
+
+fn rewrite_environment(contents: &[u8], rewrites: &Rewrites) -> Result<String> {
+    let text = std::str::from_utf8(contents).context("template .env.example is not UTF-8")?;
+    Ok(text.replace(
+        "SERVICE_NAME=lenso-starter",
+        &format!("SERVICE_NAME={}", rewrites.package_name),
+    ))
 }
 
 /// Replace the template package name with the requested project name.
@@ -463,8 +604,7 @@ fn print_next_steps(target: &Path, package_name: &str) {
     eprintln!();
     eprintln!("Next steps:");
     eprintln!("  cd {}", target.display());
-    eprintln!("  cp .env.example .env");
-    eprintln!("  lenso serve");
+    eprintln!("  lenso dev up");
     eprintln!();
     eprintln!("Install a service with `lenso service install <service-name-or-manifest>`.");
 }
@@ -522,6 +662,38 @@ mod tests {
 
         assert_eq!(source.matches("ModuleHttpRoute {").count(), 6);
         assert_eq!(source.matches("operation: None,").count(), 6);
+    }
+
+    #[test]
+    fn starter_uses_the_current_compatible_lenso_host_line() {
+        let source = TEMPLATE_DIR
+            .get_file("Cargo.toml.tmpl")
+            .expect("starter Cargo template")
+            .contents_utf8()
+            .expect("starter Cargo template is UTF-8");
+
+        assert!(source.contains("lenso = { version = \"0.3\", features = [\"host\"] }"));
+        assert!(!source.contains("version = \"0.3.16\""));
+    }
+
+    #[test]
+    fn generated_local_environment_avoids_fixed_port_assumptions() {
+        let source = "SERVICE_NAME=taste\nPOSTGRES_HOST_PORT=5432\nHTTP_PORT=3000\n";
+        let rendered = render_local_environment(source, 55_432, 31_000);
+
+        assert!(rendered.contains("SERVICE_NAME=taste"));
+        assert!(rendered.contains("POSTGRES_HOST_PORT=55432"));
+        assert!(rendered.contains("HTTP_PORT=31000"));
+    }
+
+    #[test]
+    fn port_reservation_skips_a_reachable_preferred_port() {
+        let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let occupied_port = occupied.local_addr().unwrap().port();
+
+        let reserved = reserve_loopback_port(occupied_port).unwrap();
+
+        assert_ne!(reserved.local_addr().unwrap().port(), occupied_port);
     }
 
     #[test]

@@ -193,6 +193,23 @@ identity plus the expected `normal` or `restore` mode before committing durable
 evidence. A healthy process with the wrong workload mode is treated as a failed
 authority transfer and is fenced again.
 
+For the complete local development path, start the generated Host, every
+auto-start Service in `lenso.workspace.json`, and a connected Console with one
+command:
+
+```sh
+cd ./my-lenso-host
+lenso dev up --console-root ../lenso-console
+```
+
+The first run securely prompts for the local Operator password. Automation can
+pass `--operator-password-file` with an owner-only regular file. The command
+creates loopback-only enrollment evidence, starts and migrates both Stores,
+builds the Console, configures or reuses the durable Operator, reconciles
+Module-owned UI artifacts, and connects the exact topology. Ctrl-C stops the
+Host, Console, and only the Services started by that invocation. Story is a
+Console-owned linked surface; it does not require a separate Module install.
+
 After installing and starting the independent Lenso Console Service, create its
 first password user and bootstrap that user as the first Console Operator from
 outside the Service. In an interactive terminal, the CLI securely prompts for
@@ -227,6 +244,10 @@ lenso console operator configure \
   --identifier admin@example.com
 ```
 
+Both commands persist the user in the Console Access administrator store and
+maintain the compatibility Auth scope configuration. The first administrator
+is the durable Console superadmin; later configured users are administrators.
+
 This preserves unrelated operators and explicit extra scopes while adding the
 System read/connect, artifact reconciliation, Surface Gateway, Auth, and Story
 capabilities required by the current Console workflow.
@@ -258,7 +279,9 @@ for the host-facade roadmap.
 the template Postgres service, runs migrations, then keeps the API and worker
 running until Ctrl-C. New hosts run them in one local process; pass
 `--separate-worker` when you want two child processes. Use `--skip-db` or
-`--skip-migrate` when you already have those steps covered.
+`--skip-migrate` when you already have those steps covered. `lenso dev up`
+creates a missing private `.env`, choosing free loopback ports when the template
+defaults are occupied; an existing `.env` remains authoritative.
 
 ## Scaffold a module
 
@@ -519,8 +542,9 @@ contract digests, and optional release-bound `console_ui_esm` artifact.
 connects a service, but it does not mean every module inside that service is
 the user-facing install target.
 
-The Service scaffold consumes `@lenso/service-kit` from the framework SDK when
-used in a sibling checkout. Outside that checkout it uses the published SDK.
+The Service scaffold uses published `@lenso/service-kit` and `lenso-service`
+dependencies by default. Framework contributors can opt into local checkout
+dependencies explicitly with `lenso service create --local-framework-root PATH`.
 
 ### Console and Module UI development
 
@@ -529,6 +553,11 @@ Run the complete local Console Service from its repository:
 ```sh
 lenso console dev --console-root ../lenso-console
 ```
+
+On first run, this command creates `service/.env` with available loopback ports,
+installs missing workspace dependencies, starts an isolated Postgres Compose
+project, applies migrations, and then serves the complete Console. Existing
+`service/.env` files remain authoritative.
 
 Run the Console UI artifact owned by the current Module:
 

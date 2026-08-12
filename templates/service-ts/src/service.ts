@@ -20,6 +20,7 @@ const digest = (value: unknown) =>
 const serviceId = "{{service_id}}";
 const serviceVersion = "0.1.0";
 const moduleId = "{{module_name}}";
+const moduleExport = "{{module_export}}";
 const moduleVersion = "0.1.0";
 const operationContractDigest = digest({
   operations: ["GET /status"],
@@ -66,7 +67,7 @@ const releaseWithoutDigest = {
     service_id: serviceId,
     service_release_version: serviceVersion,
     service_release_digest: serviceReleaseDigest,
-    export: moduleId,
+    export: moduleExport,
     responsibility_profile: "provider",
     contract_digests: [operationContractDigest],
   },
@@ -84,7 +85,7 @@ export const providerV1 = {
   exports: [
     {
       contractDigests: { http: operationContractDigest },
-      exportKey: moduleId,
+      exportKey: moduleExport,
       manifest: providerManifest,
       manifestDigest,
       moduleId,

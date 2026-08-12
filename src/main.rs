@@ -4,6 +4,7 @@ mod console_composition;
 mod console_connection;
 mod console_dev;
 mod console_installation;
+mod console_local;
 mod console_operator;
 mod delivery;
 mod ga;
@@ -250,8 +251,7 @@ struct AppComposeArgs {
 
 #[derive(Debug, Subcommand)]
 enum DevCommand {
-    /// Start services and host for local development.
-    #[command(hide = true)]
+    /// Start the local Host and Services, optionally with a connected Console.
     Up(DevUpArgs),
     /// Inspect local application status.
     Status(DevStatusArgs),
@@ -292,6 +292,18 @@ struct DevUpArgs {
     /// Run API and worker as separate local processes.
     #[arg(long)]
     separate_worker: bool,
+
+    /// Start, configure, and connect a local Console Service from this checkout.
+    #[arg(long, value_name = "PATH")]
+    console_root: Option<std::path::PathBuf>,
+
+    /// Password identifier for the idempotent local Console operator.
+    #[arg(long, default_value = "admin@lenso.local")]
+    operator_identifier: String,
+
+    /// Read the local Console operator password from a private regular file.
+    #[arg(long)]
+    operator_password_file: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -1063,6 +1075,10 @@ struct ServiceCreateArgs {
     /// Directory that receives the service directory.
     #[arg(long)]
     output_dir: Option<std::path::PathBuf>,
+
+    /// Explicit local framework checkout used instead of published dependencies.
+    #[arg(long, value_name = "PATH")]
+    local_framework_root: Option<std::path::PathBuf>,
 
     /// Local service port used in generated manifests.
     #[arg(long, default_value_t = 4100)]
@@ -2792,16 +2808,32 @@ async fn main() -> anyhow::Result<()> {
         },
         Command::Dev { command } => match command {
             DevCommand::Up(args) => {
-                service::dev_service(service::ServiceDevOptions {
-                    module_services_file: args.module_services_file,
-                    no_workspace: args.no_workspace,
-                    repo_root: args.repo_root,
-                    separate_worker: args.separate_worker,
-                    skip_db: args.skip_db,
-                    skip_migrate: args.skip_migrate,
-                    workspace_file: args.workspace_file,
-                })
-                .await?;
+                if let Some(console_root) = args.console_root {
+                    console_local::dev_up(console_local::DevConsoleOptions {
+                        console_root,
+                        module_services_file: args.module_services_file,
+                        no_workspace: args.no_workspace,
+                        operator_identifier: args.operator_identifier,
+                        operator_password_file: args.operator_password_file,
+                        repo_root: args.repo_root,
+                        separate_worker: args.separate_worker,
+                        skip_db: args.skip_db,
+                        skip_migrate: args.skip_migrate,
+                        workspace_file: args.workspace_file,
+                    })
+                    .await?;
+                } else {
+                    service::dev_service(service::ServiceDevOptions {
+                        module_services_file: args.module_services_file,
+                        no_workspace: args.no_workspace,
+                        repo_root: args.repo_root,
+                        separate_worker: args.separate_worker,
+                        skip_db: args.skip_db,
+                        skip_migrate: args.skip_migrate,
+                        workspace_file: args.workspace_file,
+                    })
+                    .await?;
+                }
             }
             DevCommand::Status(args) => {
                 launchpad::dev_status(launchpad::DevStatusOptions {
@@ -3409,11 +3441,12 @@ mod tests {
     }
 
     #[test]
-    fn public_dev_help_exposes_status_only() {
+    fn public_dev_help_exposes_up_and_status() {
         let help = subcommand_help("dev");
 
+        assert!(help.contains("  up"));
         assert!(help.contains("  status"));
-        for retired in ["  up", "  doctor", "  stop"] {
+        for retired in ["  doctor", "  stop"] {
             assert!(
                 !help.contains(retired),
                 "dev help still exposes `{}`:\n{help}",
@@ -3573,6 +3606,43 @@ mod tests {
         assert_eq!(
             args.repo_root.as_deref(),
             Some(std::path::Path::new("support-desk"))
+        );
+    }
+
+    #[test]
+    fn parses_dev_up_with_local_console_operator() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "dev",
+            "up",
+            "--repo-root",
+            "support-desk",
+            "--console-root",
+            "../lenso-console",
+            "--operator-identifier",
+            "operator@example.com",
+            "--operator-password-file",
+            ".lenso/operator-password",
+        ]);
+        let Command::Dev {
+            command: DevCommand::Up(args),
+        } = cli.command
+        else {
+            panic!("expected dev up");
+        };
+
+        assert_eq!(
+            args.repo_root.as_deref(),
+            Some(std::path::Path::new("support-desk"))
+        );
+        assert_eq!(
+            args.console_root.as_deref(),
+            Some(std::path::Path::new("../lenso-console"))
+        );
+        assert_eq!(args.operator_identifier, "operator@example.com");
+        assert_eq!(
+            args.operator_password_file.as_deref(),
+            Some(std::path::Path::new(".lenso/operator-password"))
         );
     }
 

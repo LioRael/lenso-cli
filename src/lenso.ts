@@ -3,6 +3,7 @@
 
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { chmodSync, statSync } from "node:fs";
 import path from "node:path";
 
 const SUPPORTED_PLATFORMS = new Set(["darwin", "linux", "win32"]);
@@ -32,6 +33,19 @@ export function binaryPath(
   }
   const exe = platform === "win32" ? "lenso.exe" : "lenso";
   return path.join(baseDir, "vendor", tag, exe);
+}
+
+export function ensureExecutableBinary(
+  executable: string,
+  platform: string = process.platform,
+): void {
+  if (platform === "win32") {
+    return;
+  }
+  const mode = statSync(executable).mode;
+  if ((mode & 0o111) === 0) {
+    chmodSync(executable, mode | 0o111);
+  }
 }
 
 interface SignalParent {
@@ -74,6 +88,14 @@ function run(): void {
   const exe = binaryPath();
   if (!exe) {
     console.error(`lenso: unsupported platform ${process.platform}/${process.arch}`);
+    process.exit(1);
+  }
+
+  try {
+    ensureExecutableBinary(exe);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`lenso: bundled binary is not executable: ${message}`);
     process.exit(1);
   }
 

@@ -18,15 +18,24 @@
         "cwd": {{service_cwd}},
         "readyUrl": "{{service_status_url}}",
         "autoStart": true,
-        "readyTimeoutMs": 10000
+        "readyTimeoutMs": 300000
       }
     ]
   },
   "modules": [
     {
-      "name": "{{module_name}}",
-      "version": "0.1.0",
-      "capabilities": ["{{module_name}}.read"]
+      "protocol": "lenso.module-manifest.v1",
+      "module_id": "{{module_name}}",
+      "capabilities": ["{{module_name}}.read"],
+      "http_routes": [
+        {
+          "method": "GET",
+          "path": "/status",
+          "capability": "{{module_name}}.read",
+          "display_name": "Read service status",
+          "story_title": "Service status read"
+        }
+      ]
     }
   ]
 }
