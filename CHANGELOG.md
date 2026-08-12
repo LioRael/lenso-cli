@@ -1,5 +1,11 @@
 ## lenso-cli@0.2.16
 
+## 0.6.1
+
+### Patch Changes
+
+- 6349d38: Point generated Host and Service guidance at the workspace-driven `lenso dev up` golden path.
+
 ## 0.6.0
 
 ### Minor Changes
