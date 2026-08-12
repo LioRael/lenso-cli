@@ -106,6 +106,7 @@ pub(crate) struct DiscoveredWorkspaceService {
     pub(crate) bearer_token: String,
     pub(crate) core: Value,
     pub(crate) provider: Value,
+    pub(crate) provider_base_url: String,
 }
 
 impl From<&ServiceCreateArgs> for ServiceCreateOptions {
@@ -298,6 +299,7 @@ pub(crate) async fn discover_local_workspace_services(
             bearer_token: enrollment.bearer_token.clone(),
             core,
             provider,
+            provider_base_url: provider_url,
         });
     }
     Ok(discovered)
@@ -1135,7 +1137,7 @@ async fn service_package_plan(options: &ServicePackageOptions) -> Result<Service
         .map(|module| {
             let module_dir = package_dir
                 .join("modules")
-                .join(module_release_path_segment(&module.name)?);
+                .join(module_release_path(&module.name)?);
             Ok(ModuleReleaseOutput {
                 contract_path: module_dir.join("lenso.module.json"),
                 module: module.clone(),
@@ -1203,7 +1205,14 @@ fn service_package_metadata(manifest: &Value) -> Result<ServicePackageMetadata> 
         if !module.is_object() {
             bail!("Service manifest module entries must be objects");
         }
-        let module_name = required_manifest_string(module, "name", "Service manifest module name")?;
+        let module_name = module
+            .get("name")
+            .or_else(|| module.get("module_id"))
+            .or_else(|| module.get("moduleId"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Service manifest module name is required"))?;
         if !seen_modules.insert(module_name.to_owned()) {
             bail!("Service manifest module `{module_name}` is declared more than once");
         }
@@ -1308,15 +1317,23 @@ fn module_names(modules: &[ServicePackageModuleMetadata]) -> Vec<String> {
     modules.iter().map(|module| module.name.clone()).collect()
 }
 
-fn module_release_path_segment(module_name: &str) -> Result<&str> {
-    if module_name.contains('/')
-        || module_name.contains('\\')
-        || module_name == "."
-        || module_name == ".."
+fn module_release_path(module_name: &str) -> Result<PathBuf> {
+    let segments = module_name.split('/').collect::<Vec<_>>();
+    if segments.is_empty()
+        || segments.len() > 2
+        || segments.iter().any(|segment| {
+            segment.is_empty()
+                || *segment == "."
+                || *segment == ".."
+                || segment.contains('\\')
+                || !segment.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' || byte == b'.'
+                })
+        })
     {
         bail!("Service manifest module `{module_name}` cannot be used as a release path");
     }
-    Ok(module_name)
+    Ok(segments.into_iter().collect())
 }
 
 fn print_service_package_report(plan: &ServicePackagePlan, check: bool, json: bool) -> Result<()> {
@@ -1655,7 +1672,7 @@ fn service_dependencies(local_framework_root: Option<&Path>) -> Result<ServiceDe
             lenso_service_dependency: "lenso-service = \"0.1\"".to_owned(),
             pnpm_workspace_overrides: String::new(),
             publish_note: None,
-            service_kit_dependency: json_string("^0.4.0"),
+            service_kit_dependency: json_string("^0.5.0"),
         });
     };
 
@@ -1825,7 +1842,7 @@ mod tests {
             publish_note: None,
             repo_root_display: "/tmp/host".to_owned(),
             service_cwd: json_string("../services/support-suite-provider"),
-            service_kit_dependency: json_string("^0.4.0"),
+            service_kit_dependency: json_string("^0.5.0"),
             service_label: "Support Suite".to_owned(),
             service_id: "local/support-suite-provider".to_owned(),
             service_name: "support-suite-provider".to_owned(),
@@ -2100,6 +2117,31 @@ mod tests {
     }
 
     #[test]
+    fn generated_service_manifests_are_package_check_compatible() {
+        for template in [
+            include_str!("../templates/service-ts/lenso.service.json.tmpl"),
+            include_str!("../templates/service-rust/lenso.service.json.tmpl"),
+        ] {
+            let manifest: Value = serde_json::from_str(&render_template(template, &scaffold()))
+                .expect("manifest should parse");
+            let metadata = service_package_metadata(&manifest).expect("manifest should package");
+
+            assert_eq!(metadata.modules[0].name, "local/support-suite");
+            assert_eq!(metadata.modules[0].version, "0.1.0");
+        }
+    }
+
+    #[test]
+    fn qualified_module_ids_use_safe_nested_release_paths() {
+        assert_eq!(
+            module_release_path("local/taste").unwrap(),
+            PathBuf::from("local/taste")
+        );
+        assert!(module_release_path("local/../taste").is_err());
+        assert!(module_release_path("local\\taste").is_err());
+    }
+
+    #[test]
     fn service_code_templates_expose_module_release_checks() {
         let ts_service = render_template(
             include_str!("../templates/service-ts/src/service.ts"),
@@ -2274,7 +2316,7 @@ mod tests {
     fn published_dependencies_are_the_default() {
         let dependencies = service_dependencies(None).unwrap();
 
-        assert_eq!(dependencies.service_kit_dependency, "\"^0.4.0\"");
+        assert_eq!(dependencies.service_kit_dependency, "\"^0.5.0\"");
         assert_eq!(
             dependencies.lenso_service_dependency,
             "lenso-service = \"0.1\""

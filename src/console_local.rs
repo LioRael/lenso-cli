@@ -70,7 +70,15 @@ struct LocalConsoleState {
 struct BuiltAuthRelease {
     digest: String,
     artifact: ConsoleCompositionArtifact,
+    release: ModuleRelease,
     surface_api: SurfaceApiTemplate,
+}
+
+#[derive(Debug, Clone)]
+struct DiscoveredProviderRelease {
+    provider_base_url: String,
+    reference: String,
+    release: ModuleRelease,
 }
 
 #[derive(Debug, Deserialize)]
@@ -267,6 +275,7 @@ async fn dev_up_inner(
     )
     .await?;
     let discovered = service::discover_local_workspace_services(&workspace_enrollments).await?;
+    let provider_releases = discover_provider_releases(&discovered).await?;
     let mut managed = vec![host_enrollment];
     let mut providers = Vec::new();
     for discovered in discovered {
@@ -286,22 +295,68 @@ async fn dev_up_inner(
     }
     write_local_console_state(&repo_root, &local_state)?;
 
-    let mut host_process = host::start(
-        Some(&repo_root),
-        options.skip_db,
-        options.skip_migrate,
-        options.separate_worker,
-    )
-    .await?;
-    wait_for_http(
-        &format!("{host_base_url}/readyz"),
-        "Host readiness",
-        Duration::from_secs(600),
-    )
-    .await?;
-    host_process.check()?;
-    let auth_template = fetch_auth_release_template(&host_base_url).await?;
-    let auth_release = build_auth_release(&repo_root, &host_base_url, auth_template)?;
+    let needs_auth_bootstrap =
+        provider_releases.iter().any(|entry| {
+            entry
+                .release
+                .manifest
+                .requires
+                .iter()
+                .any(|requirement| requirement.module_id == "lenso/auth")
+        }) && !module::has_local_release_candidate(&repo_root, "lenso/auth")?;
+    let (mut host_process, auth_release) = if needs_auth_bootstrap {
+        let mut bootstrap_host = host::start(
+            Some(&repo_root),
+            options.skip_db,
+            options.skip_migrate,
+            options.separate_worker,
+        )
+        .await?;
+        wait_for_http(
+            &format!("{host_base_url}/readyz"),
+            "Host bootstrap readiness",
+            Duration::from_secs(600),
+        )
+        .await?;
+        bootstrap_host.check()?;
+        let auth_template = fetch_auth_release_template(&host_base_url).await?;
+        let auth_release = build_auth_release(&repo_root, &host_base_url, auth_template)?;
+        bootstrap_host.stop();
+        install_discovered_provider_releases(
+            &repo_root,
+            &provider_releases,
+            Some(&auth_release.release),
+        )?;
+        let mut host_process =
+            host::start(Some(&repo_root), true, true, options.separate_worker).await?;
+        wait_for_http(
+            &format!("{host_base_url}/readyz"),
+            "Host Provider readiness",
+            Duration::from_secs(600),
+        )
+        .await?;
+        host_process.check()?;
+        (host_process, auth_release)
+    } else {
+        install_discovered_provider_releases(&repo_root, &provider_releases, None)?;
+        let mut host_process = host::start(
+            Some(&repo_root),
+            options.skip_db,
+            options.skip_migrate,
+            options.separate_worker,
+        )
+        .await?;
+        wait_for_http(
+            &format!("{host_base_url}/readyz"),
+            "Host readiness",
+            Duration::from_secs(600),
+        )
+        .await?;
+        host_process.check()?;
+        let auth_template = fetch_auth_release_template(&host_base_url).await?;
+        let auth_release = build_auth_release(&repo_root, &host_base_url, auth_template)?;
+        (host_process, auth_release)
+    };
     let trust = enrollment_trust(&system_id, &console_signer, &managed);
     let environment = BTreeMap::from([(
         "LENSO_MODULE_LENSO_SYSTEM_REGISTRY__ENROLLMENT_TRUST".to_owned(),
@@ -703,6 +758,119 @@ fn enrollment_trust(
     })
 }
 
+async fn discover_provider_releases(
+    discovered: &[service::DiscoveredWorkspaceService],
+) -> Result<Vec<DiscoveredProviderRelease>> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .context("build local Provider release client")?;
+    let mut releases = Vec::new();
+    for service in discovered {
+        let exports = service
+            .provider
+            .get("exports")
+            .and_then(Value::as_array)
+            .context("Provider descriptor exports are required")?;
+        for export in exports {
+            let export_key = export
+                .get("exportKey")
+                .and_then(Value::as_str)
+                .context("Provider export exportKey is required")?;
+            let module_id = export
+                .get("moduleId")
+                .and_then(Value::as_str)
+                .context("Provider export moduleId is required")?;
+            let expected_digest = export
+                .get("moduleReleaseDigest")
+                .and_then(Value::as_str)
+                .context("Provider export moduleReleaseDigest is required")?;
+            let reference = provider_release_reference(&service.provider_base_url, export_key)?;
+            let response = client
+                .get(&reference)
+                .send()
+                .await
+                .with_context(|| format!("fetch exact Module Release for {module_id}"))?
+                .error_for_status()
+                .with_context(|| {
+                    format!(
+                        "Provider export {module_id} does not expose its exact Module Release; update the Service runtime and scaffold"
+                    )
+                })?;
+            let release = response
+                .json::<ModuleRelease>()
+                .await
+                .with_context(|| format!("decode exact Module Release for {module_id}"))?;
+            let issues = release.validate();
+            if !issues.is_empty() {
+                bail!("Provider export {module_id} returned an invalid Module Release: {issues:?}");
+            }
+            let observed_digest = digest_json(&release)
+                .with_context(|| format!("digest exact Module Release for {module_id}"))?;
+            if release.module_id != module_id || observed_digest != expected_digest {
+                bail!(
+                    "Provider export {module_id} exact Module Release differs from its descriptor"
+                );
+            }
+            releases.push(DiscoveredProviderRelease {
+                provider_base_url: service.provider_base_url.clone(),
+                reference,
+                release,
+            });
+        }
+    }
+    Ok(releases)
+}
+
+fn provider_release_reference(provider_base_url: &str, export_key: &str) -> Result<String> {
+    let mut url = reqwest::Url::parse(provider_base_url.trim_end_matches('/'))
+        .context("parse local Provider URL")?;
+    url.path_segments_mut()
+        .map_err(|_| anyhow!("local Provider URL cannot be a base URL"))?
+        .extend(["exports", export_key, "module-release"]);
+    Ok(url.to_string())
+}
+
+fn install_discovered_provider_releases(
+    repo_root: &Path,
+    releases: &[DiscoveredProviderRelease],
+    linked_dependency: Option<&ModuleRelease>,
+) -> Result<bool> {
+    let mut candidates = releases
+        .iter()
+        .map(|entry| entry.release.clone())
+        .collect::<Vec<_>>();
+    if let Some(linked_dependency) = linked_dependency {
+        candidates.push(linked_dependency.clone());
+    }
+    let mut changed = false;
+    for entry in releases {
+        let dependencies = candidates
+            .iter()
+            .filter(|candidate| candidate.module_id != entry.release.module_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        changed |= module::install_exact_provider_release_with_candidates(
+            &serde_json::to_value(&entry.release).context("encode exact Module Release")?,
+            &entry.reference,
+            &module::ServiceModuleInstallOptions {
+                allow_incompatible: false,
+                base_url: Some(entry.provider_base_url.clone()),
+                catalog_url: None,
+                dry_run: false,
+                env_file: None,
+                install_profiles: Vec::new(),
+                module_services_file: None,
+                repo_root: Some(repo_root.to_path_buf()),
+                run_install_commands: false,
+                source: "service".to_owned(),
+            },
+            &dependencies,
+        )?;
+    }
+    Ok(changed)
+}
+
 async fn fetch_auth_release_template(host_base_url: &str) -> Result<AuthReleaseTemplate> {
     let url = format!("{host_base_url}/v1/auth/console/release");
     let template = reqwest::get(&url)
@@ -817,6 +985,7 @@ fn build_auth_release(
     Ok(BuiltAuthRelease {
         digest: release_digest,
         artifact,
+        release,
         surface_api: template.surface_api,
     })
 }
@@ -1140,6 +1309,15 @@ mod tests {
             "A=1\nLENSO_LOCAL_SYSTEM_PLANE_CONFIG=.lenso/local-system-plane.json\n"
         );
         assert_eq!(upsert_env("A=1\n", "B", "2"), "A=1\nB=2\n");
+    }
+
+    #[test]
+    fn builds_percent_encoded_exact_provider_release_urls() {
+        assert_eq!(
+            provider_release_reference("http://127.0.0.1:4100/lenso/provider/v1", "taste/profile")
+                .unwrap(),
+            "http://127.0.0.1:4100/lenso/provider/v1/exports/taste%2Fprofile/module-release"
+        );
     }
 
     #[test]

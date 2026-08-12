@@ -93,6 +93,7 @@ export const providerV1 = {
       moduleVersion,
     },
   ],
+  moduleReleases: { [moduleExport]: moduleRelease },
   protocolContractDigest: digest({ protocol: "lenso.provider.v1" }),
   runtimeInstanceId: `${serviceId}-local`,
   serviceId,

@@ -1,5 +1,5 @@
 use axum::http::{HeaderMap, StatusCode};
-use axum::{Json, Router, routing::get};
+use axum::{Json, Router, extract::Path, routing::get};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
@@ -28,6 +28,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/lenso/service/v1/manifest", get(manifest))
         .route("/lenso/provider/v1", get(provider))
+        .route(
+            "/lenso/provider/v1/exports/{export}/module-release",
+            get(module_release_endpoint),
+        )
         .route("/system-plane/v1", get(system_plane_core))
         .route("/status", get(status))
         .merge(lenso_service::health_router());
@@ -44,6 +48,15 @@ async fn manifest() -> Json<Value> {
 
 async fn provider() -> Json<Value> {
     Json(provider_descriptor())
+}
+
+async fn module_release_endpoint(
+    Path(export): Path<String>,
+) -> Result<Json<Value>, StatusCode> {
+    if export != MODULE_EXPORT {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(Json(module_release()))
 }
 
 async fn status() -> Json<Value> {
