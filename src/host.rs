@@ -9,6 +9,8 @@ use include_dir::{Dir, DirEntry, include_dir};
 use sqlx::postgres::PgPoolOptions;
 use std::collections::BTreeMap;
 
+const HOST_DATABASE_READY_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Embedded starter-host template. This is the single source of truth for the
 /// project that `lenso host init` writes out.
 const TEMPLATE_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/templates/starter-host");
@@ -130,7 +132,7 @@ pub(crate) async fn start(
 
     if !skip_db {
         run(repo_root, "docker", &["compose", "up", "-d", "postgres"])?;
-        wait_for_database(repo_root, Duration::from_secs(30)).await?;
+        wait_for_database(repo_root, HOST_DATABASE_READY_TIMEOUT).await?;
     }
     if !skip_migrate {
         run(repo_root, "cargo", &cargo_run_args("migrate"))?;
@@ -701,6 +703,11 @@ mod tests {
         assert!(rendered.contains("SERVICE_NAME=taste"));
         assert!(rendered.contains("POSTGRES_HOST_PORT=55432"));
         assert!(rendered.contains("HTTP_PORT=31000"));
+    }
+
+    #[test]
+    fn database_ready_timeout_covers_a_cold_compose_initialization() {
+        assert_eq!(HOST_DATABASE_READY_TIMEOUT, Duration::from_secs(60));
     }
 
     #[test]
