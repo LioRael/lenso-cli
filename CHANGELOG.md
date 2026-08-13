@@ -1,5 +1,11 @@
 ## lenso-cli@0.2.16
 
+## 0.7.1
+
+### Patch Changes
+
+- b299548: Generate TypeScript Provider metadata from the same canonical Module manifest served to the Host.
+
 ## 0.7.0
 
 ### Minor Changes
