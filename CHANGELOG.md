@@ -1,5 +1,11 @@
 ## lenso-cli@0.2.16
 
+## 0.7.2
+
+### Patch Changes
+
+- 6f45361: Generate TypeScript Services with Service Kit 0.6 and recover reusable local Console database credentials during state rebuilds.
+
 ## 0.7.1
 
 ### Patch Changes
