@@ -40,24 +40,7 @@ export const providedModule = defineModule({
   version: moduleVersion,
 });
 
-export const providerManifest = {
-  capabilities: ["{{module_name}}.read"],
-  console: [],
-  console_contributions: [],
-  console_slots: [],
-  http_routes: [
-    {
-      capability: "{{module_name}}.read",
-      display_name: "Read service status",
-      method: "GET",
-      path: "/status",
-      story_title: "Service status read",
-    },
-  ],
-  module_id: moduleId,
-  protocol: "lenso.module-manifest.v1",
-  story_display: [],
-};
+export const providerManifest = providedModule;
 const manifestDigest = digest(providerManifest);
 
 const releaseWithoutDigest = {
