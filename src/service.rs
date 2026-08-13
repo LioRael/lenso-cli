@@ -2220,6 +2220,8 @@ mod tests {
         assert!(ts_service.contains("const moduleExport = \"support-suite\";"));
         assert!(ts_service.contains("export: moduleExport"));
         assert!(ts_service.contains("exportKey: moduleExport"));
+        assert!(ts_service.contains("export const providerManifest = providedModule;"));
+        assert!(!ts_service.contains("export const providerManifest = {"));
         assert!(ts_service.contains("readyTimeoutMs: 30000"));
         assert!(ts_server.contains("--check-release"));
         assert!(ts_server.contains("LENSO_LOCAL_ENROLLMENT_TOKEN"));
