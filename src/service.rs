@@ -1709,7 +1709,7 @@ fn service_dependencies(local_framework_root: Option<&Path>) -> Result<ServiceDe
             lenso_service_dependency: "lenso-service = \"0.1\"".to_owned(),
             pnpm_workspace_overrides: String::new(),
             publish_note: None,
-            service_kit_dependency: json_string("^0.5.0"),
+            service_kit_dependency: json_string("^0.6.0"),
         });
     };
 
@@ -1879,7 +1879,7 @@ mod tests {
             publish_note: None,
             repo_root_display: "/tmp/host".to_owned(),
             service_cwd: json_string("../services/support-suite-provider"),
-            service_kit_dependency: json_string("^0.5.0"),
+            service_kit_dependency: json_string("^0.6.0"),
             service_label: "Support Suite".to_owned(),
             service_id: "local/support-suite-provider".to_owned(),
             service_name: "support-suite-provider".to_owned(),
@@ -2377,7 +2377,7 @@ mod tests {
     fn published_dependencies_are_the_default() {
         let dependencies = service_dependencies(None).unwrap();
 
-        assert_eq!(dependencies.service_kit_dependency, "\"^0.5.0\"");
+        assert_eq!(dependencies.service_kit_dependency, "\"^0.6.0\"");
         assert_eq!(
             dependencies.lenso_service_dependency,
             "lenso-service = \"0.1\""

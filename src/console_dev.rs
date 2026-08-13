@@ -233,7 +233,8 @@ fn prepare_container_console_dev(
     fs::create_dir_all(&root)
         .with_context(|| format!("create local Console runtime {}", root.display()))?;
     let env_file = root.join(".env");
-    ensure_container_environment(&env_file, environment)?;
+    let project = console_compose_project(&root);
+    ensure_container_environment(&env_file, environment, &project)?;
     let compose_file = root.join("compose.yml");
     fs::write(
         &compose_file,
@@ -247,7 +248,6 @@ fn prepare_container_console_dev(
             compose_file.display()
         )
     })?;
-    let project = console_compose_project(&root);
     run_compose(
         &root,
         &env_file,
@@ -277,7 +277,11 @@ fn prepare_container_console_dev(
     })
 }
 
-fn ensure_container_environment(path: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
+fn ensure_container_environment(
+    path: &Path,
+    environment: &BTreeMap<String, String>,
+    project: &str,
+) -> Result<()> {
     let mut source = if path.is_file() {
         fs::read_to_string(path)
             .with_context(|| format!("read local Console environment {}", path.display()))?
@@ -286,7 +290,22 @@ fn ensure_container_environment(path: &Path, environment: &BTreeMap<String, Stri
         let http = crate::host::reserve_loopback_port(3_030)?;
         let postgres_port = postgres.local_addr()?.port();
         let http_port = http.local_addr()?.port();
-        let password = random_secret()?;
+        let (password, recovered) = if let Some(password) =
+            existing_console_postgres_password(project)?
+        {
+            (password, true)
+        } else {
+            if console_database_volume_exists(project)? {
+                bail!(
+                    "local Console state {} is missing, but Docker project {project} still owns a database volume whose password cannot be recovered; restore the previous .env or explicitly remove that project volume before rebuilding",
+                    path.display()
+                );
+            }
+            (random_secret()?, false)
+        };
+        if recovered {
+            eprintln!("Recovered existing local Console database credentials.");
+        }
         format!(
             "CONSOLE_DATABASE_URL=postgres://lenso_console:{password}@127.0.0.1:{postgres_port}/lenso_console\nDATABASE_URL=postgres://lenso_console:{password}@127.0.0.1:{postgres_port}/lenso_console\nPOSTGRES_PASSWORD={password}\nPOSTGRES_HOST_PORT={postgres_port}\nCONSOLE_HTTP_PORT={http_port}\nHTTP_PORT={http_port}\nCONSOLE_PUBLIC_ORIGIN=http://127.0.0.1:{http_port}\nCONSOLE_RECOVERY_MODE=normal\n"
         )
@@ -297,6 +316,71 @@ fn ensure_container_environment(path: &Path, environment: &BTreeMap<String, Stri
     fs::write(path, source)
         .with_context(|| format!("write local Console environment {}", path.display()))?;
     make_private(path)
+}
+
+fn existing_console_postgres_password(project: &str) -> Result<Option<String>> {
+    let project_filter = format!("label=com.docker.compose.project={project}");
+    let output = Command::new("docker")
+        .args([
+            "container",
+            "ls",
+            "--all",
+            "--quiet",
+            "--filter",
+            &project_filter,
+            "--filter",
+            "label=com.docker.compose.service=postgres",
+        ])
+        .output()
+        .context("inspect existing local Console Postgres container")?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let containers = String::from_utf8(output.stdout)
+        .context("decode existing local Console Postgres container ids")?;
+    let Some(container) = containers.lines().find(|line| !line.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let output = Command::new("docker")
+        .args([
+            "inspect",
+            "--format",
+            "{{json .Config.Env}}",
+            container.trim(),
+        ])
+        .output()
+        .context("inspect existing local Console Postgres environment")?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let source = String::from_utf8(output.stdout)
+        .context("decode existing local Console Postgres environment")?;
+    postgres_password_from_inspect(&source)
+}
+
+fn postgres_password_from_inspect(source: &str) -> Result<Option<String>> {
+    let environment: Vec<String> =
+        serde_json::from_str(source.trim()).context("decode Docker inspect environment")?;
+    Ok(environment
+        .into_iter()
+        .find_map(|entry| entry.strip_prefix("POSTGRES_PASSWORD=").map(str::to_owned)))
+}
+
+fn console_database_volume_exists(project: &str) -> Result<bool> {
+    let project_filter = format!("label=com.docker.compose.project={project}");
+    let output = Command::new("docker")
+        .args([
+            "volume",
+            "ls",
+            "--quiet",
+            "--filter",
+            &project_filter,
+            "--filter",
+            "label=com.docker.compose.volume=console-database",
+        ])
+        .output()
+        .context("inspect existing local Console database volume")?;
+    Ok(output.status.success() && !output.stdout.is_empty())
 }
 
 fn random_secret() -> Result<String> {
@@ -720,5 +804,16 @@ mod tests {
 
         let standalone = container_compose_document(false);
         assert!(!standalone.contains("LENSO_MODULE_LENSO_SYSTEM_REGISTRY__ENROLLMENT_TRUST"));
+    }
+
+    #[test]
+    fn recovers_the_postgres_password_from_docker_inspect_environment() {
+        let output = r#"["POSTGRES_DB=lenso_console","POSTGRES_PASSWORD=kept-secret","POSTGRES_USER=lenso_console"]"#;
+
+        assert_eq!(
+            postgres_password_from_inspect(output).unwrap().as_deref(),
+            Some("kept-secret")
+        );
+        assert_eq!(postgres_password_from_inspect("[]").unwrap(), None);
     }
 }
