@@ -1,4 +1,4 @@
 interface:
-  display_name: "Lenso Start"
-  short_description: "Choose the right public Lenso path"
-  default_prompt: "Use $lenso-start to choose the right public Lenso path before authoring code or contracts."
+  display_name: Lenso vNext start
+  short_description: Route work to the smallest vNext seam.
+  default_prompt: Route this request using the vNext vocabulary and repository ADRs.

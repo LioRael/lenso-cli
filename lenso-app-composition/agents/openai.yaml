@@ -1,4 +1,4 @@
 interface:
-  display_name: "Lenso App Composition"
-  short_description: "Compose and verify a generated Lenso application."
-  default_prompt: "Use $lenso-app-composition to compose or evolve this exact Lenso App through Compose, Run locally, Connect, and Status."
+  display_name: Lenso App Composition
+  short_description: Build an explicit resolved App Plan.
+  default_prompt: Define the Module instances, bindings, and deterministic resolved plan.
