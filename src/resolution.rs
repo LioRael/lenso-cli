@@ -6,7 +6,7 @@ use std::{
 use lenso_app_plan::{
     AppComposition, CapabilityBinding as PlanBinding, CapabilityCardinality,
     CapabilityEndpointPlan, CapabilityOperationKind, CapabilityRequirementPlan, EventAdmissionPlan,
-    ExecutionClassId, ModuleInstancePlan, RequestAdmissionPlan,
+    ExecutionClassId, ExecutionLaneId, ExecutionLanePlan, ModuleInstancePlan, RequestAdmissionPlan,
 };
 
 use crate::package_manager::{ResolvedPackage, resolve_package};
@@ -19,6 +19,14 @@ use crate::{
 
 const UI_CONTRIBUTION_CAPABILITY_ID: &str = "lenso.ui.contribution@1";
 const WEB_SHELL_CAPABILITY_ID: &str = "lenso.web.shell@1";
+
+#[derive(Clone, Debug)]
+struct ContractFacts {
+    operations: BTreeSet<String>,
+    cross_lane_transfer: bool,
+}
+
+type ContractFactsByIdentity = BTreeMap<(String, String), ContractFacts>;
 
 /// Authoring operations implemented above the pure App Plan data model.
 pub trait ProjectAuthoring {
@@ -36,10 +44,10 @@ impl ProjectAuthoring for ProjectFile {
     /// execution classes, and explicit Capability bindings.
     fn check(&self, root: &Path, options: &CheckOptions) -> Result<CheckReport, AuthoringError> {
         validate_schema(self)?;
-        check_contracts(self, root)?;
+        let contracts = check_contracts(self, root)?;
         let modules = selected_modules(self, None)?;
         let packages = check_packages(self, root, &modules, options)?;
-        let composition = build_composition(self, &modules, &packages)?;
+        let composition = build_composition(self, &modules, &packages, &contracts)?;
         composition
             .resolve()
             .map_err(|error| AuthoringError::Plan {
@@ -60,10 +68,10 @@ impl ProjectAuthoring for ProjectFile {
         options: &ResolutionOptions,
     ) -> Result<ResolvedProject, AuthoringError> {
         validate_schema(self)?;
-        check_contracts(self, root)?;
+        let contracts = check_contracts(self, root)?;
         let modules = selected_modules(self, options.profile())?;
         let packages = check_packages(self, root, &modules, options.check())?;
-        let composition = build_composition(self, &modules, &packages)?;
+        let composition = build_composition(self, &modules, &packages, &contracts)?;
         let plan = composition
             .resolve()
             .map_err(|error| AuthoringError::Plan {
@@ -86,7 +94,10 @@ fn validate_schema(project: &ProjectFile) -> Result<(), AuthoringError> {
     Ok(())
 }
 
-fn check_contracts(project: &ProjectFile, root: &Path) -> Result<(), AuthoringError> {
+fn check_contracts(
+    project: &ProjectFile,
+    root: &Path,
+) -> Result<ContractFactsByIdentity, AuthoringError> {
     let mut contracts = BTreeMap::new();
     for contract in project.contracts() {
         let descriptor = root.join(contract.descriptor());
@@ -125,8 +136,14 @@ fn check_contracts(project: &ProjectFile, root: &Path) -> Result<(), AuthoringEr
             .collect::<BTreeSet<_>>();
         if contracts
             .insert(
-                (contract.capability_id(), contract.descriptor_version()),
-                descriptor_operations,
+                (
+                    contract.capability_id().to_owned(),
+                    contract.descriptor_version().to_owned(),
+                ),
+                ContractFacts {
+                    operations: descriptor_operations,
+                    cross_lane_transfer: loaded.cross_lane_transfer(),
+                },
             )
             .is_some()
         {
@@ -148,7 +165,7 @@ fn check_contracts(project: &ProjectFile, root: &Path) -> Result<(), AuthoringEr
                 )
             }))
         {
-            if !contracts.contains_key(&(capability_id, descriptor_version)) {
+            if !contracts.contains_key(&(capability_id.to_owned(), descriptor_version.to_owned())) {
                 return Err(AuthoringError::Contract {
                     path: root.to_owned(),
                     detail: format!(
@@ -159,7 +176,11 @@ fn check_contracts(project: &ProjectFile, root: &Path) -> Result<(), AuthoringEr
             }
         }
         for endpoint in module.provides() {
-            let expected = &contracts[&(endpoint.capability_id(), endpoint.descriptor_version())];
+            let expected = &contracts[&(
+                endpoint.capability_id().to_owned(),
+                endpoint.descriptor_version().to_owned(),
+            )]
+                .operations;
             let actual = endpoint.operations().iter().cloned().collect();
             if expected != &actual {
                 return Err(AuthoringError::Contract {
@@ -174,7 +195,7 @@ fn check_contracts(project: &ProjectFile, root: &Path) -> Result<(), AuthoringEr
             }
         }
     }
-    Ok(())
+    Ok(contracts)
 }
 
 fn selected_modules(
@@ -454,6 +475,7 @@ fn build_composition(
     project: &ProjectFile,
     modules: &[Module],
     packages: &BTreeMap<String, ResolvedPackage>,
+    contracts: &ContractFactsByIdentity,
 ) -> Result<AppComposition, AuthoringError> {
     let selected: BTreeSet<_> = modules.iter().map(Module::key).collect();
     let all_keys: BTreeSet<_> = project
@@ -487,9 +509,17 @@ fn build_composition(
             .with_entrypoint(module.entrypoint())
             .with_configuration(canonical_json_string(module.configuration()))
             .with_execution_class(ExecutionClassId::new(execution_class))
+            .with_execution_lane(ExecutionLaneId::new(
+                module.execution_lane().unwrap_or("main"),
+            ))
             .with_package_revision(locked.revision());
         for endpoint in module.provides() {
-            instance = instance.with_capability(to_plan_endpoint(endpoint));
+            let facts = &contracts[&(
+                endpoint.capability_id().to_owned(),
+                endpoint.descriptor_version().to_owned(),
+            )];
+            instance =
+                instance.with_capability(to_plan_endpoint(endpoint, facts.cross_lane_transfer));
         }
         for requirement in module.requires() {
             instance = instance.with_requirement(CapabilityRequirementPlan::new(
@@ -530,7 +560,16 @@ fn build_composition(
             bindings.push(plan_binding);
         }
     }
-    Ok(AppComposition::new(instances, bindings))
+    Ok(
+        AppComposition::new(instances, bindings).with_execution_lanes(
+            project
+                .composition()
+                .execution_lanes()
+                .iter()
+                .map(|lane| ExecutionLanePlan::new(lane.id()))
+                .collect(),
+        ),
+    )
 }
 
 fn to_plan_cardinality(cardinality: Cardinality) -> CapabilityCardinality {
@@ -541,7 +580,10 @@ fn to_plan_cardinality(cardinality: Cardinality) -> CapabilityCardinality {
     }
 }
 
-fn to_plan_endpoint(endpoint: &CapabilityEndpoint) -> CapabilityEndpointPlan {
+fn to_plan_endpoint(
+    endpoint: &CapabilityEndpoint,
+    cross_lane_transfer: bool,
+) -> CapabilityEndpointPlan {
     let mut plan = CapabilityEndpointPlan::new(
         endpoint.capability_id(),
         endpoint.descriptor_version(),
@@ -569,6 +611,9 @@ fn to_plan_endpoint(endpoint: &CapabilityEndpoint) -> CapabilityEndpointPlan {
     }
     if let Some(capacity) = endpoint.event_capacity() {
         plan = plan.with_event_admission(EventAdmissionPlan::new(capacity));
+    }
+    if cross_lane_transfer {
+        plan = plan.with_cross_lane_transfer();
     }
     plan
 }

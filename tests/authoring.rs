@@ -8,8 +8,8 @@ use std::{
 
 use lenso_authoring::{
     AddModule, Binding, CapabilityEndpoint, CapabilityRequirement, CheckOptions, ContractInput,
-    Module, ModuleRole, PackageInput, PackageSource, ProjectAuthoring, ProjectFile, ProjectPath,
-    RequestAdmission, ResolutionOptions, ResolvedProject, WebProfile, run_project,
+    ExecutionLane, Module, ModuleRole, PackageInput, PackageSource, ProjectAuthoring, ProjectFile,
+    ProjectPath, RequestAdmission, ResolutionOptions, ResolvedProject, WebProfile, run_project,
 };
 use lenso_bun_adapter::{BunAdapter, BunAdapterConfig, BunWire};
 use lenso_kernel::{ExecutionAdapterCatalog, TerminalOutcome};
@@ -176,6 +176,65 @@ fn meaningful_binding_changes_produce_a_plan_diff() {
             .resolve(&root, &ResolutionOptions::default())
             .unwrap()
             .canonical_bytes()
+    );
+}
+
+#[test]
+fn authoring_materializes_lane_placement_and_descriptor_transfer_support() {
+    let root = tempfile_dir();
+    write_cargo_inputs(&root, &[("provider", "1.0.0"), ("consumer", "1.0.0")]);
+    let mut project = ProjectFile::default();
+    add_package(&mut project, package("provider", "provider", "1.0.0"));
+    add_package(&mut project, package("consumer", "consumer", "1.0.0"));
+    add_greeting_contract(&mut project, &root);
+    project
+        .composition_mut()
+        .add_execution_lane(ExecutionLane::new("frontend"));
+    project
+        .composition_mut()
+        .add_execution_lane(ExecutionLane::new("workers"));
+    project.composition_mut().add_module(
+        Module::new("consumer", "consumer")
+            .with_execution_lane("frontend")
+            .with_requirement(CapabilityRequirement::one("example.greeting@1", "1.0.0")),
+    );
+    project.composition_mut().add_module(
+        Module::new("provider", "provider")
+            .with_execution_lane("workers")
+            .with_capability(CapabilityEndpoint::request(
+                "example.greeting@1",
+                "1.0.0",
+                ["greet"],
+            )),
+    );
+    project.composition_mut().add_binding(Binding::new(
+        "consumer",
+        "example.greeting@1",
+        "1.0.0",
+        "provider",
+    ));
+
+    let resolved = project
+        .resolve(&root, &ResolutionOptions::default())
+        .expect("Descriptor-declared transfer should permit cross-lane placement");
+
+    assert_eq!(resolved.plan().execution_lanes().len(), 2);
+    assert_eq!(
+        resolved
+            .plan()
+            .module_instance("provider")
+            .expect("provider should resolve")
+            .execution_lane()
+            .as_str(),
+        "workers"
+    );
+    assert!(
+        resolved
+            .plan()
+            .module_instance("provider")
+            .expect("provider should resolve")
+            .provided_capabilities()[0]
+            .supports_cross_lane_transfer()
     );
 }
 
