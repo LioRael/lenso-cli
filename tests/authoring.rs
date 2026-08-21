@@ -71,6 +71,34 @@ fn add_greeting_contract(project: &mut ProjectFile, root: &Path) {
     ));
 }
 
+fn add_web_contracts(project: &mut ProjectFile, root: &Path) {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for (source, target, capability_id) in [
+        (
+            "lenso-capability-ui-contribution",
+            "ui-contribution",
+            "lenso.ui.contribution@1",
+        ),
+        (
+            "lenso-capability-web-shell",
+            "web-shell",
+            "lenso.web.shell@1",
+        ),
+    ] {
+        copy_tree(
+            &workspace.join("crates").join(source),
+            &root.join("contract").join(target),
+        );
+        project.contracts_mut().push(ContractInput::new(
+            capability_id,
+            "1.0.0",
+            format!("contract/{target}/capability.json"),
+            format!("contract/{target}/src/generated.rs"),
+            format!("contract/{target}/generated/bindings.ts"),
+        ));
+    }
+}
+
 #[test]
 fn resolved_plan_is_the_only_canonical_execution_document() {
     let root = tempfile_dir();
@@ -244,15 +272,46 @@ fn web_profile_requires_explicit_shell_adapter_and_contribution_roles() {
     for name in ["shell", "browser", "orders-ui"] {
         add_package(&mut project, package(name, name, "1.0.0"));
     }
-    project
-        .composition_mut()
-        .add_module(Module::new("shell", "shell").with_role(ModuleRole::WebShell));
-    project
-        .composition_mut()
-        .add_module(Module::new("browser", "browser").with_role(ModuleRole::BrowserAdapter));
-    project
-        .composition_mut()
-        .add_module(Module::new("orders-ui", "orders-ui").with_role(ModuleRole::UiContribution));
+    add_web_contracts(&mut project, &root);
+    project.composition_mut().add_module(
+        Module::new("shell", "shell")
+            .with_role(ModuleRole::WebShell)
+            .with_capability(CapabilityEndpoint::request(
+                "lenso.web.shell@1",
+                "1.0.0",
+                ["read_asset", "render_route"],
+            ))
+            .with_requirement(CapabilityRequirement::many(
+                "lenso.ui.contribution@1",
+                "1.0.0",
+            )),
+    );
+    project.composition_mut().add_module(
+        Module::new("browser", "browser")
+            .with_role(ModuleRole::BrowserAdapter)
+            .with_requirement(CapabilityRequirement::one("lenso.web.shell@1", "1.0.0")),
+    );
+    project.composition_mut().add_module(
+        Module::new("orders-ui", "orders-ui")
+            .with_role(ModuleRole::UiContribution)
+            .with_capability(CapabilityEndpoint::request(
+                "lenso.ui.contribution@1",
+                "1.0.0",
+                ["describe"],
+            )),
+    );
+    project.composition_mut().add_binding(Binding::new(
+        "shell",
+        "lenso.ui.contribution@1",
+        "1.0.0",
+        "orders-ui",
+    ));
+    project.composition_mut().add_binding(Binding::new(
+        "browser",
+        "lenso.web.shell@1",
+        "1.0.0",
+        "shell",
+    ));
     project.profiles_mut().insert(
         "web".to_owned(),
         WebProfile::new("shell", "browser").with_ui_contribution("orders-ui"),
@@ -261,6 +320,37 @@ fn web_profile_requires_explicit_shell_adapter_and_contribution_roles() {
         .resolve(&root, &ResolutionOptions::default().with_profile("web"))
         .unwrap();
     assert_eq!(plan.plan().module_instances().len(), 3);
+
+    let mut without_ui = project.clone();
+    without_ui
+        .profiles_mut()
+        .insert("web".to_owned(), WebProfile::new("shell", "browser"));
+    let non_ui_plan = without_ui
+        .resolve(&root, &ResolutionOptions::default().with_profile("web"))
+        .unwrap();
+    assert_ne!(plan.canonical_bytes(), non_ui_plan.canonical_bytes());
+    assert_ne!(
+        serde_json::to_vec_pretty(&project).unwrap(),
+        serde_json::to_vec_pretty(&without_ui).unwrap()
+    );
+    assert!(non_ui_plan.plan().module_instance("orders-ui").is_none());
+
+    let mut invalid = project.clone();
+    invalid.composition_mut().modules_mut()[0] = Module::new("shell", "shell")
+        .with_role(ModuleRole::WebShell)
+        .with_capability(CapabilityEndpoint::request(
+            "lenso.web.shell@1",
+            "1.0.0",
+            ["read_asset", "render_route"],
+        ));
+    let error = invalid
+        .resolve(&root, &ResolutionOptions::default().with_profile("web"))
+        .expect_err("Web Shell must bind many UI Contributions");
+    assert!(
+        error
+            .to_string()
+            .contains("must require many lenso.ui.contribution@1")
+    );
 }
 
 #[test]

@@ -17,6 +17,9 @@ use crate::{
     ResolvedProject, canonical_json_bytes, canonical_json_string,
 };
 
+const UI_CONTRIBUTION_CAPABILITY_ID: &str = "lenso.ui.contribution@1";
+const WEB_SHELL_CAPABILITY_ID: &str = "lenso.web.shell@1";
+
 /// Authoring operations implemented above the pure App Plan data model.
 pub trait ProjectAuthoring {
     fn check(&self, root: &Path, options: &CheckOptions) -> Result<CheckReport, AuthoringError>;
@@ -230,7 +233,132 @@ fn selected_modules(
             ModuleRole::UiContribution,
         )?;
     }
+    validate_web_profile_interfaces(
+        profile_name,
+        &modules,
+        project.composition().bindings(),
+        profile,
+    )?;
     Ok(modules)
+}
+
+fn validate_web_profile_interfaces(
+    profile_name: &str,
+    modules: &[Module],
+    bindings: &[crate::Binding],
+    profile: &lenso_app_plan::authoring::WebProfile,
+) -> Result<(), AuthoringError> {
+    let module = |instance: &str| {
+        modules
+            .iter()
+            .find(|module| module.key() == instance)
+            .expect("profile Instance existence was validated")
+    };
+    if !module(profile.shell())
+        .requires()
+        .iter()
+        .any(|requirement| {
+            requirement.capability_id() == UI_CONTRIBUTION_CAPABILITY_ID
+                && requirement.cardinality() == Cardinality::Many
+        })
+    {
+        return Err(AuthoringError::InvalidProfile {
+            profile: profile_name.to_owned(),
+            detail: format!(
+                "Web Shell {} must require many {UI_CONTRIBUTION_CAPABILITY_ID}",
+                profile.shell()
+            ),
+        });
+    }
+    if !module(profile.browser_adapter())
+        .requires()
+        .iter()
+        .any(|requirement| {
+            requirement.capability_id() == WEB_SHELL_CAPABILITY_ID
+                && requirement.cardinality() == Cardinality::One
+        })
+    {
+        return Err(AuthoringError::InvalidProfile {
+            profile: profile_name.to_owned(),
+            detail: format!(
+                "Browser Adapter {} must require one {WEB_SHELL_CAPABILITY_ID}",
+                profile.browser_adapter()
+            ),
+        });
+    }
+    for contribution in profile.ui_contributions() {
+        if !module(contribution)
+            .provides()
+            .iter()
+            .any(|endpoint| endpoint.capability_id() == UI_CONTRIBUTION_CAPABILITY_ID)
+        {
+            return Err(AuthoringError::InvalidProfile {
+                profile: profile_name.to_owned(),
+                detail: format!(
+                    "UI Contribution {contribution} must provide {UI_CONTRIBUTION_CAPABILITY_ID}"
+                ),
+            });
+        }
+        validate_projected_requirements(
+            profile_name,
+            module(contribution),
+            module(profile.browser_adapter()),
+            bindings,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_projected_requirements(
+    profile_name: &str,
+    contribution: &Module,
+    browser: &Module,
+    bindings: &[crate::Binding],
+) -> Result<(), AuthoringError> {
+    for requirement in contribution.requires() {
+        let capability_id = requirement.capability_id();
+        let descriptor_version = requirement.descriptor_version();
+        if requirement.cardinality() != Cardinality::One {
+            return Err(AuthoringError::InvalidProfile {
+                profile: profile_name.to_owned(),
+                detail: format!(
+                    "UI Contribution {} requirement {capability_id} {descriptor_version} must be exactly-one for v1 browser projection",
+                    contribution.key()
+                ),
+            });
+        }
+        let mirrored = browser.requires().iter().any(|candidate| {
+            candidate.capability_id() == capability_id
+                && candidate.descriptor_version() == descriptor_version
+                && candidate.cardinality() == requirement.cardinality()
+        });
+        let providers_for = |consumer: &str| {
+            bindings
+                .iter()
+                .filter(|binding| {
+                    binding.consumer() == consumer
+                        && binding.capability_id() == capability_id
+                        && binding.descriptor_version() == descriptor_version
+                })
+                .map(crate::Binding::provider)
+                .collect::<BTreeSet<_>>()
+        };
+        let contribution_providers = providers_for(contribution.key());
+        let browser_providers = providers_for(browser.key());
+        let same_provider =
+            contribution_providers.len() == 1 && contribution_providers == browser_providers;
+        if !mirrored || !same_provider {
+            return Err(AuthoringError::InvalidProfile {
+                profile: profile_name.to_owned(),
+                detail: format!(
+                    "Browser Adapter {} must project UI Contribution {} requirement {capability_id} {descriptor_version} with the same cardinality and resolved provider",
+                    browser.key(),
+                    contribution.key()
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn check_packages(
@@ -310,8 +438,6 @@ fn validate_profile_role(
     }
     Ok(())
 }
-
-/// Runs a resolved project through a caller-supplied immutable Adapter catalog.
 
 fn validate_entrypoint(root: &Path, module: &Module) -> Result<(), AuthoringError> {
     let entrypoint = root.join(module.entrypoint());
