@@ -1,0 +1,461 @@
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
+
+use lenso_app_plan::{
+    AppComposition, CapabilityBinding as PlanBinding, CapabilityCardinality,
+    CapabilityEndpointPlan, CapabilityOperationKind, CapabilityRequirementPlan, EventAdmissionPlan,
+    ExecutionClassId, ModuleInstancePlan, RequestAdmissionPlan,
+};
+
+use crate::package_manager::{ResolvedPackage, resolve_package};
+use crate::validation::validate_configuration;
+use crate::{
+    AuthoringError, CapabilityEndpoint, Cardinality, CheckOptions, InteractionKind, Module,
+    ModuleRole, PROJECT_SCHEMA_VERSION, PackageSource, ProjectFile, ResolutionOptions,
+    ResolvedProject, canonical_json_bytes, canonical_json_string,
+};
+
+/// Authoring operations implemented above the pure App Plan data model.
+pub trait ProjectAuthoring {
+    fn check(&self, root: &Path, options: &CheckOptions) -> Result<CheckReport, AuthoringError>;
+
+    fn resolve(
+        &self,
+        root: &Path,
+        options: &ResolutionOptions,
+    ) -> Result<ResolvedProject, AuthoringError>;
+}
+
+impl ProjectAuthoring for ProjectFile {
+    /// Checks project data, package locks, generated artifacts, configuration,
+    /// execution classes, and explicit Capability bindings.
+    fn check(&self, root: &Path, options: &CheckOptions) -> Result<CheckReport, AuthoringError> {
+        validate_schema(self)?;
+        check_contracts(self, root)?;
+        let modules = selected_modules(self, None)?;
+        let packages = check_packages(self, root, &modules, options)?;
+        let composition = build_composition(self, &modules, &packages)?;
+        composition
+            .resolve()
+            .map_err(|error| AuthoringError::Plan {
+                detail: error.to_string(),
+            })?;
+        Ok(CheckReport {
+            modules: modules.len(),
+            bindings: self.composition().bindings().len(),
+            contracts: self.contracts().len(),
+            execution_classes: options.available_execution_classes().clone(),
+        })
+    }
+
+    /// Resolves one deterministic immutable Plan from Composition and lock state.
+    fn resolve(
+        &self,
+        root: &Path,
+        options: &ResolutionOptions,
+    ) -> Result<ResolvedProject, AuthoringError> {
+        validate_schema(self)?;
+        check_contracts(self, root)?;
+        let modules = selected_modules(self, options.profile())?;
+        let packages = check_packages(self, root, &modules, options.check())?;
+        let composition = build_composition(self, &modules, &packages)?;
+        let plan = composition
+            .resolve()
+            .map_err(|error| AuthoringError::Plan {
+                detail: error.to_string(),
+            })?;
+        let canonical_bytes = canonical_json_bytes(&plan);
+        Ok(ResolvedProject {
+            plan,
+            canonical_bytes,
+        })
+    }
+}
+
+fn validate_schema(project: &ProjectFile) -> Result<(), AuthoringError> {
+    if project.schema_version() != PROJECT_SCHEMA_VERSION {
+        return Err(AuthoringError::UnsupportedProjectSchema {
+            actual: project.schema_version(),
+        });
+    }
+    Ok(())
+}
+
+fn check_contracts(project: &ProjectFile, root: &Path) -> Result<(), AuthoringError> {
+    let mut contracts = BTreeMap::new();
+    for contract in project.contracts() {
+        let descriptor = root.join(contract.descriptor());
+        let rust = root.join(contract.rust());
+        let typescript = root.join(contract.typescript());
+        let loaded = lenso_contract_codegen::load_descriptor(&descriptor).map_err(|error| {
+            AuthoringError::Contract {
+                path: descriptor.clone(),
+                detail: error.to_string(),
+            }
+        })?;
+        if loaded.capability_id() != contract.capability_id()
+            || loaded.version() != contract.descriptor_version()
+        {
+            return Err(AuthoringError::Contract {
+                path: descriptor,
+                detail: format!(
+                    "declared {} {} but Descriptor is {} {}",
+                    contract.capability_id(),
+                    contract.descriptor_version(),
+                    loaded.capability_id(),
+                    loaded.version()
+                ),
+            });
+        }
+        lenso_contract_codegen::check_generated(&descriptor, &rust, &typescript).map_err(
+            |error| AuthoringError::Contract {
+                path: descriptor.clone(),
+                detail: error.to_string(),
+            },
+        )?;
+        let descriptor_operations = loaded
+            .operation_names()
+            .into_iter()
+            .map(ToOwned::to_owned)
+            .collect::<BTreeSet<_>>();
+        if contracts
+            .insert(
+                (contract.capability_id(), contract.descriptor_version()),
+                descriptor_operations,
+            )
+            .is_some()
+        {
+            return Err(AuthoringError::Contract {
+                path: descriptor,
+                detail: "duplicate Capability Descriptor input".to_owned(),
+            });
+        }
+    }
+    for module in project.composition().modules() {
+        for (capability_id, descriptor_version) in module
+            .provides()
+            .iter()
+            .map(|endpoint| (endpoint.capability_id(), endpoint.descriptor_version()))
+            .chain(module.requires().iter().map(|requirement| {
+                (
+                    requirement.capability_id(),
+                    requirement.descriptor_version(),
+                )
+            }))
+        {
+            if !contracts.contains_key(&(capability_id, descriptor_version)) {
+                return Err(AuthoringError::Contract {
+                    path: root.to_owned(),
+                    detail: format!(
+                        "Module Instance {} uses {capability_id} {descriptor_version} without a Descriptor input",
+                        module.key()
+                    ),
+                });
+            }
+        }
+        for endpoint in module.provides() {
+            let expected = &contracts[&(endpoint.capability_id(), endpoint.descriptor_version())];
+            let actual = endpoint.operations().iter().cloned().collect();
+            if expected != &actual {
+                return Err(AuthoringError::Contract {
+                    path: root.to_owned(),
+                    detail: format!(
+                        "Module Instance {} endpoint {} operations do not match Descriptor {}",
+                        module.key(),
+                        endpoint.capability_id(),
+                        endpoint.descriptor_version()
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn selected_modules(
+    project: &ProjectFile,
+    profile: Option<&str>,
+) -> Result<Vec<Module>, AuthoringError> {
+    let mut modules = project.composition().modules().to_vec();
+    let Some(profile_name) = profile else {
+        return Ok(modules);
+    };
+    let Some(profile) = project.profile(profile_name) else {
+        return Err(AuthoringError::InvalidProfile {
+            profile: profile_name.to_owned(),
+            detail: "profile is not defined".to_owned(),
+        });
+    };
+    let selected: BTreeSet<_> = profile.selected_modules().collect();
+    if profile.shell() == profile.browser_adapter() {
+        return Err(AuthoringError::InvalidProfile {
+            profile: profile_name.to_owned(),
+            detail: "Web Shell and Browser Adapter must be different Module Instances".to_owned(),
+        });
+    }
+    for key in &selected {
+        if !modules.iter().any(|module| module.key() == *key) {
+            return Err(AuthoringError::InvalidProfile {
+                profile: profile_name.to_owned(),
+                detail: format!("unknown Module Instance {key}"),
+            });
+        }
+    }
+    modules.retain(|module| selected.contains(module.key()));
+    if modules.is_empty() {
+        return Err(AuthoringError::InvalidProfile {
+            profile: profile_name.to_owned(),
+            detail: "profile selects no Module Instances".to_owned(),
+        });
+    }
+    validate_profile_role(
+        profile_name,
+        &modules,
+        profile.shell(),
+        ModuleRole::WebShell,
+    )?;
+    validate_profile_role(
+        profile_name,
+        &modules,
+        profile.browser_adapter(),
+        ModuleRole::BrowserAdapter,
+    )?;
+    for contribution in profile.ui_contributions() {
+        validate_profile_role(
+            profile_name,
+            &modules,
+            contribution,
+            ModuleRole::UiContribution,
+        )?;
+    }
+    Ok(modules)
+}
+
+fn check_packages(
+    project: &ProjectFile,
+    root: &Path,
+    modules: &[Module],
+    options: &CheckOptions,
+) -> Result<BTreeMap<String, ResolvedPackage>, AuthoringError> {
+    let mut resolved = BTreeMap::new();
+    for module in modules {
+        let Some(input) = project.packages().get(module.package()) else {
+            return Err(AuthoringError::MissingPackageInput {
+                package: module.package().to_owned(),
+            });
+        };
+        if input.name() != module.package() {
+            return Err(AuthoringError::LockMismatch {
+                package: module.package().to_owned(),
+                detail: "package map key and package identity disagree".to_owned(),
+            });
+        }
+        let locked = resolve_package(root, input)?;
+        let execution_class = module
+            .execution_class()
+            .or_else(|| input.source().default_execution_class())
+            .ok_or_else(|| AuthoringError::UnavailableExecutionClass {
+                instance: module.key().to_owned(),
+                execution_class: "<module-selected>".to_owned(),
+            })?;
+        if !options
+            .available_execution_classes()
+            .contains(execution_class)
+        {
+            return Err(AuthoringError::UnavailableExecutionClass {
+                instance: module.key().to_owned(),
+                execution_class: execution_class.to_owned(),
+            });
+        }
+        if matches!(input.source(), PackageSource::Bun | PackageSource::Npm)
+            && module.entrypoint() == "default"
+        {
+            return Err(AuthoringError::MissingEntrypoint {
+                instance: module.key().to_owned(),
+            });
+        }
+        if matches!(input.source(), PackageSource::Bun | PackageSource::Npm) {
+            validate_entrypoint(root, module)?;
+        }
+        validate_configuration(root, module)?;
+        resolved.insert(module.package().to_owned(), locked);
+    }
+    Ok(resolved)
+}
+
+fn validate_profile_role(
+    profile: &str,
+    modules: &[Module],
+    instance: &str,
+    expected: ModuleRole,
+) -> Result<(), AuthoringError> {
+    let module = modules
+        .iter()
+        .find(|module| module.key() == instance)
+        .expect("selected profile instances were checked above");
+    if module.role() != Some(expected) {
+        return Err(AuthoringError::InvalidProfile {
+            profile: profile.to_owned(),
+            detail: format!(
+                "Module Instance {instance} must declare role {}",
+                match expected {
+                    ModuleRole::WebShell => "web_shell",
+                    ModuleRole::BrowserAdapter => "browser_adapter",
+                    ModuleRole::UiContribution => "ui_contribution",
+                }
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Runs a resolved project through a caller-supplied immutable Adapter catalog.
+
+fn validate_entrypoint(root: &Path, module: &Module) -> Result<(), AuthoringError> {
+    let entrypoint = root.join(module.entrypoint());
+    if !entrypoint.is_file() {
+        return Err(AuthoringError::PackageManager {
+            package: module.package().to_owned(),
+            detail: format!("Bun entrypoint {} does not exist", entrypoint.display()),
+        });
+    }
+    Ok(())
+}
+
+fn build_composition(
+    project: &ProjectFile,
+    modules: &[Module],
+    packages: &BTreeMap<String, ResolvedPackage>,
+) -> Result<AppComposition, AuthoringError> {
+    let selected: BTreeSet<_> = modules.iter().map(Module::key).collect();
+    let all_keys: BTreeSet<_> = project
+        .composition()
+        .modules()
+        .iter()
+        .map(Module::key)
+        .collect();
+    let mut instances = Vec::with_capacity(modules.len());
+    for module in modules {
+        let input = project.packages().get(module.package()).ok_or_else(|| {
+            AuthoringError::MissingPackageInput {
+                package: module.package().to_owned(),
+            }
+        })?;
+        let locked =
+            packages
+                .get(module.package())
+                .ok_or_else(|| AuthoringError::PackageManager {
+                    package: module.package().to_owned(),
+                    detail: "package was not resolved".to_owned(),
+                })?;
+        let execution_class = module
+            .execution_class()
+            .or_else(|| input.source().default_execution_class())
+            .ok_or_else(|| AuthoringError::UnavailableExecutionClass {
+                instance: module.key().to_owned(),
+                execution_class: "<module-selected>".to_owned(),
+            })?;
+        let mut instance = ModuleInstancePlan::new(module.key(), module.package())
+            .with_entrypoint(module.entrypoint())
+            .with_configuration(canonical_json_string(module.configuration()))
+            .with_execution_class(ExecutionClassId::new(execution_class))
+            .with_package_revision(locked.revision());
+        for endpoint in module.provides() {
+            instance = instance.with_capability(to_plan_endpoint(endpoint));
+        }
+        for requirement in module.requires() {
+            instance = instance.with_requirement(CapabilityRequirementPlan::new(
+                requirement.capability_id(),
+                requirement.descriptor_version(),
+                to_plan_cardinality(requirement.cardinality()),
+            ));
+        }
+        instances.push(instance);
+    }
+    let mut bindings = Vec::new();
+    for binding in project.composition().bindings() {
+        if !all_keys.contains(binding.consumer()) || !all_keys.contains(binding.provider()) {
+            return Err(AuthoringError::Plan {
+                detail: format!(
+                    "binding {} -> {} references an unknown Module Instance",
+                    binding.consumer(),
+                    binding.provider()
+                ),
+            });
+        }
+        if selected.contains(binding.consumer()) && selected.contains(binding.provider()) {
+            let mut plan_binding = PlanBinding::new(
+                binding.consumer(),
+                binding.capability_id(),
+                binding.descriptor_version(),
+                binding.provider(),
+            );
+            if let Some(admission) = binding.admission() {
+                plan_binding = plan_binding.with_admission(RequestAdmissionPlan::new(
+                    admission.queue_capacity(),
+                    admission.max_concurrency(),
+                ));
+            }
+            if let Some(capacity) = binding.event_capacity() {
+                plan_binding = plan_binding.with_event_admission(EventAdmissionPlan::new(capacity));
+            }
+            bindings.push(plan_binding);
+        }
+    }
+    Ok(AppComposition::new(instances, bindings))
+}
+
+fn to_plan_cardinality(cardinality: Cardinality) -> CapabilityCardinality {
+    match cardinality {
+        Cardinality::One => CapabilityCardinality::One,
+        Cardinality::Optional => CapabilityCardinality::Optional,
+        Cardinality::Many => CapabilityCardinality::Many,
+    }
+}
+
+fn to_plan_endpoint(endpoint: &CapabilityEndpoint) -> CapabilityEndpointPlan {
+    let mut plan = CapabilityEndpointPlan::new(
+        endpoint.capability_id(),
+        endpoint.descriptor_version(),
+        endpoint.operations(),
+    );
+    for (operation, kind) in endpoint.operation_kinds() {
+        let kind = match kind {
+            InteractionKind::Request => CapabilityOperationKind::Request,
+            InteractionKind::Stream => CapabilityOperationKind::Stream,
+            InteractionKind::Event => CapabilityOperationKind::Event,
+        };
+        plan = plan.with_operation_kind(operation, kind);
+    }
+    if let Some(admission) = endpoint.admission() {
+        plan = plan.with_admission(RequestAdmissionPlan::new(
+            admission.queue_capacity(),
+            admission.max_concurrency(),
+        ));
+    }
+    for (operation, admission) in endpoint.operation_admissions() {
+        plan = plan.with_operation_admission(
+            operation,
+            RequestAdmissionPlan::new(admission.queue_capacity(), admission.max_concurrency()),
+        );
+    }
+    if let Some(capacity) = endpoint.event_capacity() {
+        plan = plan.with_event_admission(EventAdmissionPlan::new(capacity));
+    }
+    plan
+}
+
+/// A successful authoring check summary.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CheckReport {
+    /// Number of Module Instances checked.
+    pub modules: usize,
+    /// Number of explicit bindings checked.
+    pub bindings: usize,
+    /// Number of generated contract inputs checked.
+    pub contracts: usize,
+    /// Available host Execution Adapter classes.
+    pub execution_classes: BTreeSet<String>,
+}
