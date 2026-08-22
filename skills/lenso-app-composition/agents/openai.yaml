@@ -1,0 +1,4 @@
+interface:
+  display_name: Lenso App Composition
+  short_description: Build an explicit resolved App Plan.
+  default_prompt: Define the Module instances, bindings, and deterministic resolved plan.

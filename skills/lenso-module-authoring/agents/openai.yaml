@@ -1,0 +1,4 @@
+interface:
+  display_name: Lenso Module authoring
+  short_description: Author one linked Rust Module.
+  default_prompt: Implement this capability as a vertical linked Rust Module behind an explicit interface.

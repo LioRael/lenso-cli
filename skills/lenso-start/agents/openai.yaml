@@ -1,0 +1,4 @@
+interface:
+  display_name: Lenso vNext start
+  short_description: Route work to the smallest vNext seam.
+  default_prompt: Route this request using the vNext vocabulary and repository ADRs.
