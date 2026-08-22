@@ -8,24 +8,24 @@ repository.workspace = true
 description = "Authoring CLI and composition resolver for Lenso vNext."
 
 [[bin]]
-name = "lenso"
+name = "lenso-vnext"
 path = "src/main.rs"
 
 [dependencies]
-lenso-app-plan = { path = "../lenso-app-plan", version = "0.1.0" }
-lenso-bun-adapter = { path = "../lenso-bun-adapter", version = "0.1.1" }
-lenso-contract-codegen = { path = "../lenso-contract-codegen", version = "0.1.0" }
-lenso-kernel = { path = "../lenso-kernel", version = "0.1.1" }
-lenso-runner = { path = "../lenso-runner", version = "0.1.1" }
+lenso-app-plan = "0.1.0"
+lenso-bun-adapter = "0.1.1"
+lenso-contract-codegen = "0.1.0"
+lenso-kernel = "0.1.1"
+lenso-runner = "0.1.1"
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-lenso-capability-greeting = { path = "../lenso-capability-greeting" }
-lenso-native-adapter = { path = "../lenso-native-adapter" }
-lenso-native-greeter = { path = "../../fixtures/vnext-native-greeter" }
+lenso-capability-greeting = { git = "https://github.com/LioRael/lenso", rev = "67d21499548d07e92c2f6529d7c8345e58c067d9", version = "0.1.0" }
+lenso-native-adapter = "0.1.1"
+lenso-native-greeter = { git = "https://github.com/LioRael/lenso", rev = "67d21499548d07e92c2f6529d7c8345e58c067d9", version = "0.1.0" }
 
 [lints]
 workspace = true
