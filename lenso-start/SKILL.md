@@ -15,5 +15,5 @@ smallest seam that owns it.
 5. For Kernel, Runtime Driver, or Execution Adapter work, inspect the owning
    crate and the relevant ADRs directly.
 
-The `next` branch contains only vNext. Do not revive legacy host, provider,
+The `main` branch contains only vNext. Do not revive legacy host, provider,
 service, console, release, migration, or compatibility workflows here.

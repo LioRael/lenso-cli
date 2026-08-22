@@ -1,6 +1,6 @@
 # Lenso vNext skills
 
-These public skills describe the vNext authoring workflow for the `next` branch.
+These public skills describe the vNext authoring workflow for the `main` branch.
 They are intentionally limited to design, App Composition, and linked Rust
 Module work.
 
@@ -12,7 +12,7 @@ Module work.
 | `lenso-module-authoring` | Build a linked Rust Module behind a declared Interface. |
 
 The old Service, Provider, Console, release, contract, migration, and incident
-workflow skills are not part of the `next` repository. The `main` line and
+workflow skills are not part of the vNext repository. The v0.3.x tag and
 separate repositories own those workflows when they remain supported.
 
 Install this catalog from the repository with:
