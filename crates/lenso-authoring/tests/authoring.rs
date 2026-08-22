@@ -2,19 +2,69 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    rc::Rc,
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use futures::future::LocalBoxFuture;
 use lenso_authoring::{
     AddModule, Binding, CapabilityEndpoint, CapabilityRequirement, CheckOptions, ContractInput,
     ExecutionLane, Module, ModuleRole, PackageInput, PackageSource, ProjectAuthoring, ProjectFile,
     ProjectPath, RequestAdmission, ResolutionOptions, ResolvedProject, WebProfile, run_project,
 };
 use lenso_bun_adapter::{BunAdapter, BunAdapterConfig, BunWire};
-use lenso_kernel::{ExecutionAdapterCatalog, TerminalOutcome};
-use lenso_native_adapter::NativeModuleRegistry;
-use lenso_native_greeter::GreeterFactory;
+use lenso_kernel::{ExecutionAdapterCatalog, InvocationContext, RuntimeFailure, TerminalOutcome};
+use lenso_native_adapter::{
+    NativeModuleFactory, NativeModuleFactoryContext, NativeModuleInstance, NativeModuleRegistry,
+};
+
+#[path = "fixtures/contracts/greeting/src/generated.rs"]
+#[allow(dead_code)]
+#[rustfmt::skip]
+mod greeting_contract;
+use greeting_contract::{
+    GreetRequest, GreetResponse, GreetingEndpoint, GreetingInvocationError, GreetingProvider,
+};
+
+#[derive(Debug)]
+struct CleanProjectGreeterFactory;
+
+#[derive(Debug)]
+struct CleanProjectGreeter;
+
+impl GreetingProvider for CleanProjectGreeter {
+    fn greet(
+        &self,
+        _context: InvocationContext,
+        request: GreetRequest,
+    ) -> LocalBoxFuture<'static, Result<GreetResponse, GreetingInvocationError>> {
+        Box::pin(async move {
+            Ok(GreetResponse {
+                message: format!("Hello, {}!", request.name),
+            })
+        })
+    }
+}
+
+impl NativeModuleFactory for CleanProjectGreeterFactory {
+    fn package_id(&self) -> &'static str {
+        "example.native-greeter"
+    }
+
+    fn package_version(&self) -> &'static str {
+        "0.1.0"
+    }
+
+    fn instantiate(
+        &self,
+        _context: NativeModuleFactoryContext<'_>,
+    ) -> Result<NativeModuleInstance, RuntimeFailure> {
+        Ok(NativeModuleInstance::new(vec![Rc::new(
+            GreetingEndpoint::new(CleanProjectGreeter),
+        )]))
+    }
+}
 
 fn package(logical: &str, package_name: &str, version: &str) -> PackageInput {
     PackageInput::new(logical, PackageSource::Cargo, version)
@@ -57,9 +107,9 @@ fn copy_tree(source: &Path, destination: &Path) {
 }
 
 fn add_greeting_contract(project: &mut ProjectFile, root: &Path) {
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     copy_tree(
-        &workspace.join("crates/lenso-capability-greeting"),
+        &fixtures.join("contracts/greeting"),
         &root.join("contract/greeting"),
     );
     project.contracts_mut().push(ContractInput::new(
@@ -72,7 +122,7 @@ fn add_greeting_contract(project: &mut ProjectFile, root: &Path) {
 }
 
 fn add_web_contracts(project: &mut ProjectFile, root: &Path) {
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/contracts");
     for (source, target, capability_id) in [
         (
             "lenso-capability-ui-contribution",
@@ -86,7 +136,7 @@ fn add_web_contracts(project: &mut ProjectFile, root: &Path) {
         ),
     ] {
         copy_tree(
-            &workspace.join("crates").join(source),
+            &fixtures.join(source.trim_start_matches("lenso-capability-")),
             &root.join("contract").join(target),
         );
         project.contracts_mut().push(ContractInput::new(
@@ -439,8 +489,7 @@ fn add_updates_composition_and_package_manifest_as_reviewable_files() {
 #[test]
 fn native_clean_project_add_resolve_reload_and_run_use_the_same_plan() {
     let root = tempfile_dir();
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let fixture = workspace.join("fixtures/vnext-native-greeter");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/native-greeter");
     fs::write(
         root.join("Cargo.toml"),
         format!(
@@ -481,8 +530,9 @@ fn native_clean_project_add_resolve_reload_and_run_use_the_same_plan() {
     let loaded = ResolvedProject::from_canonical_bytes(&fs::read(plan_path).unwrap()).unwrap();
     let driver = lenso_runner::TokioDriver::new();
     driver.request_shutdown();
-    let adapters =
-        ExecutionAdapterCatalog::single(NativeModuleRegistry::new().with_factory(GreeterFactory));
+    let adapters = ExecutionAdapterCatalog::single(
+        NativeModuleRegistry::new().with_factory(CleanProjectGreeterFactory),
+    );
     let outcome = run_on_local_set(run_project(
         &loaded,
         driver,
@@ -497,21 +547,12 @@ fn native_clean_project_add_resolve_reload_and_run_use_the_same_plan() {
 #[ignore = "requires Bun; CI runs this exact clean-project production-wire test"]
 fn bun_clean_project_add_resolve_reload_and_run_use_the_same_plan() {
     let root = tempfile_dir();
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bun");
     let fixture = "fixtures/bun/request-provider.ts";
     let fixture_path = root.join(fixture);
     fs::create_dir_all(fixture_path.parent().unwrap()).unwrap();
-    fs::copy(workspace.join(fixture), &fixture_path).unwrap();
-    for relative in [
-        "crates/lenso-capability-greeting/generated/bindings.ts",
-        "crates/lenso-capability-secure-greeting/generated/bindings.ts",
-        "crates/lenso-auth-sdk/typescript/actor.ts",
-        "crates/lenso-otel-module/typescript/trace-context.ts",
-    ] {
-        let destination = root.join(relative);
-        fs::create_dir_all(destination.parent().unwrap()).unwrap();
-        fs::copy(workspace.join(relative), destination).unwrap();
-    }
+    fs::copy(fixtures.join("request-provider.ts"), &fixture_path).unwrap();
+    copy_tree(&fixtures.join("vendor"), &root.join("fixtures/bun/vendor"));
     fs::create_dir_all(root.join("module")).unwrap();
     fs::write(
         root.join("module/package.json"),

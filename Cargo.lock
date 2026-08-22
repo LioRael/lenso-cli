@@ -1804,13 +1804,12 @@ dependencies = [
 name = "lenso-authoring"
 version = "0.1.1"
 dependencies = [
+ "futures",
  "lenso-app-plan",
  "lenso-bun-adapter",
- "lenso-capability-greeting",
  "lenso-contract-codegen",
  "lenso-kernel",
  "lenso-native-adapter",
- "lenso-native-greeter",
  "lenso-runner",
  "serde",
  "serde_json",
@@ -1832,18 +1831,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tokio",
-]
-
-[[package]]
-name = "lenso-capability-greeting"
-version = "0.1.0"
-source = "git+https://github.com/LioRael/lenso?rev=67d21499548d07e92c2f6529d7c8345e58c067d9#67d21499548d07e92c2f6529d7c8345e58c067d9"
-dependencies = [
- "futures",
- "lenso-contract-codegen",
- "lenso-kernel",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -1936,17 +1923,6 @@ checksum = "233f475c4367a64f54193c7f1c9a21d4e596be4141bd86ba7a0119a22004e2c7"
 dependencies = [
  "lenso-app-plan",
  "lenso-kernel",
-]
-
-[[package]]
-name = "lenso-native-greeter"
-version = "0.1.0"
-source = "git+https://github.com/LioRael/lenso?rev=67d21499548d07e92c2f6529d7c8345e58c067d9#67d21499548d07e92c2f6529d7c8345e58c067d9"
-dependencies = [
- "futures",
- "lenso-capability-greeting",
- "lenso-kernel",
- "lenso-native-adapter",
 ]
 
 [[package]]

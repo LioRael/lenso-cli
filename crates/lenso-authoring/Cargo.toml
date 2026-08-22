@@ -23,9 +23,8 @@ sha2.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-lenso-capability-greeting = { git = "https://github.com/LioRael/lenso", rev = "67d21499548d07e92c2f6529d7c8345e58c067d9", version = "0.1.0" }
+futures = "0.3"
 lenso-native-adapter = "0.1.1"
-lenso-native-greeter = { git = "https://github.com/LioRael/lenso", rev = "67d21499548d07e92c2f6529d7c8345e58c067d9", version = "0.1.0" }
 
 [lints]
 workspace = true
