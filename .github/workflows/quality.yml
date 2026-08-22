@@ -20,6 +20,9 @@ jobs:
         with:
           node-version: 24.18.0
           cache: pnpm
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.21
       - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable
         with:
           toolchain: 1.94.0
@@ -28,5 +31,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: npm run check:npm-shim
       - run: cargo fmt --all -- --check
-      - run: cargo test --locked
-      - run: cargo package --locked --allow-dirty
+      - run: cargo test --locked --workspace
+      - name: Run vNext clean-project Bun integration
+        run: cargo test --locked -p lenso-authoring bun_clean_project_add_resolve_reload_and_run_use_the_same_plan -- --ignored --test-threads=1
+      - run: cargo package --locked -p lenso-cli --allow-dirty
+      - run: cargo package --locked -p lenso-authoring --allow-dirty

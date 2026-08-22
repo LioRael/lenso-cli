@@ -1,0 +1,4 @@
+interface:
+  display_name: Lenso vNext business planning
+  short_description: Plan owned Modules and Capabilities.
+  default_prompt: Turn this product idea into an implementation-ready vNext slice.

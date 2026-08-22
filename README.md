@@ -2,6 +2,12 @@
 
 Command-line interface for the Lenso backend framework.
 
+This repository also owns the vNext `lenso-authoring` Module extracted from
+`LioRael/lenso` at monorepo commit
+`67d21499548d07e92c2f6529d7c8345e58c067d9` under ADR 0064. During the bounded
+CLI transition its executable is named `lenso-vnext`; the existing `lenso`
+binary remains the stable v0.3 operator interface.
+
 ## Install
 
 ```sh
