@@ -4,12 +4,9 @@ version = "0.1.5"
 edition.workspace = true
 license.workspace = true
 publish = true
+autobins = false
 repository.workspace = true
-description = "Authoring CLI and composition resolver for Lenso vNext."
-
-[[bin]]
-name = "lenso-vnext"
-path = "src/main.rs"
+description = "Authoring and composition resolver library for Lenso."
 
 [dependencies]
 lenso-app-plan = "0.1.0"

@@ -2,11 +2,10 @@
 
 Command-line interface for the Lenso backend framework.
 
-This repository also owns the vNext `lenso-authoring` Module extracted from
-`LioRael/lenso` at monorepo commit
-`67d21499548d07e92c2f6529d7c8345e58c067d9` under ADR 0064. During the bounded
-CLI transition its executable is named `lenso-vnext`; the existing `lenso`
-binary remains the stable v0.3 operator interface.
+This repository also owns the `lenso-authoring` library extracted from
+`LioRael/lenso` under ADR 0064. Its `add`, `check`, `resolve`, and `run`
+workflows are exposed through the same `lenso` executable as the rest of the
+CLI; the library does not publish a second binary.
 
 Project-wide agent workflows live in the
 [`LioRael/lenso` skill pack](https://github.com/LioRael/lenso/tree/main/skills),
@@ -20,6 +19,25 @@ npm install -g @lenso/cli
 # or
 cargo install lenso-cli
 ```
+
+## Plan authoring
+
+The same `lenso` executable validates authoring projects, resolves immutable
+App Plans, and runs those Plans through the selected Driver and Execution
+Adapters:
+
+```sh
+lenso check --project lenso.json \
+  --execution-class lenso.native-rust@1
+lenso resolve --project lenso.json \
+  --execution-class lenso.native-rust@1 \
+  --output .lenso/resolved-plan.json
+lenso run --plan .lenso/resolved-plan.json --root .
+```
+
+Use `lenso add` to add a Module package to the authoring project. These
+top-level commands are the only public authoring binary surface; the
+`lenso-authoring` crate is a library.
 
 ## Application lifecycle
 
