@@ -1,4 +1,4 @@
 interface:
-  display_name: Lenso vNext business planning
-  short_description: Plan owned Modules and Capabilities.
-  default_prompt: Turn this product idea into an implementation-ready vNext slice.
+  display_name: "Lenso Module-first Planning"
+  short_description: "Turn outcomes into a vertical Module map."
+  default_prompt: "Use $lenso-business-planning to turn this product outcome into owned Modules, Capability edges, and one executable slice."

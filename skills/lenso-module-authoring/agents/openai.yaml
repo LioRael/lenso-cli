@@ -1,4 +1,4 @@
 interface:
-  display_name: Lenso Module authoring
-  short_description: Author one linked Rust Module.
-  default_prompt: Implement this capability as a vertical linked Rust Module behind an explicit interface.
+  display_name: "Lenso Module Authoring"
+  short_description: "Author any removable product Module."
+  default_prompt: "Use $lenso-module-authoring to implement this product behavior as a vertical Module behind explicit Capabilities."
