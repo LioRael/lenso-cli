@@ -1,0 +1,7 @@
+[workspace]
+release = false
+release_always = true
+
+[[package]]
+name = "lenso-authoring"
+release = true
