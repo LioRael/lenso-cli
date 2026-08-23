@@ -7,14 +7,16 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use futures::future::LocalBoxFuture;
 use lenso_authoring::{
     AddModule, Binding, CapabilityEndpoint, CapabilityRequirement, CheckOptions, ContractInput,
     ExecutionLane, Module, ModuleRole, PackageInput, PackageSource, ProjectAuthoring, ProjectFile,
     ProjectPath, RequestAdmission, ResolutionOptions, ResolvedProject, WebProfile, run_project,
 };
 use lenso_bun_adapter::{BunAdapter, BunAdapterConfig, BunWire};
-use lenso_kernel::{ExecutionAdapterCatalog, InvocationContext, RuntimeFailure, TerminalOutcome};
+use lenso_kernel::{
+    ExecutionAdapterCatalog, InvocationContext, NativeRequestFuture, RuntimeFailure,
+    TerminalOutcome,
+};
 use lenso_native_adapter::{
     NativeModuleFactory, NativeModuleFactoryContext, NativeModuleInstance, NativeModuleRegistry,
 };
@@ -24,7 +26,7 @@ use lenso_native_adapter::{
 #[rustfmt::skip]
 mod greeting_contract;
 use greeting_contract::{
-    GreetRequest, GreetResponse, GreetingEndpoint, GreetingInvocationError, GreetingProvider,
+    GreetRequest, GreetResponse, Greeting, GreetingEndpoint, GreetingProvider,
 };
 
 #[derive(Debug)]
@@ -38,11 +40,11 @@ impl GreetingProvider for CleanProjectGreeter {
         &self,
         _context: InvocationContext,
         request: GreetRequest,
-    ) -> LocalBoxFuture<'static, Result<GreetResponse, GreetingInvocationError>> {
+    ) -> NativeRequestFuture<Greeting> {
         Box::pin(async move {
-            Ok(GreetResponse {
+            Ok(Ok(GreetResponse {
                 message: format!("Hello, {}!", request.name),
-            })
+            }))
         })
     }
 }

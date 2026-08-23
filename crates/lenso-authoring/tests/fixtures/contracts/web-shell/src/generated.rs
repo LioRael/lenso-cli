@@ -105,22 +105,15 @@ impl RequestCapability for ShellReadAsset {
 
     fn invoke_native(endpoint: &dyn NativeRequestEndpoint, operation: &str, request: Self::Request, context: InvocationContext) -> NativeRequestFuture<Self> {
         if operation != READ_ASSET_OPERATION {
-            return lenso_kernel::invoke_erased_native_request::<Self>(endpoint, operation, request, context);
+            return lenso_kernel::invoke_typed_or_erased_native_request::<Self>(endpoint, operation, request, context);
         }
         let Some(typed_endpoint) = endpoint
             .typed_endpoint()
             .and_then(|endpoint| endpoint.downcast_ref::<ShellRequestEndpoint>())
         else {
-            return lenso_kernel::invoke_erased_native_request::<Self>(endpoint, operation, request, context);
+            return lenso_kernel::invoke_typed_or_erased_native_request::<Self>(endpoint, operation, request, context);
         };
-        let provider = Rc::clone(&typed_endpoint.provider);
-        Box::pin(async move {
-            match provider.read_asset(context, request).await {
-                Ok(value) => Ok(Ok(value)),
-                Err(ShellReadAssetInvocationError::Domain(error)) => Ok(Err(error)),
-                Err(ShellReadAssetInvocationError::Runtime(error)) => Err(error),
-            }
-        })
+        Rc::clone(&typed_endpoint.provider).read_asset(context, request)
     }
 }
 
@@ -135,22 +128,15 @@ impl RequestCapability for ShellRenderRoute {
 
     fn invoke_native(endpoint: &dyn NativeRequestEndpoint, operation: &str, request: Self::Request, context: InvocationContext) -> NativeRequestFuture<Self> {
         if operation != RENDER_ROUTE_OPERATION {
-            return lenso_kernel::invoke_erased_native_request::<Self>(endpoint, operation, request, context);
+            return lenso_kernel::invoke_typed_or_erased_native_request::<Self>(endpoint, operation, request, context);
         }
         let Some(typed_endpoint) = endpoint
             .typed_endpoint()
             .and_then(|endpoint| endpoint.downcast_ref::<ShellRequestEndpoint>())
         else {
-            return lenso_kernel::invoke_erased_native_request::<Self>(endpoint, operation, request, context);
+            return lenso_kernel::invoke_typed_or_erased_native_request::<Self>(endpoint, operation, request, context);
         };
-        let provider = Rc::clone(&typed_endpoint.provider);
-        Box::pin(async move {
-            match provider.render_route(context, request).await {
-                Ok(value) => Ok(Ok(value)),
-                Err(ShellRenderRouteInvocationError::Domain(error)) => Ok(Err(error)),
-                Err(ShellRenderRouteInvocationError::Runtime(error)) => Err(error),
-            }
-        })
+        Rc::clone(&typed_endpoint.provider).render_route(context, request)
     }
 }
 
@@ -263,8 +249,8 @@ pub fn encode_render_route_error(value: &RenderRouteError) -> Result<String, ser
 pub fn decode_render_route_error(wire: &str) -> Result<RenderRouteError, serde_json::Error> { decode_portable_json(wire) }
 
 pub trait ShellProvider: fmt::Debug + 'static {
-    fn read_asset(&self, context: InvocationContext, request: ReadAssetRequest) -> LocalBoxFuture<'static, Result<ReadAssetResponse, ShellReadAssetInvocationError>>;
-    fn render_route(&self, context: InvocationContext, request: RenderRouteRequest) -> LocalBoxFuture<'static, Result<RenderRouteResponse, ShellRenderRouteInvocationError>>;
+    fn read_asset(&self, context: InvocationContext, request: ReadAssetRequest) -> NativeRequestFuture<ShellReadAsset>;
+    fn render_route(&self, context: InvocationContext, request: RenderRouteRequest) -> NativeRequestFuture<ShellRenderRoute>;
 }
 
 #[derive(Debug)]
@@ -294,26 +280,26 @@ impl<P: ShellProvider> NativeRequestEndpoint for ShellEndpoint<P> {
                 let Ok(request) = request.downcast::<ReadAssetRequest>() else {
                     return Box::pin(futures::future::ready(Err(RuntimeFailure::ProtocolViolation { capability: CAPABILITY_ID })));
                 };
-                let provider = Rc::clone(&self.provider);
+                let invocation = Rc::clone(&self.provider).read_asset(context, *request);
                 Box::pin(async move {
-                    match provider.read_asset(context, *request).await {
-                        Ok(value) => Ok(Ok(Box::new(value) as Box<dyn std::any::Any>)),
-                        Err(ShellReadAssetInvocationError::Domain(error)) => Ok(Err(Box::new(error) as Box<dyn std::any::Any>)),
-                        Err(ShellReadAssetInvocationError::Runtime(error)) => Err(error),
-                    }
+                    invocation.await.map(|result| {
+                        result
+                            .map(|value| Box::new(value) as Box<dyn std::any::Any>)
+                            .map_err(|error| Box::new(error) as Box<dyn std::any::Any>)
+                    })
                 })
             },
             RENDER_ROUTE_OPERATION => {
                 let Ok(request) = request.downcast::<RenderRouteRequest>() else {
                     return Box::pin(futures::future::ready(Err(RuntimeFailure::ProtocolViolation { capability: CAPABILITY_ID })));
                 };
-                let provider = Rc::clone(&self.provider);
+                let invocation = Rc::clone(&self.provider).render_route(context, *request);
                 Box::pin(async move {
-                    match provider.render_route(context, *request).await {
-                        Ok(value) => Ok(Ok(Box::new(value) as Box<dyn std::any::Any>)),
-                        Err(ShellRenderRouteInvocationError::Domain(error)) => Ok(Err(Box::new(error) as Box<dyn std::any::Any>)),
-                        Err(ShellRenderRouteInvocationError::Runtime(error)) => Err(error),
-                    }
+                    invocation.await.map(|result| {
+                        result
+                            .map(|value| Box::new(value) as Box<dyn std::any::Any>)
+                            .map_err(|error| Box::new(error) as Box<dyn std::any::Any>)
+                    })
                 })
             }
             _ => Box::pin(futures::future::ready(Err(RuntimeFailure::UnknownOperation { capability: CAPABILITY_ID, operation: operation.to_owned() }))),
