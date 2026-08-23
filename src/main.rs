@@ -1,4 +1,5 @@
 mod app_composition;
+mod authoring;
 mod capability;
 mod console_composition;
 mod console_connection;
@@ -40,6 +41,14 @@ struct Cli {
 enum Command {
     /// Start a Lenso host project locally.
     Serve(ServeArgs),
+    /// Add a Module package to an authoring project.
+    Add(authoring::AddArgs),
+    /// Validate an authoring project and its generated contracts.
+    Check(authoring::CheckArgs),
+    /// Resolve an authoring project into an immutable App Plan.
+    Resolve(authoring::ResolveArgs),
+    /// Run a resolved App Plan.
+    Run(authoring::RunArgs),
     /// Compose Lenso applications.
     App {
         #[command(subcommand)]
@@ -2766,6 +2775,10 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Command::Add(args) => authoring::add(&args)?,
+        Command::Check(args) => authoring::check(&args)?,
+        Command::Resolve(args) => authoring::resolve(&args)?,
+        Command::Run(args) => authoring::run(&args).await?,
         Command::Serve(args) => {
             host::serve(
                 args.repo_root.as_deref(),
@@ -3291,6 +3304,69 @@ mod tests {
             .unwrap_or_else(|| panic!("missing `{name}` command"))
             .render_long_help()
             .to_string()
+    }
+
+    #[test]
+    fn authoring_workflow_uses_the_single_lenso_entrypoint() {
+        let help = Cli::command().render_long_help().to_string();
+        for command in ["add", "check", "resolve", "run"] {
+            assert!(
+                help.contains(&format!("  {command}")),
+                "top-level help is missing `{command}`:\n{help}"
+            );
+        }
+
+        assert!(matches!(
+            Cli::try_parse_from([
+                "lenso",
+                "check",
+                "--project",
+                "lenso.json",
+                "--execution-class",
+                "lenso.native-rust@1",
+            ])
+            .expect("check command should parse")
+            .command,
+            Command::Check(_)
+        ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "lenso",
+                "resolve",
+                "--project",
+                "lenso.json",
+                "--output",
+                ".lenso/resolved-plan.json",
+            ])
+            .expect("resolve command should parse")
+            .command,
+            Command::Resolve(_)
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["lenso", "run", "--plan", ".lenso/resolved-plan.json"])
+                .expect("run command should parse")
+                .command,
+            Command::Run(_)
+        ));
+
+        let cli = Cli::try_parse_from([
+            "lenso",
+            "add",
+            "--key",
+            "greeter",
+            "--package",
+            "example.greeter",
+            "--package-name",
+            "greeter-package",
+            "--source",
+            "cargo",
+            "--version",
+            "1",
+        ])
+        .expect("the consolidated CLI should preserve authoring add options");
+        let Command::Add(_) = cli.command else {
+            panic!("expected add command");
+        };
     }
 
     #[test]

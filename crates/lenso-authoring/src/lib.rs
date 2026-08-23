@@ -1,4 +1,4 @@
-//! Package-manager inspection, Plan resolution, and Runner orchestration for Lenso vNext.
+//! Package-manager inspection, Plan resolution, and Runner orchestration for Lenso.
 
 mod authoring_project;
 mod canonical;

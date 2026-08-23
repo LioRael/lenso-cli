@@ -1,7 +1,7 @@
 # Authoring test fixtures
 
 These fixtures are owned by the authoring test suite. They deliberately avoid
-reaching into sibling repositories after the vNext repository split.
+reaching into sibling repositories after the authoring repository split.
 
 - `contracts/` contains immutable capability descriptors and schemas from
   Lenso commit `67d21499548d07e92c2f6529d7c8345e58c067d9`. Their generated
