@@ -1,6 +1,0 @@
-interface:
-  display_name: "Lenso Start"
-  short_description: "Route work to one vNext owner."
-  default_prompt: "Use $lenso-start to route this request to one primary Lenso vNext workflow."
-policy:
-  allow_implicit_invocation: false
