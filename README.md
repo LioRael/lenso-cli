@@ -8,6 +8,11 @@ This repository also owns the vNext `lenso-authoring` Module extracted from
 CLI transition its executable is named `lenso-vnext`; the existing `lenso`
 binary remains the stable v0.3 operator interface.
 
+Project-wide agent workflows live in the
+[`LioRael/lenso` skill pack](https://github.com/LioRael/lenso/tree/main/skills),
+so this repository owns executable authoring without becoming a second skill
+source of truth.
+
 ## Install
 
 ```sh
