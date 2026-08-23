@@ -1,0 +1,4 @@
+interface:
+  display_name: "Lenso Runtime Extension"
+  short_description: "Extend how Modules run on a host."
+  default_prompt: "Use $lenso-runtime-extension to implement this Driver, Execution Adapter, Runner, process, transport, or endpoint change without moving product behavior into Kernel."

@@ -1,4 +1,4 @@
 interface:
-  display_name: Lenso App Composition
-  short_description: Build an explicit resolved App Plan.
-  default_prompt: Define the Module instances, bindings, and deterministic resolved plan.
+  display_name: "Lenso App Composition"
+  short_description: "Select Modules and resolve the App Plan."
+  default_prompt: "Use $lenso-app-composition to select keyed Module Instances, bind their Capabilities, and materialize the immutable Resolved App Plan."
