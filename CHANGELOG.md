@@ -1,5 +1,11 @@
 ## lenso-cli@0.2.16
 
+## 0.9.0
+
+### Minor Changes
+
+- 7803235: Add typed Bun Module scaffolding and a watch-mode development workflow.
+
 ## 0.8.0
 
 ### Minor Changes
