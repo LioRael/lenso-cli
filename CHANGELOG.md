@@ -1,5 +1,11 @@
 ## lenso-cli@0.2.31
 
+## 0.10.0
+
+### Minor Changes
+
+- 4db26f3: Add inferred Module development, standalone Rust authoring scaffolds, actionable Module checks, verification and removal evidence, Capability semantic diffs, and focused Module-card recipes.
+
 ### Features
 
 - Add typed Bun Module scaffolding, generated Provider bindings, and a watch-mode
