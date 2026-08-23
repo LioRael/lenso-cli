@@ -1,10 +1,9 @@
 [workspace]
-release = false
-release_always = true
+release_always = false
 pr_labels = ["release"]
 changelog_update = false
 git_tag_name = "{{ package }}@{{ version }}"
 
 [[package]]
 name = "lenso-authoring"
-release = true
+release = false
