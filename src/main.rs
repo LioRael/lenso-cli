@@ -22,7 +22,7 @@ mod system;
 mod system_sandbox;
 mod workload_control_contract;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 /// Lenso command-line interface.
 #[derive(Debug, Parser)]
@@ -983,9 +983,21 @@ struct ModuleDevArgs {
     #[arg(long = "console-ui")]
     console_ui: bool,
 
+    /// Resolve and run a Bun Module project, restarting from a fresh Plan after source changes.
+    #[arg(long)]
+    bun: bool,
+
     /// Module repository root. Defaults to the current directory.
     #[arg(long)]
     repo_root: Option<std::path::PathBuf>,
+
+    /// Authoring project document, relative to the Module repository root.
+    #[arg(long, default_value = "lenso.json")]
+    project: std::path::PathBuf,
+
+    /// Bun executable used by the Execution Adapter.
+    #[arg(long = "bun-bin", default_value = "bun")]
+    bun_bin: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2179,6 +2191,18 @@ struct ModuleCreateArgs {
     #[arg(long)]
     repo_root: Option<std::path::PathBuf>,
 
+    /// Module implementation runtime.
+    #[arg(long, value_enum, default_value_t = ModuleRuntimeArg::Rust)]
+    runtime: ModuleRuntimeArg,
+
+    /// New Bun project directory. Defaults to the Module id.
+    #[arg(long)]
+    dir: Option<std::path::PathBuf>,
+
+    /// Skip `bun install` after generating a Bun project.
+    #[arg(long)]
+    no_install: bool,
+
     /// Display label.
     #[arg(long)]
     label: Option<String>,
@@ -2206,6 +2230,12 @@ struct ModuleCreateArgs {
     /// Print files without writing them.
     #[arg(long)]
     dry_run: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum ModuleRuntimeArg {
+    Rust,
+    Bun,
 }
 
 impl From<&ServiceModuleInstallArgs> for module::ServiceModuleInstallOptions {
@@ -2703,12 +2733,18 @@ impl From<&ModuleCreateArgs> for module::ModuleCreateOptions {
     fn from(args: &ModuleCreateArgs) -> Self {
         Self {
             capability: args.capability.clone(),
+            dir: args.dir.clone(),
             dry_run: args.dry_run,
             icon: args.icon.clone(),
             label: args.label.clone(),
             module_id: args.module_id.clone(),
+            no_install: args.no_install,
             repo_root: args.repo_root.clone(),
             route: args.route.clone(),
+            runtime: match args.runtime {
+                ModuleRuntimeArg::Rust => module::ModuleRuntime::Rust,
+                ModuleRuntimeArg::Bun => module::ModuleRuntime::Bun,
+            },
             surface_name: args.surface_name.clone(),
             with_console: args.with_console_ui,
         }
@@ -3063,12 +3099,21 @@ async fn main() -> anyhow::Result<()> {
             ModuleCommand::Create(args) => {
                 module::create_module((&args).into()).await?;
             }
-            ModuleCommand::Dev(args) => {
-                if !args.console_ui {
-                    anyhow::bail!("`lenso module dev` currently requires --console-ui");
+            ModuleCommand::Dev(args) => match (args.console_ui, args.bun) {
+                (true, false) => {
+                    console_dev::run_module_console_ui_dev(args.repo_root.as_deref())?;
                 }
-                console_dev::run_module_console_ui_dev(args.repo_root.as_deref())?;
-            }
+                (false, true) => {
+                    authoring::dev_bun(args.repo_root.as_deref(), &args.project, &args.bun_bin)
+                        .await?;
+                }
+                (false, false) => {
+                    anyhow::bail!("`lenso module dev` requires --bun or --console-ui");
+                }
+                (true, true) => {
+                    anyhow::bail!("`lenso module dev` accepts only one of --bun or --console-ui");
+                }
+            },
             ModuleCommand::Install(args) => {
                 module::install_module(&args.manifest_reference, (&args).into()).await?;
             }
@@ -4066,11 +4111,68 @@ mod tests {
         };
 
         assert!(args.console_ui);
+        assert!(!args.bun);
         assert_eq!(
             args.repo_root.as_deref(),
             Some(std::path::Path::new("./module-repo"))
         );
         assert!(Cli::try_parse_from(["lenso", "module", "dev", "--console"]).is_err());
+    }
+
+    #[test]
+    fn parses_bun_module_create() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "module",
+            "create",
+            "greeting",
+            "--runtime",
+            "bun",
+            "--dir",
+            "./greeting-app",
+            "--capability",
+            "example.greeting@1",
+            "--no-install",
+        ]);
+        let Command::Module {
+            command: ModuleCommand::Create(args),
+        } = cli.command
+        else {
+            panic!("expected module create");
+        };
+
+        assert_eq!(args.runtime, ModuleRuntimeArg::Bun);
+        assert_eq!(
+            args.dir.as_deref(),
+            Some(std::path::Path::new("./greeting-app"))
+        );
+        assert_eq!(args.capability.as_deref(), Some("example.greeting@1"));
+        assert!(args.no_install);
+    }
+
+    #[test]
+    fn parses_bun_module_dev() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "module",
+            "dev",
+            "--bun",
+            "--repo-root",
+            "./greeting-app",
+            "--bun-bin",
+            "/opt/bun/bin/bun",
+        ]);
+        let Command::Module {
+            command: ModuleCommand::Dev(args),
+        } = cli.command
+        else {
+            panic!("expected module dev");
+        };
+
+        assert!(args.bun);
+        assert!(!args.console_ui);
+        assert_eq!(args.project, std::path::Path::new("lenso.json"));
+        assert_eq!(args.bun_bin, "/opt/bun/bin/bun");
     }
 
     #[test]

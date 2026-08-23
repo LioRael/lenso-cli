@@ -45,4 +45,73 @@ export interface GreetingProvider {
   greet(context: InvocationContext, request: GreetRequest): Promise<GreetResult>;
 }
 
+export type ProviderDispatchOutcome =
+  | { readonly kind: "success"; readonly value: unknown }
+  | { readonly kind: "domain"; readonly value: unknown }
+  | { readonly kind: "runtime"; readonly failure: RuntimeFailure };
+
+export interface CapabilityProviderDescriptor {
+  readonly capability_id: string;
+  readonly descriptor_version: string;
+  readonly operations: ReadonlyArray<string>;
+  readonly stream_operations: ReadonlyArray<string>;
+  readonly event_operations: ReadonlyArray<string>;
+}
+
+export interface CapabilityProviderBinding {
+  readonly descriptor: CapabilityProviderDescriptor;
+  invokeRequest(
+    operation: string,
+    context: InvocationContext,
+    payload: unknown,
+  ): Promise<ProviderDispatchOutcome>;
+}
+
+function providerErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export function bindGreetingProvider(
+  provider: GreetingProvider,
+): CapabilityProviderBinding {
+  return {
+    descriptor: {
+      capability_id: CAPABILITY_ID,
+      descriptor_version: DESCRIPTOR_VERSION,
+      operations: ["greet"],
+      stream_operations: [],
+      event_operations: [],
+    },
+    async invokeRequest(operation, context, payload) {
+      switch (operation) {
+      case "greet": {
+        let request: GreetRequest;
+        try {
+          request = decodeGreetRequest(lensoContractRuntime.encodePortableJson(payload, "request"));
+        } catch (error) {
+          return { kind: "runtime", failure: { kind: "protocol_violation", detail: providerErrorMessage(error) } };
+        }
+        try {
+          const result = await provider.greet(context, request);
+          if (result.ok) {
+            return { kind: "success", value: JSON.parse(encodeGreetResponse(result.value)) as unknown };
+          }
+          if (result.error.kind === "domain") {
+            return { kind: "domain", value: JSON.parse(encodeGreetError(result.error.error)) as unknown };
+          }
+          return { kind: "runtime", failure: result.error.error };
+        } catch (error) {
+          return { kind: "runtime", failure: { kind: "module_failure", detail: providerErrorMessage(error) } };
+        }
+      }
+        default:
+          return { kind: "runtime", failure: { kind: "unknown_operation", operation } };
+      }
+    },
+  };
+}
+
+export type Provider = GreetingProvider;
+export const bindProvider = bindGreetingProvider;
+
 export const portableValueProfile = lensoContractRuntime.portableValueProfile;

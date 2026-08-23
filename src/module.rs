@@ -6,6 +6,9 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
+use lenso_authoring::{
+    CapabilityEndpoint, ContractInput, Module, PackageInput, PackageSource, ProjectFile,
+};
 use lenso_contracts::{
     CatalogAction, DeclaredCompatibilityState, ModuleDelivery, ModuleEligibility,
     ModuleEligibilityState, ModuleLifecycleState, ModuleRelease, ModuleVerificationCell,
@@ -343,14 +346,23 @@ pub struct ModuleServiceStopOptions {
 #[derive(Debug, Clone)]
 pub struct ModuleCreateOptions {
     pub capability: Option<String>,
+    pub dir: Option<PathBuf>,
     pub dry_run: bool,
     pub icon: Option<String>,
     pub label: Option<String>,
     pub module_id: String,
+    pub no_install: bool,
     pub repo_root: Option<PathBuf>,
     pub route: Option<String>,
+    pub runtime: ModuleRuntime,
     pub surface_name: Option<String>,
     pub with_console: bool,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ModuleRuntime {
+    Rust,
+    Bun,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -547,6 +559,19 @@ const PROVIDER_PROTOCOL_VERSION: &str = "lenso.provider.v1";
 const SUPPORTED_SERVICE_MODULE_FEATURES: &[&str] = &["service.lifecycle", "service.status"];
 
 pub async fn create_module(options: ModuleCreateOptions) -> Result<()> {
+    match options.runtime {
+        ModuleRuntime::Rust => create_rust_module(options),
+        ModuleRuntime::Bun => create_bun_module(&options),
+    }
+}
+
+fn create_rust_module(options: ModuleCreateOptions) -> Result<()> {
+    if options.dir.is_some() {
+        bail!("--dir is available only with --runtime bun");
+    }
+    if options.no_install {
+        bail!("--no-install is available only with --runtime bun");
+    }
     let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
     let module_id = slugify(&options.module_id);
     if module_id.is_empty() {
@@ -647,6 +672,364 @@ pub async fn create_module(options: ModuleCreateOptions) -> Result<()> {
         println!("- just arch-check");
     }
 
+    Ok(())
+}
+
+fn create_bun_module(options: &ModuleCreateOptions) -> Result<()> {
+    if options.with_console
+        || options.icon.is_some()
+        || options.label.is_some()
+        || options.route.is_some()
+        || options.surface_name.is_some()
+    {
+        bail!(
+            "Bun scaffolds do not accept Rust Console artifact options; create the Provider project first"
+        );
+    }
+
+    let module_id = slugify(&options.module_id);
+    if module_id.is_empty() {
+        bail!("Module id is required");
+    }
+    let target = bun_project_target(options, &module_id)?;
+    if target.exists() {
+        bail!("Bun project directory already exists: {}", target.display());
+    }
+
+    let capability_id = options
+        .capability
+        .clone()
+        .unwrap_or_else(|| format!("local.{module_id}@1"));
+    let files = bun_scaffold_files(&target, &module_id, &capability_id)?;
+    if options.dry_run {
+        println!("Bun Module dry run:");
+        for path in files.keys() {
+            println!("- {}", display_relative(&target, path));
+        }
+        for path in [
+            target.join(format!("contracts/{module_id}/generated/bindings.rs")),
+            target.join(format!("contracts/{module_id}/generated/bindings.ts")),
+        ] {
+            println!("- {}", display_relative(&target, &path));
+        }
+        return Ok(());
+    }
+
+    let parent = target
+        .parent()
+        .ok_or_else(|| anyhow!("Bun project target must have a parent directory"))?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("create Bun project parent {}", parent.display()))?;
+    let target_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("bun-module");
+    let stage = parent.join(format!(
+        ".{target_name}.lenso-stage-{}",
+        uuid::Uuid::now_v7()
+    ));
+    fs::create_dir(&stage)
+        .with_context(|| format!("create Bun scaffold stage {}", stage.display()))?;
+
+    let materialized =
+        materialize_bun_scaffold(&files, &target, &stage, &module_id, !options.no_install);
+    if let Err(error) = materialized {
+        if let Err(cleanup_error) = fs::remove_dir_all(&stage) {
+            return Err(error.context(format!(
+                "also failed to remove incomplete scaffold {}: {cleanup_error}",
+                stage.display()
+            )));
+        }
+        return Err(error);
+    }
+    if let Err(source) = fs::rename(&stage, &target) {
+        let error = anyhow!(source).context(format!(
+            "publish complete Bun scaffold {} to {}",
+            stage.display(),
+            target.display()
+        ));
+        if let Err(cleanup_error) = fs::remove_dir_all(&stage) {
+            return Err(error.context(format!(
+                "also failed to remove complete staging directory {}: {cleanup_error}",
+                stage.display()
+            )));
+        }
+        return Err(error);
+    }
+
+    println!("Created Bun Module project at {}.", target.display());
+    println!("Next steps:");
+    if options.no_install {
+        println!("- cd {} && bun install", target.display());
+    } else {
+        println!("- dependencies installed and generated types checked");
+    }
+    println!("- cd {} && lenso module dev --bun", target.display());
+    Ok(())
+}
+
+fn bun_project_target(options: &ModuleCreateOptions, module_id: &str) -> Result<PathBuf> {
+    let base = match options.repo_root.as_deref() {
+        Some(path) => absolutize(path)?,
+        None => std::env::current_dir().context("resolve current directory")?,
+    };
+    let dir = options
+        .dir
+        .as_deref()
+        .unwrap_or_else(|| Path::new(module_id));
+    Ok(if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        base.join(dir)
+    })
+}
+
+fn bun_scaffold_files(
+    target: &Path,
+    module_id: &str,
+    capability_id: &str,
+) -> Result<PendingWrites> {
+    const DESCRIPTOR_VERSION: &str = "1.0.0";
+    const MODULE_VERSION: &str = "0.1.0";
+
+    let package_name = format!("lenso-module-{module_id}");
+    let package_id = format!("local.{module_id}");
+    let contract_root = format!("contracts/{module_id}");
+    let module_root = format!("modules/{module_id}");
+    let workspace_revision = format!("workspace:{module_root}");
+    let descriptor_path = format!("{contract_root}/capability.json");
+    let rust_path = format!("{contract_root}/generated/bindings.rs");
+    let typescript_path = format!("{contract_root}/generated/bindings.ts");
+
+    let mut project = ProjectFile::default();
+    let package = PackageInput::new(&package_id, PackageSource::Bun, &workspace_revision)
+        .with_package_name(&package_name)
+        .with_locked_revision(&workspace_revision)
+        .with_manifest(format!("{module_root}/package.json"))
+        .with_lockfile("bun.lock");
+    project.packages_mut().insert(package_id.clone(), package);
+    project.composition_mut().add_module(
+        Module::new(module_id, &package_id)
+            .with_entrypoint(format!("{module_root}/src/index.ts"))
+            .with_capability(CapabilityEndpoint::request(
+                capability_id,
+                DESCRIPTOR_VERSION,
+                ["execute"],
+            )),
+    );
+    project.contracts_mut().push(ContractInput::new(
+        capability_id,
+        DESCRIPTOR_VERSION,
+        &descriptor_path,
+        &rust_path,
+        &typescript_path,
+    ));
+
+    let descriptor = json!({
+        "id": capability_id,
+        "version": DESCRIPTOR_VERSION,
+        "portable": true,
+        "cross_lane_transfer": true,
+        "operations": [{
+            "name": "execute",
+            "interaction": "request",
+            "request_schema": "schemas/execute-request.schema.json",
+            "response_schema": "schemas/execute-response.schema.json",
+            "domain_error_schema": "schemas/execute-error.schema.json"
+        }]
+    });
+    let request_schema = json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "required": ["input"],
+        "properties": { "input": { "type": "string" } },
+        "additionalProperties": false
+    });
+    let response_schema = json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "required": ["output"],
+        "properties": { "output": { "type": "string" } },
+        "additionalProperties": false
+    });
+    let error_schema = json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "oneOf": [{ "const": "invalid_input" }]
+    });
+
+    let root_package = json!({
+        "name": format!("{module_id}-app"),
+        "private": true,
+        "type": "module",
+        "packageManager": "bun@1.2.21",
+        "workspaces": ["modules/*"],
+        "scripts": {
+            "check": "lenso check --project lenso.json --execution-class lenso.bun-process@1",
+            "dev": "lenso module dev --bun",
+            "resolve": "lenso resolve --project lenso.json --execution-class lenso.bun-process@1",
+            "typecheck": "tsc -p tsconfig.json"
+        },
+        "devDependencies": {
+            "@types/bun": "1.2.21",
+            "typescript": "5.9.2"
+        }
+    });
+    let module_package = json!({
+        "name": package_name,
+        "version": MODULE_VERSION,
+        "private": true,
+        "type": "module",
+        "scripts": { "typecheck": "tsc -p ../../tsconfig.json" },
+        "dependencies": {
+            "@lenso/bun-module": "0.1.0",
+            "@lenso/contract-runtime": "0.1.0"
+        },
+        "engines": { "bun": ">=1.2.21" }
+    });
+    let tsconfig = json!({
+        "compilerOptions": {
+            "allowImportingTsExtensions": true,
+            "module": "ESNext",
+            "moduleResolution": "Bundler",
+            "noEmit": true,
+            "skipLibCheck": true,
+            "strict": true,
+            "target": "ES2022",
+            "types": ["bun"]
+        },
+        "include": ["contracts/**/*.ts", "modules/**/*.ts"]
+    });
+    let module_source = format!(
+        r#"import {{ defineModule, serve }} from "@lenso/bun-module";
+import {{ bindProvider, type Provider }} from "../../../{typescript_path}";
+
+const provider: Provider = {{
+  async execute(_context, request) {{
+    return {{ ok: true, value: {{ output: request.input }} }};
+  }},
+}};
+
+serve(defineModule({{ providers: [bindProvider(provider)] }}));
+"#
+    );
+    let readme = format!(
+        r"# {module_id}
+
+Bun Module scaffold for `{capability_id}`.
+
+```sh
+bun install
+bun run typecheck
+lenso check --project lenso.json --execution-class lenso.bun-process@1
+lenso module dev --bun
+```
+
+Implement the typed Provider in `{module_root}/src/index.ts`. The checked-in
+Descriptor and generated bindings live under `{contract_root}`.
+"
+    );
+
+    let mut files = PendingWrites::new();
+    queue_write(
+        &mut files,
+        target.join(".gitignore"),
+        "node_modules\n.lenso\n".to_owned(),
+    );
+    queue_write(&mut files, target.join("README.md"), readme);
+    queue_write(
+        &mut files,
+        target.join("lenso.json"),
+        format!("{}\n", serde_json::to_string_pretty(&project)?),
+    );
+    queue_write(
+        &mut files,
+        target.join("package.json"),
+        json_string_pretty(&root_package)?,
+    );
+    queue_write(
+        &mut files,
+        target.join("tsconfig.json"),
+        json_string_pretty(&tsconfig)?,
+    );
+    queue_write(
+        &mut files,
+        target.join(&descriptor_path),
+        json_string_pretty(&descriptor)?,
+    );
+    queue_write(
+        &mut files,
+        target.join(format!(
+            "{contract_root}/schemas/execute-request.schema.json"
+        )),
+        json_string_pretty(&request_schema)?,
+    );
+    queue_write(
+        &mut files,
+        target.join(format!(
+            "{contract_root}/schemas/execute-response.schema.json"
+        )),
+        json_string_pretty(&response_schema)?,
+    );
+    queue_write(
+        &mut files,
+        target.join(format!("{contract_root}/schemas/execute-error.schema.json")),
+        json_string_pretty(&error_schema)?,
+    );
+    queue_write(
+        &mut files,
+        target.join(format!("{module_root}/package.json")),
+        json_string_pretty(&module_package)?,
+    );
+    queue_write(
+        &mut files,
+        target.join(format!("{module_root}/src/index.ts")),
+        module_source,
+    );
+    Ok(files)
+}
+
+fn materialize_bun_scaffold(
+    files: &PendingWrites,
+    target: &Path,
+    stage: &Path,
+    module_id: &str,
+    install: bool,
+) -> Result<()> {
+    for (path, contents) in files {
+        let relative = path
+            .strip_prefix(target)
+            .with_context(|| format!("scaffold path {} escaped target", path.display()))?;
+        write_file(&stage.join(relative), contents.as_bytes())?;
+    }
+
+    let descriptor = stage.join(format!("contracts/{module_id}/capability.json"));
+    let generated = lenso_contract_codegen::generate(&descriptor)
+        .with_context(|| format!("generate bindings from {}", descriptor.display()))?;
+    write_file(
+        &stage.join(format!("contracts/{module_id}/generated/bindings.rs")),
+        generated.rust.as_bytes(),
+    )?;
+    write_file(
+        &stage.join(format!("contracts/{module_id}/generated/bindings.ts")),
+        generated.typescript.as_bytes(),
+    )?;
+
+    if install {
+        run_bun_scaffold_command(stage, &["install"])?;
+        run_bun_scaffold_command(stage, &["run", "typecheck"])?;
+    }
+    Ok(())
+}
+
+fn run_bun_scaffold_command(stage: &Path, args: &[&str]) -> Result<()> {
+    let status = Command::new("bun")
+        .args(args)
+        .current_dir(stage)
+        .status()
+        .with_context(|| format!("run `bun {}`", args.join(" ")))?;
+    if !status.success() {
+        bail!("`bun {}` failed with {status}", args.join(" "));
+    }
     Ok(())
 }
 
@@ -10423,6 +10806,87 @@ fn write_json(path: &Path, value: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bun_scaffold_generates_a_typed_provider_project() {
+        let root =
+            std::env::temp_dir().join(format!("lenso-cli-bun-scaffold-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join("greeting-app");
+        let options = ModuleCreateOptions {
+            capability: Some("example.greeting@1".to_owned()),
+            dir: Some(target.clone()),
+            dry_run: false,
+            icon: None,
+            label: None,
+            module_id: "greeting".to_owned(),
+            no_install: true,
+            repo_root: None,
+            route: None,
+            runtime: ModuleRuntime::Bun,
+            surface_name: None,
+            with_console: false,
+        };
+
+        create_bun_module(&options).unwrap();
+        let descriptor = target.join("contracts/greeting/capability.json");
+        let rust = target.join("contracts/greeting/generated/bindings.rs");
+        let typescript = target.join("contracts/greeting/generated/bindings.ts");
+        lenso_contract_codegen::check_generated(&descriptor, &rust, &typescript).unwrap();
+        let module_source =
+            fs::read_to_string(target.join("modules/greeting/src/index.ts")).unwrap();
+        let project: ProjectFile =
+            serde_json::from_slice(&fs::read(target.join("lenso.json")).unwrap()).unwrap();
+        let package = project.packages().get("local.greeting").unwrap();
+
+        assert_eq!(
+            (
+                project.composition().modules().len(),
+                project.contracts().len(),
+                module_source.contains("bindProvider(provider)"),
+                package.version(),
+                package.locked_revision(),
+            ),
+            (
+                1,
+                1,
+                true,
+                "workspace:modules/greeting",
+                "workspace:modules/greeting",
+            )
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bun_scaffold_refuses_an_existing_target() {
+        let root =
+            std::env::temp_dir().join(format!("lenso-cli-bun-existing-{}", uuid::Uuid::now_v7()));
+        let target = root.join("existing");
+        fs::create_dir_all(&target).unwrap();
+        let options = ModuleCreateOptions {
+            capability: None,
+            dir: Some(target),
+            dry_run: false,
+            icon: None,
+            label: None,
+            module_id: "greeting".to_owned(),
+            no_install: true,
+            repo_root: None,
+            route: None,
+            runtime: ModuleRuntime::Bun,
+            surface_name: None,
+            with_console: false,
+        };
+
+        let error = create_bun_module(&options).unwrap_err().to_string();
+
+        assert!(
+            error.contains("already exists"),
+            "unexpected error: {error}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[cfg(unix)]
     #[tokio::test]
