@@ -1803,14 +1803,13 @@ dependencies = [
 [[package]]
 name = "lenso-authoring"
 version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "caea4b1fbd156216d1e3e7d923db3e94e590b48b0493ed6d75a4ef593aece7aa"
 dependencies = [
- "futures",
  "lenso-app-plan",
  "lenso-bun-adapter",
  "lenso-contract-codegen",
- "lenso-contract-runtime",
  "lenso-kernel",
- "lenso-native-adapter",
  "lenso-runner",
  "serde",
  "serde_json",
@@ -1820,14 +1819,15 @@ dependencies = [
 
 [[package]]
 name = "lenso-authoring"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "caea4b1fbd156216d1e3e7d923db3e94e590b48b0493ed6d75a4ef593aece7aa"
+version = "0.1.6"
 dependencies = [
+ "futures",
  "lenso-app-plan",
  "lenso-bun-adapter",
  "lenso-contract-codegen",
+ "lenso-contract-runtime",
  "lenso-kernel",
+ "lenso-native-adapter",
  "lenso-runner",
  "serde",
  "serde_json",
@@ -1862,7 +1862,7 @@ dependencies = [
  "getrandom 0.4.3",
  "include_dir",
  "lenso-app-plan",
- "lenso-authoring 0.1.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "lenso-authoring 0.1.5",
  "lenso-bun-adapter",
  "lenso-contracts",
  "lenso-kernel",
