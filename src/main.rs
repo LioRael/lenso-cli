@@ -398,6 +398,8 @@ enum CapabilityCommand {
     Check(CapabilityCheckArgs),
     /// Inspect a local capability pack.
     Inspect(CapabilityInspectArgs),
+    /// Preview semantic Descriptor changes and affected Module Instances.
+    Diff(CapabilityDiffArgs),
     /// Manage the local capability pack library.
     Library {
         #[command(subcommand)]
@@ -451,6 +453,23 @@ struct CapabilityCheckArgs {
 struct CapabilityInspectArgs {
     /// Capability pack directory or lenso.capability.json path.
     path: std::path::PathBuf,
+}
+
+#[derive(Debug, Args, Clone)]
+struct CapabilityDiffArgs {
+    /// Previously accepted Capability Descriptor.
+    baseline: std::path::PathBuf,
+
+    /// Candidate Capability Descriptor.
+    candidate: std::path::PathBuf,
+
+    /// Optional App authoring project used to identify affected Module Instances.
+    #[arg(long)]
+    project: Option<std::path::PathBuf>,
+
+    /// Print the versioned semantic diff as JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -963,8 +982,12 @@ struct ConsoleCompositionApplyArgs {
 enum ModuleCommand {
     /// Create a linked module or service scaffold.
     Create(ModuleCreateArgs),
-    /// Start module-local development helpers.
+    /// Start the inferred Module development loop.
     Dev(ModuleDevArgs),
+    /// Validate a Module authoring project with actionable diagnostics.
+    Check(ModuleCheckArgs),
+    /// Prove Module behavior declarations, composition, and removal.
+    Verify(ModuleVerifyArgs),
     /// Install a module capability from a release, catalog entry, service, or linked source.
     Install(ServiceModuleInstallArgs),
     /// Reapply an installed module from its install receipt.
@@ -979,11 +1002,11 @@ enum ModuleCommand {
 
 #[derive(Debug, Args, Clone)]
 struct ModuleDevArgs {
-    /// Start the Module-owned Console UI artifact development server.
+    /// Start the Module-owned Console UI artifact development server (legacy override).
     #[arg(long = "console-ui")]
     console_ui: bool,
 
-    /// Resolve and run a Bun Module project, restarting from a fresh Plan after source changes.
+    /// Resolve and run a Bun Module project (legacy override).
     #[arg(long)]
     bun: bool,
 
@@ -998,6 +1021,48 @@ struct ModuleDevArgs {
     /// Bun executable used by the Execution Adapter.
     #[arg(long = "bun-bin", default_value = "bun")]
     bun_bin: String,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ModuleCheckArgs {
+    /// Module repository root. Defaults to the current directory.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Authoring project document, relative to the Module repository root.
+    #[arg(long, default_value = "lenso.json")]
+    project: std::path::PathBuf,
+
+    /// Emit the versioned authoring report as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ModuleVerifyArgs {
+    /// Module repository root. Defaults to the current directory.
+    #[arg(long)]
+    repo_root: Option<std::path::PathBuf>,
+
+    /// Authoring project document, relative to the Module repository root.
+    #[arg(long, default_value = "lenso.json")]
+    project: std::path::PathBuf,
+
+    /// Verify removal of this App-local Module Instance. Defaults to every Instance.
+    #[arg(long = "module")]
+    module_key: Option<String>,
+
+    /// Behavior verification manifest, relative to the Module repository root.
+    #[arg(long, default_value = "lenso.module.verify.json")]
+    manifest: std::path::PathBuf,
+
+    /// Write the versioned verification evidence to this path.
+    #[arg(long, default_value = ".lenso/module-verification.json")]
+    output: std::path::PathBuf,
+
+    /// Emit the versioned verification evidence as JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2195,11 +2260,15 @@ struct ModuleCreateArgs {
     #[arg(long, value_enum, default_value_t = ModuleRuntimeArg::Rust)]
     runtime: ModuleRuntimeArg,
 
-    /// New Bun project directory. Defaults to the Module id.
+    /// High-value authoring recipe used to seed the Module card.
+    #[arg(long, value_enum, default_value_t = ModuleRecipeArg::Stateless)]
+    recipe: ModuleRecipeArg,
+
+    /// New standalone Module project directory. Defaults to the Module id.
     #[arg(long)]
     dir: Option<std::path::PathBuf>,
 
-    /// Skip `bun install` after generating a Bun project.
+    /// Skip package installation and compile checks after generating a standalone project.
     #[arg(long)]
     no_install: bool,
 
@@ -2236,6 +2305,14 @@ struct ModuleCreateArgs {
 enum ModuleRuntimeArg {
     Rust,
     Bun,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum ModuleRecipeArg {
+    Stateless,
+    Stateful,
+    WebConsole,
+    ManagedWork,
 }
 
 impl From<&ServiceModuleInstallArgs> for module::ServiceModuleInstallOptions {
@@ -2740,6 +2817,12 @@ impl From<&ModuleCreateArgs> for module::ModuleCreateOptions {
             module_id: args.module_id.clone(),
             no_install: args.no_install,
             repo_root: args.repo_root.clone(),
+            recipe: match args.recipe {
+                ModuleRecipeArg::Stateless => module::ModuleRecipe::Stateless,
+                ModuleRecipeArg::Stateful => module::ModuleRecipe::Stateful,
+                ModuleRecipeArg::WebConsole => module::ModuleRecipe::WebConsole,
+                ModuleRecipeArg::ManagedWork => module::ModuleRecipe::ManagedWork,
+            },
             route: args.route.clone(),
             runtime: match args.runtime {
                 ModuleRuntimeArg::Rust => module::ModuleRuntime::Rust,
@@ -2945,6 +3028,14 @@ async fn main() -> anyhow::Result<()> {
             CapabilityCommand::Inspect(args) => {
                 capability::inspect(capability::InspectOptions { path: args.path })?;
             }
+            CapabilityCommand::Diff(args) => {
+                capability::diff(capability::DiffOptions {
+                    baseline: args.baseline,
+                    candidate: args.candidate,
+                    json: args.json,
+                    project: args.project,
+                })?;
+            }
             CapabilityCommand::Library { command } => match command {
                 CapabilityLibraryCommand::Init(args) => {
                     capability::library_init(capability::LibraryInitOptions {
@@ -3108,12 +3199,30 @@ async fn main() -> anyhow::Result<()> {
                         .await?;
                 }
                 (false, false) => {
-                    anyhow::bail!("`lenso module dev` requires --bun or --console-ui");
+                    authoring::dev_module(args.repo_root.as_deref(), &args.project, &args.bun_bin)
+                        .await?;
                 }
                 (true, true) => {
                     anyhow::bail!("`lenso module dev` accepts only one of --bun or --console-ui");
                 }
             },
+            ModuleCommand::Check(args) => {
+                authoring::check_module(authoring::ModuleCheckOptions {
+                    json: args.json,
+                    project: args.project,
+                    repo_root: args.repo_root,
+                })?;
+            }
+            ModuleCommand::Verify(args) => {
+                authoring::verify_module(authoring::ModuleVerifyOptions {
+                    json: args.json,
+                    manifest: args.manifest,
+                    module_key: args.module_key,
+                    output: args.output,
+                    project: args.project,
+                    repo_root: args.repo_root,
+                })?;
+            }
             ModuleCommand::Install(args) => {
                 module::install_module(&args.manifest_reference, (&args).into()).await?;
             }
@@ -4176,6 +4285,51 @@ mod tests {
     }
 
     #[test]
+    fn parses_inferred_module_dev() {
+        let cli = Cli::parse_from(["lenso", "module", "dev"]);
+        let Command::Module {
+            command: ModuleCommand::Dev(args),
+        } = cli.command
+        else {
+            panic!("expected module dev");
+        };
+
+        assert!(!args.bun);
+        assert!(!args.console_ui);
+        assert_eq!(args.project, std::path::Path::new("lenso.json"));
+    }
+
+    #[test]
+    fn parses_module_check_and_verify() {
+        let check = Cli::parse_from(["lenso", "module", "check", "--json"]);
+        let Command::Module {
+            command: ModuleCommand::Check(check),
+        } = check.command
+        else {
+            panic!("expected module check");
+        };
+        assert!(check.json);
+
+        let verify = Cli::parse_from([
+            "lenso",
+            "module",
+            "verify",
+            "--module",
+            "greeting",
+            "--output",
+            "proof.json",
+        ]);
+        let Command::Module {
+            command: ModuleCommand::Verify(verify),
+        } = verify.command
+        else {
+            panic!("expected module verify");
+        };
+        assert_eq!(verify.module_key.as_deref(), Some("greeting"));
+        assert_eq!(verify.output, std::path::Path::new("proof.json"));
+    }
+
+    #[test]
     fn parses_agent_command_context() {
         let cli = Cli::parse_from(["lenso", "agent", "context", "--output", "AGENT_CONTEXT.md"]);
         let Command::Agent {
@@ -4236,6 +4390,33 @@ mod tests {
         assert_eq!(
             args.path,
             std::path::PathBuf::from("./capabilities/support-sla")
+        );
+        assert!(args.json);
+    }
+
+    #[test]
+    fn parses_capability_semantic_diff() {
+        let cli = Cli::parse_from([
+            "lenso",
+            "capability",
+            "diff",
+            "old.json",
+            "new.json",
+            "--project",
+            "lenso.json",
+            "--json",
+        ]);
+        let Command::Capability {
+            command: CapabilityCommand::Diff(args),
+        } = cli.command
+        else {
+            panic!("expected capability diff");
+        };
+        assert_eq!(args.baseline, std::path::Path::new("old.json"));
+        assert_eq!(args.candidate, std::path::Path::new("new.json"));
+        assert_eq!(
+            args.project.as_deref(),
+            Some(std::path::Path::new("lenso.json"))
         );
         assert!(args.json);
     }

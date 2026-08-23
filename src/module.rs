@@ -353,6 +353,7 @@ pub struct ModuleCreateOptions {
     pub module_id: String,
     pub no_install: bool,
     pub repo_root: Option<PathBuf>,
+    pub recipe: ModuleRecipe,
     pub route: Option<String>,
     pub runtime: ModuleRuntime,
     pub surface_name: Option<String>,
@@ -363,6 +364,14 @@ pub struct ModuleCreateOptions {
 pub enum ModuleRuntime {
     Rust,
     Bun,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ModuleRecipe {
+    Stateless,
+    Stateful,
+    WebConsole,
+    ManagedWork,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -566,17 +575,23 @@ pub async fn create_module(options: ModuleCreateOptions) -> Result<()> {
 }
 
 fn create_rust_module(options: ModuleCreateOptions) -> Result<()> {
-    if options.dir.is_some() {
-        bail!("--dir is available only with --runtime bun");
-    }
-    if options.no_install {
-        bail!("--no-install is available only with --runtime bun");
-    }
-    let repo_root = resolve_repo_root(options.repo_root.as_deref())?;
     let module_id = slugify(&options.module_id);
     if module_id.is_empty() {
         bail!("Module id is required");
     }
+    let base = options.repo_root.as_deref().map_or_else(
+        || std::env::current_dir().context("resolve current directory"),
+        absolutize,
+    )?;
+    let embedded = options.dir.is_none()
+        && (is_starter_host_root(&base) || is_framework_workspace_root(&base));
+    if !embedded {
+        return create_standalone_rust_module(&options, &base, &module_id);
+    }
+    if options.no_install {
+        bail!("--no-install is available only for standalone Module projects");
+    }
+    let repo_root = resolve_repo_root(Some(&base))?;
     let module_crate = snake_case(&module_id);
     let host_layout = is_starter_host_root(&repo_root);
     let module_dir = if host_layout {
@@ -675,6 +690,424 @@ fn create_rust_module(options: ModuleCreateOptions) -> Result<()> {
     Ok(())
 }
 
+fn create_standalone_rust_module(
+    options: &ModuleCreateOptions,
+    base: &Path,
+    module_id: &str,
+) -> Result<()> {
+    if options.with_console
+        || options.icon.is_some()
+        || options.label.is_some()
+        || options.route.is_some()
+        || options.surface_name.is_some()
+    {
+        bail!(
+            "standalone Rust scaffolds do not yet combine Console UI assets; add the Module-owned artifact after creating the Provider project"
+        );
+    }
+    let target = options
+        .dir
+        .as_deref()
+        .map_or_else(|| base.join(module_id), |dir| resolve_path(base, dir));
+    if target.exists() {
+        bail!(
+            "Rust Module project directory already exists: {}",
+            target.display()
+        );
+    }
+    let capability_id = options
+        .capability
+        .clone()
+        .unwrap_or_else(|| format!("local.{module_id}@1"));
+    let files = rust_scaffold_files(&target, module_id, &capability_id, options.recipe)?;
+    if options.dry_run {
+        println!("Rust Module dry run:");
+        for path in files.keys() {
+            println!("- {}", display_relative(&target, path));
+        }
+        for path in [
+            target.join(format!("contracts/{module_id}/generated/bindings.rs")),
+            target.join(format!("contracts/{module_id}/generated/bindings.ts")),
+        ] {
+            println!("- {}", display_relative(&target, &path));
+        }
+        return Ok(());
+    }
+    let parent = target
+        .parent()
+        .ok_or_else(|| anyhow!("Rust Module project target must have a parent directory"))?;
+    fs::create_dir_all(parent)?;
+    let target_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("rust-module");
+    let stage = parent.join(format!(
+        ".{target_name}.lenso-stage-{}",
+        uuid::Uuid::now_v7()
+    ));
+    fs::create_dir(&stage)?;
+    let result = materialize_rust_scaffold(&files, &target, &stage, module_id, !options.no_install);
+    if let Err(error) = result {
+        let _ = fs::remove_dir_all(&stage);
+        return Err(error);
+    }
+    fs::rename(&stage, &target).with_context(|| {
+        format!(
+            "publish complete Rust Module scaffold {} to {}",
+            stage.display(),
+            target.display()
+        )
+    })?;
+    println!("Created Rust Module project at {}.", target.display());
+    println!("Next steps:");
+    if options.no_install {
+        println!("- cd {} && cargo generate-lockfile", target.display());
+    } else {
+        println!("- dependencies locked and generated project checked");
+    }
+    println!("- cd {} && lenso module dev", target.display());
+    println!("- cd {} && lenso module verify", target.display());
+    Ok(())
+}
+
+fn rust_scaffold_files(
+    target: &Path,
+    module_id: &str,
+    capability_id: &str,
+    recipe: ModuleRecipe,
+) -> Result<PendingWrites> {
+    const DESCRIPTOR_VERSION: &str = "1.0.0";
+    const MODULE_VERSION: &str = "0.1.0";
+    let package_name = format!("lenso-module-{module_id}");
+    let crate_name = snake_case(&package_name);
+    let package_id = format!("local.{module_id}");
+    let type_name = pascal_case(module_id);
+    let contract_root = format!("contracts/{module_id}");
+    let descriptor_path = format!("{contract_root}/capability.json");
+    let rust_path = format!("{contract_root}/generated/bindings.rs");
+    let typescript_path = format!("{contract_root}/generated/bindings.ts");
+
+    let mut project = ProjectFile::default();
+    project.packages_mut().insert(
+        package_id.clone(),
+        PackageInput::new(&package_id, PackageSource::Cargo, MODULE_VERSION)
+            .with_package_name(&package_name)
+            .with_manifest("Cargo.toml")
+            .with_lockfile("Cargo.lock"),
+    );
+    project
+        .composition_mut()
+        .add_module(Module::new(module_id, &package_id).with_capability(
+            CapabilityEndpoint::request(capability_id, DESCRIPTOR_VERSION, ["execute"]),
+        ));
+    project.contracts_mut().push(ContractInput::new(
+        capability_id,
+        DESCRIPTOR_VERSION,
+        &descriptor_path,
+        &rust_path,
+        &typescript_path,
+    ));
+
+    let descriptor = json!({
+        "id": capability_id,
+        "version": DESCRIPTOR_VERSION,
+        "portable": true,
+        "cross_lane_transfer": true,
+        "operations": [{
+            "name": "execute",
+            "interaction": "request",
+            "request_schema": "schemas/execute-request.schema.json",
+            "response_schema": "schemas/execute-response.schema.json",
+            "domain_error_schema": "schemas/execute-error.schema.json"
+        }]
+    });
+    let request_schema = json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "required": ["input"],
+        "properties": { "input": { "type": "string" } },
+        "additionalProperties": false
+    });
+    let response_schema = json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "required": ["output"],
+        "properties": { "output": { "type": "string" } },
+        "additionalProperties": false
+    });
+    let error_schema = json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "oneOf": [{ "const": "invalid_input" }]
+    });
+    let cargo_toml = format!(
+        r#"[package]
+name = "{package_name}"
+version = "{MODULE_VERSION}"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT"
+
+[workspace]
+
+[dependencies]
+futures = "0.3"
+lenso-app-plan = "0.1.0"
+lenso-contract-runtime = "0.1.0"
+lenso-kernel = "0.1.4"
+lenso-native-adapter = "0.1.1"
+lenso-runner = "0.1.1"
+serde = {{ version = "1", features = ["derive"] }}
+serde_json = "1"
+tokio = {{ version = "1.52", features = ["macros", "rt", "signal", "time"] }}
+"#
+    );
+    let module_source = format!(
+        r#"use std::rc::Rc;
+
+use futures::future;
+use lenso_kernel::{{InvocationContext, NativeRequestEndpoint, NativeRequestFuture, RuntimeFailure}};
+use lenso_native_adapter::{{NativeModuleFactory, NativeModuleFactoryContext, NativeModuleInstance}};
+
+#[path = "../{rust_path}"]
+#[allow(dead_code)]
+#[rustfmt::skip]
+pub mod generated;
+
+use generated::{{ExecuteError, ExecuteRequest, ExecuteResponse, {type_name}, {type_name}Endpoint, {type_name}Provider}};
+
+#[derive(Debug)]
+pub struct {type_name}Module;
+
+impl {type_name}Provider for {type_name}Module {{
+    fn execute(
+        &self,
+        _context: InvocationContext,
+        request: ExecuteRequest,
+    ) -> NativeRequestFuture<{type_name}> {{
+        let result = if request.input.trim().is_empty() {{
+            Err(ExecuteError::InvalidInput)
+        }} else {{
+            Ok(ExecuteResponse {{ output: request.input }})
+        }};
+        Box::pin(future::ready(Ok(result)))
+    }}
+}}
+
+fn endpoint() -> Rc<dyn NativeRequestEndpoint> {{
+    Rc::new({type_name}Endpoint::new({type_name}Module))
+}}
+
+#[derive(Debug)]
+pub struct {type_name}Factory;
+
+impl NativeModuleFactory for {type_name}Factory {{
+    fn package_id(&self) -> &'static str {{ "{package_id}" }}
+    fn package_version(&self) -> &'static str {{ env!("CARGO_PKG_VERSION") }}
+
+    fn instantiate(
+        &self,
+        _context: NativeModuleFactoryContext<'_>,
+    ) -> Result<NativeModuleInstance, RuntimeFailure> {{
+        Ok(NativeModuleInstance::new(vec![endpoint()]))
+    }}
+}}
+
+#[cfg(test)]
+mod tests {{
+    use super::*;
+    use lenso_kernel::CancellationToken;
+
+    fn context() -> InvocationContext {{
+        InvocationContext::new(1, None, CancellationToken::new())
+    }}
+
+    #[test]
+    fn provider_returns_success() {{
+        let result = futures::executor::block_on({type_name}Module.execute(
+            context(),
+            ExecuteRequest {{ input: "Ada".to_owned() }},
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.output, "Ada");
+    }}
+
+    #[test]
+    fn provider_returns_domain_error() {{
+        let result = futures::executor::block_on({type_name}Module.execute(
+            context(),
+            ExecuteRequest {{ input: " ".to_owned() }},
+        ))
+        .unwrap();
+        assert!(matches!(result, Err(ExecuteError::InvalidInput)));
+    }}
+
+    #[test]
+    fn endpoint_rejects_unknown_operation_as_runtime_failure() {{
+        let result = futures::executor::block_on(endpoint().invoke(
+            "missing",
+            Box::new(ExecuteRequest {{ input: "Ada".to_owned() }}),
+            context(),
+        ));
+        assert!(matches!(result, Err(RuntimeFailure::UnknownOperation {{ .. }})));
+    }}
+
+    #[test]
+    fn fresh_generation_owns_a_fresh_endpoint() {{
+        let first = endpoint();
+        let second = endpoint();
+        assert!(!Rc::ptr_eq(&first, &second));
+    }}
+}}
+"#
+    );
+    let runner_source = format!(
+        r#"use std::{{fs, time::Duration}};
+
+use {crate_name}::{type_name}Factory;
+use lenso_app_plan::ResolvedAppPlan;
+use lenso_kernel::ExecutionAdapterCatalog;
+use lenso_native_adapter::NativeModuleRegistry;
+use lenso_runner::TokioDriver;
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {{
+    let plan_path = std::env::args().nth(1).unwrap_or_else(|| ".lenso/resolved-plan.json".to_owned());
+    let plan: ResolvedAppPlan = serde_json::from_slice(&fs::read(&plan_path)?)?;
+    let driver = TokioDriver::new();
+    let shutdown = driver.clone();
+    let local = tokio::task::LocalSet::new();
+    local.spawn_local(async move {{
+        if tokio::signal::ctrl_c().await.is_ok() {{ shutdown.request_shutdown(); }}
+    }});
+    let adapters = ExecutionAdapterCatalog::single(
+        NativeModuleRegistry::new().with_factory({type_name}Factory),
+    );
+    let outcome = local.run_until(lenso_runner::run(
+        plan,
+        driver,
+        adapters,
+        Duration::from_secs(10),
+    )).await?;
+    println!("{{outcome:?}}");
+    Ok(())
+}}
+"#
+    );
+    let verification = json!({
+        "protocol": "lenso.module-verification-manifest.v1",
+        "probes": [
+            { "id": "package", "purpose": "package", "command": "cargo test --locked" },
+            { "id": "success", "purpose": "success", "command": "cargo test --locked provider_returns_success" },
+            { "id": "domain-error", "purpose": "domain_error", "command": "cargo test --locked provider_returns_domain_error" },
+            { "id": "runtime-failure", "purpose": "runtime_failure", "command": "cargo test --locked endpoint_rejects_unknown_operation_as_runtime_failure" },
+            { "id": "lifecycle-cleanup", "purpose": "lifecycle_cleanup", "command": "cargo test --locked fresh_generation_owns_a_fresh_endpoint" }
+        ]
+    });
+    let readme = format!(
+        "# {module_id}\n\nStandalone native Rust Module for `{capability_id}`.\n\n```sh\nlenso module check\nlenso module dev\nlenso module verify\n```\n\nThe generated development Runner statically registers `{type_name}Factory`; production Apps still own their Runner assembly.\n"
+    );
+
+    let mut files = PendingWrites::new();
+    queue_write(
+        &mut files,
+        target.join(".gitignore"),
+        "target\n.lenso\n".to_owned(),
+    );
+    queue_write(&mut files, target.join("Cargo.toml"), cargo_toml);
+    queue_write(&mut files, target.join("README.md"), readme);
+    queue_write(
+        &mut files,
+        target.join("MODULE.md"),
+        module_card(module_id, capability_id, recipe),
+    );
+    queue_write(&mut files, target.join("src/lib.rs"), module_source);
+    queue_write(
+        &mut files,
+        target.join("src/bin/lenso-module-dev.rs"),
+        runner_source,
+    );
+    queue_write(
+        &mut files,
+        target.join("lenso.json"),
+        format!("{}\n", serde_json::to_string_pretty(&project)?),
+    );
+    queue_write(
+        &mut files,
+        target.join("lenso.module.verify.json"),
+        json_string_pretty(&verification)?,
+    );
+    queue_write(
+        &mut files,
+        target.join(&descriptor_path),
+        json_string_pretty(&descriptor)?,
+    );
+    queue_write(
+        &mut files,
+        target.join(format!(
+            "{contract_root}/schemas/execute-request.schema.json"
+        )),
+        json_string_pretty(&request_schema)?,
+    );
+    queue_write(
+        &mut files,
+        target.join(format!(
+            "{contract_root}/schemas/execute-response.schema.json"
+        )),
+        json_string_pretty(&response_schema)?,
+    );
+    queue_write(
+        &mut files,
+        target.join(format!("{contract_root}/schemas/execute-error.schema.json")),
+        json_string_pretty(&error_schema)?,
+    );
+    Ok(files)
+}
+
+fn materialize_rust_scaffold(
+    files: &PendingWrites,
+    target: &Path,
+    stage: &Path,
+    module_id: &str,
+    check: bool,
+) -> Result<()> {
+    for (path, contents) in files {
+        let relative = path
+            .strip_prefix(target)
+            .with_context(|| format!("Rust scaffold path {} escaped target", path.display()))?;
+        write_file(&stage.join(relative), contents.as_bytes())?;
+    }
+    let descriptor = stage.join(format!("contracts/{module_id}/capability.json"));
+    let generated = lenso_contract_codegen::generate(&descriptor)
+        .with_context(|| format!("generate bindings from {}", descriptor.display()))?;
+    write_file(
+        &stage.join(format!("contracts/{module_id}/generated/bindings.rs")),
+        generated.rust.as_bytes(),
+    )?;
+    write_file(
+        &stage.join(format!("contracts/{module_id}/generated/bindings.ts")),
+        generated.typescript.as_bytes(),
+    )?;
+    if check {
+        run_rust_scaffold_command(stage, &["generate-lockfile"])?;
+        run_rust_scaffold_command(stage, &["check", "--locked"])?;
+        run_rust_scaffold_command(stage, &["test", "--locked"])?;
+    }
+    Ok(())
+}
+
+fn run_rust_scaffold_command(stage: &Path, args: &[&str]) -> Result<()> {
+    let status = Command::new("cargo")
+        .args(args)
+        .current_dir(stage)
+        .status()
+        .with_context(|| format!("run `cargo {}`", args.join(" ")))?;
+    if !status.success() {
+        bail!("`cargo {}` failed with {status}", args.join(" "));
+    }
+    Ok(())
+}
+
 fn create_bun_module(options: &ModuleCreateOptions) -> Result<()> {
     if options.with_console
         || options.icon.is_some()
@@ -700,7 +1133,7 @@ fn create_bun_module(options: &ModuleCreateOptions) -> Result<()> {
         .capability
         .clone()
         .unwrap_or_else(|| format!("local.{module_id}@1"));
-    let files = bun_scaffold_files(&target, &module_id, &capability_id)?;
+    let files = bun_scaffold_files(&target, &module_id, &capability_id, options.recipe)?;
     if options.dry_run {
         println!("Bun Module dry run:");
         for path in files.keys() {
@@ -764,7 +1197,7 @@ fn create_bun_module(options: &ModuleCreateOptions) -> Result<()> {
     } else {
         println!("- dependencies installed and generated types checked");
     }
-    println!("- cd {} && lenso module dev --bun", target.display());
+    println!("- cd {} && lenso module dev", target.display());
     Ok(())
 }
 
@@ -788,6 +1221,7 @@ fn bun_scaffold_files(
     target: &Path,
     module_id: &str,
     capability_id: &str,
+    recipe: ModuleRecipe,
 ) -> Result<PendingWrites> {
     const DESCRIPTOR_VERSION: &str = "1.0.0";
     const MODULE_VERSION: &str = "0.1.0";
@@ -865,8 +1299,9 @@ fn bun_scaffold_files(
         "workspaces": ["modules/*"],
         "scripts": {
             "check": "lenso check --project lenso.json --execution-class lenso.bun-process@1",
-            "dev": "lenso module dev --bun",
+            "dev": "lenso module dev",
             "resolve": "lenso resolve --project lenso.json --execution-class lenso.bun-process@1",
+            "test": "bun test",
             "typecheck": "tsc -p tsconfig.json"
         },
         "devDependencies": {
@@ -903,7 +1338,7 @@ fn bun_scaffold_files(
         r#"import {{ defineModule, serve }} from "@lenso/bun-module";
 import {{ bindProvider, type Provider }} from "../../../{typescript_path}";
 
-const provider: Provider = {{
+export const provider: Provider = {{
   async execute(_context, request) {{
     return {{ ok: true, value: {{ output: request.input }} }};
   }},
@@ -912,6 +1347,38 @@ const provider: Provider = {{
 serve(defineModule({{ providers: [bindProvider(provider)] }}));
 "#
     );
+    let module_test = r#"import { describe, expect, test } from "bun:test";
+import { provider } from "./index.ts";
+
+describe("Module Provider", () => {
+  test("returns success", async () => {
+    const result = await provider.execute({} as never, { input: "Ada" });
+    expect(result).toEqual({ ok: true, value: { output: "Ada" } });
+  });
+
+  test("returns a Domain Error", async () => {
+    const result = await provider.execute({} as never, { input: " " });
+    expect(result).toEqual({ ok: false, error: { kind: "domain", error: "invalid_input" } });
+  });
+
+  test("does not retain mutable state across calls", async () => {
+    const first = await provider.execute({} as never, { input: "first" });
+    const second = await provider.execute({} as never, { input: "second" });
+    expect(first).toEqual({ ok: true, value: { output: "first" } });
+    expect(second).toEqual({ ok: true, value: { output: "second" } });
+  });
+});
+"#;
+    let verification = json!({
+        "protocol": "lenso.module-verification-manifest.v1",
+        "probes": [
+            { "id": "package", "purpose": "package", "command": "bun run typecheck && bun test" },
+            { "id": "success", "purpose": "success", "command": "bun test --test-name-pattern 'returns success'" },
+            { "id": "domain-error", "purpose": "domain_error", "command": "bun test --test-name-pattern 'returns a Domain Error'" },
+            { "id": "runtime-failure", "purpose": "runtime_failure", "command": "lenso check --project lenso.json --execution-class lenso.native-rust@1", "expectFailure": true },
+            { "id": "lifecycle-cleanup", "purpose": "lifecycle_cleanup", "command": "bun test --test-name-pattern 'does not retain mutable state'" }
+        ]
+    });
     let readme = format!(
         r"# {module_id}
 
@@ -921,7 +1388,8 @@ Bun Module scaffold for `{capability_id}`.
 bun install
 bun run typecheck
 lenso check --project lenso.json --execution-class lenso.bun-process@1
-lenso module dev --bun
+lenso module dev
+lenso module verify
 ```
 
 Implement the typed Provider in `{module_root}/src/index.ts`. The checked-in
@@ -936,6 +1404,11 @@ Descriptor and generated bindings live under `{contract_root}`.
         "node_modules\n.lenso\n".to_owned(),
     );
     queue_write(&mut files, target.join("README.md"), readme);
+    queue_write(
+        &mut files,
+        target.join("MODULE.md"),
+        module_card(module_id, capability_id, recipe),
+    );
     queue_write(
         &mut files,
         target.join("lenso.json"),
@@ -985,6 +1458,16 @@ Descriptor and generated bindings live under `{contract_root}`.
         target.join(format!("{module_root}/src/index.ts")),
         module_source,
     );
+    queue_write(
+        &mut files,
+        target.join(format!("{module_root}/src/index.test.ts")),
+        module_test.to_owned(),
+    );
+    queue_write(
+        &mut files,
+        target.join("lenso.module.verify.json"),
+        json_string_pretty(&verification)?,
+    );
     Ok(files)
 }
 
@@ -1017,6 +1500,7 @@ fn materialize_bun_scaffold(
     if install {
         run_bun_scaffold_command(stage, &["install"])?;
         run_bun_scaffold_command(stage, &["run", "typecheck"])?;
+        run_bun_scaffold_command(stage, &["test"])?;
     }
     Ok(())
 }
@@ -7694,6 +8178,52 @@ fn snake_case(value: &str) -> String {
     value.replace('-', "_")
 }
 
+fn pascal_case(value: &str) -> String {
+    value
+        .split(['-', '_'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            let Some(first) = chars.next() else {
+                return String::new();
+            };
+            format!("{}{}", first.to_ascii_uppercase(), chars.as_str())
+        })
+        .collect()
+}
+
+fn module_card(module_id: &str, capability_id: &str, recipe: ModuleRecipe) -> String {
+    let (shape, owned_resources, lifecycle, first_behavior) = match recipe {
+        ModuleRecipe::Stateless => (
+            "Stateless Request Module",
+            "None by default",
+            "Create a fresh Provider generation; no managed work",
+            "One typed request returns success or a Domain Error",
+        ),
+        ModuleRecipe::Stateful => (
+            "Stateful Module",
+            "Module-owned tables, migrations, and optional transactional Outbox",
+            "Validate configuration in prepare; open state in activate; close it in deactivate",
+            "One state transition is observable through the provided Capability",
+        ),
+        ModuleRecipe::WebConsole => (
+            "Web and Console UI Module",
+            "Module-owned UI artifact and any product-specific HTTP routes",
+            "Keep ingress behind the App Ready Gate and bind the UI artifact to the Module Release",
+            "One real browser route consumes a typed Capability",
+        ),
+        ModuleRecipe::ManagedWork => (
+            "Managed background-work Module",
+            "Generation-owned tasks, cancellation handles, and checkpoints",
+            "Spawn only in activate; cancel and join every task in deactivate",
+            "One work item reaches a terminal observable outcome",
+        ),
+    };
+    format!(
+        "# Module card: {module_id}\n\n- Shape: {shape}\n- Deletion boundary: removing `{module_id}` removes its behavior, state meaning, policy, tasks, and operational complexity.\n- Owned facts: TODO — name the business facts for which this Module has final authorization.\n- Provided Capabilities: `{capability_id}`\n- Required Capabilities: none in the starter; declare every dependency explicitly before use.\n- Configuration: opaque, non-secret values only; use secret references for credentials.\n- External resources: {owned_resources}\n- Lifecycle: {lifecycle}\n- First observable behavior: {first_behavior}\n\n## Verification\n\nRun `lenso module check`, `lenso module verify`, and then remove this Instance from a test Composition and resolve the remainder. Replace every TODO before treating the card as design evidence.\n"
+    )
+}
+
 fn title_case(value: &str) -> String {
     value
         .split('-')
@@ -10821,6 +11351,7 @@ mod tests {
             label: None,
             module_id: "greeting".to_owned(),
             no_install: true,
+            recipe: ModuleRecipe::Stateless,
             repo_root: None,
             route: None,
             runtime: ModuleRuntime::Bun,
@@ -10835,6 +11366,9 @@ mod tests {
         lenso_contract_codegen::check_generated(&descriptor, &rust, &typescript).unwrap();
         let module_source =
             fs::read_to_string(target.join("modules/greeting/src/index.ts")).unwrap();
+        let verification: Value =
+            serde_json::from_slice(&fs::read(target.join("lenso.module.verify.json")).unwrap())
+                .unwrap();
         let project: ProjectFile =
             serde_json::from_slice(&fs::read(target.join("lenso.json")).unwrap()).unwrap();
         let package = project.packages().get("local.greeting").unwrap();
@@ -10855,6 +11389,15 @@ mod tests {
                 "workspace:modules/greeting",
             )
         );
+        assert_eq!(
+            verification["probes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|probe| probe["purpose"] == "runtime_failure")
+                .and_then(|probe| probe["expectFailure"].as_bool()),
+            Some(true)
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -10872,6 +11415,7 @@ mod tests {
             label: None,
             module_id: "greeting".to_owned(),
             no_install: true,
+            recipe: ModuleRecipe::Stateless,
             repo_root: None,
             route: None,
             runtime: ModuleRuntime::Bun,
@@ -10884,6 +11428,49 @@ mod tests {
         assert!(
             error.contains("already exists"),
             "unexpected error: {error}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rust_scaffold_generates_a_standalone_native_project() {
+        let root =
+            std::env::temp_dir().join(format!("lenso-cli-rust-scaffold-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join("greeting-app");
+        let options = ModuleCreateOptions {
+            capability: Some("example.greeting@1".to_owned()),
+            dir: Some(target.clone()),
+            dry_run: false,
+            icon: None,
+            label: None,
+            module_id: "greeting".to_owned(),
+            no_install: true,
+            recipe: ModuleRecipe::ManagedWork,
+            repo_root: Some(root.clone()),
+            route: None,
+            runtime: ModuleRuntime::Rust,
+            surface_name: None,
+            with_console: false,
+        };
+
+        create_rust_module(options).unwrap();
+
+        let descriptor = target.join("contracts/greeting/capability.json");
+        let rust = target.join("contracts/greeting/generated/bindings.rs");
+        let typescript = target.join("contracts/greeting/generated/bindings.ts");
+        lenso_contract_codegen::check_generated(&descriptor, &rust, &typescript).unwrap();
+        let cargo = fs::read_to_string(target.join("Cargo.toml")).unwrap();
+        let source = fs::read_to_string(target.join("src/lib.rs")).unwrap();
+        let verification = fs::read_to_string(target.join("lenso.module.verify.json")).unwrap();
+        assert!(cargo.contains("[workspace]"));
+        assert!(source.contains("impl GreetingProvider for GreetingModule"));
+        assert!(target.join("src/bin/lenso-module-dev.rs").is_file());
+        assert!(verification.contains("lifecycle_cleanup"));
+        assert!(
+            fs::read_to_string(target.join("MODULE.md"))
+                .unwrap()
+                .contains("Managed background-work Module")
         );
         fs::remove_dir_all(root).unwrap();
     }

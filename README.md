@@ -39,6 +39,30 @@ Use `lenso add` to add a Module package to the authoring project. These
 top-level commands are the only public authoring binary surface; the
 `lenso-authoring` crate is a library.
 
+## Module inner loop
+
+Create either official execution shape as a self-contained authoring project:
+
+```sh
+lenso module create greeting --runtime rust
+# or: lenso module create greeting --runtime bun
+cd greeting
+lenso module check
+lenso module dev
+lenso module verify
+```
+
+`module dev` infers the execution class from `lenso.json`; the older `--bun`
+flag remains a compatibility override. Native Rust scaffolds include a
+statically linked development Runner, while production Runner composition
+remains App-owned. `module check --json` emits owner/path/fix diagnostics and
+`module verify --json` records behavior probes plus a real removal-resolution
+proof in `.lenso/module-verification.json`.
+
+Use `--recipe stateless`, `stateful`, `web-console`, or `managed-work` to seed
+the generated `MODULE.md` card. Preview Capability evolution and known affected
+Instances with `lenso capability diff OLD NEW --project lenso.json`.
+
 ## Application lifecycle
 
 ```sh
