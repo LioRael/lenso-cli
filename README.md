@@ -324,6 +324,24 @@ defaults are occupied; an existing `.env` remains authoritative.
 
 ## Scaffold a module
 
+Create a complete Bun Module authoring project with a Capability Descriptor,
+generated Rust and TypeScript bindings, a typed Provider, `lenso.json`, and a
+locked workspace:
+
+```sh
+lenso module create greeting --runtime bun
+cd greeting
+lenso module dev --bun
+```
+
+The scaffold installs `@lenso/bun-module` and validates its TypeScript surface
+before publishing the new directory. Use `--capability example.greeting@1` to
+select the Capability identity, `--dir PATH` to select the project directory,
+or `--no-install` for an offline scaffold. Existing targets are never replaced.
+
+The original linked Rust scaffold remains available as the default inside a
+framework workspace or starter host:
+
 ```sh
 lenso module create billing
 ```
@@ -585,9 +603,21 @@ The Service scaffold uses published `@lenso/service-kit` and `lenso-service`
 dependencies by default. Framework contributors can opt into local checkout
 dependencies explicitly with `lenso service create --local-framework-root PATH`.
 
-### Console and Module UI development
+### Module development
 
-Run the released local Console Service independently:
+For a Bun Module project, resolve the entire authoring project and start the
+production Bun Adapter wire with source watching:
+
+```sh
+lenso module dev --bun
+```
+
+Every relevant source or lockfile change stops the current child process,
+rechecks generated contracts and package locks, resolves a fresh immutable App
+Plan, and then starts again. Runtime output directories are excluded from the
+watch set.
+
+For Console development, run the released local Console Service independently:
 
 ```sh
 lenso console dev

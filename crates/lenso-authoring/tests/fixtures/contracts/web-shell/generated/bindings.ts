@@ -81,4 +81,93 @@ export interface ShellProvider {
   render_route(context: InvocationContext, request: RenderRouteRequest): Promise<RenderRouteResult>;
 }
 
+export type ProviderDispatchOutcome =
+  | { readonly kind: "success"; readonly value: unknown }
+  | { readonly kind: "domain"; readonly value: unknown }
+  | { readonly kind: "runtime"; readonly failure: RuntimeFailure };
+
+export interface CapabilityProviderDescriptor {
+  readonly capability_id: string;
+  readonly descriptor_version: string;
+  readonly operations: ReadonlyArray<string>;
+  readonly stream_operations: ReadonlyArray<string>;
+  readonly event_operations: ReadonlyArray<string>;
+}
+
+export interface CapabilityProviderBinding {
+  readonly descriptor: CapabilityProviderDescriptor;
+  invokeRequest(
+    operation: string,
+    context: InvocationContext,
+    payload: unknown,
+  ): Promise<ProviderDispatchOutcome>;
+}
+
+function providerErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export function bindShellProvider(
+  provider: ShellProvider,
+): CapabilityProviderBinding {
+  return {
+    descriptor: {
+      capability_id: CAPABILITY_ID,
+      descriptor_version: DESCRIPTOR_VERSION,
+      operations: ["read_asset", "render_route"],
+      stream_operations: [],
+      event_operations: [],
+    },
+    async invokeRequest(operation, context, payload) {
+      switch (operation) {
+      case "read_asset": {
+        let request: ReadAssetRequest;
+        try {
+          request = decodeReadAssetRequest(lensoContractRuntime.encodePortableJson(payload, "request"));
+        } catch (error) {
+          return { kind: "runtime", failure: { kind: "protocol_violation", detail: providerErrorMessage(error) } };
+        }
+        try {
+          const result = await provider.read_asset(context, request);
+          if (result.ok) {
+            return { kind: "success", value: JSON.parse(encodeReadAssetResponse(result.value)) as unknown };
+          }
+          if (result.error.kind === "domain") {
+            return { kind: "domain", value: JSON.parse(encodeReadAssetError(result.error.error)) as unknown };
+          }
+          return { kind: "runtime", failure: result.error.error };
+        } catch (error) {
+          return { kind: "runtime", failure: { kind: "module_failure", detail: providerErrorMessage(error) } };
+        }
+      }
+      case "render_route": {
+        let request: RenderRouteRequest;
+        try {
+          request = decodeRenderRouteRequest(lensoContractRuntime.encodePortableJson(payload, "request"));
+        } catch (error) {
+          return { kind: "runtime", failure: { kind: "protocol_violation", detail: providerErrorMessage(error) } };
+        }
+        try {
+          const result = await provider.render_route(context, request);
+          if (result.ok) {
+            return { kind: "success", value: JSON.parse(encodeRenderRouteResponse(result.value)) as unknown };
+          }
+          if (result.error.kind === "domain") {
+            return { kind: "domain", value: JSON.parse(encodeRenderRouteError(result.error.error)) as unknown };
+          }
+          return { kind: "runtime", failure: result.error.error };
+        } catch (error) {
+          return { kind: "runtime", failure: { kind: "module_failure", detail: providerErrorMessage(error) } };
+        }
+      }
+        default:
+          return { kind: "runtime", failure: { kind: "unknown_operation", operation } };
+      }
+    },
+  };
+}
+
+export type Provider = ShellProvider;
+export const bindProvider = bindShellProvider;
+
 export const portableValueProfile = lensoContractRuntime.portableValueProfile;
