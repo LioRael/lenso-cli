@@ -1,3 +1,10 @@
+## lenso-cli@0.2.31
+
+### Features
+
+- Add typed Bun Module scaffolding, generated Provider bindings, and a watch-mode
+  development workflow with fresh Plan resolution and runtime recovery.
+
 ## lenso-cli@0.2.16
 
 ## 0.8.0
