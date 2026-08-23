@@ -3,7 +3,9 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use lenso_authoring::{ProjectFile, ProjectPath};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 pub(crate) const PROTOCOL: &str = "lenso.capability-pack.v1";
 const LIBRARY_PROTOCOL: &str = "lenso.capability-library.v1";
@@ -27,6 +29,34 @@ pub(crate) struct CheckOptions {
 #[derive(Debug, Clone)]
 pub(crate) struct InspectOptions {
     pub(crate) path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DiffOptions {
+    pub(crate) baseline: PathBuf,
+    pub(crate) candidate: PathBuf,
+    pub(crate) json: bool,
+    pub(crate) project: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CapabilityDiffReport {
+    artifact_version: &'static str,
+    capability_id: String,
+    baseline_version: String,
+    candidate_version: String,
+    compatibility: &'static str,
+    changes: Vec<CapabilitySemanticChange>,
+    affected_modules: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CapabilitySemanticChange {
+    kind: &'static str,
+    operation: Option<String>,
+    detail: String,
 }
 
 #[derive(Debug, Clone)]
@@ -240,6 +270,190 @@ pub(crate) fn inspect(options: InspectOptions) -> Result<()> {
     }
     println!("Next: lenso app compose --pack {}", options.path.display());
     Ok(())
+}
+
+pub(crate) fn diff(options: DiffOptions) -> Result<()> {
+    let baseline = read_descriptor(&options.baseline)?;
+    let candidate = read_descriptor(&options.candidate)?;
+    let baseline_id = descriptor_string(&baseline, "id", &options.baseline)?;
+    let candidate_id = descriptor_string(&candidate, "id", &options.candidate)?;
+    if baseline_id != candidate_id {
+        bail!(
+            "Capability identity changed from `{baseline_id}` to `{candidate_id}`; publish a different role contract instead of treating this as evolution"
+        );
+    }
+    let baseline_version = descriptor_string(&baseline, "version", &options.baseline)?;
+    let candidate_version = descriptor_string(&candidate, "version", &options.candidate)?;
+    let before = descriptor_operations(&baseline, &options.baseline)?;
+    let after = descriptor_operations(&candidate, &options.candidate)?;
+    let mut changes = Vec::new();
+    for (name, operation) in &before {
+        match after.get(name) {
+            None => changes.push(CapabilitySemanticChange {
+                kind: "breaking",
+                operation: Some(name.clone()),
+                detail: "Operation was removed".to_owned(),
+            }),
+            Some(candidate_operation) if candidate_operation != operation => {
+                changes.push(CapabilitySemanticChange {
+                    kind: "breaking",
+                    operation: Some(name.clone()),
+                    detail: operation_change_detail(operation, candidate_operation),
+                });
+            }
+            Some(_) => {}
+        }
+    }
+    for name in after.keys().filter(|name| !before.contains_key(*name)) {
+        changes.push(CapabilitySemanticChange {
+            kind: "additive",
+            operation: Some(name.clone()),
+            detail: "Operation was added".to_owned(),
+        });
+    }
+    if baseline.get("portable") != candidate.get("portable")
+        || baseline.get("cross_lane_transfer") != candidate.get("cross_lane_transfer")
+    {
+        changes.push(CapabilitySemanticChange {
+            kind: "breaking",
+            operation: None,
+            detail: "Portability or cross-lane transfer support changed".to_owned(),
+        });
+    }
+    changes.sort_by(|left, right| {
+        left.operation
+            .cmp(&right.operation)
+            .then(left.detail.cmp(&right.detail))
+    });
+    let compatibility = classify_compatibility(&changes);
+    let affected_modules = options
+        .project
+        .as_deref()
+        .map(|path| affected_modules(path, &candidate_id))
+        .transpose()?
+        .unwrap_or_default();
+    let report = CapabilityDiffReport {
+        artifact_version: "lenso.capability-diff.v1",
+        capability_id: candidate_id.to_owned(),
+        baseline_version: baseline_version.to_owned(),
+        candidate_version: candidate_version.to_owned(),
+        compatibility,
+        changes,
+        affected_modules,
+    };
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "Capability {}: {} -> {} ({})",
+            report.capability_id,
+            report.baseline_version,
+            report.candidate_version,
+            report.compatibility
+        );
+        for change in &report.changes {
+            println!(
+                "- {}{}: {}",
+                change.kind,
+                change
+                    .operation
+                    .as_deref()
+                    .map_or_else(String::new, |operation| format!(" {operation}")),
+                change.detail
+            );
+        }
+        if !report.affected_modules.is_empty() {
+            println!("Affected Module Instances:");
+            for module in &report.affected_modules {
+                println!("- {module}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn classify_compatibility(changes: &[CapabilitySemanticChange]) -> &'static str {
+    if changes.iter().any(|change| change.kind == "breaking") {
+        "breaking"
+    } else if changes.iter().any(|change| change.kind == "additive") {
+        "additive"
+    } else {
+        "compatible"
+    }
+}
+
+fn read_descriptor(path: &Path) -> Result<Value> {
+    serde_json::from_slice(&fs::read(path).with_context(|| format!("read {}", path.display()))?)
+        .with_context(|| format!("parse Capability Descriptor {}", path.display()))
+}
+
+fn descriptor_string<'a>(document: &'a Value, key: &str, path: &Path) -> Result<&'a str> {
+    document
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("Descriptor {} needs string `{key}`", path.display()))
+}
+
+fn descriptor_operations(
+    path_value: &Value,
+    path: &Path,
+) -> Result<std::collections::BTreeMap<String, Value>> {
+    let operations = path_value
+        .get("operations")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("Descriptor {} needs `operations`", path.display()))?;
+    let mut by_name = std::collections::BTreeMap::new();
+    for operation in operations {
+        let name = operation
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Descriptor {} has an Operation without a name",
+                    path.display()
+                )
+            })?;
+        if by_name.insert(name.to_owned(), operation.clone()).is_some() {
+            bail!("Descriptor {} repeats Operation `{name}`", path.display());
+        }
+    }
+    Ok(by_name)
+}
+
+fn operation_change_detail(before: &Value, after: &Value) -> String {
+    let interaction_before = before.get("interaction").and_then(Value::as_str);
+    let interaction_after = after.get("interaction").and_then(Value::as_str);
+    if interaction_before != interaction_after {
+        return format!(
+            "interaction changed from {} to {}",
+            interaction_before.unwrap_or("request"),
+            interaction_after.unwrap_or("request")
+        );
+    }
+    "Schema reference or Operation contract changed".to_owned()
+}
+
+fn affected_modules(path: &Path, capability_id: &str) -> Result<Vec<String>> {
+    let project: ProjectFile = ProjectPath::load(path)?;
+    let mut modules = project
+        .composition()
+        .modules()
+        .iter()
+        .filter(|module| {
+            module
+                .provides()
+                .iter()
+                .any(|endpoint| endpoint.capability_id() == capability_id)
+                || module
+                    .requires()
+                    .iter()
+                    .any(|requirement| requirement.capability_id() == capability_id)
+        })
+        .map(|module| module.key().to_owned())
+        .collect::<Vec<_>>();
+    modules.sort();
+    modules.dedup();
+    Ok(modules)
 }
 
 pub(crate) fn library_init(options: LibraryInitOptions) -> Result<()> {
@@ -754,5 +968,25 @@ mod tests {
             resolve_pack_path(&root, Path::new("support-sla")),
             root.join("capabilities/support-sla")
         );
+    }
+
+    #[test]
+    fn semantic_diff_prioritizes_breaking_over_additive_changes() {
+        let changes = vec![
+            CapabilitySemanticChange {
+                kind: "additive",
+                operation: Some("inspect".to_owned()),
+                detail: "Operation was added".to_owned(),
+            },
+            CapabilitySemanticChange {
+                kind: "breaking",
+                operation: Some("execute".to_owned()),
+                detail: "Operation was removed".to_owned(),
+            },
+        ];
+
+        assert_eq!(classify_compatibility(&changes), "breaking");
+        assert_eq!(classify_compatibility(&changes[..1]), "additive");
+        assert_eq!(classify_compatibility(&[]), "compatible");
     }
 }

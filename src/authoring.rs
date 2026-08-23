@@ -1,8 +1,9 @@
 use std::{
     any::Any,
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
+    process::Command,
     time::Duration,
 };
 
@@ -10,12 +11,13 @@ use anyhow::Context;
 use clap::Args;
 use lenso_app_plan::{CapabilityEndpointPlan, ExecutionClassId, ResolvedAppPlan};
 use lenso_authoring::{
-    AddModule, CheckOptions, Module, PackageInput, PackageSource, ProjectAuthoring, ProjectPath,
-    ResolutionOptions, ResolvedProject, run_project,
+    AddModule, AuthoringError, Cardinality, CheckOptions, Module, PackageInput, PackageSource,
+    ProjectAuthoring, ProjectFile, ProjectPath, ResolutionOptions, ResolvedProject, run_project,
 };
 use lenso_bun_adapter::{BunAdapter, BunAdapterConfig, BunCapabilityCodec, BunWire};
 use lenso_kernel::{ExecutionAdapterCatalog, RuntimeFailure};
 use lenso_runner::TokioDriver;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -72,6 +74,93 @@ pub(crate) struct RunArgs {
     root: PathBuf,
     #[arg(long, default_value = "bun")]
     bun: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ModuleCheckOptions {
+    pub(crate) json: bool,
+    pub(crate) project: PathBuf,
+    pub(crate) repo_root: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ModuleVerifyOptions {
+    pub(crate) json: bool,
+    pub(crate) manifest: PathBuf,
+    pub(crate) module_key: Option<String>,
+    pub(crate) output: PathBuf,
+    pub(crate) project: PathBuf,
+    pub(crate) repo_root: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModuleAuthoringReport {
+    artifact_version: &'static str,
+    status: &'static str,
+    project: String,
+    execution_classes: Vec<String>,
+    checks: Vec<ModuleAuthoringCheck>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModuleAuthoringCheck {
+    id: String,
+    layer: &'static str,
+    owner: &'static str,
+    status: &'static str,
+    path: String,
+    message: String,
+    fix: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct VerificationManifest {
+    protocol: String,
+    #[serde(default)]
+    probes: Vec<VerificationProbe>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct VerificationProbe {
+    id: String,
+    purpose: String,
+    command: String,
+    #[serde(default, rename = "expectFailure")]
+    expect_failure: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VerificationEvidence {
+    artifact_version: &'static str,
+    status: &'static str,
+    project: String,
+    plan_fingerprint: Option<String>,
+    probes: Vec<VerificationProbeEvidence>,
+    removal_proofs: Vec<RemovalProof>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VerificationProbeEvidence {
+    id: String,
+    purpose: String,
+    command: String,
+    status: &'static str,
+    exit_code: Option<i32>,
+    detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemovalProof {
+    requested_module: String,
+    removed_modules: Vec<String>,
+    remaining_modules: usize,
+    status: &'static str,
+    detail: String,
 }
 
 pub(crate) fn add(args: &AddArgs) -> anyhow::Result<()> {
@@ -184,6 +273,575 @@ pub(crate) async fn run(args: &RunArgs) -> anyhow::Result<()> {
         .await?;
     println!("{outcome:?}");
     Ok(())
+}
+
+pub(crate) async fn dev_module(
+    repo_root: Option<&Path>,
+    project: &Path,
+    bun: &str,
+) -> anyhow::Result<()> {
+    let root = module_root(repo_root)?;
+    let project_path = root.join(project);
+    let loaded = ProjectPath::load(&project_path)
+        .with_context(|| format!("load Module authoring project {}", project_path.display()))?;
+    let execution_classes = inferred_execution_classes(&loaded)?;
+    match execution_classes.as_slice() {
+        [class] if class == "lenso.bun-process@1" => dev_bun(Some(&root), project, bun).await,
+        [class] if class == "lenso.native-rust@1" => dev_native(&root, &project_path).await,
+        [] => anyhow::bail!("Module project contains no Module Instances"),
+        classes => anyhow::bail!(
+            "`lenso module dev` supports one inferred execution class; found {}. Use an App Runner for mixed execution classes",
+            classes.join(", ")
+        ),
+    }
+}
+
+pub(crate) fn check_module(options: ModuleCheckOptions) -> anyhow::Result<()> {
+    let root = module_root(options.repo_root.as_deref())?;
+    let project_path = root.join(&options.project);
+    let mut checks = Vec::new();
+    let loaded = match ProjectPath::load(&project_path) {
+        Ok(project) => {
+            checks.push(ok_check(
+                "project",
+                "composition",
+                "App Composition",
+                &project_path,
+                "authoring project parsed",
+            ));
+            project
+        }
+        Err(error) => {
+            checks.push(authoring_failure_check(&error, &project_path));
+            let report = ModuleAuthoringReport {
+                artifact_version: "lenso.module-authoring-report.v1",
+                status: "failed",
+                project: project_path.display().to_string(),
+                execution_classes: Vec::new(),
+                checks,
+            };
+            print_authoring_report(&report, options.json)?;
+            anyhow::bail!("Module authoring check failed");
+        }
+    };
+    let execution_classes = inferred_execution_classes(&loaded)?;
+    let check_options = CheckOptions::new(execution_classes.clone());
+    match loaded.check(&root, &check_options) {
+        Ok(report) => {
+            checks.push(ok_check(
+                "contracts",
+                "capability",
+                "Capability authoring",
+                &project_path,
+                &format!("{} generated contract input(s) are fresh", report.contracts),
+            ));
+            checks.push(ok_check(
+                "packages",
+                "package",
+                "Package manager",
+                &project_path,
+                &format!("{} Module package lock(s) agree", report.modules),
+            ));
+            checks.push(ok_check(
+                "composition",
+                "composition",
+                "App Composition",
+                &project_path,
+                &format!("{} binding(s) resolve", report.bindings),
+            ));
+        }
+        Err(error) => checks.push(authoring_failure_check(&error, &project_path)),
+    }
+    let failed = checks.iter().any(|check| check.status == "failed");
+    let report = ModuleAuthoringReport {
+        artifact_version: "lenso.module-authoring-report.v1",
+        status: if failed { "failed" } else { "ready" },
+        project: project_path.display().to_string(),
+        execution_classes,
+        checks,
+    };
+    print_authoring_report(&report, options.json)?;
+    if failed {
+        anyhow::bail!("Module authoring check failed");
+    }
+    Ok(())
+}
+
+pub(crate) fn verify_module(options: ModuleVerifyOptions) -> anyhow::Result<()> {
+    let root = module_root(options.repo_root.as_deref())?;
+    let project_path = root.join(&options.project);
+    let manifest_path = root.join(&options.manifest);
+    let output_path = root.join(&options.output);
+    let project = ProjectPath::load(&project_path)?;
+    let execution_classes = inferred_execution_classes(&project)?;
+    let resolution_options =
+        ResolutionOptions::default().with_check_options(CheckOptions::new(execution_classes));
+    let (plan_fingerprint, mut failed) = match project.resolve(&root, &resolution_options) {
+        Ok(resolved) => (Some(resolved.fingerprint()), false),
+        Err(error) => {
+            eprintln!("composition verification failed: {error}");
+            (None, true)
+        }
+    };
+
+    let mut probes = Vec::new();
+    match read_verification_manifest(&manifest_path) {
+        Ok(manifest) => {
+            let required = [
+                "package",
+                "success",
+                "domain_error",
+                "runtime_failure",
+                "lifecycle_cleanup",
+            ];
+            for purpose in required {
+                if !manifest.probes.iter().any(|probe| probe.purpose == purpose) {
+                    failed = true;
+                    probes.push(VerificationProbeEvidence {
+                        id: format!("missing-{purpose}"),
+                        purpose: purpose.to_owned(),
+                        command: String::new(),
+                        status: "failed",
+                        exit_code: None,
+                        detail: Some(format!(
+                            "verification manifest is missing `{purpose}` proof"
+                        )),
+                    });
+                }
+            }
+            for probe in manifest.probes {
+                let status = verification_command(&probe.command)
+                    .current_dir(&root)
+                    .status()
+                    .with_context(|| format!("run verification probe {}", probe.id))?;
+                let passed = status.success() != probe.expect_failure;
+                failed |= !passed;
+                probes.push(VerificationProbeEvidence {
+                    id: probe.id,
+                    purpose: probe.purpose,
+                    command: probe.command,
+                    status: if passed { "passed" } else { "failed" },
+                    exit_code: status.code(),
+                    detail: probe
+                        .expect_failure
+                        .then(|| "expected the command to fail".to_owned()),
+                });
+            }
+        }
+        Err(error) => {
+            failed = true;
+            probes.push(VerificationProbeEvidence {
+                id: "verification-manifest".to_owned(),
+                purpose: "behavior".to_owned(),
+                command: String::new(),
+                status: "failed",
+                exit_code: None,
+                detail: Some(error.to_string()),
+            });
+        }
+    }
+
+    let targets = if let Some(module_key) = options.module_key {
+        if !project
+            .composition()
+            .modules()
+            .iter()
+            .any(|module| module.key() == module_key)
+        {
+            anyhow::bail!("Module Instance `{module_key}` is not in the App Composition");
+        }
+        vec![module_key]
+    } else {
+        project
+            .composition()
+            .modules()
+            .iter()
+            .map(|module| module.key().to_owned())
+            .collect()
+    };
+    let mut removal_proofs = Vec::new();
+    for target in targets {
+        let proof = removal_proof(&project, &root, &resolution_options, &target);
+        failed |= proof.status != "passed";
+        removal_proofs.push(proof);
+    }
+    let evidence = VerificationEvidence {
+        artifact_version: "lenso.module-verification.v1",
+        status: if failed { "failed" } else { "passed" },
+        project: project_path.display().to_string(),
+        plan_fingerprint,
+        probes,
+        removal_proofs,
+    };
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(
+        &output_path,
+        format!("{}\n", serde_json::to_string_pretty(&evidence)?),
+    )?;
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(&evidence)?);
+    } else {
+        println!("Module verification: {}", evidence.status);
+        println!("- evidence: {}", output_path.display());
+        for proof in &evidence.removal_proofs {
+            println!(
+                "- removal {}: {} ({})",
+                proof.requested_module, proof.status, proof.detail
+            );
+        }
+    }
+    if failed {
+        anyhow::bail!(
+            "Module verification failed; inspect {}",
+            output_path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn verification_command(command: &str) -> Command {
+    let mut process = Command::new("cmd");
+    process.args(["/C", command]);
+    process
+}
+
+#[cfg(not(windows))]
+fn verification_command(command: &str) -> Command {
+    let mut process = Command::new("sh");
+    process.args(["-c", command]);
+    process
+}
+
+fn module_root(repo_root: Option<&Path>) -> anyhow::Result<PathBuf> {
+    let current = std::env::current_dir().context("resolve current directory")?;
+    Ok(match repo_root {
+        Some(path) if path.is_absolute() => path.to_path_buf(),
+        Some(path) => current.join(path),
+        None => current,
+    })
+}
+
+fn inferred_execution_classes(project: &ProjectFile) -> anyhow::Result<Vec<String>> {
+    let mut classes = BTreeSet::new();
+    for module in project.composition().modules() {
+        let class = module
+            .execution_class()
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                project
+                    .packages()
+                    .get(module.package())
+                    .and_then(|package| package.source().default_execution_class())
+                    .map(ToOwned::to_owned)
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Module Instance `{}` has no inferable execution class",
+                    module.key()
+                )
+            })?;
+        classes.insert(class);
+    }
+    Ok(classes.into_iter().collect())
+}
+
+fn ok_check(
+    id: &str,
+    layer: &'static str,
+    owner: &'static str,
+    path: &Path,
+    message: &str,
+) -> ModuleAuthoringCheck {
+    ModuleAuthoringCheck {
+        id: id.to_owned(),
+        layer,
+        owner,
+        status: "passed",
+        path: path.display().to_string(),
+        message: message.to_owned(),
+        fix: None,
+    }
+}
+
+fn authoring_failure_check(error: &AuthoringError, fallback: &Path) -> ModuleAuthoringCheck {
+    let (id, layer, owner, path, fix) = match error {
+        AuthoringError::Contract { path, .. } => (
+            "contracts",
+            "capability",
+            "Capability authoring",
+            path.as_path(),
+            "Regenerate the package-local bindings from this Descriptor, then rerun `lenso module check`.",
+        ),
+        AuthoringError::LockMismatch { .. } | AuthoringError::PackageManager { .. } => (
+            "packages",
+            "package",
+            "Package manager",
+            fallback,
+            "Refresh the ordinary package lock without editing its resolved identity by hand.",
+        ),
+        AuthoringError::UnavailableExecutionClass { .. }
+        | AuthoringError::MissingEntrypoint { .. } => (
+            "execution",
+            "adapter",
+            "Execution Adapter",
+            fallback,
+            "Select an installed execution class and an exact package entrypoint.",
+        ),
+        AuthoringError::InvalidConfiguration { .. } | AuthoringError::SecretValue { .. } => (
+            "configuration",
+            "module",
+            "Module",
+            fallback,
+            "Make configuration match its Schema and replace secret values with secret references.",
+        ),
+        AuthoringError::Plan { .. } | AuthoringError::InvalidProfile { .. } => (
+            "composition",
+            "composition",
+            "App Composition",
+            fallback,
+            "Declare every requirement and binding explicitly, then resolve a fresh Plan.",
+        ),
+        _ => (
+            "project",
+            "authoring",
+            "Authoring CLI",
+            fallback,
+            "Correct the reported authoring input and rerun `lenso module check`.",
+        ),
+    };
+    ModuleAuthoringCheck {
+        id: id.to_owned(),
+        layer,
+        owner,
+        status: "failed",
+        path: path.display().to_string(),
+        message: error.to_string(),
+        fix: Some(fix.to_owned()),
+    }
+}
+
+fn print_authoring_report(report: &ModuleAuthoringReport, json: bool) -> anyhow::Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(report)?);
+    } else {
+        println!("Module authoring: {}", report.status);
+        println!("- project: {}", report.project);
+        println!("- execution: {}", report.execution_classes.join(", "));
+        for check in &report.checks {
+            println!("- {}: {} — {}", check.id, check.status, check.message);
+            if let Some(fix) = &check.fix {
+                println!("  fix: {fix}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read_verification_manifest(path: &Path) -> anyhow::Result<VerificationManifest> {
+    let manifest: VerificationManifest = serde_json::from_slice(
+        &fs::read(path).with_context(|| format!("read {}", path.display()))?,
+    )
+    .with_context(|| format!("parse {}", path.display()))?;
+    if manifest.protocol != "lenso.module-verification-manifest.v1" {
+        anyhow::bail!(
+            "unsupported verification manifest protocol `{}`",
+            manifest.protocol
+        );
+    }
+    Ok(manifest)
+}
+
+fn removal_proof(
+    project: &ProjectFile,
+    root: &Path,
+    options: &ResolutionOptions,
+    target: &str,
+) -> RemovalProof {
+    let mut candidate = project.clone();
+    let mut removed = BTreeSet::from([target.to_owned()]);
+    loop {
+        let mut next = removed.clone();
+        for binding in candidate.composition().bindings() {
+            if !removed.contains(binding.provider()) || removed.contains(binding.consumer()) {
+                continue;
+            }
+            let required = candidate
+                .composition()
+                .modules()
+                .iter()
+                .find(|module| module.key() == binding.consumer())
+                .and_then(|module| {
+                    module.requires().iter().find(|requirement| {
+                        requirement.capability_id() == binding.capability_id()
+                            && requirement.descriptor_version() == binding.descriptor_version()
+                    })
+                })
+                .is_some_and(|requirement| requirement.cardinality() != Cardinality::Optional);
+            if required {
+                next.insert(binding.consumer().to_owned());
+            }
+        }
+        if next == removed {
+            break;
+        }
+        removed = next;
+    }
+    candidate
+        .composition_mut()
+        .modules_mut()
+        .retain(|module| !removed.contains(module.key()));
+    candidate
+        .composition_mut()
+        .bindings_mut()
+        .retain(|binding| {
+            !removed.contains(binding.consumer()) && !removed.contains(binding.provider())
+        });
+    let remaining_modules = candidate.composition().modules().len();
+    match candidate.resolve(root, options) {
+        Ok(_) => RemovalProof {
+            requested_module: target.to_owned(),
+            removed_modules: removed.into_iter().collect(),
+            remaining_modules,
+            status: "passed",
+            detail: "remaining App Composition resolves without hidden runtime mutation".to_owned(),
+        },
+        Err(error) => RemovalProof {
+            requested_module: target.to_owned(),
+            removed_modules: removed.into_iter().collect(),
+            remaining_modules,
+            status: "failed",
+            detail: error.to_string(),
+        },
+    }
+}
+
+async fn dev_native(root: &Path, project_path: &Path) -> anyhow::Result<()> {
+    let runner = root.join("src/bin/lenso-module-dev.rs");
+    if !runner.is_file() {
+        anyhow::bail!(
+            "native Module development needs {}; create a standalone Rust scaffold or add a statically linked development Runner",
+            runner.display()
+        );
+    }
+    println!("watching native Rust Module project at {}", root.display());
+    loop {
+        let fingerprint = project_fingerprint(root)?;
+        let project = match ProjectPath::load(project_path) {
+            Ok(project) => project,
+            Err(error) => {
+                eprintln!("Rust Module project load failed: {error}");
+                if wait_for_project_change(root, fingerprint).await? == DevDecision::Stop {
+                    return Ok(());
+                }
+                continue;
+            }
+        };
+        let options = ResolutionOptions::default()
+            .with_check_options(CheckOptions::new(["lenso.native-rust@1"]));
+        let resolved = match project.resolve(root, &options) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                eprintln!("Rust Module check failed: {error}");
+                if wait_for_project_change(root, fingerprint).await? == DevDecision::Stop {
+                    return Ok(());
+                }
+                continue;
+            }
+        };
+        let plan_path = root.join(".lenso/resolved-plan.json");
+        if let Some(parent) = plan_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&plan_path, resolved.canonical_bytes())?;
+        println!(
+            "resolved {} ({})",
+            plan_path.display(),
+            resolved.fingerprint()
+        );
+        match run_native_until_change(root, fingerprint).await? {
+            DevDecision::Restart => println!("source changed; resolving a fresh App Plan"),
+            DevDecision::AwaitChange => {
+                eprintln!("native runtime stopped; waiting for a source change");
+                if wait_for_project_change(root, fingerprint).await? == DevDecision::Stop {
+                    return Ok(());
+                }
+            }
+            DevDecision::Stop => return Ok(()),
+        }
+    }
+}
+
+async fn run_native_until_change(
+    root: &Path,
+    fingerprint: [u8; 32],
+) -> anyhow::Result<DevDecision> {
+    let mut command = tokio::process::Command::new("cargo");
+    command
+        .args([
+            "run",
+            "--quiet",
+            "--bin",
+            "lenso-module-dev",
+            "--",
+            ".lenso/resolved-plan.json",
+        ])
+        .current_dir(root)
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.as_std_mut().process_group(0);
+    }
+    let mut child = command
+        .spawn()
+        .context("start the statically linked native Module development Runner")?;
+    let mut interval = tokio::time::interval(Duration::from_millis(350));
+    loop {
+        tokio::select! {
+            status = child.wait() => {
+                let status = status.context("wait for native Module development Runner")?;
+                if !status.success() {
+                    eprintln!("native Module Runner exited with {status}");
+                }
+                return Ok(DevDecision::AwaitChange);
+            }
+            signal = tokio::signal::ctrl_c() => {
+                signal.context("wait for Ctrl-C")?;
+                stop_native_child(&mut child).await;
+                return Ok(DevDecision::Stop);
+            }
+            _ = interval.tick() => {
+                match project_fingerprint(root) {
+                    Ok(next) if next != fingerprint => {
+                        stop_native_child(&mut child).await;
+                        return Ok(DevDecision::Restart);
+                    }
+                    Ok(_) => {}
+                    Err(error) => eprintln!("could not inspect Rust Module sources: {error:#}"),
+                }
+            }
+        }
+    }
+}
+
+async fn stop_native_child(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(id) = child.id() {
+        use nix::{sys::signal::Signal, unistd::Pid};
+
+        if nix::sys::signal::killpg(Pid::from_raw(id as i32), Signal::SIGINT).is_ok()
+            && tokio::time::timeout(Duration::from_secs(10), child.wait())
+                .await
+                .is_ok()
+        {
+            return;
+        }
+    }
+    let _ = child.start_kill();
+    let _ = child.wait().await;
 }
 
 pub(crate) async fn dev_bun(
