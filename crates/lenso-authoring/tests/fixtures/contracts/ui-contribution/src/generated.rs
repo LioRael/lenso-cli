@@ -85,22 +85,15 @@ impl RequestCapability for Contribution {
 
     fn invoke_native(endpoint: &dyn NativeRequestEndpoint, operation: &str, request: Self::Request, context: InvocationContext) -> NativeRequestFuture<Self> {
         if operation != DESCRIBE_OPERATION {
-            return lenso_kernel::invoke_erased_native_request::<Self>(endpoint, operation, request, context);
+            return lenso_kernel::invoke_typed_or_erased_native_request::<Self>(endpoint, operation, request, context);
         }
         let Some(typed_endpoint) = endpoint
             .typed_endpoint()
             .and_then(|endpoint| endpoint.downcast_ref::<ContributionRequestEndpoint>())
         else {
-            return lenso_kernel::invoke_erased_native_request::<Self>(endpoint, operation, request, context);
+            return lenso_kernel::invoke_typed_or_erased_native_request::<Self>(endpoint, operation, request, context);
         };
-        let provider = Rc::clone(&typed_endpoint.provider);
-        Box::pin(async move {
-            match provider.describe(context, request).await {
-                Ok(value) => Ok(Ok(value)),
-                Err(ContributionInvocationError::Domain(error)) => Ok(Err(error)),
-                Err(ContributionInvocationError::Runtime(error)) => Err(error),
-            }
-        })
+        Rc::clone(&typed_endpoint.provider).describe(context, request)
     }
 }
 
@@ -159,7 +152,7 @@ pub fn encode_describe_error(value: &DescribeError) -> Result<String, serde_json
 pub fn decode_describe_error(wire: &str) -> Result<DescribeError, serde_json::Error> { decode_portable_json(wire) }
 
 pub trait ContributionProvider: fmt::Debug + 'static {
-    fn describe(&self, context: InvocationContext, request: DescribeRequest) -> LocalBoxFuture<'static, Result<DescribeResponse, ContributionInvocationError>>;
+    fn describe(&self, context: InvocationContext, request: DescribeRequest) -> NativeRequestFuture<Contribution>;
 }
 
 #[derive(Debug)]
@@ -188,13 +181,13 @@ impl<P: ContributionProvider> NativeRequestEndpoint for ContributionEndpoint<P> 
                 let Ok(request) = request.downcast::<DescribeRequest>() else {
                     return Box::pin(futures::future::ready(Err(RuntimeFailure::ProtocolViolation { capability: CAPABILITY_ID })));
                 };
-                let provider = Rc::clone(&self.provider);
+                let invocation = Rc::clone(&self.provider).describe(context, *request);
                 Box::pin(async move {
-                    match provider.describe(context, *request).await {
-                        Ok(value) => Ok(Ok(Box::new(value) as Box<dyn std::any::Any>)),
-                        Err(ContributionInvocationError::Domain(error)) => Ok(Err(Box::new(error) as Box<dyn std::any::Any>)),
-                        Err(ContributionInvocationError::Runtime(error)) => Err(error),
-                    }
+                    invocation.await.map(|result| {
+                        result
+                            .map(|value| Box::new(value) as Box<dyn std::any::Any>)
+                            .map_err(|error| Box::new(error) as Box<dyn std::any::Any>)
+                    })
                 })
             }
             _ => Box::pin(futures::future::ready(Err(RuntimeFailure::UnknownOperation { capability: CAPABILITY_ID, operation: operation.to_owned() }))),

@@ -46,22 +46,15 @@ impl RequestCapability for Greeting {
 
     fn invoke_native(endpoint: &dyn NativeRequestEndpoint, operation: &str, request: Self::Request, context: InvocationContext) -> NativeRequestFuture<Self> {
         if operation != GREET_OPERATION {
-            return lenso_kernel::invoke_erased_native_request::<Self>(endpoint, operation, request, context);
+            return lenso_kernel::invoke_typed_or_erased_native_request::<Self>(endpoint, operation, request, context);
         }
         let Some(typed_endpoint) = endpoint
             .typed_endpoint()
             .and_then(|endpoint| endpoint.downcast_ref::<GreetingRequestEndpoint>())
         else {
-            return lenso_kernel::invoke_erased_native_request::<Self>(endpoint, operation, request, context);
+            return lenso_kernel::invoke_typed_or_erased_native_request::<Self>(endpoint, operation, request, context);
         };
-        let provider = Rc::clone(&typed_endpoint.provider);
-        Box::pin(async move {
-            match provider.greet(context, request).await {
-                Ok(value) => Ok(Ok(value)),
-                Err(GreetingInvocationError::Domain(error)) => Ok(Err(error)),
-                Err(GreetingInvocationError::Runtime(error)) => Err(error),
-            }
-        })
+        Rc::clone(&typed_endpoint.provider).greet(context, request)
     }
 }
 
@@ -120,7 +113,7 @@ pub fn encode_greet_error(value: &GreetError) -> Result<String, serde_json::Erro
 pub fn decode_greet_error(wire: &str) -> Result<GreetError, serde_json::Error> { decode_portable_json(wire) }
 
 pub trait GreetingProvider: fmt::Debug + 'static {
-    fn greet(&self, context: InvocationContext, request: GreetRequest) -> LocalBoxFuture<'static, Result<GreetResponse, GreetingInvocationError>>;
+    fn greet(&self, context: InvocationContext, request: GreetRequest) -> NativeRequestFuture<Greeting>;
 }
 
 #[derive(Debug)]
@@ -149,13 +142,13 @@ impl<P: GreetingProvider> NativeRequestEndpoint for GreetingEndpoint<P> {
                 let Ok(request) = request.downcast::<GreetRequest>() else {
                     return Box::pin(futures::future::ready(Err(RuntimeFailure::ProtocolViolation { capability: CAPABILITY_ID })));
                 };
-                let provider = Rc::clone(&self.provider);
+                let invocation = Rc::clone(&self.provider).greet(context, *request);
                 Box::pin(async move {
-                    match provider.greet(context, *request).await {
-                        Ok(value) => Ok(Ok(Box::new(value) as Box<dyn std::any::Any>)),
-                        Err(GreetingInvocationError::Domain(error)) => Ok(Err(Box::new(error) as Box<dyn std::any::Any>)),
-                        Err(GreetingInvocationError::Runtime(error)) => Err(error),
-                    }
+                    invocation.await.map(|result| {
+                        result
+                            .map(|value| Box::new(value) as Box<dyn std::any::Any>)
+                            .map_err(|error| Box::new(error) as Box<dyn std::any::Any>)
+                    })
                 })
             }
             _ => Box::pin(futures::future::ready(Err(RuntimeFailure::UnknownOperation { capability: CAPABILITY_ID, operation: operation.to_owned() }))),
