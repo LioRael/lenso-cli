@@ -1,5 +1,11 @@
 ## lenso-cli@0.2.16
 
+## 0.8.0
+
+### Minor Changes
+
+- 6a925c5: Expose authoring add, check, resolve, and run workflows through the single `lenso` executable.
+
 ## 0.7.2
 
 ### Patch Changes
