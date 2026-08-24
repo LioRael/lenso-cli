@@ -42,6 +42,50 @@ generated projections, schemas, and Capability bindings. `resolve` writes a
 canonical immutable App Plan. `run` hosts that exact plan; it does not discover
 or install Modules dynamically.
 
+## Reusable App variants
+
+Large Apps can keep cohesive ordinary Project fragments and assemble named
+variants without copying a complete project document for each combination:
+
+```json
+{
+  "schema_version": 1,
+  "root": "..",
+  "variants": {
+    "local-coding": {
+      "fragments": [
+        "composition/fragments/core.json",
+        "composition/fragments/model/fixture.json",
+        "composition/fragments/tools/coding.json"
+      ],
+      "output": "composition/local-coding/resolved-plan.json"
+    }
+  }
+}
+```
+
+```sh
+lenso compose list --recipe composition/recipes.json
+lenso compose check --recipe composition/recipes.json \
+  --execution-class lenso.native-rust@1
+lenso compose resolve --recipe composition/recipes.json \
+  --execution-class lenso.native-rust@1
+```
+
+Fragment contents use the same `composition`, `packages`, `contracts`, and
+`profiles` fields as an ordinary project. A fragment may instead list
+`cargo_contracts`; `compose` locates those Cargo packages and reads their
+owner-local `capability.json` and generated projections, so an App does not need
+to vendor a second contract copy. Paths inside fragments are relative to the
+recipe root. Duplicate Module keys and bindings, conflicting package or contract
+inputs, path escapes, and invalid resulting Compositions fail before Plan
+output. `--variant <name> --without <fragment>` checks a focused removal without
+creating a second project document.
+
+Recipes and fragments are authoring inputs only. `compose resolve` expands one
+exact ordinary Project in memory and then uses the existing validation and
+resolution path; neither recipes nor fragments enter the Kernel or runtime.
+
 ## Module authoring
 
 Create a self-contained Rust or Bun Module project:
@@ -72,6 +116,9 @@ lenso add
 lenso check
 lenso resolve
 lenso run
+lenso compose list
+lenso compose check
+lenso compose resolve
 lenso module create
 lenso module dev
 lenso module check

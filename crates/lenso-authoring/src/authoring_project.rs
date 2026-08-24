@@ -64,6 +64,10 @@ pub enum AuthoringError {
         profile: String,
         detail: String,
     },
+    Recipe {
+        path: PathBuf,
+        detail: String,
+    },
     Runner {
         source: lenso_kernel::PlanValidationError,
     },
@@ -122,6 +126,9 @@ impl fmt::Display for AuthoringError {
             }
             Self::InvalidProfile { profile, detail } => {
                 write!(formatter, "invalid authoring profile {profile}: {detail}")
+            }
+            Self::Recipe { path, detail } => {
+                write!(formatter, "Composition recipe {}: {detail}", path.display())
             }
             Self::Runner { source } => {
                 write!(formatter, "Runner rejected the resolved Plan: {source}")

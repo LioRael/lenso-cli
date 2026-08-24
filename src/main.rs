@@ -26,6 +26,11 @@ enum Command {
     Resolve(authoring::ResolveArgs),
     /// Run a resolved App Plan.
     Run(authoring::RunArgs),
+    /// Expand reusable Project fragments into exact App variants.
+    Compose {
+        #[command(subcommand)]
+        command: authoring::ComposeCommand,
+    },
     /// Create and develop a Lenso Module.
     Module {
         #[command(subcommand)]
@@ -159,6 +164,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Check(args) => authoring::check(&args)?,
         Command::Resolve(args) => authoring::resolve(&args)?,
         Command::Run(args) => authoring::run(&args).await?,
+        Command::Compose { command } => authoring::compose(command)?,
         Command::Module { command } => match command {
             ModuleCommand::Create(args) => {
                 module::create_module(&module::ModuleCreateOptions {
@@ -224,7 +230,10 @@ mod tests {
             .get_subcommands()
             .map(clap::Command::get_name)
             .collect::<Vec<_>>();
-        assert_eq!(names, ["add", "check", "resolve", "run", "module"]);
+        assert_eq!(
+            names,
+            ["add", "check", "resolve", "run", "compose", "module"]
+        );
 
         let module = command
             .get_subcommands()
