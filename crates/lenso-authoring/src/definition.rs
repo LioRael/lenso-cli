@@ -134,6 +134,51 @@ impl CargoAppDefinition {
     }
 }
 
+/// Builds a statically linked Host and reads one dependency's Descriptor
+/// directly from its Cargo artifacts without loading or executing Module code.
+pub fn inspect_cargo_module(
+    manifest: &Path,
+    host_package: &str,
+    cargo_package: &str,
+    entrypoint: &str,
+) -> Result<ModuleDescriptor, AuthoringError> {
+    let artifacts =
+        build_descriptor_artifacts(manifest, std::iter::once(cargo_package), Some(host_package))?;
+    let mut matches = Vec::new();
+    for path in artifacts {
+        let bytes = fs::read(&path).map_err(|source| AuthoringError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        matches.extend(
+            extract_descriptors(&bytes, &path)?
+                .into_iter()
+                .filter(|descriptor| descriptor.entrypoint() == entrypoint),
+        );
+    }
+    matches.sort_by(|left, right| {
+        left.package_id()
+            .cmp(right.package_id())
+            .then_with(|| left.package_revision().cmp(right.package_revision()))
+    });
+    matches.dedup();
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        0 => Err(AuthoringError::ModuleDescriptor {
+            path: manifest.to_owned(),
+            detail: format!(
+                "Cargo package `{cargo_package}` exposes no Module Descriptor entrypoint `{entrypoint}`"
+            ),
+        }),
+        count => Err(AuthoringError::ModuleDescriptor {
+            path: manifest.to_owned(),
+            detail: format!(
+                "Cargo package `{cargo_package}` exposes {count} Module Descriptors for entrypoint `{entrypoint}`; select a package with one unambiguous descriptor"
+            ),
+        }),
+    }
+}
+
 fn build_descriptor_artifacts<'a>(
     manifest: &Path,
     packages: impl Iterator<Item = &'a str>,
@@ -189,7 +234,8 @@ fn descriptor_build_command(
     packages: &BTreeSet<String>,
     host_package: Option<&str>,
 ) -> Command {
-    let mut command = Command::new("cargo");
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let mut command = Command::new(cargo);
     command
         .args([
             "build",

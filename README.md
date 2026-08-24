@@ -67,14 +67,34 @@ execution classes, or lifecycle policy:
 ```
 
 ```sh
+lenso app add example-text-tools-module \
+  --definition lenso.app.json \
+  --version '^1.0' \
+  --configuration '{"prefix":"docs"}'
+
 lenso app check --definition lenso.app.json
 lenso app resolve --definition lenso.app.json \
   --output .lenso/resolved-plan.json
+
+# Remove only this App-local Instance; the Host may keep the dependency.
+lenso app remove text-tools --definition lenso.app.json
+
+# Remove the dependency too when no other Instance uses it.
+lenso app remove text-tools --definition lenso.app.json --uninstall
 ```
 
-The CLI builds only the selected locked Cargo packages, reads Descriptor bytes
-from their artifacts without executing package code, derives unambiguous
-bindings, and writes the same immutable Plan format consumed by the Kernel.
+`app add` delegates dependency and lock ownership to Cargo, discovers the
+runtime package id from the package-owned Descriptor, chooses a useful default
+Instance key, and updates the small App Definition. Use `--path` for a local
+package or `--git` with `--rev`, `--branch`, or `--tag` for Git. `--dry-run`
+performs the complete build and resolution check, reports touched files, and
+then restores them byte-for-byte.
+
+Every edit is transactional: dependency files and the App Definition are
+restored when Descriptor discovery or composition fails. The CLI builds only
+the selected locked Cargo packages, reads Descriptor bytes from their artifacts
+without executing package code, derives unambiguous bindings, and writes the
+same immutable Plan format consumed by the Kernel.
 `one` and `optional` ambiguities require an explicit App Definition decision;
 `many` providers are ordered deterministically.
 

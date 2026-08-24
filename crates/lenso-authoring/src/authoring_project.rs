@@ -72,6 +72,10 @@ pub enum AuthoringError {
         path: PathBuf,
         detail: String,
     },
+    AppEdit {
+        path: PathBuf,
+        detail: String,
+    },
     Runner {
         source: lenso_kernel::PlanValidationError,
     },
@@ -136,6 +140,9 @@ impl fmt::Display for AuthoringError {
             }
             Self::ModuleDescriptor { path, detail } => {
                 write!(formatter, "Module Descriptor {}: {detail}", path.display())
+            }
+            Self::AppEdit { path, detail } => {
+                write!(formatter, "App Definition {}: {detail}", path.display())
             }
             Self::Runner { source } => {
                 write!(formatter, "Runner rejected the resolved Plan: {source}")
