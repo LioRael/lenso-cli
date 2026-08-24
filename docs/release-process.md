@@ -43,9 +43,17 @@ pnpm changeset status --output /tmp/lenso-cli-changesets.json
 npm run check:npm-shim
 cargo fmt --all -- --check
 cargo test --locked
-cargo package --locked --allow-dirty
-cargo publish --dry-run --locked --allow-dirty
+cargo package --locked -p lenso-authoring --allow-dirty
+cargo package --locked -p lenso-cli --allow-dirty --no-verify
+cargo publish --dry-run --locked -p lenso-authoring --allow-dirty
+cargo publish --dry-run --locked -p lenso-cli --allow-dirty --no-verify
 ```
+
+The CLI package uses `--no-verify` before release because its workspace
+`lenso-authoring` changes are not available from crates.io yet. The workspace
+test verifies both packages together, and the preceding command verifies the
+library package independently. Release-plz publishes changed workspace crates
+in dependency order.
 
 To inspect an npm archive locally, build the current platform payload first:
 

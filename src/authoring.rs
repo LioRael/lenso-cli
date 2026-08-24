@@ -8,11 +8,12 @@ use std::{
 };
 
 use anyhow::Context;
-use clap::Args;
+use clap::{Args, Subcommand};
 use lenso_app_plan::{CapabilityEndpointPlan, ExecutionClassId, ResolvedAppPlan};
 use lenso_authoring::{
-    AddModule, AuthoringError, Cardinality, CheckOptions, Module, PackageInput, PackageSource,
-    ProjectAuthoring, ProjectFile, ProjectPath, ResolutionOptions, ResolvedProject, run_project,
+    AddModule, AuthoringError, Cardinality, CheckOptions, CompositionRecipePath, Module,
+    PackageInput, PackageSource, ProjectAuthoring, ProjectFile, ProjectPath, ResolutionOptions,
+    ResolvedProject, run_project,
 };
 use lenso_bun_adapter::{BunAdapter, BunAdapterConfig, BunCapabilityCodec, BunWire};
 use lenso_kernel::{ExecutionAdapterCatalog, RuntimeFailure};
@@ -74,6 +75,53 @@ pub(crate) struct RunArgs {
     root: PathBuf,
     #[arg(long, default_value = "bun")]
     bun: String,
+}
+
+#[derive(Debug, Subcommand, Clone)]
+pub(crate) enum ComposeCommand {
+    /// List available variants.
+    List(ComposeListArgs),
+    /// Check one or every materialized variant.
+    Check(ComposeCheckArgs),
+    /// Resolve one or every variant to its declared canonical Plan output.
+    Resolve(ComposeResolveArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+pub(crate) struct ComposeListArgs {
+    /// Reusable Composition recipe document.
+    #[arg(long, default_value = "composition/recipes.json")]
+    recipe: PathBuf,
+}
+
+#[derive(Debug, Args, Clone)]
+pub(crate) struct ComposeCheckArgs {
+    /// Reusable Composition recipe document.
+    #[arg(long, default_value = "composition/recipes.json")]
+    recipe: PathBuf,
+    /// Check only one named variant.
+    #[arg(long)]
+    variant: Option<String>,
+    /// Remove one selected fragment before checking; requires --variant.
+    #[arg(long = "without")]
+    excluded_fragments: Vec<String>,
+    #[arg(long = "execution-class")]
+    execution_classes: Vec<String>,
+}
+
+#[derive(Debug, Args, Clone)]
+pub(crate) struct ComposeResolveArgs {
+    /// Reusable Composition recipe document.
+    #[arg(long, default_value = "composition/recipes.json")]
+    recipe: PathBuf,
+    /// Resolve only one named variant.
+    #[arg(long)]
+    variant: Option<String>,
+    /// Override the declared output; valid only with --variant.
+    #[arg(long)]
+    output: Option<PathBuf>,
+    #[arg(long = "execution-class")]
+    execution_classes: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -232,6 +280,89 @@ pub(crate) fn resolve(args: &ResolveArgs) -> anyhow::Result<()> {
     std::fs::write(&output, resolved.canonical_bytes())?;
     println!("resolved {} ({})", output.display(), resolved.fingerprint());
     Ok(())
+}
+
+pub(crate) fn compose(command: ComposeCommand) -> anyhow::Result<()> {
+    match command {
+        ComposeCommand::List(args) => compose_list(&args),
+        ComposeCommand::Check(args) => compose_check(&args),
+        ComposeCommand::Resolve(args) => compose_resolve(&args),
+    }
+}
+
+fn compose_list(args: &ComposeListArgs) -> anyhow::Result<()> {
+    let path = CompositionRecipePath::new(&args.recipe);
+    let recipe = path.load()?;
+    for (name, variant) in recipe.variants() {
+        println!("{name}\t{}", variant.output());
+    }
+    Ok(())
+}
+
+fn compose_check(args: &ComposeCheckArgs) -> anyhow::Result<()> {
+    if !args.excluded_fragments.is_empty() && args.variant.is_none() {
+        anyhow::bail!("--without requires --variant");
+    }
+    let path = CompositionRecipePath::new(&args.recipe);
+    let recipe = path.load()?;
+    for name in selected_recipe_variants(&recipe, args.variant.as_deref())? {
+        let materialized = path.materialize_without(&recipe, name, &args.excluded_fragments)?;
+        let report = materialized
+            .project()
+            .check(materialized.root(), &check_options(&args.execution_classes))?;
+        println!(
+            "checked {name}: {} Module Instances, {} bindings, {} contracts",
+            report.modules, report.bindings, report.contracts
+        );
+    }
+    Ok(())
+}
+
+fn compose_resolve(args: &ComposeResolveArgs) -> anyhow::Result<()> {
+    if args.output.is_some() && args.variant.is_none() {
+        anyhow::bail!("--output requires --variant");
+    }
+    let path = CompositionRecipePath::new(&args.recipe);
+    let recipe = path.load()?;
+    for name in selected_recipe_variants(&recipe, args.variant.as_deref())? {
+        let materialized = path.materialize(&recipe, name)?;
+        let mut options =
+            ResolutionOptions::default().with_check_options(check_options(&args.execution_classes));
+        if let Some(profile) = materialized.profile() {
+            options = options.with_profile(profile);
+        }
+        let resolved = materialized
+            .project()
+            .resolve(materialized.root(), &options)?;
+        let output = args
+            .output
+            .as_deref()
+            .unwrap_or_else(|| materialized.output());
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(output, resolved.canonical_bytes())?;
+        println!(
+            "resolved {name} -> {} ({})",
+            output.display(),
+            resolved.fingerprint()
+        );
+    }
+    Ok(())
+}
+
+fn selected_recipe_variants<'a>(
+    recipe: &'a lenso_authoring::CompositionRecipe,
+    selected: Option<&'a str>,
+) -> anyhow::Result<Vec<&'a str>> {
+    if let Some(name) = selected {
+        if recipe.variant(name).is_none() {
+            anyhow::bail!("Composition variant `{name}` is not defined");
+        }
+        Ok(vec![name])
+    } else {
+        Ok(recipe.variants().keys().map(String::as_str).collect())
+    }
 }
 
 pub(crate) async fn run(args: &RunArgs) -> anyhow::Result<()> {
