@@ -32,6 +32,33 @@ pub struct CompositionVariant {
     profile: Option<String>,
 }
 
+/// Structured command owned by an App and launched by authoring workflows.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct CompositionRunner {
+    program: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    execution_classes: Vec<String>,
+}
+
+impl CompositionRunner {
+    /// Returns the executable name or path without shell interpretation.
+    pub fn program(&self) -> &str {
+        &self.program
+    }
+
+    /// Returns the exact argument vector supplied to the executable.
+    pub fn args(&self) -> &[String] {
+        &self.args
+    }
+
+    /// Returns the execution classes required by the product-owned Runner.
+    pub fn execution_classes(&self) -> &[String] {
+        &self.execution_classes
+    }
+}
+
 impl CompositionVariant {
     /// Returns fragment paths in deterministic authored order.
     pub fn fragments(&self) -> &[String] {
@@ -56,6 +83,8 @@ pub struct CompositionRecipe {
     schema_version: u32,
     #[serde(default = "default_root")]
     root: String,
+    #[serde(default)]
+    runner: Option<CompositionRunner>,
     variants: BTreeMap<String, CompositionVariant>,
 }
 
@@ -68,6 +97,11 @@ impl CompositionRecipe {
     /// Returns the authored root path relative to the recipe document.
     pub fn root(&self) -> &str {
         &self.root
+    }
+
+    /// Returns the product-owned Runner used by `compose run` and `compose dev`.
+    pub fn runner(&self) -> Option<&CompositionRunner> {
+        self.runner.as_ref()
     }
 
     /// Returns every named variant in stable lexical order.
@@ -112,6 +146,12 @@ impl CompositionRecipePath {
         }
         if recipe.variants.is_empty() {
             return Err(recipe_error(&self.path, "defines no variants"));
+        }
+        if recipe
+            .runner()
+            .is_some_and(|runner| runner.program().trim().is_empty())
+        {
+            return Err(recipe_error(&self.path, "Runner program cannot be empty"));
         }
         validate_root_path(&self.path, &recipe.root)?;
         let mut outputs = BTreeSet::new();
@@ -602,6 +642,63 @@ mod tests {
             .unwrap();
         assert_eq!(reduced.project().composition().modules().len(), 1);
         assert_eq!(reduced.project().packages().len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recipe_exposes_one_structured_product_runner() {
+        let root = fixture_root();
+        write(
+            &root.join("composition/recipes.json"),
+            r#"{
+              "root": "..",
+              "runner": {
+                "program": "cargo",
+                "args": ["run", "-p", "example-app", "--"],
+                "execution_classes": ["lenso.native-rust@1"]
+              },
+              "variants": {
+                "example": {
+                  "fragments": ["fragments/app.json"],
+                  "output": "plans/example.json"
+                }
+              }
+            }"#,
+        );
+        write(&root.join("fragments/app.json"), "{}");
+
+        let path = CompositionRecipePath::new(root.join("composition/recipes.json"));
+        let recipe = path.load().unwrap();
+        let runner = recipe.runner().unwrap();
+
+        assert_eq!(runner.program(), "cargo");
+        assert_eq!(runner.args(), ["run", "-p", "example-app", "--"]);
+        assert_eq!(runner.execution_classes(), ["lenso.native-rust@1"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recipe_rejects_an_empty_product_runner_program() {
+        let root = fixture_root();
+        write(
+            &root.join("composition/recipes.json"),
+            r#"{
+              "root": "..",
+              "runner": { "program": "", "args": [] },
+              "variants": {
+                "example": {
+                  "fragments": ["fragments/app.json"],
+                  "output": "plans/example.json"
+                }
+              }
+            }"#,
+        );
+        write(&root.join("fragments/app.json"), "{}");
+
+        let path = CompositionRecipePath::new(root.join("composition/recipes.json"));
+        let error = path.load().unwrap_err();
+
+        assert!(error.to_string().contains("Runner program cannot be empty"));
         fs::remove_dir_all(root).unwrap();
     }
 

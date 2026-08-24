@@ -164,7 +164,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Check(args) => authoring::check(&args)?,
         Command::Resolve(args) => authoring::resolve(&args)?,
         Command::Run(args) => authoring::run(&args).await?,
-        Command::Compose { command } => authoring::compose(command)?,
+        Command::Compose { command } => authoring::compose(command).await?,
         Command::Module { command } => match command {
             ModuleCommand::Create(args) => {
                 module::create_module(&module::ModuleCreateOptions {
