@@ -12,10 +12,11 @@ use lenso_app_plan::{
 use crate::package_manager::{ResolvedPackage, resolve_package};
 use crate::validation::validate_configuration;
 use crate::{
-    AuthoringError, CapabilityEndpoint, Cardinality, CheckOptions, InteractionKind, Module,
-    ModuleRole, PROJECT_SCHEMA_VERSION, PackageSource, ProjectFile, ResolutionOptions,
+    AuthoringError, CapabilityEndpoint, Cardinality, CheckOptions, ContractInput, InteractionKind,
+    Module, ModuleRole, PROJECT_SCHEMA_VERSION, PackageSource, ProjectFile, ResolutionOptions,
     ResolvedProject, canonical_json_bytes, canonical_json_string,
 };
+use lenso_contract_codegen::ProjectionLanguage;
 
 const UI_CONTRIBUTION_CAPABILITY_ID: &str = "lenso.ui.contribution@1";
 const WEB_SHELL_CAPABILITY_ID: &str = "lenso.web.shell@1";
@@ -27,6 +28,30 @@ struct ContractFacts {
 }
 
 type ContractFactsByIdentity = BTreeMap<(String, String), ContractFacts>;
+
+fn check_owned_projections(
+    contract: &ContractInput,
+    root: &Path,
+    descriptor: &Path,
+) -> Result<(), AuthoringError> {
+    for (language, projection) in [
+        (ProjectionLanguage::Rust, contract.rust_projection()),
+        (
+            ProjectionLanguage::TypeScript,
+            contract.typescript_projection(),
+        ),
+    ] {
+        let Some(projection) = projection else {
+            continue;
+        };
+        lenso_contract_codegen::check_projection(descriptor, language, &root.join(projection))
+            .map_err(|error| AuthoringError::Contract {
+                path: descriptor.to_owned(),
+                detail: error.to_string(),
+            })?;
+    }
+    Ok(())
+}
 
 /// Authoring operations implemented above the pure App Plan data model.
 pub trait ProjectAuthoring {
@@ -101,8 +126,6 @@ fn check_contracts(
     let mut contracts = BTreeMap::new();
     for contract in project.contracts() {
         let descriptor = root.join(contract.descriptor());
-        let rust = root.join(contract.rust());
-        let typescript = root.join(contract.typescript());
         let loaded = lenso_contract_codegen::load_descriptor(&descriptor).map_err(|error| {
             AuthoringError::Contract {
                 path: descriptor.clone(),
@@ -123,12 +146,7 @@ fn check_contracts(
                 ),
             });
         }
-        lenso_contract_codegen::check_generated(&descriptor, &rust, &typescript).map_err(
-            |error| AuthoringError::Contract {
-                path: descriptor.clone(),
-                detail: error.to_string(),
-            },
-        )?;
+        check_owned_projections(contract, root, &descriptor)?;
         let descriptor_operations = loaded
             .operation_names()
             .into_iter()

@@ -1792,9 +1792,9 @@ dependencies = [
 
 [[package]]
 name = "lenso-app-plan"
-version = "0.1.0"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43afd42e0158e98fefded2fca95e6e3e461251b667afb11cea1422e9b6d56a8e"
+checksum = "ad6a4da2f09151892d2b0491c823ae28b418df65f7cfd2c857209ebd09afd994"
 dependencies = [
  "serde",
  "serde_json",
@@ -1886,9 +1886,9 @@ dependencies = [
 
 [[package]]
 name = "lenso-contract-codegen"
-version = "0.5.1"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e53f306e655ab863e3940b847a2e4c242a53a326b68697f2892678367ffb480"
+checksum = "6d705a51256e28e1c835c86dc8de83aa4472f01d51ffbdd40345227ec20e10af"
 dependencies = [
  "semver",
  "serde_json",
