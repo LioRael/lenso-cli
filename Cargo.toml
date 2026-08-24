@@ -56,7 +56,7 @@ clap = { version = "4", features = ["derive"] }
 getrandom = "0.4"
 include_dir = "0.7"
 lenso-app-plan = "0.1.2"
-lenso-authoring = "0.1.5"
+lenso-authoring = { path = "crates/lenso-authoring", version = "0.1.6" }
 lenso-bun-adapter = "0.1.1"
 lenso-contract-codegen = "0.5.2"
 lenso-contracts = "0.4.0"
