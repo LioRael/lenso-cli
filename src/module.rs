@@ -725,12 +725,8 @@ fn create_standalone_rust_module(
         for path in files.keys() {
             println!("- {}", display_relative(&target, path));
         }
-        for path in [
-            target.join(format!("contracts/{module_id}/generated/bindings.rs")),
-            target.join(format!("contracts/{module_id}/generated/bindings.ts")),
-        ] {
-            println!("- {}", display_relative(&target, &path));
-        }
+        let generated = target.join(format!("contracts/{module_id}/generated/bindings.rs"));
+        println!("- {}", display_relative(&target, &generated));
         return Ok(());
     }
     let parent = target
@@ -785,7 +781,6 @@ fn rust_scaffold_files(
     let contract_root = format!("contracts/{module_id}");
     let descriptor_path = format!("{contract_root}/capability.json");
     let rust_path = format!("{contract_root}/generated/bindings.rs");
-    let typescript_path = format!("{contract_root}/generated/bindings.ts");
 
     let mut project = ProjectFile::default();
     project.packages_mut().insert(
@@ -800,13 +795,10 @@ fn rust_scaffold_files(
         .add_module(Module::new(module_id, &package_id).with_capability(
             CapabilityEndpoint::request(capability_id, DESCRIPTOR_VERSION, ["execute"]),
         ));
-    project.contracts_mut().push(ContractInput::new(
-        capability_id,
-        DESCRIPTOR_VERSION,
-        &descriptor_path,
-        &rust_path,
-        &typescript_path,
-    ));
+    project.contracts_mut().push(
+        ContractInput::descriptor_only(capability_id, DESCRIPTOR_VERSION, &descriptor_path)
+            .with_rust_projection(&rust_path),
+    );
 
     let descriptor = json!({
         "id": capability_id,
@@ -1078,15 +1070,14 @@ fn materialize_rust_scaffold(
         write_file(&stage.join(relative), contents.as_bytes())?;
     }
     let descriptor = stage.join(format!("contracts/{module_id}/capability.json"));
-    let generated = lenso_contract_codegen::generate(&descriptor)
-        .with_context(|| format!("generate bindings from {}", descriptor.display()))?;
+    let generated = lenso_contract_codegen::generate_projection(
+        &descriptor,
+        lenso_contract_codegen::ProjectionLanguage::Rust,
+    )
+    .with_context(|| format!("generate Rust binding from {}", descriptor.display()))?;
     write_file(
         &stage.join(format!("contracts/{module_id}/generated/bindings.rs")),
-        generated.rust.as_bytes(),
-    )?;
-    write_file(
-        &stage.join(format!("contracts/{module_id}/generated/bindings.ts")),
-        generated.typescript.as_bytes(),
+        generated.source.as_bytes(),
     )?;
     if check {
         run_rust_scaffold_command(stage, &["generate-lockfile"])?;
@@ -1139,12 +1130,8 @@ fn create_bun_module(options: &ModuleCreateOptions) -> Result<()> {
         for path in files.keys() {
             println!("- {}", display_relative(&target, path));
         }
-        for path in [
-            target.join(format!("contracts/{module_id}/generated/bindings.rs")),
-            target.join(format!("contracts/{module_id}/generated/bindings.ts")),
-        ] {
-            println!("- {}", display_relative(&target, &path));
-        }
+        let generated = target.join(format!("contracts/{module_id}/generated/bindings.ts"));
+        println!("- {}", display_relative(&target, &generated));
         return Ok(());
     }
 
@@ -1232,7 +1219,6 @@ fn bun_scaffold_files(
     let module_root = format!("modules/{module_id}");
     let workspace_revision = format!("workspace:{module_root}");
     let descriptor_path = format!("{contract_root}/capability.json");
-    let rust_path = format!("{contract_root}/generated/bindings.rs");
     let typescript_path = format!("{contract_root}/generated/bindings.ts");
 
     let mut project = ProjectFile::default();
@@ -1251,13 +1237,10 @@ fn bun_scaffold_files(
                 ["execute"],
             )),
     );
-    project.contracts_mut().push(ContractInput::new(
-        capability_id,
-        DESCRIPTOR_VERSION,
-        &descriptor_path,
-        &rust_path,
-        &typescript_path,
-    ));
+    project.contracts_mut().push(
+        ContractInput::descriptor_only(capability_id, DESCRIPTOR_VERSION, &descriptor_path)
+            .with_typescript_projection(&typescript_path),
+    );
 
     let descriptor = json!({
         "id": capability_id,
@@ -1486,15 +1469,14 @@ fn materialize_bun_scaffold(
     }
 
     let descriptor = stage.join(format!("contracts/{module_id}/capability.json"));
-    let generated = lenso_contract_codegen::generate(&descriptor)
-        .with_context(|| format!("generate bindings from {}", descriptor.display()))?;
-    write_file(
-        &stage.join(format!("contracts/{module_id}/generated/bindings.rs")),
-        generated.rust.as_bytes(),
-    )?;
+    let generated = lenso_contract_codegen::generate_projection(
+        &descriptor,
+        lenso_contract_codegen::ProjectionLanguage::TypeScript,
+    )
+    .with_context(|| format!("generate TypeScript binding from {}", descriptor.display()))?;
     write_file(
         &stage.join(format!("contracts/{module_id}/generated/bindings.ts")),
-        generated.typescript.as_bytes(),
+        generated.source.as_bytes(),
     )?;
 
     if install {
@@ -11361,9 +11343,18 @@ mod tests {
 
         create_bun_module(&options).unwrap();
         let descriptor = target.join("contracts/greeting/capability.json");
-        let rust = target.join("contracts/greeting/generated/bindings.rs");
         let typescript = target.join("contracts/greeting/generated/bindings.ts");
-        lenso_contract_codegen::check_generated(&descriptor, &rust, &typescript).unwrap();
+        lenso_contract_codegen::check_projection(
+            &descriptor,
+            lenso_contract_codegen::ProjectionLanguage::TypeScript,
+            &typescript,
+        )
+        .unwrap();
+        assert!(
+            !target
+                .join("contracts/greeting/generated/bindings.rs")
+                .exists()
+        );
         let module_source =
             fs::read_to_string(target.join("modules/greeting/src/index.ts")).unwrap();
         let verification: Value =
@@ -11458,8 +11449,17 @@ mod tests {
 
         let descriptor = target.join("contracts/greeting/capability.json");
         let rust = target.join("contracts/greeting/generated/bindings.rs");
-        let typescript = target.join("contracts/greeting/generated/bindings.ts");
-        lenso_contract_codegen::check_generated(&descriptor, &rust, &typescript).unwrap();
+        lenso_contract_codegen::check_projection(
+            &descriptor,
+            lenso_contract_codegen::ProjectionLanguage::Rust,
+            &rust,
+        )
+        .unwrap();
+        assert!(
+            !target
+                .join("contracts/greeting/generated/bindings.ts")
+                .exists()
+        );
         let cargo = fs::read_to_string(target.join("Cargo.toml")).unwrap();
         let source = fs::read_to_string(target.join("src/lib.rs")).unwrap();
         let verification = fs::read_to_string(target.join("lenso.module.verify.json")).unwrap();

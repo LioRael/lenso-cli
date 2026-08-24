@@ -342,6 +342,51 @@ fn every_capability_requires_a_matching_fresh_descriptor() {
 }
 
 #[test]
+fn contract_checks_only_require_the_language_projections_owned_by_the_project() {
+    let root = tempfile_dir();
+    write_cargo_inputs(&root, &[("example-greeter", "1.0.0")]);
+    let mut project = ProjectFile::default();
+    add_package(
+        &mut project,
+        package("example.greeter", "example-greeter", "1.0.0"),
+    );
+    project.composition_mut().add_module(
+        Module::new("greeter", "example.greeter").with_capability(CapabilityEndpoint::request(
+            "example.greeting@1",
+            "1.0.0",
+            ["greet"],
+        )),
+    );
+
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    copy_tree(
+        &fixtures.join("contracts/greeting"),
+        &root.join("contract/greeting"),
+    );
+    fs::remove_file(root.join("contract/greeting/generated/bindings.ts")).unwrap();
+    project.contracts_mut().push(
+        ContractInput::descriptor_only(
+            "example.greeting@1",
+            "1.0.0",
+            "contract/greeting/capability.json",
+        )
+        .with_rust_projection("contract/greeting/src/generated.rs"),
+    );
+
+    let project_path = root.join("lenso.json");
+    fs::write(
+        &project_path,
+        serde_json::to_vec_pretty(&project).expect("project should serialize"),
+    )
+    .unwrap();
+    let project = ProjectPath::load(&project_path)
+        .expect("a project document may omit unowned language projections");
+    project
+        .check(&root, &CheckOptions::default())
+        .expect("an undeclared TypeScript projection should not be required");
+}
+
+#[test]
 fn sensitive_configuration_requires_an_explicit_secret_reference() {
     let root = tempfile_dir();
     write_cargo_inputs(&root, &[("configured", "1.0.0")]);
