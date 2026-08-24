@@ -274,7 +274,7 @@ mod tests {
 
     #[test]
     fn descriptor_envelopes_are_extracted_without_executing_code() {
-        let json = r#"{"package_id":"example.tool","package_revision":"1.0.0","entrypoint":"default","provided_capabilities":[],"required_capabilities":[],"execution_class":"lenso.native-rust@1","restart_policy":{"mode":"never","max_attempts":0,"window":{"secs":0,"nanos":0},"backoff":{"secs":0,"nanos":0},"stability":{"secs":0,"nanos":0},"jitter":{"secs":0,"nanos":0}},"criticality":"non_critical"}"#;
+        let json = r#"{"package_id":"example.tool","package_revision":"1.0.0","entrypoint":"default","configuration_schema":{"type":"object","required":["name"],"properties":{"name":{"type":"string"}},"additionalProperties":false},"provided_capabilities":[],"required_capabilities":[],"execution_class":"lenso.native-rust@1","restart_policy":{"mode":"never","max_attempts":0,"window":{"secs":0,"nanos":0},"backoff":{"secs":0,"nanos":0},"stability":{"secs":0,"nanos":0},"jitter":{"secs":0,"nanos":0}},"criticality":"non_critical"}"#;
         let artifact = [
             b"binary-prefix".as_slice(),
             DESCRIPTOR_START,
@@ -288,6 +288,10 @@ mod tests {
         assert_eq!(descriptors.len(), 1);
         assert_eq!(descriptors[0].package_id(), "example.tool");
         assert_eq!(descriptors[0].package_revision(), "1.0.0");
+        assert_eq!(
+            descriptors[0].configuration_schema().unwrap()["required"],
+            serde_json::json!(["name"])
+        );
     }
 
     #[test]
