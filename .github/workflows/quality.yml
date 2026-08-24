@@ -35,8 +35,11 @@ jobs:
       - name: Run clean-project Bun integration
         run: cargo test --locked -p lenso-authoring bun_clean_project_add_resolve_reload_and_run_use_the_same_plan -- --ignored --test-threads=1
       - run: cargo package --locked -p lenso-authoring --allow-dirty
-      # The CLI consumes the workspace copy of lenso-authoring. Until a release
-      # publishes that copy, Cargo cannot verify the CLI tarball against crates.io.
-      # Workspace tests above compile the two packages together; these two steps
-      # separately verify the library tarball and the CLI payload.
-      - run: cargo package --locked -p lenso-cli --allow-dirty --no-verify
+      # A release-plz PR can bump lenso-authoring and lenso-cli atomically, but
+      # `cargo package` still resolves the CLI dependency from crates.io before
+      # the release workflow has published the library. Ordinary PRs and main
+      # pushes retain the full CLI payload gate; the release workflow publishes
+      # workspace packages in dependency order.
+      - name: Package CLI payload
+        if: ${{ !startsWith(github.head_ref, 'release-plz-') }}
+        run: cargo package --locked -p lenso-cli --allow-dirty --no-verify
