@@ -42,6 +42,42 @@ generated projections, schemas, and Capability bindings. `resolve` writes a
 canonical immutable App Plan. `run` hosts that exact plan; it does not discover
 or install Modules dynamically.
 
+## Source-derived App Definitions
+
+Modules authored by a derivation macro embed a package-owned Module Descriptor
+in their compiled Cargo artifact. An App Definition selects packages and keyed
+Instances without repeating Capability IDs, operation tables, bindings,
+execution classes, or lifecycle policy:
+
+```json
+{
+  "schema_version": 1,
+  "manifest": "Cargo.toml",
+  "packages": {
+    "example.text-tools": "example-text-tools-module"
+  },
+  "app": {
+    "name": "example",
+    "modules": [
+      { "key": "text-tools", "package": "example.text-tools" }
+    ],
+    "decisions": []
+  }
+}
+```
+
+```sh
+lenso app check --definition lenso.app.json
+lenso app resolve --definition lenso.app.json \
+  --output .lenso/resolved-plan.json
+```
+
+The CLI builds only the selected locked Cargo packages, reads Descriptor bytes
+from their artifacts without executing package code, derives unambiguous
+bindings, and writes the same immutable Plan format consumed by the Kernel.
+`one` and `optional` ambiguities require an explicit App Definition decision;
+`many` providers are ordered deterministically.
+
 ## Reusable App variants
 
 Large Apps can keep cohesive ordinary Project fragments and assemble named

@@ -2,6 +2,7 @@
 
 mod authoring_project;
 mod canonical;
+mod definition;
 mod package_manager;
 mod recipe;
 mod resolution;
@@ -10,6 +11,7 @@ mod validation;
 mod workflow;
 
 pub use authoring_project::*;
+pub use definition::*;
 pub use lenso_app_plan::authoring::*;
 pub use recipe::*;
 pub use resolution::*;
