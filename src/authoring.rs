@@ -296,7 +296,7 @@ pub(crate) async fn dev_module(
     }
 }
 
-pub(crate) fn check_module(options: ModuleCheckOptions) -> anyhow::Result<()> {
+pub(crate) fn check_module(options: &ModuleCheckOptions) -> anyhow::Result<()> {
     let root = module_root(options.repo_root.as_deref())?;
     let project_path = root.join(&options.project);
     let mut checks = Vec::new();
@@ -367,6 +367,7 @@ pub(crate) fn check_module(options: ModuleCheckOptions) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn verify_module(options: ModuleVerifyOptions) -> anyhow::Result<()> {
     let root = module_root(options.repo_root.as_deref())?;
     let project_path = root.join(&options.project);
@@ -832,7 +833,7 @@ async fn stop_native_child(child: &mut tokio::process::Child) {
     if let Some(id) = child.id() {
         use nix::{sys::signal::Signal, unistd::Pid};
 
-        if nix::sys::signal::killpg(Pid::from_raw(id as i32), Signal::SIGINT).is_ok()
+        if nix::sys::signal::killpg(Pid::from_raw(id.cast_signed()), Signal::SIGINT).is_ok()
             && tokio::time::timeout(Duration::from_secs(10), child.wait())
                 .await
                 .is_ok()
@@ -974,7 +975,7 @@ impl DevelopmentJsonCodec {
         value
             .downcast_ref::<Value>()
             .cloned()
-            .ok_or_else(|| RuntimeFailure::ProtocolViolation {
+            .ok_or(RuntimeFailure::ProtocolViolation {
                 capability: self.capability_id,
             })
     }

@@ -180,9 +180,8 @@ fn resolve_bun(root: &Path, package: &PackageInput) -> Result<ResolvedPackage, A
                 .trim_start_matches(['├', '└', '─', ' '])
                 .rsplit_once('@')
         })
-        .filter_map(|(name, version)| {
-            (name.trim() == package_name).then(|| version.trim().to_owned())
-        })
+        .filter(|(name, _)| name.trim() == package_name)
+        .map(|(_, version)| version.trim().to_owned())
         .collect();
     select_version(package, &lockfile, versions)
 }

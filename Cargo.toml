@@ -3,15 +3,14 @@ name = "lenso-cli"
 version = "0.2.34"
 edition = "2024"
 license = "MIT"
-description = "Lenso command-line interface for scaffolding and operating Lenso backend projects."
+description = "Authoring CLI and library for Lenso App Plans and Modules."
 repository = "https://github.com/LioRael/lenso-cli"
 homepage = "https://github.com/LioRael/lenso-cli"
 rust-version = "1.94"
 categories = ["command-line-utilities", "development-tools"]
-keywords = ["cli", "scaffold", "backend", "framework"]
+keywords = ["cli", "authoring", "modules", "app-plan"]
 include = [
     "src/**/*.rs",
-    "templates/**",
     "README.md",
     "Cargo.toml",
 ]
@@ -50,29 +49,16 @@ must_use_candidate = "allow"
 
 [dependencies]
 anyhow = "1.0"
-axum = "0.8"
-base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
-getrandom = "0.4"
-include_dir = "0.7"
 lenso-app-plan = "0.1.2"
 lenso-authoring = { path = "crates/lenso-authoring", version = "0.1.7" }
 lenso-bun-adapter = "0.1.1"
 lenso-contract-codegen = "0.5.2"
-lenso-contracts = "0.4.0"
 lenso-kernel = "0.1.4"
-lenso-module-management = "0.2.0"
 lenso-runner = "0.1.1"
-lenso-service = "0.1"
-reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
-rpassword = "7"
-schemars = "1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-serde_json_canonicalizer = "0.3.2"
 sha2 = "0.11"
-sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "json", "uuid"] }
-thiserror = "2"
 tokio = { version = "1.52", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 uuid = { version = "1", features = ["v7"] }
 
@@ -84,8 +70,8 @@ unsafe_code = "forbid"
 missing_debug_implementations = "warn"
 
 [lints.clippy]
-all = "warn"
-pedantic = "warn"
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
