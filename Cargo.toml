@@ -1,6 +1,6 @@
 [package]
 name = "lenso-cli"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 license = "MIT"
 description = "Authoring CLI and library for Lenso App Plans and Modules."
@@ -51,7 +51,7 @@ must_use_candidate = "allow"
 anyhow = "1.0"
 clap = { version = "4", features = ["derive"] }
 lenso-app-plan = "0.1.4"
-lenso-authoring = { path = "crates/lenso-authoring", version = "0.2.0" }
+lenso-authoring = { path = "crates/lenso-authoring", version = "0.2.1" }
 lenso-bun-adapter = "0.1.1"
 lenso-contract-codegen = "0.5.2"
 lenso-kernel = "0.1.4"
