@@ -68,6 +68,10 @@ pub enum AuthoringError {
         path: PathBuf,
         detail: String,
     },
+    ModuleDescriptor {
+        path: PathBuf,
+        detail: String,
+    },
     Runner {
         source: lenso_kernel::PlanValidationError,
     },
@@ -129,6 +133,9 @@ impl fmt::Display for AuthoringError {
             }
             Self::Recipe { path, detail } => {
                 write!(formatter, "Composition recipe {}: {detail}", path.display())
+            }
+            Self::ModuleDescriptor { path, detail } => {
+                write!(formatter, "Module Descriptor {}: {detail}", path.display())
             }
             Self::Runner { source } => {
                 write!(formatter, "Runner rejected the resolved Plan: {source}")

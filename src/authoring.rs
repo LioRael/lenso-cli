@@ -11,9 +11,10 @@ use anyhow::Context;
 use clap::{Args, Subcommand};
 use lenso_app_plan::{CapabilityEndpointPlan, ExecutionClassId, ResolvedAppPlan};
 use lenso_authoring::{
-    AddModule, AuthoringError, Cardinality, CheckOptions, CompositionRecipePath, CompositionRunner,
-    Module, PackageInput, PackageSource, ProjectAuthoring, ProjectFile, ProjectPath,
-    ResolutionOptions, ResolvedProject, run_project,
+    AddModule, AuthoringError, Cardinality, CargoAppDefinition, CheckOptions,
+    CompositionRecipePath, CompositionRunner, Module, PackageInput, PackageSource,
+    ProjectAuthoring, ProjectFile, ProjectPath, ResolutionOptions, ResolvedProject, run_project,
+    sha256_bytes,
 };
 use lenso_bun_adapter::{BunAdapter, BunAdapterConfig, BunCapabilityCodec, BunWire};
 use lenso_kernel::{ExecutionAdapterCatalog, RuntimeFailure};
@@ -89,6 +90,31 @@ pub(crate) enum ComposeCommand {
     Run(ComposeRunArgs),
     /// Watch, resolve, and restart one variant through its product-owned Runner.
     Dev(ComposeDevArgs),
+}
+
+#[derive(Debug, Subcommand, Clone)]
+pub(crate) enum AppCommand {
+    /// Check a source-derived App Definition and its package artifacts.
+    Check(AppCheckArgs),
+    /// Resolve a source-derived App Definition into an immutable Plan.
+    Resolve(AppResolveArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+pub(crate) struct AppCheckArgs {
+    /// App Definition document.
+    #[arg(long, default_value = "lenso.app.json")]
+    definition: PathBuf,
+}
+
+#[derive(Debug, Args, Clone)]
+pub(crate) struct AppResolveArgs {
+    /// App Definition document.
+    #[arg(long, default_value = "lenso.app.json")]
+    definition: PathBuf,
+    /// Canonical immutable Plan output.
+    #[arg(long, default_value = ".lenso/resolved-plan.json")]
+    output: PathBuf,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -324,6 +350,44 @@ pub(crate) async fn compose(command: ComposeCommand) -> anyhow::Result<()> {
         ComposeCommand::Run(args) => compose_run(&args).await,
         ComposeCommand::Dev(args) => compose_dev(&args).await,
     }
+}
+
+pub(crate) fn app(command: AppCommand) -> anyhow::Result<()> {
+    match command {
+        AppCommand::Check(args) => app_check(&args),
+        AppCommand::Resolve(args) => app_resolve(&args),
+    }
+}
+
+fn app_check(args: &AppCheckArgs) -> anyhow::Result<()> {
+    let definition = CargoAppDefinition::load(&args.definition)?;
+    let root = args.definition.parent().unwrap_or_else(|| Path::new("."));
+    let composition = definition.derive(root)?;
+    let plan = composition.resolve()?;
+    println!(
+        "checked {}: {} Module Instances, {} derived bindings",
+        definition.app().name(),
+        plan.module_instances().len(),
+        plan.capability_bindings().len()
+    );
+    Ok(())
+}
+
+fn app_resolve(args: &AppResolveArgs) -> anyhow::Result<()> {
+    let definition = CargoAppDefinition::load(&args.definition)?;
+    let root = args.definition.parent().unwrap_or_else(|| Path::new("."));
+    let bytes = definition.resolve_canonical(root)?;
+    if let Some(parent) = args.output.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&args.output, &bytes)?;
+    println!(
+        "resolved {} -> {} ({})",
+        definition.app().name(),
+        args.output.display(),
+        sha256_bytes(&bytes)
+    );
+    Ok(())
 }
 
 fn compose_list(args: &ComposeListArgs) -> anyhow::Result<()> {
