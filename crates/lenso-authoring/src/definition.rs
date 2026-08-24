@@ -39,6 +39,8 @@ pub struct CargoAppDefinition {
     manifest: String,
     #[serde(default)]
     packages: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    host_package: Option<String>,
     app: AppDefinition,
 }
 
@@ -53,6 +55,11 @@ impl CargoAppDefinition {
 
     pub fn packages(&self) -> &BTreeMap<String, String> {
         &self.packages
+    }
+
+    /// Cargo package whose dependency graph closes the statically linked Host.
+    pub fn host_package(&self) -> Option<&str> {
+        self.host_package.as_deref()
     }
 
     pub const fn app(&self) -> &AppDefinition {
@@ -103,6 +110,7 @@ impl CargoAppDefinition {
         let artifacts = build_descriptor_artifacts(
             &root.join(&self.manifest),
             selected_packages.iter().map(String::as_str),
+            self.host_package(),
         )?;
         let catalog = catalog_from_artifacts(&artifacts)?;
         self.app
@@ -129,20 +137,10 @@ impl CargoAppDefinition {
 fn build_descriptor_artifacts<'a>(
     manifest: &Path,
     packages: impl Iterator<Item = &'a str>,
+    host_package: Option<&str>,
 ) -> Result<Vec<PathBuf>, AuthoringError> {
     let packages = packages.map(ToOwned::to_owned).collect::<BTreeSet<_>>();
-    let mut command = Command::new("cargo");
-    command
-        .args([
-            "build",
-            "--locked",
-            "--message-format=json-render-diagnostics",
-        ])
-        .arg("--manifest-path")
-        .arg(manifest);
-    for package in &packages {
-        command.arg("--package").arg(package);
-    }
+    let mut command = descriptor_build_command(manifest, &packages, host_package);
     let output = command.output().map_err(|source| AuthoringError::Io {
         path: manifest.to_owned(),
         source,
@@ -184,6 +182,30 @@ fn build_descriptor_artifacts<'a>(
         }
     }
     Ok(artifacts.into_iter().collect())
+}
+
+fn descriptor_build_command(
+    manifest: &Path,
+    packages: &BTreeSet<String>,
+    host_package: Option<&str>,
+) -> Command {
+    let mut command = Command::new("cargo");
+    command
+        .args([
+            "build",
+            "--locked",
+            "--message-format=json-render-diagnostics",
+        ])
+        .arg("--manifest-path")
+        .arg(manifest);
+    if let Some(host_package) = host_package {
+        command.arg("--package").arg(host_package);
+    } else {
+        for package in packages {
+            command.arg("--package").arg(package);
+        }
+    }
+    command
 }
 
 fn cargo_artifact_matches(message: &Value, package: &str) -> bool {
@@ -311,5 +333,60 @@ mod tests {
         assert!(cargo_artifact_matches(&modern, "example-tools"));
         assert!(cargo_artifact_matches(&path_package, "example-tools"));
         assert!(!cargo_artifact_matches(&dependency, "example-tools"));
+    }
+
+    #[test]
+    fn host_package_is_optional_and_round_trips() {
+        let definition = serde_json::json!({
+            "schema_version": 1,
+            "manifest": "Cargo.toml",
+            "host_package": "example-host",
+            "packages": {"example.tool": "example-tool"},
+            "app": {
+                "name": "example",
+                "modules": [{
+                    "key": "tool",
+                    "package": "example.tool",
+                    "configuration": {}
+                }],
+                "decisions": [],
+                "execution_lanes": [{"id": "main"}]
+            }
+        });
+        let parsed: CargoAppDefinition = serde_json::from_value(definition).unwrap();
+        assert_eq!(parsed.host_package(), Some("example-host"));
+        assert_eq!(
+            serde_json::to_value(parsed).unwrap()["host_package"],
+            "example-host"
+        );
+    }
+
+    #[test]
+    fn host_package_builds_the_linked_graph_instead_of_external_packages_directly() {
+        let packages = BTreeSet::from([
+            "example-local-module".to_owned(),
+            "example-external-module".to_owned(),
+        ]);
+        let command =
+            descriptor_build_command(Path::new("Cargo.toml"), &packages, Some("example-host"));
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            arguments
+                .windows(2)
+                .any(|pair| pair == ["--package", "example-host"])
+        );
+        assert!(
+            !arguments
+                .iter()
+                .any(|argument| argument == "example-external-module")
+        );
+        assert!(
+            !arguments
+                .iter()
+                .any(|argument| argument == "example-local-module")
+        );
     }
 }
