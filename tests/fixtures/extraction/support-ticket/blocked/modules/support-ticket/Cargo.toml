@@ -1,7 +1,0 @@
-[package]
-name = "support-ticket"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-support-sla = { path = "../support-sla" }

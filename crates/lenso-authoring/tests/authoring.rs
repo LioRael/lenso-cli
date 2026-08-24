@@ -1,4 +1,5 @@
 use std::{
+    fmt::Write as _,
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -82,9 +83,11 @@ fn write_cargo_inputs(root: &Path, packages: &[(&str, &str)]) {
     .unwrap();
     let mut lock = "version = 4\n".to_owned();
     for (name, version) in packages {
-        lock.push_str(&format!(
-            "\n[[package]]\nname = \"{name}\"\nversion = \"{version}\"\n"
-        ));
+        writeln!(
+            lock,
+            "\n[[package]]\nname = \"{name}\"\nversion = \"{version}\""
+        )
+        .unwrap();
     }
     fs::write(root.join("Cargo.lock"), lock).unwrap();
 }
