@@ -51,6 +51,11 @@ variants without copying a complete project document for each combination:
 {
   "schema_version": 1,
   "root": "..",
+  "runner": {
+    "program": "cargo",
+    "args": ["run", "-p", "example-app", "--"],
+    "execution_classes": ["lenso.native-rust@1"]
+  },
   "variants": {
     "local-coding": {
       "fragments": [
@@ -66,10 +71,10 @@ variants without copying a complete project document for each combination:
 
 ```sh
 lenso compose list --recipe composition/recipes.json
-lenso compose check --recipe composition/recipes.json \
-  --execution-class lenso.native-rust@1
-lenso compose resolve --recipe composition/recipes.json \
-  --execution-class lenso.native-rust@1
+lenso compose check --recipe composition/recipes.json
+lenso compose resolve --recipe composition/recipes.json
+lenso compose run --variant local-coding
+lenso compose dev --variant local-coding
 ```
 
 Fragment contents use the same `composition`, `packages`, `contracts`, and
@@ -85,6 +90,13 @@ creating a second project document.
 Recipes and fragments are authoring inputs only. `compose resolve` expands one
 exact ordinary Project in memory and then uses the existing validation and
 resolution path; neither recipes nor fragments enter the Kernel or runtime.
+`compose run` and `compose dev` resolve to an ignored
+`.lenso/compose/<variant>/resolved-plan.json`, export that path as
+`LENSO_RESOLVED_PLAN`, and launch the structured product-owned Runner without
+shell interpretation. `compose dev` watches the recipe root, excludes ordinary
+runtime output directories, and restarts the complete Runner with a fresh Plan
+after a source change. Explicit command-line execution classes override the
+Runner defaults. Arguments after `--` are forwarded to the product Runner.
 
 ## Module authoring
 
@@ -119,6 +131,8 @@ lenso run
 lenso compose list
 lenso compose check
 lenso compose resolve
+lenso compose run
+lenso compose dev
 lenso module create
 lenso module dev
 lenso module check

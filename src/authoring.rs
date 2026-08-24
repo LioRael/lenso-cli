@@ -11,9 +11,9 @@ use anyhow::Context;
 use clap::{Args, Subcommand};
 use lenso_app_plan::{CapabilityEndpointPlan, ExecutionClassId, ResolvedAppPlan};
 use lenso_authoring::{
-    AddModule, AuthoringError, Cardinality, CheckOptions, CompositionRecipePath, Module,
-    PackageInput, PackageSource, ProjectAuthoring, ProjectFile, ProjectPath, ResolutionOptions,
-    ResolvedProject, run_project,
+    AddModule, AuthoringError, Cardinality, CheckOptions, CompositionRecipePath, CompositionRunner,
+    Module, PackageInput, PackageSource, ProjectAuthoring, ProjectFile, ProjectPath,
+    ResolutionOptions, ResolvedProject, run_project,
 };
 use lenso_bun_adapter::{BunAdapter, BunAdapterConfig, BunCapabilityCodec, BunWire};
 use lenso_kernel::{ExecutionAdapterCatalog, RuntimeFailure};
@@ -85,6 +85,10 @@ pub(crate) enum ComposeCommand {
     Check(ComposeCheckArgs),
     /// Resolve one or every variant to its declared canonical Plan output.
     Resolve(ComposeResolveArgs),
+    /// Resolve and run one variant through its product-owned Runner.
+    Run(ComposeRunArgs),
+    /// Watch, resolve, and restart one variant through its product-owned Runner.
+    Dev(ComposeDevArgs),
 }
 
 #[derive(Debug, Args, Clone)]
@@ -122,6 +126,36 @@ pub(crate) struct ComposeResolveArgs {
     output: Option<PathBuf>,
     #[arg(long = "execution-class")]
     execution_classes: Vec<String>,
+}
+
+#[derive(Debug, Args, Clone)]
+pub(crate) struct ComposeRunArgs {
+    /// Reusable Composition recipe document.
+    #[arg(long, default_value = "composition/recipes.json")]
+    recipe: PathBuf,
+    /// Named variant to resolve and run.
+    #[arg(long)]
+    variant: String,
+    #[arg(long = "execution-class")]
+    execution_classes: Vec<String>,
+    /// Additional arguments forwarded to the product Runner after `--`.
+    #[arg(last = true)]
+    runner_args: Vec<String>,
+}
+
+#[derive(Debug, Args, Clone)]
+pub(crate) struct ComposeDevArgs {
+    /// Reusable Composition recipe document.
+    #[arg(long, default_value = "composition/recipes.json")]
+    recipe: PathBuf,
+    /// Named variant to watch and run.
+    #[arg(long)]
+    variant: String,
+    #[arg(long = "execution-class")]
+    execution_classes: Vec<String>,
+    /// Additional arguments forwarded to each product Runner after `--`.
+    #[arg(last = true)]
+    runner_args: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -282,11 +316,13 @@ pub(crate) fn resolve(args: &ResolveArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(crate) fn compose(command: ComposeCommand) -> anyhow::Result<()> {
+pub(crate) async fn compose(command: ComposeCommand) -> anyhow::Result<()> {
     match command {
         ComposeCommand::List(args) => compose_list(&args),
         ComposeCommand::Check(args) => compose_check(&args),
         ComposeCommand::Resolve(args) => compose_resolve(&args),
+        ComposeCommand::Run(args) => compose_run(&args).await,
+        ComposeCommand::Dev(args) => compose_dev(&args).await,
     }
 }
 
@@ -305,11 +341,12 @@ fn compose_check(args: &ComposeCheckArgs) -> anyhow::Result<()> {
     }
     let path = CompositionRecipePath::new(&args.recipe);
     let recipe = path.load()?;
+    let execution_classes = recipe_execution_classes(&recipe, &args.execution_classes);
     for name in selected_recipe_variants(&recipe, args.variant.as_deref())? {
         let materialized = path.materialize_without(&recipe, name, &args.excluded_fragments)?;
         let report = materialized
             .project()
-            .check(materialized.root(), &check_options(&args.execution_classes))?;
+            .check(materialized.root(), &check_options(execution_classes))?;
         println!(
             "checked {name}: {} Module Instances, {} bindings, {} contracts",
             report.modules, report.bindings, report.contracts
@@ -324,10 +361,11 @@ fn compose_resolve(args: &ComposeResolveArgs) -> anyhow::Result<()> {
     }
     let path = CompositionRecipePath::new(&args.recipe);
     let recipe = path.load()?;
+    let execution_classes = recipe_execution_classes(&recipe, &args.execution_classes);
     for name in selected_recipe_variants(&recipe, args.variant.as_deref())? {
         let materialized = path.materialize(&recipe, name)?;
         let mut options =
-            ResolutionOptions::default().with_check_options(check_options(&args.execution_classes));
+            ResolutionOptions::default().with_check_options(check_options(execution_classes));
         if let Some(profile) = materialized.profile() {
             options = options.with_profile(profile);
         }
@@ -349,6 +387,198 @@ fn compose_resolve(args: &ComposeResolveArgs) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+fn recipe_execution_classes<'a>(
+    recipe: &'a lenso_authoring::CompositionRecipe,
+    requested: &'a [String],
+) -> &'a [String] {
+    if requested.is_empty() {
+        recipe
+            .runner()
+            .map_or(requested, CompositionRunner::execution_classes)
+    } else {
+        requested
+    }
+}
+
+async fn compose_run(args: &ComposeRunArgs) -> anyhow::Result<()> {
+    let execution =
+        resolve_variant_for_execution(&args.recipe, &args.variant, &args.execution_classes)?;
+    println!("running {} ({})", execution.variant, execution.fingerprint);
+    let status = tokio::process::Command::new(execution.runner.program())
+        .args(execution.runner.args())
+        .args(&args.runner_args)
+        .current_dir(&execution.root)
+        .env("LENSO_RESOLVED_PLAN", &execution.plan)
+        .env("LENSO_COMPOSITION_VARIANT", &execution.variant)
+        .status()
+        .await
+        .with_context(|| {
+            format!(
+                "start product Runner `{}` for Composition variant `{}`",
+                execution.runner.program(),
+                execution.variant
+            )
+        })?;
+    if !status.success() {
+        anyhow::bail!(
+            "product Runner for Composition variant `{}` exited with {status}",
+            execution.variant
+        );
+    }
+    Ok(())
+}
+
+async fn compose_dev(args: &ComposeDevArgs) -> anyhow::Result<()> {
+    let path = CompositionRecipePath::new(&args.recipe);
+    let recipe = path.load()?;
+    let root = path.root(&recipe)?;
+    if recipe.runner().is_none() {
+        anyhow::bail!(
+            "Composition recipe {} defines no product Runner",
+            args.recipe.display()
+        );
+    }
+    println!(
+        "watching Composition variant `{}` at {}",
+        args.variant,
+        root.display()
+    );
+    loop {
+        let fingerprint = project_fingerprint(&root)?;
+        let execution = match resolve_variant_for_execution(
+            &args.recipe,
+            &args.variant,
+            &args.execution_classes,
+        ) {
+            Ok(execution) => execution,
+            Err(error) => {
+                eprintln!("Composition variant resolution failed: {error:#}");
+                if wait_for_project_change(&root, fingerprint).await? == DevDecision::Stop {
+                    return Ok(());
+                }
+                continue;
+            }
+        };
+        println!("running {} ({})", execution.variant, execution.fingerprint);
+        match run_product_runner_until_change(&execution, &args.runner_args, fingerprint).await? {
+            DevDecision::Restart => {
+                println!("source changed; resolving a fresh App Plan");
+            }
+            DevDecision::AwaitChange => {
+                eprintln!("product Runner stopped; waiting for a source change");
+                if wait_for_project_change(&root, fingerprint).await? == DevDecision::Stop {
+                    return Ok(());
+                }
+            }
+            DevDecision::Stop => return Ok(()),
+        }
+    }
+}
+
+async fn run_product_runner_until_change(
+    execution: &ResolvedVariantExecution,
+    runner_args: &[String],
+    fingerprint: [u8; 32],
+) -> anyhow::Result<DevDecision> {
+    let mut command = tokio::process::Command::new(execution.runner.program());
+    command
+        .args(execution.runner.args())
+        .args(runner_args)
+        .current_dir(&execution.root)
+        .env("LENSO_RESOLVED_PLAN", &execution.plan)
+        .env("LENSO_COMPOSITION_VARIANT", &execution.variant)
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.as_std_mut().process_group(0);
+    }
+    let mut child = command.spawn().with_context(|| {
+        format!(
+            "start product Runner `{}` for Composition variant `{}`",
+            execution.runner.program(),
+            execution.variant
+        )
+    })?;
+    let mut interval = tokio::time::interval(Duration::from_millis(350));
+    loop {
+        tokio::select! {
+            status = child.wait() => {
+                let status = status.context("wait for product Runner")?;
+                if !status.success() {
+                    eprintln!("product Runner exited with {status}");
+                }
+                return Ok(DevDecision::AwaitChange);
+            }
+            signal = tokio::signal::ctrl_c() => {
+                signal.context("wait for Ctrl-C")?;
+                stop_process_group_child(&mut child).await;
+                return Ok(DevDecision::Stop);
+            }
+            _ = interval.tick() => {
+                match project_fingerprint(&execution.root) {
+                    Ok(next) if next != fingerprint => {
+                        stop_process_group_child(&mut child).await;
+                        return Ok(DevDecision::Restart);
+                    }
+                    Ok(_) => {}
+                    Err(error) => eprintln!("could not inspect App sources: {error:#}"),
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ResolvedVariantExecution {
+    fingerprint: String,
+    plan: PathBuf,
+    root: PathBuf,
+    runner: CompositionRunner,
+    variant: String,
+}
+
+fn resolve_variant_for_execution(
+    recipe_path: &Path,
+    variant: &str,
+    execution_classes: &[String],
+) -> anyhow::Result<ResolvedVariantExecution> {
+    let path = CompositionRecipePath::new(recipe_path);
+    let recipe = path.load()?;
+    let runner = recipe.runner().cloned().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Composition recipe {} defines no product Runner",
+            recipe_path.display()
+        )
+    })?;
+    let materialized = path.materialize(&recipe, variant)?;
+    let execution_classes = recipe_execution_classes(&recipe, execution_classes);
+    let mut options =
+        ResolutionOptions::default().with_check_options(check_options(execution_classes));
+    if let Some(profile) = materialized.profile() {
+        options = options.with_profile(profile);
+    }
+    let resolved = materialized
+        .project()
+        .resolve(materialized.root(), &options)?;
+    let plan = materialized
+        .root()
+        .join(".lenso/compose")
+        .join(variant)
+        .join("resolved-plan.json");
+    if let Some(parent) = plan.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&plan, resolved.canonical_bytes())?;
+    Ok(ResolvedVariantExecution {
+        fingerprint: resolved.fingerprint().clone(),
+        plan,
+        root: materialized.root().to_owned(),
+        runner,
+        variant: variant.to_owned(),
+    })
 }
 
 fn selected_recipe_variants<'a>(
@@ -942,13 +1172,13 @@ async fn run_native_until_change(
             }
             signal = tokio::signal::ctrl_c() => {
                 signal.context("wait for Ctrl-C")?;
-                stop_native_child(&mut child).await;
+                stop_process_group_child(&mut child).await;
                 return Ok(DevDecision::Stop);
             }
             _ = interval.tick() => {
                 match project_fingerprint(root) {
                     Ok(next) if next != fingerprint => {
-                        stop_native_child(&mut child).await;
+                        stop_process_group_child(&mut child).await;
                         return Ok(DevDecision::Restart);
                     }
                     Ok(_) => {}
@@ -959,7 +1189,7 @@ async fn run_native_until_change(
     }
 }
 
-async fn stop_native_child(child: &mut tokio::process::Child) {
+async fn stop_process_group_child(child: &mut tokio::process::Child) {
     #[cfg(unix)]
     if let Some(id) = child.id() {
         use nix::{sys::signal::Signal, unistd::Pid};
@@ -1319,7 +1549,7 @@ async fn wait_for_project_change(
                 match project_fingerprint(root) {
                     Ok(next) if next != fingerprint => return Ok(DevDecision::Restart),
                     Ok(_) => {}
-                    Err(error) => eprintln!("could not inspect Bun Module sources: {error:#}"),
+                    Err(error) => eprintln!("could not inspect project sources: {error:#}"),
                 }
             }
         }
