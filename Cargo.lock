@@ -1802,7 +1802,7 @@ dependencies = [
 
 [[package]]
 name = "lenso-authoring"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "futures",
  "lenso-app-plan",
@@ -1836,7 +1836,7 @@ dependencies = [
 
 [[package]]
 name = "lenso-cli"
-version = "0.2.32"
+version = "0.2.33"
 dependencies = [
  "anyhow",
  "axum",
