@@ -360,7 +360,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {{
         ]
     });
     let readme = format!(
-        "# {module_id}\n\nStandalone native Rust Module for `{capability_id}`. Business code uses the stable `lenso` facade; Descriptor lowering, endpoints, factory construction, and link-time registration are generated.\n\n```sh\nlenso dev\nlenso verify\n```\n\nThe development Runner discovers this package's generated linked factory; production Apps still own their Runner assembly. Advanced diagnostics remain available through `lenso module check`.\n"
+        "# {module_id}\n\nStandalone native Rust Module for `{capability_id}`. Business code uses the stable `lenso` facade; Descriptor lowering, endpoints, factory construction, and link-time registration are generated.\n\n```sh\nlenso check\nlenso dev\nlenso verify\n```\n\nThe development Runner discovers this package's generated linked factory; production Apps still own their Runner assembly.\n"
     );
 
     let mut files = PendingWrites::new();
@@ -545,7 +545,7 @@ fn create_bun_module(options: &ModuleCreateOptions) -> Result<()> {
     } else {
         println!("- dependencies installed and generated types checked");
     }
-    println!("- cd {} && lenso module dev", target.display());
+    println!("- cd {} && lenso dev", target.display());
     Ok(())
 }
 
@@ -643,9 +643,9 @@ fn bun_scaffold_files(
         "packageManager": "bun@1.2.21",
         "workspaces": ["modules/*"],
         "scripts": {
-            "check": "lenso check --project lenso.json --execution-class lenso.bun-process@1",
-            "dev": "lenso module dev",
-            "resolve": "lenso resolve --project lenso.json --execution-class lenso.bun-process@1",
+            "check": "lenso check",
+            "dev": "lenso dev",
+            "verify": "lenso verify",
             "test": "bun test",
             "typecheck": "tsc -p tsconfig.json"
         },
@@ -720,7 +720,7 @@ describe("Module Provider", () => {
             { "id": "package", "purpose": "package", "command": "bun run typecheck && bun test" },
             { "id": "success", "purpose": "success", "command": "bun test --test-name-pattern 'returns success'" },
             { "id": "domain-error", "purpose": "domain_error", "command": "bun test --test-name-pattern 'returns a Domain Error'" },
-            { "id": "runtime-failure", "purpose": "runtime_failure", "command": "lenso check --project lenso.json --execution-class lenso.native-rust@1", "expectFailure": true },
+            { "id": "runtime-failure", "purpose": "runtime_failure", "command": "lenso check --project .lenso/missing-project.json", "expectFailure": true },
             { "id": "lifecycle-cleanup", "purpose": "lifecycle_cleanup", "command": "bun test --test-name-pattern 'does not retain mutable state'" }
         ]
     });
@@ -732,9 +732,9 @@ Bun Module scaffold for `{capability_id}`.
 ```sh
 bun install
 bun run typecheck
-lenso check --project lenso.json --execution-class lenso.bun-process@1
-lenso module dev
-lenso module verify
+lenso check
+lenso dev
+lenso verify
 ```
 
 Implement the typed Provider in `{module_root}/src/index.ts`. The checked-in
@@ -928,7 +928,7 @@ fn module_card(module_id: &str, capability_id: &str, recipe: ModuleRecipe) -> St
         ),
     };
     format!(
-        "# Module card: {module_id}\n\n- Shape: {shape}\n- Deletion boundary: removing `{module_id}` removes its behavior, state meaning, policy, tasks, and operational complexity.\n- Owned facts: TODO — name the business facts for which this Module has final authorization.\n- Provided Capabilities: `{capability_id}`\n- Required Capabilities: none in the starter; declare every dependency explicitly before use.\n- Configuration: opaque, non-secret values only; use secret references for credentials.\n- External resources: {owned_resources}\n- Lifecycle: {lifecycle}\n- First observable behavior: {first_behavior}\n\n## Verification\n\nRun `lenso module check`, `lenso module verify`, and then remove this Instance from a test Composition and resolve the remainder. Replace every TODO before treating the card as design evidence.\n"
+        "# Module card: {module_id}\n\n- Shape: {shape}\n- Deletion boundary: removing `{module_id}` removes its behavior, state meaning, policy, tasks, and operational complexity.\n- Owned facts: TODO — name the business facts for which this Module has final authorization.\n- Provided Capabilities: `{capability_id}`\n- Required Capabilities: none in the starter; declare every dependency explicitly before use.\n- Configuration: opaque, non-secret values only; use secret references for credentials.\n- External resources: {owned_resources}\n- Lifecycle: {lifecycle}\n- First observable behavior: {first_behavior}\n\n## Verification\n\nRun `lenso check`, `lenso verify`, and then remove this Instance from a test App Definition and resolve the remainder. Replace every TODO before treating the card as design evidence.\n"
     )
 }
 
