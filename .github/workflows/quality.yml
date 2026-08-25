@@ -32,6 +32,17 @@ jobs:
       - run: npm run check:npm-shim
       - run: cargo fmt --all -- --check
       - run: cargo test --locked --workspace
+      - name: Verify release dependency convergence
+        shell: bash
+        run: |
+          versions=$(cargo metadata --locked --format-version 1 \
+            | jq -r '.packages[] | select(.name == "lenso-contract-codegen") | .version' \
+            | sort -u)
+          if [[ $(wc -l <<< "$versions" | tr -d ' ') != "1" ]]; then
+            echo "lenso-contract-codegen must resolve to one registry-compatible version; found:"
+            echo "$versions"
+            exit 1
+          fi
       - name: Run clean-project Bun integration
         run: cargo test --locked -p lenso-authoring bun_clean_project_add_resolve_reload_and_run_use_the_same_plan -- --ignored --test-threads=1
       - run: cargo package --locked -p lenso-authoring --allow-dirty

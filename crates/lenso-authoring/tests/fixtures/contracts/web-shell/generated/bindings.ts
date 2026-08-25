@@ -23,8 +23,8 @@ export interface ReadAssetRequest {
 }
 
 export interface ReadAssetResponse {
-  content_type: string;
   content: string;
+  content_type: string;
 }
 
 export interface RenderRouteRequest {
@@ -32,16 +32,16 @@ export interface RenderRouteRequest {
 }
 
 export interface RenderRouteResponse {
-  contribution_id: string;
-  body: string;
-  navigation: Array<RenderRouteResponseNavigationItem>;
   asset_paths: Array<string>;
+  body: string;
+  contribution_id: string;
+  navigation: Array<RenderRouteResponseNavigationItem>;
   requirements: Array<RenderRouteResponseRequirementsItem>;
 }
 
 export interface RenderRouteResponseNavigationItem {
-  route: string;
   label: string;
+  route: string;
 }
 
 export interface RenderRouteResponseRequirementsItem {

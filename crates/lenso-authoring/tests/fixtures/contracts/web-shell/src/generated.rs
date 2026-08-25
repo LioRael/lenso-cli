@@ -3,12 +3,21 @@ use std::{fmt, rc::Rc};
 use futures::future::LocalBoxFuture;
 use lenso_kernel::{InvocationContext, ModuleDependencies, NativeRequestEndpoint, NativeRequestFuture, NativeRequestHandle, RequestCapability, RuntimeFailure};
 
+use lenso_module_authoring::CapabilityClient;
 pub const CAPABILITY_ID: &str = "lenso.web.shell@1";
 pub const DESCRIPTOR_VERSION: &str = "1.0.0";
 pub const PORTABLE: bool = true;
 pub const CROSS_LANE_TRANSFER: bool = false;
 pub const SHELL_CAPABILITY_ID: &str = CAPABILITY_ID;
 pub const SHELL_DESCRIPTOR_VERSION: &str = DESCRIPTOR_VERSION;
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __lenso_provided_shell { () => { "{\"capability_id\":\"lenso.web.shell@1\",\"descriptor_version\":\"1.0.0\",\"operations\":[\"read_asset\",\"render_route\"],\"operation_kinds\":{},\"default_admission\":{\"queue_capacity\":0,\"max_concurrency\":1},\"operation_admissions\":{},\"event_admission\":null,\"cross_lane_transfer\":false}" }; }
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __lenso_required_shell_client { () => { "{\"capability_id\":\"lenso.web.shell@1\",\"descriptor_version\":\"1.0.0\",\"cardinality\":\"one\"}" }; }
 
 pub const READ_ASSET_OPERATION: &str = "read_asset";
 pub const RENDER_ROUTE_OPERATION: &str = "render_route";
@@ -25,12 +34,12 @@ pub struct ReadAssetRequest {
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ReadAssetResponse {
-    #[serde(rename = "content_type")]
-    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
-    pub content_type: String,
     #[serde(rename = "content")]
     #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
     pub content: String,
+    #[serde(rename = "content_type")]
+    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
+    pub content_type: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -48,18 +57,18 @@ pub struct RenderRouteRequest {
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RenderRouteResponse {
-    #[serde(rename = "contribution_id")]
-    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
-    pub contribution_id: String,
-    #[serde(rename = "body")]
-    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
-    pub body: String,
-    #[serde(rename = "navigation")]
-    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
-    pub navigation: Vec<RenderRouteResponseNavigationItem>,
     #[serde(rename = "asset_paths")]
     #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
     pub asset_paths: Vec<String>,
+    #[serde(rename = "body")]
+    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
+    pub body: String,
+    #[serde(rename = "contribution_id")]
+    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
+    pub contribution_id: String,
+    #[serde(rename = "navigation")]
+    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
+    pub navigation: Vec<RenderRouteResponseNavigationItem>,
     #[serde(rename = "requirements")]
     #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
     pub requirements: Vec<RenderRouteResponseRequirementsItem>,
@@ -67,12 +76,12 @@ pub struct RenderRouteResponse {
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RenderRouteResponseNavigationItem {
-    #[serde(rename = "route")]
-    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
-    pub route: String,
     #[serde(rename = "label")]
     #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
     pub label: String,
+    #[serde(rename = "route")]
+    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
+    pub route: String,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -248,9 +257,85 @@ pub fn decode_render_route_response(wire: &str) -> Result<RenderRouteResponse, s
 pub fn encode_render_route_error(value: &RenderRouteError) -> Result<String, serde_json::Error> { encode_portable_json(value) }
 pub fn decode_render_route_error(wire: &str) -> Result<RenderRouteError, serde_json::Error> { decode_portable_json(wire) }
 
+#[doc(hidden)]
+pub trait __LensoIntoShellReadAssetResult {
+    fn __lenso_into_result(self) -> Result<Result<ReadAssetResponse, ReadAssetError>, RuntimeFailure>;
+}
+impl __LensoIntoShellReadAssetResult for Result<ReadAssetResponse, ReadAssetError> {
+    fn __lenso_into_result(self) -> Result<Result<ReadAssetResponse, ReadAssetError>, RuntimeFailure> { Ok(self) }
+}
+impl __LensoIntoShellReadAssetResult for Result<ReadAssetResponse, lenso_module_authoring::ModuleError<ReadAssetError, RuntimeFailure>> {
+    fn __lenso_into_result(self) -> Result<Result<ReadAssetResponse, ReadAssetError>, RuntimeFailure> {
+        match self {
+            Ok(value) => Ok(Ok(value)),
+            Err(lenso_module_authoring::ModuleError::Domain(error)) => Ok(Err(error)),
+            Err(lenso_module_authoring::ModuleError::Runtime(error)) => Err(error),
+        }
+    }
+}
+impl __LensoIntoShellReadAssetResult for Result<ReadAssetResponse, ShellReadAssetInvocationError> {
+    fn __lenso_into_result(self) -> Result<Result<ReadAssetResponse, ReadAssetError>, RuntimeFailure> {
+        match self {
+            Ok(value) => Ok(Ok(value)),
+            Err(ShellReadAssetInvocationError::Domain(error)) => Ok(Err(error)),
+            Err(ShellReadAssetInvocationError::Runtime(error)) => Err(error),
+        }
+    }
+}
+
+#[doc(hidden)]
+pub trait __LensoIntoShellRenderRouteResult {
+    fn __lenso_into_result(self) -> Result<Result<RenderRouteResponse, RenderRouteError>, RuntimeFailure>;
+}
+impl __LensoIntoShellRenderRouteResult for Result<RenderRouteResponse, RenderRouteError> {
+    fn __lenso_into_result(self) -> Result<Result<RenderRouteResponse, RenderRouteError>, RuntimeFailure> { Ok(self) }
+}
+impl __LensoIntoShellRenderRouteResult for Result<RenderRouteResponse, lenso_module_authoring::ModuleError<RenderRouteError, RuntimeFailure>> {
+    fn __lenso_into_result(self) -> Result<Result<RenderRouteResponse, RenderRouteError>, RuntimeFailure> {
+        match self {
+            Ok(value) => Ok(Ok(value)),
+            Err(lenso_module_authoring::ModuleError::Domain(error)) => Ok(Err(error)),
+            Err(lenso_module_authoring::ModuleError::Runtime(error)) => Err(error),
+        }
+    }
+}
+impl __LensoIntoShellRenderRouteResult for Result<RenderRouteResponse, ShellRenderRouteInvocationError> {
+    fn __lenso_into_result(self) -> Result<Result<RenderRouteResponse, RenderRouteError>, RuntimeFailure> {
+        match self {
+            Ok(value) => Ok(Ok(value)),
+            Err(ShellRenderRouteInvocationError::Domain(error)) => Ok(Err(error)),
+            Err(ShellRenderRouteInvocationError::Runtime(error)) => Err(error),
+        }
+    }
+}
+
 pub trait ShellProvider: fmt::Debug + 'static {
     fn read_asset(&self, context: InvocationContext, request: ReadAssetRequest) -> NativeRequestFuture<ShellReadAsset>;
     fn render_route(&self, context: InvocationContext, request: RenderRouteRequest) -> NativeRequestFuture<ShellRenderRoute>;
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __lenso_native_lower_shell {
+    ($module:ty, $support:path) => {
+        use $support as __LensoNativeSupportShell;
+        impl $crate::ShellProvider for $module {
+        fn read_asset(&self, context: __LensoNativeSupportShell::InvocationContext, request: $crate::ReadAssetRequest) -> __LensoNativeSupportShell::NativeRequestFuture<$crate::ShellReadAsset> {
+            let module = self.clone();
+            ::std::boxed::Box::pin(async move {
+                let result = <$module>::read_asset(&module, context, request).await;
+                $crate::__LensoIntoShellReadAssetResult::__lenso_into_result(result)
+            })
+        }
+        fn render_route(&self, context: __LensoNativeSupportShell::InvocationContext, request: $crate::RenderRouteRequest) -> __LensoNativeSupportShell::NativeRequestFuture<$crate::ShellRenderRoute> {
+            let module = self.clone();
+            ::std::boxed::Box::pin(async move {
+                let result = <$module>::render_route(&module, context, request).await;
+                $crate::__LensoIntoShellRenderRouteResult::__lenso_into_result(result)
+            })
+        }
+        }
+    };
 }
 
 #[derive(Debug)]
@@ -307,6 +392,36 @@ impl<P: ShellProvider> NativeRequestEndpoint for ShellEndpoint<P> {
     }
 }
 
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __lenso_native_endpoints_shell {
+    ($provider:expr, $support:path) => {{
+        use $support as __LensoNativeSupport;
+        let endpoint = ::std::rc::Rc::new($crate::ShellEndpoint::new($provider));
+        (
+            vec![endpoint.clone() as ::std::rc::Rc<dyn __LensoNativeSupport::NativeRequestEndpoint>],
+            vec![],
+            vec![],
+        )
+    }};
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __lenso_native_provide_shell {
+    ($provider:expr, $lifecycle:expr, $support:path) => {{
+        use $support as __LensoNativeSupport;
+        let (request_endpoints, stream_endpoints, event_endpoints) =
+            $crate::__lenso_native_endpoints_shell!($provider, $support);
+        __LensoNativeSupport::NativeModuleInstance::with_all_endpoints(
+            request_endpoints,
+            stream_endpoints,
+            event_endpoints,
+            $lifecycle,
+        )
+    }};
+}
+
 #[derive(Debug)]
 pub struct ShellClient {
     read_asset: NativeRequestHandle<ShellReadAsset>,
@@ -314,10 +429,7 @@ pub struct ShellClient {
 }
 impl ShellClient {
     pub fn from_dependencies(dependencies: &ModuleDependencies) -> Result<Self, RuntimeFailure> {
-        Ok(Self {
-            read_asset: dependencies.one::<ShellReadAsset>()?,
-            render_route: dependencies.one::<ShellRenderRoute>()?,
-        })
+        <Self as CapabilityClient>::from_dependencies(dependencies)
     }
 
     pub async fn read_asset(&self, request: ReadAssetRequest) -> Result<ReadAssetResponse, ShellReadAssetInvocationError> {
@@ -342,6 +454,27 @@ impl ShellClient {
         self.render_route.invoke_with_context(RENDER_ROUTE_OPERATION, context, request).await
             .map_err(ShellRenderRouteInvocationError::Runtime)?
             .map_err(ShellRenderRouteInvocationError::Domain)
+    }
+}
+
+impl CapabilityClient for ShellClient {
+    type Dependencies = ModuleDependencies;
+    type Error = RuntimeFailure;
+
+    const CAPABILITY_ID: &'static str = CAPABILITY_ID;
+    const DESCRIPTOR_VERSION: &'static str = DESCRIPTOR_VERSION;
+
+    fn from_dependencies(dependencies: &ModuleDependencies) -> Result<Self, RuntimeFailure> {
+        Ok(Self {
+            read_asset: dependencies.one::<ShellReadAsset>()?,
+            render_route: dependencies.one::<ShellRenderRoute>()?,
+        })
+    }
+
+    fn already_connected() -> RuntimeFailure {
+        RuntimeFailure::ModuleFailure {
+            detail: format!("Capability Port {CAPABILITY_ID} was connected more than once"),
+        }
     }
 }
 

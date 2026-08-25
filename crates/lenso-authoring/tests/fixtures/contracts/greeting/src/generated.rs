@@ -3,12 +3,21 @@ use std::{fmt, rc::Rc};
 use futures::future::LocalBoxFuture;
 use lenso_kernel::{InvocationContext, ModuleDependencies, NativeRequestEndpoint, NativeRequestFuture, NativeRequestHandle, RequestCapability, RuntimeFailure};
 
+use lenso_module_authoring::CapabilityClient;
 pub const CAPABILITY_ID: &str = "example.greeting@1";
 pub const DESCRIPTOR_VERSION: &str = "1.0.0";
 pub const PORTABLE: bool = true;
 pub const CROSS_LANE_TRANSFER: bool = true;
 pub const GREETING_CAPABILITY_ID: &str = CAPABILITY_ID;
 pub const GREETING_DESCRIPTOR_VERSION: &str = DESCRIPTOR_VERSION;
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __lenso_provided_greeting { () => { "{\"capability_id\":\"example.greeting@1\",\"descriptor_version\":\"1.0.0\",\"operations\":[\"greet\"],\"operation_kinds\":{},\"default_admission\":{\"queue_capacity\":0,\"max_concurrency\":1},\"operation_admissions\":{},\"event_admission\":null,\"cross_lane_transfer\":true}" }; }
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __lenso_required_greeting_client { () => { "{\"capability_id\":\"example.greeting@1\",\"descriptor_version\":\"1.0.0\",\"cardinality\":\"one\"}" }; }
 
 pub const GREET_OPERATION: &str = "greet";
 
@@ -112,8 +121,51 @@ pub fn decode_greet_response(wire: &str) -> Result<GreetResponse, serde_json::Er
 pub fn encode_greet_error(value: &GreetError) -> Result<String, serde_json::Error> { encode_portable_json(value) }
 pub fn decode_greet_error(wire: &str) -> Result<GreetError, serde_json::Error> { decode_portable_json(wire) }
 
+#[doc(hidden)]
+pub trait __LensoIntoGreetingGreetResult {
+    fn __lenso_into_result(self) -> Result<Result<GreetResponse, GreetError>, RuntimeFailure>;
+}
+impl __LensoIntoGreetingGreetResult for Result<GreetResponse, GreetError> {
+    fn __lenso_into_result(self) -> Result<Result<GreetResponse, GreetError>, RuntimeFailure> { Ok(self) }
+}
+impl __LensoIntoGreetingGreetResult for Result<GreetResponse, lenso_module_authoring::ModuleError<GreetError, RuntimeFailure>> {
+    fn __lenso_into_result(self) -> Result<Result<GreetResponse, GreetError>, RuntimeFailure> {
+        match self {
+            Ok(value) => Ok(Ok(value)),
+            Err(lenso_module_authoring::ModuleError::Domain(error)) => Ok(Err(error)),
+            Err(lenso_module_authoring::ModuleError::Runtime(error)) => Err(error),
+        }
+    }
+}
+impl __LensoIntoGreetingGreetResult for Result<GreetResponse, GreetingInvocationError> {
+    fn __lenso_into_result(self) -> Result<Result<GreetResponse, GreetError>, RuntimeFailure> {
+        match self {
+            Ok(value) => Ok(Ok(value)),
+            Err(GreetingInvocationError::Domain(error)) => Ok(Err(error)),
+            Err(GreetingInvocationError::Runtime(error)) => Err(error),
+        }
+    }
+}
+
 pub trait GreetingProvider: fmt::Debug + 'static {
     fn greet(&self, context: InvocationContext, request: GreetRequest) -> NativeRequestFuture<Greeting>;
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __lenso_native_lower_greeting {
+    ($module:ty, $support:path) => {
+        use $support as __LensoNativeSupportGreeting;
+        impl $crate::GreetingProvider for $module {
+        fn greet(&self, context: __LensoNativeSupportGreeting::InvocationContext, request: $crate::GreetRequest) -> __LensoNativeSupportGreeting::NativeRequestFuture<$crate::Greeting> {
+            let module = self.clone();
+            ::std::boxed::Box::pin(async move {
+                let result = <$module>::greet(&module, context, request).await;
+                $crate::__LensoIntoGreetingGreetResult::__lenso_into_result(result)
+            })
+        }
+        }
+    };
 }
 
 #[derive(Debug)]
@@ -156,6 +208,36 @@ impl<P: GreetingProvider> NativeRequestEndpoint for GreetingEndpoint<P> {
     }
 }
 
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __lenso_native_endpoints_greeting {
+    ($provider:expr, $support:path) => {{
+        use $support as __LensoNativeSupport;
+        let endpoint = ::std::rc::Rc::new($crate::GreetingEndpoint::new($provider));
+        (
+            vec![endpoint.clone() as ::std::rc::Rc<dyn __LensoNativeSupport::NativeRequestEndpoint>],
+            vec![],
+            vec![],
+        )
+    }};
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __lenso_native_provide_greeting {
+    ($provider:expr, $lifecycle:expr, $support:path) => {{
+        use $support as __LensoNativeSupport;
+        let (request_endpoints, stream_endpoints, event_endpoints) =
+            $crate::__lenso_native_endpoints_greeting!($provider, $support);
+        __LensoNativeSupport::NativeModuleInstance::with_all_endpoints(
+            request_endpoints,
+            stream_endpoints,
+            event_endpoints,
+            $lifecycle,
+        )
+    }};
+}
+
 #[derive(Debug)]
 pub struct GreetingClient {
     greet: NativeRequestHandle<Greeting>,
@@ -166,9 +248,7 @@ impl GreetingClient {
     }
 
     pub fn from_dependencies(dependencies: &ModuleDependencies) -> Result<Self, RuntimeFailure> {
-        Ok(Self {
-            greet: dependencies.one::<Greeting>()?,
-        })
+        <Self as CapabilityClient>::from_dependencies(dependencies)
     }
 
     pub async fn greet(&self, request: GreetRequest) -> Result<GreetResponse, GreetingInvocationError> {
@@ -181,6 +261,26 @@ impl GreetingClient {
         self.greet.invoke_with_context(GREET_OPERATION, context, request).await
             .map_err(GreetingInvocationError::Runtime)?
             .map_err(GreetingInvocationError::Domain)
+    }
+}
+
+impl CapabilityClient for GreetingClient {
+    type Dependencies = ModuleDependencies;
+    type Error = RuntimeFailure;
+
+    const CAPABILITY_ID: &'static str = CAPABILITY_ID;
+    const DESCRIPTOR_VERSION: &'static str = DESCRIPTOR_VERSION;
+
+    fn from_dependencies(dependencies: &ModuleDependencies) -> Result<Self, RuntimeFailure> {
+        Ok(Self {
+            greet: dependencies.one::<Greeting>()?,
+        })
+    }
+
+    fn already_connected() -> RuntimeFailure {
+        RuntimeFailure::ModuleFailure {
+            detail: format!("Capability Port {CAPABILITY_ID} was connected more than once"),
+        }
     }
 }
 
