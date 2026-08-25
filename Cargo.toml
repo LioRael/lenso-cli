@@ -10,9 +10,10 @@ rust-version = "1.94"
 categories = ["command-line-utilities", "development-tools"]
 keywords = ["cli", "authoring", "modules", "app-plan"]
 include = [
-    "src/**/*.rs",
-    "README.md",
-    "Cargo.toml",
+    "/src/**/*.rs",
+    "/docs/migration-0.4.md",
+    "/README.md",
+    "/Cargo.toml",
 ]
 
 [[bin]]

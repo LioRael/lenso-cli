@@ -30,6 +30,9 @@ lenso dev
 lenso verify
 ```
 
+Users upgrading from the legacy nested and Plan-oriented commands should read
+the [0.4 / 0.12 migration guide](docs/migration-0.4.md).
+
 The Rust starter uses the public `lenso` facade. Its business source contains
 `#[module]` and `#[provides(...)]`; Capability lowering, endpoints, the native
 factory, link-time registration, and the package-owned Module Descriptor are
