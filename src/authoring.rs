@@ -11,10 +11,10 @@ use anyhow::Context;
 use clap::{Args, Subcommand};
 use lenso_app_plan::{CapabilityEndpointPlan, ExecutionClassId, ResolvedAppPlan};
 use lenso_authoring::{
-    AddModule, AuthoringError, Cardinality, CargoAppDefinition, CheckOptions,
-    CompositionRecipePath, CompositionRunner, Module, PackageInput, PackageSource,
-    ProjectAuthoring, ProjectFile, ProjectPath, ResolutionOptions, ResolvedProject, run_project,
-    sha256_bytes,
+    AddModule, AppAddRequest, AppRemoveRequest, AuthoringError, Cardinality, CargoAppDefinition,
+    CargoModuleSource, CheckOptions, CompositionRecipePath, CompositionRunner, Module,
+    PackageInput, PackageSource, ProjectAuthoring, ProjectFile, ProjectPath, ResolutionOptions,
+    ResolvedProject, run_project, sha256_bytes,
 };
 use lenso_bun_adapter::{BunAdapter, BunAdapterConfig, BunCapabilityCodec, BunWire};
 use lenso_kernel::{ExecutionAdapterCatalog, RuntimeFailure};
@@ -94,10 +94,72 @@ pub(crate) enum ComposeCommand {
 
 #[derive(Debug, Subcommand, Clone)]
 pub(crate) enum AppCommand {
+    /// Install a Cargo Module and select one App-local Instance.
+    Add(Box<AppAddArgs>),
+    /// Remove one App-local Instance and optionally uninstall its Cargo package.
+    Remove(AppRemoveArgs),
     /// Check a source-derived App Definition and its package artifacts.
     Check(AppCheckArgs),
     /// Resolve a source-derived App Definition into an immutable Plan.
     Resolve(AppResolveArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+#[command(disable_version_flag = true)]
+pub(crate) struct AppAddArgs {
+    /// Cargo package that owns the Module Descriptor.
+    cargo_package: String,
+    /// App Definition document.
+    #[arg(long, default_value = "lenso.app.json")]
+    definition: PathBuf,
+    /// App-local Instance key. Defaults to the final segment of the runtime package id.
+    #[arg(long)]
+    key: Option<String>,
+    /// Descriptor entrypoint exposed by the package.
+    #[arg(long, default_value = "default")]
+    entrypoint: String,
+    /// Module configuration as a JSON value.
+    #[arg(long, default_value = "{}", value_parser = parse_json_value)]
+    configuration: Value,
+    /// Execution lane selected for this Instance.
+    #[arg(long)]
+    execution_lane: Option<String>,
+    /// crates.io version requirement.
+    #[arg(long, conflicts_with_all = ["git", "path"])]
+    version: Option<String>,
+    /// Git repository source.
+    #[arg(long, conflicts_with = "path")]
+    git: Option<String>,
+    /// Exact Git revision; requires --git.
+    #[arg(long, requires = "git", conflicts_with_all = ["branch", "tag"])]
+    rev: Option<String>,
+    /// Git branch; requires --git.
+    #[arg(long, requires = "git", conflicts_with_all = ["rev", "tag"])]
+    branch: Option<String>,
+    /// Git tag; requires --git.
+    #[arg(long, requires = "git", conflicts_with_all = ["rev", "branch"])]
+    tag: Option<String>,
+    /// Local Cargo package path.
+    #[arg(long, conflicts_with = "git")]
+    path: Option<PathBuf>,
+    /// Validate and print the change, then restore every touched file.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+pub(crate) struct AppRemoveArgs {
+    /// App-local Module Instance key.
+    key: String,
+    /// App Definition document.
+    #[arg(long, default_value = "lenso.app.json")]
+    definition: PathBuf,
+    /// Also remove the Cargo dependency when no other Instance uses it.
+    #[arg(long)]
+    uninstall: bool,
+    /// Validate and print the change, then restore every touched file.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -354,9 +416,63 @@ pub(crate) async fn compose(command: ComposeCommand) -> anyhow::Result<()> {
 
 pub(crate) fn app(command: AppCommand) -> anyhow::Result<()> {
     match command {
+        AppCommand::Add(args) => app_add(&args),
+        AppCommand::Remove(args) => app_remove(&args),
         AppCommand::Check(args) => app_check(&args),
         AppCommand::Resolve(args) => app_resolve(&args),
     }
+}
+
+fn app_add(args: &AppAddArgs) -> anyhow::Result<()> {
+    let result = lenso_authoring::add_app_module(
+        &args.definition,
+        &AppAddRequest {
+            cargo_package: args.cargo_package.clone(),
+            key: args.key.clone(),
+            entrypoint: args.entrypoint.clone(),
+            configuration: args.configuration.clone(),
+            execution_lane: args.execution_lane.clone(),
+            source: CargoModuleSource {
+                version: args.version.clone(),
+                git: args.git.clone(),
+                rev: args.rev.clone(),
+                branch: args.branch.clone(),
+                tag: args.tag.clone(),
+                path: args.path.clone(),
+            },
+            dry_run: args.dry_run,
+        },
+    )?;
+    print_app_edit("added", &result);
+    Ok(())
+}
+
+fn app_remove(args: &AppRemoveArgs) -> anyhow::Result<()> {
+    let result = lenso_authoring::remove_app_module(
+        &args.definition,
+        &AppRemoveRequest {
+            key: args.key.clone(),
+            uninstall: args.uninstall,
+            dry_run: args.dry_run,
+        },
+    )?;
+    print_app_edit("removed", &result);
+    Ok(())
+}
+
+fn print_app_edit(action: &str, result: &lenso_authoring::AppEditResult) {
+    let prefix = if result.dry_run { "would have " } else { "" };
+    println!(
+        "{prefix}{action} {} -> {} ({})",
+        result.key, result.runtime_package, result.cargo_package
+    );
+    for path in &result.changed_files {
+        println!("  {}", path.display());
+    }
+}
+
+fn parse_json_value(value: &str) -> Result<Value, String> {
+    serde_json::from_str(value).map_err(|error| error.to_string())
 }
 
 fn app_check(args: &AppCheckArgs) -> anyhow::Result<()> {

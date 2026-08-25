@@ -1,5 +1,6 @@
 //! Package-manager inspection, Plan resolution, and Runner orchestration for Lenso.
 
+mod app_edit;
 mod authoring_project;
 mod canonical;
 mod definition;
@@ -10,6 +11,7 @@ mod runner;
 mod validation;
 mod workflow;
 
+pub use app_edit::*;
 pub use authoring_project::*;
 pub use definition::*;
 pub use lenso_app_plan::authoring::*;
