@@ -1,5 +1,12 @@
 ## lenso-cli@0.2.31
 
+## 0.11.0
+
+### Minor Changes
+
+- aa33d99: Add transactional `lenso app add` and `lenso app remove` workflows for Cargo-backed Modules.
+- 44e757b: Remove the retired framework command surfaces and keep only App Plan and Module authoring.
+
 ## 0.10.0
 
 ### Minor Changes
