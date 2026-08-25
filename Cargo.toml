@@ -54,7 +54,7 @@ clap = { version = "4", features = ["derive"] }
 lenso-app-plan = "0.1.4"
 lenso-authoring = { path = "crates/lenso-authoring", version = "0.2.2" }
 lenso-bun-adapter = "0.1.1"
-lenso-contract-codegen-next = { package = "lenso-contract-codegen", git = "https://github.com/LioRael/lenso-protocols", rev = "16c4aff52c539e16f3024f6414de56e6c181b030" }
+lenso-contract-codegen-next = { package = "lenso-contract-codegen", version = "0.6.1", git = "https://github.com/LioRael/lenso-protocols", rev = "f6fda58d863d165610a65e15a190fa071828e831" }
 lenso-kernel = "0.1.4"
 lenso-runner = "0.1.1"
 serde = { version = "1.0", features = ["derive"] }
