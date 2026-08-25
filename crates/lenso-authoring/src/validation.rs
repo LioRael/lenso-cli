@@ -9,6 +9,7 @@ const SUPPORTED_SCHEMA_KEYWORDS: &[&str] = &[
     "const",
     "enum",
     "items",
+    "minimum",
     "properties",
     "required",
     "type",
@@ -91,9 +92,33 @@ fn validate_json_schema(value: &Value, schema: &Value, path: &str) -> Result<(),
     }
     validate_schema_type(value, schema, path)?;
     validate_schema_value_constraints(value, schema, path)?;
+    validate_schema_numeric_constraints(value, schema, path)?;
     validate_schema_required(value, schema, path)?;
     validate_schema_properties(value, schema, path)?;
     validate_schema_items(value, schema, path)
+}
+
+fn validate_schema_numeric_constraints(
+    value: &Value,
+    schema: &Map<String, Value>,
+    path: &str,
+) -> Result<(), AuthoringError> {
+    let Some(minimum) = schema.get("minimum") else {
+        return Ok(());
+    };
+    let minimum = minimum
+        .as_f64()
+        .ok_or_else(|| invalid_configuration(path, "schema minimum must be a number"))?;
+    let Some(value) = value.as_f64() else {
+        return Ok(());
+    };
+    if value < minimum {
+        return Err(invalid_configuration(
+            path,
+            format!("number must be greater than or equal to {minimum}"),
+        ));
+    }
+    Ok(())
 }
 
 fn invalid_configuration(path: &str, detail: impl Into<String>) -> AuthoringError {
@@ -260,4 +285,35 @@ fn validate_schema_items(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::validate_json_schema;
+
+    #[test]
+    fn minimum_accepts_the_boundary_and_rejects_smaller_numbers() {
+        let schema = json!({ "type": "integer", "minimum": 1 });
+
+        assert!(validate_json_schema(&json!(1), &schema, "module.configuration.ttl").is_ok());
+        let error = validate_json_schema(&json!(0), &schema, "module.configuration.ttl")
+            .expect_err("a value below minimum must be rejected");
+
+        assert!(error.to_string().contains("greater than or equal to 1"));
+    }
+
+    #[test]
+    fn minimum_itself_must_be_numeric() {
+        let schema = json!({ "type": "integer", "minimum": "one" });
+        let error = validate_json_schema(&json!(1), &schema, "module.configuration.ttl")
+            .expect_err("a malformed minimum must be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("schema minimum must be a number")
+        );
+    }
 }
