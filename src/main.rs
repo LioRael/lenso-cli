@@ -1,5 +1,6 @@
 mod authoring;
 mod module;
+mod plugin;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
@@ -30,6 +31,11 @@ enum Command {
     App {
         #[command(subcommand)]
         command: authoring::AppCommand,
+    },
+    /// Build and verify immutable Plugin Release bundles.
+    Plugin {
+        #[command(subcommand)]
+        command: plugin::PluginCommand,
     },
 }
 
@@ -152,6 +158,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Check(args) => check_module(args)?,
         Command::Verify(args) => verify_module(args)?,
         Command::App { command } => authoring::app(command)?,
+        Command::Plugin { command } => plugin::plugin(command)?,
     }
 
     Ok(())
@@ -219,7 +226,7 @@ mod tests {
             .get_subcommands()
             .map(clap::Command::get_name)
             .collect::<Vec<_>>();
-        assert_eq!(names, ["new", "dev", "check", "verify", "app"]);
+        assert_eq!(names, ["new", "dev", "check", "verify", "app", "plugin"]);
 
         let app = command
             .get_subcommands()
@@ -230,5 +237,15 @@ mod tests {
             .map(clap::Command::get_name)
             .collect::<Vec<_>>();
         assert_eq!(app_names, ["add", "remove", "check", "resolve"]);
+
+        let plugin = command
+            .get_subcommands()
+            .find(|subcommand| subcommand.get_name() == "plugin")
+            .expect("plugin command");
+        let plugin_names = plugin
+            .get_subcommands()
+            .map(clap::Command::get_name)
+            .collect::<Vec<_>>();
+        assert_eq!(plugin_names, ["build", "verify"]);
     }
 }

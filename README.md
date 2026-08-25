@@ -110,6 +110,31 @@ same immutable Plan format consumed by the Kernel.
 `one` and `optional` ambiguities require an explicit App Definition decision;
 `many` providers are ordered deterministically.
 
+## Plugin Release bundles
+
+Plugin authors can turn already-built source artifacts into one immutable,
+self-verifying Release directory without hand-encoding WebAssembly Components
+or calculating digests:
+
+```sh
+cargo build --release --target wasm32-unknown-unknown
+
+lenso plugin build \
+  --manifest lenso-plugin.template.json \
+  --artifact agent-wasm=target/wasm32-unknown-unknown/release/agent_plugin.wasm \
+  --output dist/agent-plugin
+
+lenso plugin verify --bundle dist/agent-plugin
+```
+
+For a `wasm_component` Artifact, `plugin build` converts the Rust core Wasm
+module to a validated Component before recording its exact digest and size.
+QuickJS, process, native library, data, and product-metadata files use the same
+Bundle closure and verification rules. The command never executes publisher
+code, never overwrites an existing output, and does not grant permissions,
+admit a Release, or switch a running App Generation; those remain Host-owned
+operations.
+
 `dev` infers the execution class from the generated project. Native Rust
 scaffolds include a development Runner; production Runner composition remains
 App-owned. `verify` records behavior probes and a real removal-resolution
@@ -132,6 +157,8 @@ lenso app add
 lenso app remove
 lenso app check
 lenso app resolve
+lenso plugin build
+lenso plugin verify
 ```
 
 `app check` and `app resolve` remain explicit advanced commands for App owners
