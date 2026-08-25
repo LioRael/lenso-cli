@@ -11,9 +11,8 @@ use anyhow::Context;
 use clap::{Args, Subcommand};
 use lenso_app_plan::{CapabilityEndpointPlan, ExecutionClassId, ResolvedAppPlan};
 use lenso_authoring::{
-    AddModule, AppAddRequest, AppRemoveRequest, AuthoringError, Cardinality, CargoAppDefinition,
-    CargoModuleSource, CheckOptions, CompositionRecipePath, CompositionRunner, Module,
-    PackageInput, PackageSource, ProjectAuthoring, ProjectFile, ProjectPath, ResolutionOptions,
+    AppAddRequest, AppRemoveRequest, AuthoringError, Cardinality, CargoAppDefinition,
+    CargoModuleSource, CheckOptions, ProjectAuthoring, ProjectFile, ProjectPath, ResolutionOptions,
     ResolvedProject, run_project, sha256_bytes,
 };
 use lenso_bun_adapter::{BunAdapter, BunAdapterConfig, BunCapabilityCodec, BunWire};
@@ -22,75 +21,6 @@ use lenso_runner::TokioDriver;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-
-#[derive(Debug, Args, Clone)]
-#[command(disable_version_flag = true)]
-pub(crate) struct AddArgs {
-    #[arg(long, default_value = "lenso.json")]
-    project: PathBuf,
-    #[arg(long)]
-    key: String,
-    #[arg(long = "package")]
-    runtime_id: String,
-    #[arg(long = "package-name")]
-    package_name: Option<String>,
-    #[arg(long = "source", value_parser = ["cargo", "bun", "npm", "oci"])]
-    package_source: String,
-    #[arg(long)]
-    version: String,
-    #[arg(long)]
-    locked_revision: Option<String>,
-    #[arg(long)]
-    entrypoint: Option<String>,
-    #[arg(long)]
-    manifest: Option<String>,
-    #[arg(long)]
-    lockfile: Option<String>,
-}
-
-#[derive(Debug, Args, Clone)]
-pub(crate) struct CheckArgs {
-    #[arg(long, default_value = "lenso.json")]
-    project: PathBuf,
-    #[arg(long = "execution-class")]
-    execution_classes: Vec<String>,
-}
-
-#[derive(Debug, Args, Clone)]
-pub(crate) struct ResolveArgs {
-    #[arg(long, default_value = "lenso.json")]
-    project: PathBuf,
-    #[arg(long)]
-    profile: Option<String>,
-    #[arg(long = "execution-class")]
-    execution_classes: Vec<String>,
-    #[arg(long)]
-    output: Option<PathBuf>,
-}
-
-#[derive(Debug, Args, Clone)]
-pub(crate) struct RunArgs {
-    #[arg(long, default_value = ".lenso/resolved-plan.json")]
-    plan: PathBuf,
-    #[arg(long, default_value = ".")]
-    root: PathBuf,
-    #[arg(long, default_value = "bun")]
-    bun: String,
-}
-
-#[derive(Debug, Subcommand, Clone)]
-pub(crate) enum ComposeCommand {
-    /// List available variants.
-    List(ComposeListArgs),
-    /// Check one or every materialized variant.
-    Check(ComposeCheckArgs),
-    /// Resolve one or every variant to its declared canonical Plan output.
-    Resolve(ComposeResolveArgs),
-    /// Resolve and run one variant through its product-owned Runner.
-    Run(ComposeRunArgs),
-    /// Watch, resolve, and restart one variant through its product-owned Runner.
-    Dev(ComposeDevArgs),
-}
 
 #[derive(Debug, Subcommand, Clone)]
 pub(crate) enum AppCommand {
@@ -179,73 +109,6 @@ pub(crate) struct AppResolveArgs {
     output: PathBuf,
 }
 
-#[derive(Debug, Args, Clone)]
-pub(crate) struct ComposeListArgs {
-    /// Reusable Composition recipe document.
-    #[arg(long, default_value = "composition/recipes.json")]
-    recipe: PathBuf,
-}
-
-#[derive(Debug, Args, Clone)]
-pub(crate) struct ComposeCheckArgs {
-    /// Reusable Composition recipe document.
-    #[arg(long, default_value = "composition/recipes.json")]
-    recipe: PathBuf,
-    /// Check only one named variant.
-    #[arg(long)]
-    variant: Option<String>,
-    /// Remove one selected fragment before checking; requires --variant.
-    #[arg(long = "without")]
-    excluded_fragments: Vec<String>,
-    #[arg(long = "execution-class")]
-    execution_classes: Vec<String>,
-}
-
-#[derive(Debug, Args, Clone)]
-pub(crate) struct ComposeResolveArgs {
-    /// Reusable Composition recipe document.
-    #[arg(long, default_value = "composition/recipes.json")]
-    recipe: PathBuf,
-    /// Resolve only one named variant.
-    #[arg(long)]
-    variant: Option<String>,
-    /// Override the declared output; valid only with --variant.
-    #[arg(long)]
-    output: Option<PathBuf>,
-    #[arg(long = "execution-class")]
-    execution_classes: Vec<String>,
-}
-
-#[derive(Debug, Args, Clone)]
-pub(crate) struct ComposeRunArgs {
-    /// Reusable Composition recipe document.
-    #[arg(long, default_value = "composition/recipes.json")]
-    recipe: PathBuf,
-    /// Named variant to resolve and run.
-    #[arg(long)]
-    variant: String,
-    #[arg(long = "execution-class")]
-    execution_classes: Vec<String>,
-    /// Additional arguments forwarded to the product Runner after `--`.
-    #[arg(last = true)]
-    runner_args: Vec<String>,
-}
-
-#[derive(Debug, Args, Clone)]
-pub(crate) struct ComposeDevArgs {
-    /// Reusable Composition recipe document.
-    #[arg(long, default_value = "composition/recipes.json")]
-    recipe: PathBuf,
-    /// Named variant to watch and run.
-    #[arg(long)]
-    variant: String,
-    #[arg(long = "execution-class")]
-    execution_classes: Vec<String>,
-    /// Additional arguments forwarded to each product Runner after `--`.
-    #[arg(last = true)]
-    runner_args: Vec<String>,
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct ModuleCheckOptions {
     pub(crate) json: bool,
@@ -331,87 +194,6 @@ struct RemovalProof {
     remaining_modules: usize,
     status: &'static str,
     detail: String,
-}
-
-pub(crate) fn add(args: &AddArgs) -> anyhow::Result<()> {
-    let package_source = match args.package_source.as_str() {
-        "cargo" => PackageSource::Cargo,
-        "bun" => PackageSource::Bun,
-        "npm" => PackageSource::Npm,
-        "oci" => PackageSource::Oci,
-        source => anyhow::bail!("unknown package source {source}"),
-    };
-    let mut package = PackageInput::new(&args.runtime_id, package_source, args.version.clone());
-    if let Some(package_name) = &args.package_name {
-        package = package.with_package_name(package_name);
-    }
-    if let Some(locked_revision) = &args.locked_revision {
-        package = package.with_locked_revision(locked_revision);
-    }
-    if let Some(manifest) = &args.manifest {
-        package = package.with_manifest(manifest);
-    }
-    if let Some(lockfile) = &args.lockfile {
-        package = package.with_lockfile(lockfile);
-    }
-    let mut module = Module::new(&args.key, &args.runtime_id);
-    if let Some(entrypoint) = &args.entrypoint {
-        module = module.with_entrypoint(entrypoint);
-    }
-    let result = ProjectPath::new(&args.project).add(&AddModule::new(module, package))?;
-    for changed in result.changed_files() {
-        println!("updated {}", changed.display());
-    }
-    Ok(())
-}
-
-pub(crate) fn check(args: &CheckArgs) -> anyhow::Result<()> {
-    let project = ProjectPath::load(&args.project)?;
-    let root = args
-        .project
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
-    let options = check_options(&args.execution_classes);
-    let report = project.check(root, &options)?;
-    println!(
-        "checked {} Module Instances, {} bindings, {} contracts",
-        report.modules, report.bindings, report.contracts
-    );
-    Ok(())
-}
-
-pub(crate) fn resolve(args: &ResolveArgs) -> anyhow::Result<()> {
-    let project = ProjectPath::load(&args.project)?;
-    let root = args
-        .project
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
-    let mut options =
-        ResolutionOptions::default().with_check_options(check_options(&args.execution_classes));
-    if let Some(profile) = &args.profile {
-        options = options.with_profile(profile);
-    }
-    let resolved = project.resolve(root, &options)?;
-    let output = args
-        .output
-        .clone()
-        .unwrap_or_else(|| root.join(".lenso/resolved-plan.json"));
-    if let Some(parent) = output.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&output, resolved.canonical_bytes())?;
-    println!("resolved {} ({})", output.display(), resolved.fingerprint());
-    Ok(())
-}
-
-pub(crate) async fn compose(command: ComposeCommand) -> anyhow::Result<()> {
-    match command {
-        ComposeCommand::List(args) => compose_list(&args),
-        ComposeCommand::Check(args) => compose_check(&args),
-        ComposeCommand::Resolve(args) => compose_resolve(&args),
-        ComposeCommand::Run(args) => compose_run(&args).await,
-        ComposeCommand::Dev(args) => compose_dev(&args).await,
-    }
 }
 
 pub(crate) fn app(command: AppCommand) -> anyhow::Result<()> {
@@ -506,316 +288,6 @@ fn app_resolve(args: &AppResolveArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn compose_list(args: &ComposeListArgs) -> anyhow::Result<()> {
-    let path = CompositionRecipePath::new(&args.recipe);
-    let recipe = path.load()?;
-    for (name, variant) in recipe.variants() {
-        println!("{name}\t{}", variant.output());
-    }
-    Ok(())
-}
-
-fn compose_check(args: &ComposeCheckArgs) -> anyhow::Result<()> {
-    if !args.excluded_fragments.is_empty() && args.variant.is_none() {
-        anyhow::bail!("--without requires --variant");
-    }
-    let path = CompositionRecipePath::new(&args.recipe);
-    let recipe = path.load()?;
-    let execution_classes = recipe_execution_classes(&recipe, &args.execution_classes);
-    for name in selected_recipe_variants(&recipe, args.variant.as_deref())? {
-        let materialized = path.materialize_without(&recipe, name, &args.excluded_fragments)?;
-        let report = materialized
-            .project()
-            .check(materialized.root(), &check_options(execution_classes))?;
-        println!(
-            "checked {name}: {} Module Instances, {} bindings, {} contracts",
-            report.modules, report.bindings, report.contracts
-        );
-    }
-    Ok(())
-}
-
-fn compose_resolve(args: &ComposeResolveArgs) -> anyhow::Result<()> {
-    if args.output.is_some() && args.variant.is_none() {
-        anyhow::bail!("--output requires --variant");
-    }
-    let path = CompositionRecipePath::new(&args.recipe);
-    let recipe = path.load()?;
-    let execution_classes = recipe_execution_classes(&recipe, &args.execution_classes);
-    for name in selected_recipe_variants(&recipe, args.variant.as_deref())? {
-        let materialized = path.materialize(&recipe, name)?;
-        let mut options =
-            ResolutionOptions::default().with_check_options(check_options(execution_classes));
-        if let Some(profile) = materialized.profile() {
-            options = options.with_profile(profile);
-        }
-        let resolved = materialized
-            .project()
-            .resolve(materialized.root(), &options)?;
-        let output = args
-            .output
-            .as_deref()
-            .unwrap_or_else(|| materialized.output());
-        if let Some(parent) = output.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(output, resolved.canonical_bytes())?;
-        println!(
-            "resolved {name} -> {} ({})",
-            output.display(),
-            resolved.fingerprint()
-        );
-    }
-    Ok(())
-}
-
-fn recipe_execution_classes<'a>(
-    recipe: &'a lenso_authoring::CompositionRecipe,
-    requested: &'a [String],
-) -> &'a [String] {
-    if requested.is_empty() {
-        recipe
-            .runner()
-            .map_or(requested, CompositionRunner::execution_classes)
-    } else {
-        requested
-    }
-}
-
-async fn compose_run(args: &ComposeRunArgs) -> anyhow::Result<()> {
-    let execution =
-        resolve_variant_for_execution(&args.recipe, &args.variant, &args.execution_classes)?;
-    println!("running {} ({})", execution.variant, execution.fingerprint);
-    let status = tokio::process::Command::new(execution.runner.program())
-        .args(execution.runner.args())
-        .args(&args.runner_args)
-        .current_dir(&execution.root)
-        .env("LENSO_RESOLVED_PLAN", &execution.plan)
-        .env("LENSO_COMPOSITION_VARIANT", &execution.variant)
-        .status()
-        .await
-        .with_context(|| {
-            format!(
-                "start product Runner `{}` for Composition variant `{}`",
-                execution.runner.program(),
-                execution.variant
-            )
-        })?;
-    if !status.success() {
-        anyhow::bail!(
-            "product Runner for Composition variant `{}` exited with {status}",
-            execution.variant
-        );
-    }
-    Ok(())
-}
-
-async fn compose_dev(args: &ComposeDevArgs) -> anyhow::Result<()> {
-    let path = CompositionRecipePath::new(&args.recipe);
-    let recipe = path.load()?;
-    let root = path.root(&recipe)?;
-    if recipe.runner().is_none() {
-        anyhow::bail!(
-            "Composition recipe {} defines no product Runner",
-            args.recipe.display()
-        );
-    }
-    println!(
-        "watching Composition variant `{}` at {}",
-        args.variant,
-        root.display()
-    );
-    loop {
-        let fingerprint = project_fingerprint(&root)?;
-        let execution = match resolve_variant_for_execution(
-            &args.recipe,
-            &args.variant,
-            &args.execution_classes,
-        ) {
-            Ok(execution) => execution,
-            Err(error) => {
-                eprintln!("Composition variant resolution failed: {error:#}");
-                if wait_for_project_change(&root, fingerprint).await? == DevDecision::Stop {
-                    return Ok(());
-                }
-                continue;
-            }
-        };
-        println!("running {} ({})", execution.variant, execution.fingerprint);
-        match run_product_runner_until_change(&execution, &args.runner_args, fingerprint).await? {
-            DevDecision::Restart => {
-                println!("source changed; resolving a fresh App Plan");
-            }
-            DevDecision::AwaitChange => {
-                eprintln!("product Runner stopped; waiting for a source change");
-                if wait_for_project_change(&root, fingerprint).await? == DevDecision::Stop {
-                    return Ok(());
-                }
-            }
-            DevDecision::Stop => return Ok(()),
-        }
-    }
-}
-
-async fn run_product_runner_until_change(
-    execution: &ResolvedVariantExecution,
-    runner_args: &[String],
-    fingerprint: [u8; 32],
-) -> anyhow::Result<DevDecision> {
-    let mut command = tokio::process::Command::new(execution.runner.program());
-    command
-        .args(execution.runner.args())
-        .args(runner_args)
-        .current_dir(&execution.root)
-        .env("LENSO_RESOLVED_PLAN", &execution.plan)
-        .env("LENSO_COMPOSITION_VARIANT", &execution.variant)
-        .kill_on_drop(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.as_std_mut().process_group(0);
-    }
-    let mut child = command.spawn().with_context(|| {
-        format!(
-            "start product Runner `{}` for Composition variant `{}`",
-            execution.runner.program(),
-            execution.variant
-        )
-    })?;
-    let mut interval = tokio::time::interval(Duration::from_millis(350));
-    loop {
-        tokio::select! {
-            status = child.wait() => {
-                let status = status.context("wait for product Runner")?;
-                if !status.success() {
-                    eprintln!("product Runner exited with {status}");
-                }
-                return Ok(DevDecision::AwaitChange);
-            }
-            signal = tokio::signal::ctrl_c() => {
-                signal.context("wait for Ctrl-C")?;
-                stop_process_group_child(&mut child).await;
-                return Ok(DevDecision::Stop);
-            }
-            _ = interval.tick() => {
-                match project_fingerprint(&execution.root) {
-                    Ok(next) if next != fingerprint => {
-                        stop_process_group_child(&mut child).await;
-                        return Ok(DevDecision::Restart);
-                    }
-                    Ok(_) => {}
-                    Err(error) => eprintln!("could not inspect App sources: {error:#}"),
-                }
-            }
-        }
-    }
-}
-
-#[derive(Debug)]
-struct ResolvedVariantExecution {
-    fingerprint: String,
-    plan: PathBuf,
-    root: PathBuf,
-    runner: CompositionRunner,
-    variant: String,
-}
-
-fn resolve_variant_for_execution(
-    recipe_path: &Path,
-    variant: &str,
-    execution_classes: &[String],
-) -> anyhow::Result<ResolvedVariantExecution> {
-    let path = CompositionRecipePath::new(recipe_path);
-    let recipe = path.load()?;
-    let runner = recipe.runner().cloned().ok_or_else(|| {
-        anyhow::anyhow!(
-            "Composition recipe {} defines no product Runner",
-            recipe_path.display()
-        )
-    })?;
-    let materialized = path.materialize(&recipe, variant)?;
-    let execution_classes = recipe_execution_classes(&recipe, execution_classes);
-    let mut options =
-        ResolutionOptions::default().with_check_options(check_options(execution_classes));
-    if let Some(profile) = materialized.profile() {
-        options = options.with_profile(profile);
-    }
-    let resolved = materialized
-        .project()
-        .resolve(materialized.root(), &options)?;
-    let plan = materialized
-        .root()
-        .join(".lenso/compose")
-        .join(variant)
-        .join("resolved-plan.json");
-    if let Some(parent) = plan.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(&plan, resolved.canonical_bytes())?;
-    Ok(ResolvedVariantExecution {
-        fingerprint: resolved.fingerprint().clone(),
-        plan,
-        root: materialized.root().to_owned(),
-        runner,
-        variant: variant.to_owned(),
-    })
-}
-
-fn selected_recipe_variants<'a>(
-    recipe: &'a lenso_authoring::CompositionRecipe,
-    selected: Option<&'a str>,
-) -> anyhow::Result<Vec<&'a str>> {
-    if let Some(name) = selected {
-        if recipe.variant(name).is_none() {
-            anyhow::bail!("Composition variant `{name}` is not defined");
-        }
-        Ok(vec![name])
-    } else {
-        Ok(recipe.variants().keys().map(String::as_str).collect())
-    }
-}
-
-pub(crate) async fn run(args: &RunArgs) -> anyhow::Result<()> {
-    let plan = std::fs::read(&args.plan)
-        .with_context(|| format!("failed to read {}", args.plan.display()))?;
-    let resolved = ResolvedProject::from_canonical_bytes(&plan)?;
-    let mut adapters = ExecutionAdapterCatalog::new();
-    let needs_bun = resolved
-        .plan()
-        .module_instances()
-        .iter()
-        .any(|instance| instance.execution_class() == &ExecutionClassId::bun_child_process());
-    if needs_bun {
-        let config = BunAdapterConfig::new(&args.bun, BunWire::JsonRpcHttp)
-            .with_working_directory(&args.root);
-        let mut codec_cache = DevelopmentCodecCache::default();
-        let bun = bun_adapter_with_development_codecs(
-            BunAdapter::production(args.bun.clone()).with_config(config),
-            resolved.plan(),
-            &mut codec_cache,
-        );
-        adapters = adapters.with_adapter(bun)?;
-    }
-    let driver = TokioDriver::new();
-    let local = tokio::task::LocalSet::new();
-    let shutdown_driver = driver.clone();
-    local.spawn_local(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            shutdown_driver.request_shutdown();
-        }
-    });
-    let outcome = local
-        .run_until(run_project(
-            &resolved,
-            driver,
-            adapters,
-            Duration::from_secs(10),
-        ))
-        .await?;
-    println!("{outcome:?}");
-    Ok(())
-}
-
 pub(crate) async fn dev_module(
     repo_root: Option<&Path>,
     project: &Path,
@@ -831,7 +303,7 @@ pub(crate) async fn dev_module(
         [class] if class == "lenso.native-rust@1" => dev_native(&root, &project_path).await,
         [] => anyhow::bail!("Module project contains no Module Instances"),
         classes => anyhow::bail!(
-            "`lenso module dev` supports one inferred execution class; found {}. Use an App Runner for mixed execution classes",
+            "`lenso dev` supports one inferred execution class; found {}. Use an App Runner for mixed execution classes",
             classes.join(", ")
         ),
     }
@@ -1115,7 +587,7 @@ fn authoring_failure_check(error: &AuthoringError, fallback: &Path) -> ModuleAut
             "capability",
             "Capability authoring",
             path.as_path(),
-            "Regenerate the package-local bindings from this Descriptor, then rerun `lenso module check`.",
+            "Regenerate the package-local bindings from this Descriptor, then rerun `lenso check`.",
         ),
         AuthoringError::LockMismatch { .. } | AuthoringError::PackageManager { .. } => (
             "packages",
@@ -1151,7 +623,7 @@ fn authoring_failure_check(error: &AuthoringError, fallback: &Path) -> ModuleAut
             "authoring",
             "Authoring CLI",
             fallback,
-            "Correct the reported authoring input and rerun `lenso module check`.",
+            "Correct the reported authoring input and rerun `lenso check`.",
         ),
     };
     ModuleAuthoringCheck {
@@ -1602,17 +1074,6 @@ impl DevelopmentCodecCache {
     }
 }
 
-fn bun_adapter_with_development_codecs(
-    mut adapter: BunAdapter,
-    plan: &ResolvedAppPlan,
-    cache: &mut DevelopmentCodecCache,
-) -> BunAdapter {
-    for codec in cache.for_plan(plan) {
-        adapter = adapter.with_codec(codec);
-    }
-    adapter
-}
-
 fn intern_for_process(value: &str) -> &'static str {
     // Native endpoint identities are process-static. The cache above interns each
     // distinct Descriptor shape once, even when ordinary source edits restart it.
@@ -1777,14 +1238,6 @@ fn collect_project_files(directory: &Path, files: &mut Vec<PathBuf>) -> anyhow::
         }
     }
     Ok(())
-}
-
-fn check_options(execution_classes: &[String]) -> CheckOptions {
-    if execution_classes.is_empty() {
-        CheckOptions::default()
-    } else {
-        CheckOptions::new(execution_classes.to_vec())
-    }
 }
 
 #[cfg(test)]

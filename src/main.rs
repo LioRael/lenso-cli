@@ -3,12 +3,12 @@ mod module;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-/// Author, validate, resolve, and run Lenso applications and Modules.
+/// Build, diagnose, and verify Lenso Modules and App Definitions.
 #[derive(Debug, Parser)]
 #[command(
     name = "lenso",
     version,
-    about = "Author, validate, resolve, and run Lenso applications and Modules",
+    about = "Build, diagnose, and verify Lenso Modules and App Definitions",
     propagate_version = true
 )]
 struct Cli {
@@ -22,43 +22,15 @@ enum Command {
     New(ModuleCreateArgs),
     /// Start the Module development loop in the current project.
     Dev(ModuleDevArgs),
+    /// Diagnose the current Module project with actionable checks.
+    Check(ModuleCheckArgs),
     /// Prove Module behavior, lifecycle, composition, and removal.
     Verify(ModuleVerifyArgs),
-    /// Add a Module package to an authoring project.
-    Add(authoring::AddArgs),
-    /// Validate an authoring project and its generated contracts.
-    Check(authoring::CheckArgs),
-    /// Resolve an authoring project into an immutable App Plan.
-    Resolve(authoring::ResolveArgs),
-    /// Run a resolved App Plan.
-    Run(authoring::RunArgs),
-    /// Expand reusable Project fragments into exact App variants.
-    Compose {
-        #[command(subcommand)]
-        command: authoring::ComposeCommand,
-    },
     /// Check and resolve source-derived App Definitions.
     App {
         #[command(subcommand)]
         command: authoring::AppCommand,
     },
-    /// Create and develop a Lenso Module.
-    Module {
-        #[command(subcommand)]
-        command: ModuleCommand,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum ModuleCommand {
-    /// Create a standalone Rust or Bun Module authoring project.
-    Create(ModuleCreateArgs),
-    /// Start the inferred Module development loop.
-    Dev(ModuleDevArgs),
-    /// Validate a Module authoring project with actionable diagnostics.
-    Check(ModuleCheckArgs),
-    /// Prove Module behavior declarations, composition, and removal.
-    Verify(ModuleVerifyArgs),
 }
 
 #[derive(Debug, Args, Clone)]
@@ -173,25 +145,9 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::New(args) => create_module(args)?,
         Command::Dev(args) => dev_module(args).await?,
+        Command::Check(args) => check_module(args)?,
         Command::Verify(args) => verify_module(args)?,
-        Command::Add(args) => authoring::add(&args)?,
-        Command::Check(args) => authoring::check(&args)?,
-        Command::Resolve(args) => authoring::resolve(&args)?,
-        Command::Run(args) => authoring::run(&args).await?,
-        Command::Compose { command } => authoring::compose(command).await?,
         Command::App { command } => authoring::app(command)?,
-        Command::Module { command } => match command {
-            ModuleCommand::Create(args) => create_module(args)?,
-            ModuleCommand::Dev(args) => dev_module(args).await?,
-            ModuleCommand::Check(args) => {
-                authoring::check_module(&authoring::ModuleCheckOptions {
-                    json: args.json,
-                    project: args.project,
-                    repo_root: args.repo_root,
-                })?;
-            }
-            ModuleCommand::Verify(args) => verify_module(args)?,
-        },
     }
 
     Ok(())
@@ -222,6 +178,14 @@ async fn dev_module(args: ModuleDevArgs) -> anyhow::Result<()> {
     authoring::dev_module(args.repo_root.as_deref(), &args.project, &args.bun_bin).await
 }
 
+fn check_module(args: ModuleCheckArgs) -> anyhow::Result<()> {
+    authoring::check_module(&authoring::ModuleCheckOptions {
+        json: args.json,
+        project: args.project,
+        repo_root: args.repo_root,
+    })
+}
+
 fn verify_module(args: ModuleVerifyArgs) -> anyhow::Result<()> {
     authoring::verify_module(authoring::ModuleVerifyOptions {
         json: args.json,
@@ -244,28 +208,22 @@ mod tests {
     }
 
     #[test]
-    fn removed_framework_commands_are_not_public() {
+    fn only_intent_level_commands_are_public() {
         let command = Cli::command();
         let names = command
             .get_subcommands()
             .map(clap::Command::get_name)
             .collect::<Vec<_>>();
-        assert_eq!(
-            names,
-            [
-                "new", "dev", "verify", "add", "check", "resolve", "run", "compose", "app",
-                "module"
-            ]
-        );
+        assert_eq!(names, ["new", "dev", "check", "verify", "app"]);
 
-        let module = command
+        let app = command
             .get_subcommands()
-            .find(|subcommand| subcommand.get_name() == "module")
-            .expect("module command");
-        let module_names = module
+            .find(|subcommand| subcommand.get_name() == "app")
+            .expect("app command");
+        let app_names = app
             .get_subcommands()
             .map(clap::Command::get_name)
             .collect::<Vec<_>>();
-        assert_eq!(module_names, ["create", "dev", "check", "verify"]);
+        assert_eq!(app_names, ["add", "remove", "check", "resolve"]);
     }
 }
