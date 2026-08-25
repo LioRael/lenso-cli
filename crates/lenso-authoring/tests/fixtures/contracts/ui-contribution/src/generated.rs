@@ -22,37 +22,37 @@ pub struct DescribeRequest {
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DescribeResponse {
-    #[serde(rename = "assets")]
-    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
-    pub assets: Vec<DescribeResponseAssetsItem>,
-    #[serde(rename = "body")]
-    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
-    pub body: String,
     #[serde(rename = "contribution_id")]
     #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
     pub contribution_id: String,
-    #[serde(rename = "navigation_label")]
-    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
-    pub navigation_label: String,
-    #[serde(rename = "requirements")]
-    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
-    pub requirements: Vec<DescribeResponseRequirementsItem>,
     #[serde(rename = "route")]
     #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
     pub route: String,
+    #[serde(rename = "navigation_label")]
+    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
+    pub navigation_label: String,
+    #[serde(rename = "body")]
+    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
+    pub body: String,
+    #[serde(rename = "assets")]
+    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
+    pub assets: Vec<DescribeResponseAssetsItem>,
+    #[serde(rename = "requirements")]
+    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
+    pub requirements: Vec<DescribeResponseRequirementsItem>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DescribeResponseAssetsItem {
-    #[serde(rename = "content")]
-    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
-    pub content: String,
-    #[serde(rename = "content_type")]
-    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
-    pub content_type: String,
     #[serde(rename = "path")]
     #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
     pub path: String,
+    #[serde(rename = "content_type")]
+    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
+    pub content_type: String,
+    #[serde(rename = "content")]
+    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
+    pub content: String,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]

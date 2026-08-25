@@ -11,7 +11,7 @@ description = "Authoring and composition resolver library for Lenso."
 [dependencies]
 lenso-app-plan = "0.1.4"
 lenso-bun-adapter = "0.1.1"
-lenso-contract-codegen = "0.5.2"
+lenso-contract-codegen = "0.6.0"
 lenso-kernel = "0.1.4"
 lenso-runner = "0.1.1"
 serde.workspace = true

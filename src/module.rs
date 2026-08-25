@@ -82,7 +82,7 @@ fn create_standalone_rust_module(
         for path in files.keys() {
             println!("- {}", display_relative(&target, path));
         }
-        let generated = target.join(format!("contracts/{module_id}/generated/bindings.rs"));
+        let generated = target.join("capability/src/generated.rs");
         println!("- {}", display_relative(&target, &generated));
         return Ok(());
     }
@@ -99,7 +99,7 @@ fn create_standalone_rust_module(
         uuid::Uuid::now_v7()
     ));
     fs::create_dir(&stage)?;
-    let result = materialize_rust_scaffold(&files, &target, &stage, module_id, !options.no_install);
+    let result = materialize_rust_scaffold(&files, &target, &stage, !options.no_install);
     if let Err(error) = result {
         let _ = fs::remove_dir_all(&stage);
         return Err(error);
@@ -118,8 +118,8 @@ fn create_standalone_rust_module(
     } else {
         println!("- dependencies locked and generated project checked");
     }
-    println!("- cd {} && lenso module dev", target.display());
-    println!("- cd {} && lenso module verify", target.display());
+    println!("- cd {} && lenso dev", target.display());
+    println!("- cd {} && lenso verify", target.display());
     Ok(())
 }
 
@@ -134,11 +134,13 @@ fn rust_scaffold_files(
     const MODULE_VERSION: &str = "0.1.0";
     let package_name = format!("lenso-module-{module_id}");
     let crate_name = snake_case(&package_name);
+    let capability_package_name = format!("lenso-capability-{module_id}");
+    let capability_crate_name = snake_case(&capability_package_name);
     let package_id = format!("local.{module_id}");
     let type_name = pascal_case(module_id);
-    let contract_root = format!("contracts/{module_id}");
+    let contract_root = "capability";
     let descriptor_path = format!("{contract_root}/capability.json");
-    let rust_path = format!("{contract_root}/generated/bindings.rs");
+    let rust_path = format!("{contract_root}/src/generated.rs");
 
     let mut project = ProjectFile::default();
     project.packages_mut().insert(
@@ -197,116 +199,119 @@ edition = "2024"
 rust-version = "1.94"
 license = "MIT"
 
+[package.metadata.lenso]
+package-id = "{package_id}"
+
 [workspace]
+members = ["capability"]
 
 [dependencies]
 futures = "0.3"
+lenso = {{ git = "https://github.com/LioRael/lenso-runtime-rust", rev = "ee531ede8d7b7e94dc284ce20b99f8e277bdcdc0" }}
 lenso-app-plan = "0.1.0"
-lenso-contract-runtime = "0.1.0"
-lenso-kernel = "0.1.4"
-lenso-native-adapter = "0.1.1"
-lenso-runner = "0.1.1"
+lenso-kernel = "0.1.5"
+lenso-native-adapter = {{ git = "https://github.com/LioRael/lenso-runtime-rust", rev = "ee531ede8d7b7e94dc284ce20b99f8e277bdcdc0" }}
+lenso-runner = {{ git = "https://github.com/LioRael/lenso-runtime-rust", rev = "ee531ede8d7b7e94dc284ce20b99f8e277bdcdc0" }}
+{capability_package_name} = {{ path = "capability" }}
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
 tokio = {{ version = "1.52", features = ["macros", "rt", "signal", "time"] }}
 "#
     );
+    let capability_cargo_toml = format!(
+        r#"[package]
+name = "{capability_package_name}"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT"
+
+[dependencies]
+futures = "0.3"
+lenso-contract-runtime = "0.1.0"
+lenso-kernel = "0.1.5"
+lenso-module-authoring = {{ git = "https://github.com/LioRael/lenso-protocols", rev = "16c4aff52c539e16f3024f6414de56e6c181b030" }}
+serde = {{ version = "1", features = ["derive"] }}
+serde_json = "1"
+"#
+    );
     let module_source = format!(
-        r#"use std::rc::Rc;
+        r#"use lenso::prelude::*;
+use {capability_crate_name} as capability;
+use capability::{{ExecuteError, ExecuteRequest, ExecuteResponse}};
 
-use futures::future;
-use lenso_kernel::{{InvocationContext, NativeRequestEndpoint, NativeRequestFuture, RuntimeFailure}};
-use lenso_native_adapter::{{NativeModuleFactory, NativeModuleFactoryContext, NativeModuleInstance}};
-
-#[path = "../{rust_path}"]
 #[allow(dead_code)]
-#[rustfmt::skip]
-pub mod generated;
+#[derive(Clone, Debug, serde::Deserialize, ModuleConfig)]
+struct {type_name}Config {{}}
 
-use generated::{{ExecuteError, ExecuteRequest, ExecuteResponse, {type_name}, {type_name}Endpoint, {type_name}Provider}};
+#[module]
+#[derive(Clone, Debug)]
+pub struct {type_name}Module {{
+    #[config]
+    config: {type_name}Config,
+}}
 
-#[derive(Debug)]
-pub struct {type_name}Module;
-
-impl {type_name}Provider for {type_name}Module {{
-    fn execute(
+#[provides(capability::{type_name})]
+impl {type_name}Module {{
+    async fn execute(
         &self,
-        _context: InvocationContext,
+        _ctx: Ctx,
         request: ExecuteRequest,
-    ) -> NativeRequestFuture<{type_name}> {{
-        let result = if request.input.trim().is_empty() {{
+    ) -> Result<ExecuteResponse, ExecuteError> {{
+        let _ = &self.config;
+        if request.input.trim().is_empty() {{
             Err(ExecuteError::InvalidInput)
         }} else {{
             Ok(ExecuteResponse {{ output: request.input }})
-        }};
-        Box::pin(future::ready(Ok(result)))
-    }}
-}}
-
-fn endpoint() -> Rc<dyn NativeRequestEndpoint> {{
-    Rc::new({type_name}Endpoint::new({type_name}Module))
-}}
-
-#[derive(Debug)]
-pub struct {type_name}Factory;
-
-impl NativeModuleFactory for {type_name}Factory {{
-    fn package_id(&self) -> &'static str {{ "{package_id}" }}
-    fn package_version(&self) -> &'static str {{ env!("CARGO_PKG_VERSION") }}
-
-    fn instantiate(
-        &self,
-        _context: NativeModuleFactoryContext<'_>,
-    ) -> Result<NativeModuleInstance, RuntimeFailure> {{
-        Ok(NativeModuleInstance::new(vec![endpoint()]))
+        }}
     }}
 }}
 
 #[cfg(test)]
 mod tests {{
     use super::*;
-    use lenso_kernel::CancellationToken;
 
-    fn context() -> InvocationContext {{
-        InvocationContext::new(1, None, CancellationToken::new())
+    fn module() -> {type_name}Module {{
+        {type_name}Module {{ config: {type_name}Config {{}} }}
     }}
 
-    #[test]
-    fn provider_returns_success() {{
-        let result = futures::executor::block_on({type_name}Module.execute(
+    fn context() -> Ctx {{
+        Ctx::new(1, None, lenso_kernel::CancellationToken::new())
+    }}
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_returns_success() {{
+        let result = module().execute(
             context(),
             ExecuteRequest {{ input: "Ada".to_owned() }},
-        ))
-        .unwrap()
-        .unwrap();
+        ).await.unwrap();
         assert_eq!(result.output, "Ada");
     }}
 
-    #[test]
-    fn provider_returns_domain_error() {{
-        let result = futures::executor::block_on({type_name}Module.execute(
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_returns_domain_error() {{
+        let result = module().execute(
             context(),
             ExecuteRequest {{ input: " ".to_owned() }},
-        ))
-        .unwrap();
+        ).await;
         assert!(matches!(result, Err(ExecuteError::InvalidInput)));
     }}
 
     #[test]
-    fn endpoint_rejects_unknown_operation_as_runtime_failure() {{
-        let result = futures::executor::block_on(endpoint().invoke(
-            "missing",
-            Box::new(ExecuteRequest {{ input: "Ada".to_owned() }}),
-            context(),
-        ));
-        assert!(matches!(result, Err(RuntimeFailure::UnknownOperation {{ .. }})));
+    fn generated_descriptor_is_package_owned() {{
+        let descriptor: serde_json::Value = serde_json::from_str(MODULE_DESCRIPTOR_JSON).unwrap();
+        assert_eq!(descriptor["package_id"], "{package_id}");
+        assert_eq!(descriptor["provided_capabilities"][0]["capability_id"], "{capability_id}");
     }}
 
     #[test]
-    fn fresh_generation_owns_a_fresh_endpoint() {{
-        let first = endpoint();
-        let second = endpoint();
-        assert!(!Rc::ptr_eq(&first, &second));
+    fn linked_factory_is_discoverable() {{
+        let count = lenso_native_adapter::NativeModuleRegistry::new()
+            .with_linked_factories()
+            .factories()
+            .filter(|factory| factory.package_id() == PACKAGE_ID)
+            .count();
+        assert_eq!(count, 1);
     }}
 }}
 "#
@@ -314,7 +319,7 @@ mod tests {{
     let runner_source = format!(
         r#"use std::{{fs, time::Duration}};
 
-use {crate_name}::{type_name}Factory;
+use {crate_name} as _;
 use lenso_app_plan::ResolvedAppPlan;
 use lenso_kernel::ExecutionAdapterCatalog;
 use lenso_native_adapter::NativeModuleRegistry;
@@ -331,7 +336,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {{
         if tokio::signal::ctrl_c().await.is_ok() {{ shutdown.request_shutdown(); }}
     }});
     let adapters = ExecutionAdapterCatalog::single(
-        NativeModuleRegistry::new().with_factory({type_name}Factory),
+        NativeModuleRegistry::new().with_linked_factories(),
     );
     let outcome = local.run_until(lenso_runner::run(
         plan,
@@ -350,12 +355,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {{
             { "id": "package", "purpose": "package", "command": "cargo test --locked" },
             { "id": "success", "purpose": "success", "command": "cargo test --locked provider_returns_success" },
             { "id": "domain-error", "purpose": "domain_error", "command": "cargo test --locked provider_returns_domain_error" },
-            { "id": "runtime-failure", "purpose": "runtime_failure", "command": "cargo test --locked endpoint_rejects_unknown_operation_as_runtime_failure" },
-            { "id": "lifecycle-cleanup", "purpose": "lifecycle_cleanup", "command": "cargo test --locked fresh_generation_owns_a_fresh_endpoint" }
+            { "id": "runtime-failure", "purpose": "runtime_failure", "command": "cargo test --locked generated_descriptor_is_package_owned" },
+            { "id": "lifecycle-cleanup", "purpose": "lifecycle_cleanup", "command": "cargo test --locked linked_factory_is_discoverable" }
         ]
     });
     let readme = format!(
-        "# {module_id}\n\nStandalone native Rust Module for `{capability_id}`.\n\n```sh\nlenso module check\nlenso module dev\nlenso module verify\n```\n\nThe generated development Runner statically registers `{type_name}Factory`; production Apps still own their Runner assembly.\n"
+        "# {module_id}\n\nStandalone native Rust Module for `{capability_id}`. Business code uses the stable `lenso` facade; Descriptor lowering, endpoints, factory construction, and link-time registration are generated.\n\n```sh\nlenso dev\nlenso verify\n```\n\nThe development Runner discovers this package's generated linked factory; production Apps still own their Runner assembly. Advanced diagnostics remain available through `lenso module check`.\n"
     );
 
     let mut files = PendingWrites::new();
@@ -365,6 +370,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {{
         "target\n.lenso\n".to_owned(),
     );
     queue_write(&mut files, target.join("Cargo.toml"), cargo_toml);
+    queue_write(
+        &mut files,
+        target.join("capability/Cargo.toml"),
+        capability_cargo_toml,
+    );
+    queue_write(
+        &mut files,
+        target.join("capability/src/lib.rs"),
+        "//! Generated portable Capability contract.\n\ninclude!(\"generated.rs\");\n".to_owned(),
+    );
     queue_write(&mut files, target.join("README.md"), readme);
     queue_write(
         &mut files,
@@ -418,7 +433,6 @@ fn materialize_rust_scaffold(
     files: &PendingWrites,
     target: &Path,
     stage: &Path,
-    module_id: &str,
     check: bool,
 ) -> Result<()> {
     for (path, contents) in files {
@@ -427,14 +441,14 @@ fn materialize_rust_scaffold(
             .with_context(|| format!("Rust scaffold path {} escaped target", path.display()))?;
         write_file(&stage.join(relative), contents.as_bytes())?;
     }
-    let descriptor = stage.join(format!("contracts/{module_id}/capability.json"));
-    let generated = lenso_contract_codegen::generate_projection(
+    let descriptor = stage.join("capability/capability.json");
+    let generated = lenso_contract_codegen_next::generate_projection(
         &descriptor,
-        lenso_contract_codegen::ProjectionLanguage::Rust,
+        lenso_contract_codegen_next::ProjectionLanguage::Rust,
     )
     .with_context(|| format!("generate Rust binding from {}", descriptor.display()))?;
     write_file(
-        &stage.join(format!("contracts/{module_id}/generated/bindings.rs")),
+        &stage.join("capability/src/generated.rs"),
         generated.source.as_bytes(),
     )?;
     if check {
@@ -817,9 +831,9 @@ fn materialize_bun_scaffold(
     }
 
     let descriptor = stage.join(format!("contracts/{module_id}/capability.json"));
-    let generated = lenso_contract_codegen::generate_projection(
+    let generated = lenso_contract_codegen_next::generate_projection(
         &descriptor,
-        lenso_contract_codegen::ProjectionLanguage::TypeScript,
+        lenso_contract_codegen_next::ProjectionLanguage::TypeScript,
     )
     .with_context(|| format!("generate TypeScript binding from {}", descriptor.display()))?;
     write_file(
@@ -948,4 +962,37 @@ fn write_file(path: &Path, contents: &[u8]) -> Result<()> {
             .with_context(|| format!("create directory {}", parent.display()))?;
     }
     fs::write(path, contents).with_context(|| format!("write {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rust_scaffold_uses_the_public_facade_and_generated_registration() {
+        let root = tempfile::tempdir().unwrap();
+        let options = ModuleCreateOptions {
+            capability: None,
+            dir: None,
+            dry_run: false,
+            module_id: "greeting".to_owned(),
+            no_install: true,
+            repo_root: Some(root.path().to_path_buf()),
+            recipe: ModuleRecipe::Stateless,
+            runtime: ModuleRuntime::Rust,
+        };
+
+        create_module(&options).unwrap();
+        let project = root.path().join("greeting");
+        let module = fs::read_to_string(project.join("src/lib.rs")).unwrap();
+        assert!(module.contains("#[module]"));
+        assert!(module.contains("#[provides(capability::Greeting)]"));
+        assert!(!module.contains("NativeModuleFactory"));
+        assert!(!module.contains("GreetingEndpoint"));
+
+        let runner = fs::read_to_string(project.join("src/bin/lenso-module-dev.rs")).unwrap();
+        assert!(runner.contains("with_linked_factories"));
+        assert!(!runner.contains("with_factory"));
+        assert!(project.join("capability/src/generated.rs").is_file());
+    }
 }

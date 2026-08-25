@@ -54,7 +54,7 @@ clap = { version = "4", features = ["derive"] }
 lenso-app-plan = "0.1.4"
 lenso-authoring = { path = "crates/lenso-authoring", version = "0.2.2" }
 lenso-bun-adapter = "0.1.1"
-lenso-contract-codegen = "0.5.2"
+lenso-contract-codegen-next = { package = "lenso-contract-codegen", git = "https://github.com/LioRael/lenso-protocols", rev = "16c4aff52c539e16f3024f6414de56e6c181b030" }
 lenso-kernel = "0.1.4"
 lenso-runner = "0.1.1"
 serde = { version = "1.0", features = ["derive"] }
@@ -65,6 +65,9 @@ uuid = { version = "1", features = ["v7"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.30", features = ["signal"] }
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints.rust]
 unsafe_code = "forbid"
