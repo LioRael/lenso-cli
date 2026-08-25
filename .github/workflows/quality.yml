@@ -45,6 +45,8 @@ jobs:
           fi
       - name: Run clean-project Bun integration
         run: cargo test --locked -p lenso-authoring bun_clean_project_add_resolve_reload_and_run_use_the_same_plan -- --ignored --test-threads=1
+      - name: Run published Bun scaffold regression
+        run: cargo test --locked -p lenso-cli bun_scaffold_install_typecheck_and_tests_succeed -- --ignored --test-threads=1
       - run: cargo package --locked -p lenso-authoring --allow-dirty
       - name: Detect CLI crate payload changes
         id: cli-crate
