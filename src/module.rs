@@ -649,6 +649,9 @@ fn bun_scaffold_files(
             "test": "bun test",
             "typecheck": "tsc -p tsconfig.json"
         },
+        "dependencies": {
+            "@lenso/contract-runtime": "0.1.0"
+        },
         "devDependencies": {
             "@types/bun": "1.2.21",
             "typescript": "5.9.2"
@@ -685,6 +688,9 @@ import {{ bindProvider, type Provider }} from "../../../{typescript_path}";
 
 export const provider: Provider = {{
   async execute(_context, request) {{
+    if (request.input.trim().length === 0) {{
+      return {{ ok: false, error: {{ kind: "domain", error: "invalid_input" }} }};
+    }}
     return {{ ok: true, value: {{ output: request.input }} }};
   }},
 }};
@@ -994,5 +1000,37 @@ mod tests {
         assert!(runner.contains("with_linked_factories"));
         assert!(!runner.contains("with_factory"));
         assert!(project.join("capability/src/generated.rs").is_file());
+    }
+
+    #[test]
+    fn bun_scaffold_installs_contract_runtime_where_projections_resolve_it() {
+        let root = tempfile::tempdir().unwrap();
+        let options = bun_options(root.path(), true);
+
+        create_module(&options).unwrap();
+        let package: Value =
+            serde_json::from_slice(&fs::read(root.path().join("greeting/package.json")).unwrap())
+                .unwrap();
+        assert_eq!(package["dependencies"]["@lenso/contract-runtime"], "0.1.0");
+    }
+
+    #[test]
+    #[ignore = "requires Bun; CI runs this exact published-scaffold regression"]
+    fn bun_scaffold_install_typecheck_and_tests_succeed() {
+        let root = tempfile::tempdir().unwrap();
+        create_module(&bun_options(root.path(), false)).unwrap();
+    }
+
+    fn bun_options(repo_root: &Path, no_install: bool) -> ModuleCreateOptions {
+        ModuleCreateOptions {
+            capability: None,
+            dir: None,
+            dry_run: false,
+            module_id: "greeting".to_owned(),
+            no_install,
+            repo_root: Some(repo_root.to_path_buf()),
+            recipe: ModuleRecipe::Stateless,
+            runtime: ModuleRuntime::Bun,
+        }
     }
 }
