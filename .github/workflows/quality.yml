@@ -46,7 +46,7 @@ jobs:
             exit 0
           fi
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
-          if git diff --quiet "$BASE_SHA"...HEAD -- \
+          if git diff --quiet "$BASE_SHA" HEAD -- \
             Cargo.toml Cargo.lock README.md docs/migration-0.4.md src; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
