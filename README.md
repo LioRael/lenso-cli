@@ -54,6 +54,7 @@ execution classes, or lifecycle policy:
 {
   "schema_version": 1,
   "manifest": "Cargo.toml",
+  "host_package": "example-host",
   "packages": {
     "example.text-tools": "example-text-tools-module"
   },
@@ -84,12 +85,14 @@ lenso app remove text-tools --definition lenso.app.json
 lenso app remove text-tools --definition lenso.app.json --uninstall
 ```
 
-`app add` delegates dependency and lock ownership to Cargo, discovers the
-runtime package id from the package-owned Descriptor, chooses a useful default
-Instance key, and updates the small App Definition. Use `--path` for a local
-package or `--git` with `--rev`, `--branch`, or `--tag` for Git. `--dry-run`
-performs the complete build and resolution check, reports touched files, and
-then restores them byte-for-byte.
+`host_package` names the Cargo package that statically links the selected
+Modules; `app add` and `app remove --uninstall` edit that package's
+dependencies. `app add` delegates dependency and lock ownership to Cargo,
+discovers the runtime package id from the package-owned Descriptor, chooses a
+useful default Instance key, and updates the small App Definition. Use `--path`
+for a local package or `--git` with `--rev`, `--branch`, or `--tag` for Git.
+`--dry-run` performs the complete build and resolution check, reports touched
+files, and then restores them byte-for-byte.
 
 Every edit is transactional: dependency files and the App Definition are
 restored when Descriptor discovery or composition fails. The CLI builds only
