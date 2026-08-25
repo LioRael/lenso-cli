@@ -72,6 +72,9 @@ nix = { version = "0.30", features = ["signal"] }
 [dev-dependencies]
 tempfile.workspace = true
 
+[patch.crates-io]
+lenso-app-plan = { git = "https://github.com/LioRael/lenso", rev = "e285d6e0f472a7f1836bb03f3b6f02b65ad45c94" }
+
 [lints.rust]
 unsafe_code = "forbid"
 missing_debug_implementations = "warn"
