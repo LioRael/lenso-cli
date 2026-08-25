@@ -321,7 +321,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1109,7 +1109,8 @@ dependencies = [
 [[package]]
 name = "lenso-plugin-bundle"
 version = "0.1.0"
-source = "git+https://github.com/LioRael/lenso-runtime-rust?rev=6d504b530b268fe6b08b5b4253956af05697f733#6d504b530b268fe6b08b5b4253956af05697f733"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "819332e461172397ebe710c325ef1b03e2656d57f32c02efbbea88992b560ac9"
 dependencies = [
  "hex",
  "lenso-app-plan",
@@ -1441,7 +1442,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1812,10 +1813,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2207,7 +2208,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
