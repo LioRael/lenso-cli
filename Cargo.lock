@@ -962,6 +962,7 @@ dependencies = [
  "lenso-app-plan",
  "lenso-authoring",
  "lenso-bun-adapter",
+ "lenso-contract-authoring 0.1.0 (git+https://github.com/LioRael/lenso-protocols?rev=f6fda58d863d165610a65e15a190fa071828e831)",
  "lenso-contract-codegen 0.6.1 (git+https://github.com/LioRael/lenso-protocols?rev=f6fda58d863d165610a65e15a190fa071828e831)",
  "lenso-kernel",
  "lenso-runner",

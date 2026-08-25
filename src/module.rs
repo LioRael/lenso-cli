@@ -136,6 +136,9 @@ fn rust_scaffold_files(
     let crate_name = snake_case(&package_name);
     let capability_package_name = format!("lenso-capability-{module_id}");
     let capability_crate_name = snake_case(&capability_package_name);
+    let capability_source_id = capability_id
+        .strip_suffix("@1")
+        .ok_or_else(|| anyhow!("starter Capability id must end in `@1`"))?;
     let package_id = format!("local.{module_id}");
     let type_name = pascal_case(module_id);
     let contract_root = "capability";
@@ -225,16 +228,97 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
 license = "MIT"
+build = "build.rs"
 
 [dependencies]
 futures = "0.3"
+lenso-contract-authoring = {{ git = "https://github.com/LioRael/lenso-protocols", rev = "f6fda58d863d165610a65e15a190fa071828e831" }}
 lenso-contract-runtime = "0.1.0"
 lenso-kernel = "0.1.5"
 lenso-module-authoring = {{ git = "https://github.com/LioRael/lenso-protocols", rev = "16c4aff52c539e16f3024f6414de56e6c181b030" }}
+schemars = "1"
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
+
+[build-dependencies]
+lenso-contract-authoring = {{ git = "https://github.com/LioRael/lenso-protocols", rev = "f6fda58d863d165610a65e15a190fa071828e831" }}
+lenso-contract-codegen = {{ git = "https://github.com/LioRael/lenso-protocols", rev = "f6fda58d863d165610a65e15a190fa071828e831" }}
+schemars = "1"
+serde = {{ version = "1", features = ["derive"] }}
 "#
     );
+    let contract_source = format!(
+        r#"//! Authoritative source for the {type_name} Capability contract.
+
+use lenso_contract_authoring as lenso;
+
+#[derive(lenso::JsonSchema, serde::Deserialize)]
+#[schemars(deny_unknown_fields)]
+pub struct ExecuteRequest {{
+    pub input: String,
+}}
+
+#[derive(lenso::JsonSchema, serde::Deserialize)]
+#[schemars(deny_unknown_fields)]
+pub struct ExecuteResponse {{
+    pub output: String,
+}}
+
+#[derive(lenso::DomainError)]
+pub enum ExecuteError {{
+    InvalidInput,
+}}
+
+#[lenso::capability(
+    id = "{capability_source_id}",
+    major = 1,
+    version = "{DESCRIPTOR_VERSION}",
+    portable = true,
+    cross_lane_transfer = true
+)]
+pub trait {type_name} {{
+    async fn execute(
+        &self,
+        context: lenso::Ctx<'_>,
+        request: ExecuteRequest,
+    ) -> Result<ExecuteResponse, ExecuteError>;
+}}
+"#
+    );
+    let capability_build = r#"use std::{env, path::Path};
+
+use lenso_contract_codegen::{
+    ProjectionLanguage, check_projection, check_source_snapshot, write_projection,
+    write_source_snapshot,
+};
+
+#[allow(dead_code)]
+#[path = "src/contract.rs"]
+mod contract_source;
+
+fn main() {
+    println!("cargo:rerun-if-changed=capability.json");
+    println!("cargo:rerun-if-changed=schemas");
+    println!("cargo:rerun-if-changed=src/contract.rs");
+    println!("cargo:rerun-if-changed=src/generated.rs");
+    println!("cargo:rerun-if-env-changed=LENSO_UPDATE_CONTRACT_SNAPSHOT");
+
+    let descriptor = Path::new("capability.json");
+    let generated = Path::new("src/generated.rs");
+    let snapshot = contract_source::__lenso_capability_snapshot();
+    if env::var_os("LENSO_UPDATE_CONTRACT_SNAPSHOT").is_some() {
+        write_source_snapshot(&snapshot, descriptor)
+            .unwrap_or_else(|error| panic!("failed to update Capability snapshot: {error}"));
+        write_projection(descriptor, ProjectionLanguage::Rust, generated)
+            .unwrap_or_else(|error| panic!("failed to update Rust projection: {error}"));
+    } else {
+        check_source_snapshot(&snapshot, descriptor)
+            .unwrap_or_else(|error| panic!("Capability Descriptor or Schemas are stale: {error}"));
+        check_projection(descriptor, ProjectionLanguage::Rust, generated)
+            .unwrap_or_else(|error| panic!("Capability Rust projection is stale: {error}"));
+    }
+}
+"#;
     let module_source = format!(
         r#"use lenso::prelude::*;
 use {capability_crate_name} as capability;
@@ -360,7 +444,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {{
         ]
     });
     let readme = format!(
-        "# {module_id}\n\nStandalone native Rust Module for `{capability_id}`. Business code uses the stable `lenso` facade; Descriptor lowering, endpoints, factory construction, and link-time registration are generated.\n\n```sh\nlenso check\nlenso dev\nlenso verify\n```\n\nThe development Runner discovers this package's generated linked factory; production Apps still own their Runner assembly.\n"
+        "# {module_id}\n\nStandalone native Rust Module for `{capability_id}`. Edit `capability/src/contract.rs`; the Descriptor, Schemas, and Rust projection are locked generated artifacts. Business code uses the stable `lenso` facade; Descriptor lowering, endpoints, factory construction, and link-time registration are generated.\n\n```sh\nlenso check --update-contracts\nlenso check\nlenso dev\nlenso verify\n```\n\nThe development Runner discovers this package's generated linked factory; production Apps still own their Runner assembly.\n"
     );
 
     let mut files = PendingWrites::new();
@@ -378,7 +462,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {{
     queue_write(
         &mut files,
         target.join("capability/src/lib.rs"),
-        "//! Generated portable Capability contract.\n\ninclude!(\"generated.rs\");\n".to_owned(),
+        "//! Portable Capability contract authored in Rust source.\n\n#[allow(dead_code)]\nmod contract;\ninclude!(\"generated.rs\");\n".to_owned(),
+    );
+    queue_write(
+        &mut files,
+        target.join("capability/src/contract.rs"),
+        contract_source,
+    );
+    queue_write(
+        &mut files,
+        target.join("capability/build.rs"),
+        capability_build.to_owned(),
     );
     queue_write(&mut files, target.join("README.md"), readme);
     queue_write(
@@ -442,6 +536,33 @@ fn materialize_rust_scaffold(
         write_file(&stage.join(relative), contents.as_bytes())?;
     }
     let descriptor = stage.join("capability/capability.json");
+    let descriptor_value: Value = serde_json::from_slice(&fs::read(&descriptor)?)?;
+    let read_schema = |name: &str| -> Result<Value> {
+        Ok(serde_json::from_slice(&fs::read(
+            stage.join("capability/schemas").join(name),
+        )?)?)
+    };
+    let snapshot = lenso_contract_authoring_next::CapabilitySnapshot {
+        capability_id: descriptor_value["id"]
+            .as_str()
+            .ok_or_else(|| anyhow!("starter Descriptor has no Capability id"))?
+            .to_owned(),
+        version: descriptor_value["version"]
+            .as_str()
+            .ok_or_else(|| anyhow!("starter Descriptor has no version"))?
+            .to_owned(),
+        portable: true,
+        cross_lane_transfer: true,
+        operations: vec![lenso_contract_authoring_next::OperationSnapshot {
+            name: "execute".to_owned(),
+            interaction: "request".to_owned(),
+            request_schema: read_schema("execute-request.schema.json")?,
+            response_schema: read_schema("execute-response.schema.json")?,
+            domain_error_schema: read_schema("execute-error.schema.json")?,
+        }],
+    };
+    lenso_contract_codegen_next::write_source_snapshot(&snapshot, &descriptor)
+        .context("write canonical starter Capability snapshot")?;
     let generated = lenso_contract_codegen_next::generate_projection(
         &descriptor,
         lenso_contract_codegen_next::ProjectionLanguage::Rust,
@@ -1000,6 +1121,13 @@ mod tests {
         assert!(runner.contains("with_linked_factories"));
         assert!(!runner.contains("with_factory"));
         assert!(project.join("capability/src/generated.rs").is_file());
+        let contract = fs::read_to_string(project.join("capability/src/contract.rs")).unwrap();
+        assert!(contract.contains("#[lenso::capability("));
+        assert!(contract.contains("pub trait Greeting"));
+        let build = fs::read_to_string(project.join("capability/build.rs")).unwrap();
+        assert!(build.contains("check_source_snapshot"));
+        assert!(build.contains("write_source_snapshot"));
+        assert!(build.contains("write_projection"));
     }
 
     #[test]
