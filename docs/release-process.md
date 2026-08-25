@@ -66,3 +66,20 @@ npm pack --dry-run --ignore-scripts
 Cross-repository compatibility is proven by SemVer requirements, contracts,
 and focused integration checks. Do not restore the retired `lenso-release`
 runtime or a shared release channel to coordinate the two package streams.
+
+## Event recovery
+
+GitHub suppresses new workflow runs when a repository `GITHUB_TOKEN` creates or
+updates a release branch. If merging one of those generated branches does not
+produce the expected `main` push run, dispatch the same reviewed Trusted
+Publisher workflow against `main` instead of creating an empty commit or using
+a local registry token:
+
+```sh
+gh workflow run release-plz.yml --ref main
+gh workflow run release-changesets.yml --ref main
+```
+
+Inspect the exact `main` commit and public registry state before dispatching.
+The manual entry points run the same jobs, permissions, package checks, and OIDC
+publish steps as the normal push path.
