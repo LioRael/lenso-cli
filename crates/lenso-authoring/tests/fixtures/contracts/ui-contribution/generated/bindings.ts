@@ -23,18 +23,18 @@ export interface DescribeRequest {
 }
 
 export interface DescribeResponse {
-  assets: Array<DescribeResponseAssetsItem>;
-  body: string;
   contribution_id: string;
-  navigation_label: string;
-  requirements: Array<DescribeResponseRequirementsItem>;
   route: string;
+  navigation_label: string;
+  body: string;
+  assets: Array<DescribeResponseAssetsItem>;
+  requirements: Array<DescribeResponseRequirementsItem>;
 }
 
 export interface DescribeResponseAssetsItem {
-  content: string;
-  content_type: string;
   path: string;
+  content_type: string;
+  content: string;
 }
 
 export interface DescribeResponseRequirementsItem {

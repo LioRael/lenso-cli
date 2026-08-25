@@ -18,7 +18,26 @@ npm install -g @lenso/cli
 cargo install lenso-cli
 ```
 
-## App Plan authoring
+## Module authoring golden path
+
+Ordinary Module authors start with three commands:
+
+```sh
+lenso new greeting
+cd greeting
+lenso dev
+lenso verify
+```
+
+The Rust starter uses the public `lenso` facade. Its business source contains
+`#[module]` and `#[provides(...)]`; Capability lowering, endpoints, the native
+factory, link-time registration, and the package-owned Module Descriptor are
+generated. Because the starter defines a new Capability, its locked portable
+contract lives in a separate `capability` crate rather than beside Module
+behavior. `lenso module create`, `lenso module dev`, and
+`lenso module verify` remain compatible explicit forms.
+
+## Advanced App Plan authoring
 
 ```sh
 lenso add --project lenso.json \
@@ -156,7 +175,8 @@ Runner defaults. Arguments after `--` are forwarded to the product Runner.
 
 ## Module authoring
 
-Create a self-contained Rust or Bun Module project:
+Create a self-contained Rust or Bun Module project using the explicit command
+form:
 
 ```sh
 lenso module create greeting --runtime rust
@@ -166,6 +186,9 @@ lenso module check
 lenso module dev
 lenso module verify
 ```
+
+The shorter ordinary path is `lenso new greeting`, `lenso dev`, and
+`lenso verify`.
 
 `module dev` infers the execution class from `lenso.json`. Native Rust
 scaffolds include a development Runner; production Runner composition remains
@@ -181,6 +204,9 @@ The CLI intentionally exposes only App Plan and Module authoring:
 
 ```text
 lenso add
+lenso new
+lenso dev
+lenso verify
 lenso check
 lenso resolve
 lenso run

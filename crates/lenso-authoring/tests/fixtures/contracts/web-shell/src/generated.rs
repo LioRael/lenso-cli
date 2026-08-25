@@ -25,12 +25,12 @@ pub struct ReadAssetRequest {
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ReadAssetResponse {
-    #[serde(rename = "content")]
-    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
-    pub content: String,
     #[serde(rename = "content_type")]
     #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
     pub content_type: String,
+    #[serde(rename = "content")]
+    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
+    pub content: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -48,18 +48,18 @@ pub struct RenderRouteRequest {
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RenderRouteResponse {
-    #[serde(rename = "asset_paths")]
-    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
-    pub asset_paths: Vec<String>,
-    #[serde(rename = "body")]
-    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
-    pub body: String,
     #[serde(rename = "contribution_id")]
     #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
     pub contribution_id: String,
+    #[serde(rename = "body")]
+    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
+    pub body: String,
     #[serde(rename = "navigation")]
     #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
     pub navigation: Vec<RenderRouteResponseNavigationItem>,
+    #[serde(rename = "asset_paths")]
+    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
+    pub asset_paths: Vec<String>,
     #[serde(rename = "requirements")]
     #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
     pub requirements: Vec<RenderRouteResponseRequirementsItem>,
@@ -67,12 +67,12 @@ pub struct RenderRouteResponse {
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RenderRouteResponseNavigationItem {
-    #[serde(rename = "label")]
-    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
-    pub label: String,
     #[serde(rename = "route")]
     #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
     pub route: String,
+    #[serde(rename = "label")]
+    #[serde(deserialize_with = "lenso_contract_runtime::serde::deserialize_required")]
+    pub label: String,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]

@@ -18,6 +18,12 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Create a new standalone Module project.
+    New(ModuleCreateArgs),
+    /// Start the Module development loop in the current project.
+    Dev(ModuleDevArgs),
+    /// Prove Module behavior, lifecycle, composition, and removal.
+    Verify(ModuleVerifyArgs),
     /// Add a Module package to an authoring project.
     Add(authoring::AddArgs),
     /// Validate an authoring project and its generated contracts.
@@ -165,6 +171,9 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Command::New(args) => create_module(args)?,
+        Command::Dev(args) => dev_module(args).await?,
+        Command::Verify(args) => verify_module(args)?,
         Command::Add(args) => authoring::add(&args)?,
         Command::Check(args) => authoring::check(&args)?,
         Command::Resolve(args) => authoring::resolve(&args)?,
@@ -172,30 +181,8 @@ async fn main() -> anyhow::Result<()> {
         Command::Compose { command } => authoring::compose(command).await?,
         Command::App { command } => authoring::app(command)?,
         Command::Module { command } => match command {
-            ModuleCommand::Create(args) => {
-                module::create_module(&module::ModuleCreateOptions {
-                    capability: args.capability,
-                    dir: args.dir,
-                    dry_run: args.dry_run,
-                    module_id: args.module_id,
-                    no_install: args.no_install,
-                    repo_root: args.repo_root,
-                    recipe: match args.recipe {
-                        ModuleRecipeArg::Stateless => module::ModuleRecipe::Stateless,
-                        ModuleRecipeArg::Stateful => module::ModuleRecipe::Stateful,
-                        ModuleRecipeArg::WebConsole => module::ModuleRecipe::WebConsole,
-                        ModuleRecipeArg::ManagedWork => module::ModuleRecipe::ManagedWork,
-                    },
-                    runtime: match args.runtime {
-                        ModuleRuntimeArg::Rust => module::ModuleRuntime::Rust,
-                        ModuleRuntimeArg::Bun => module::ModuleRuntime::Bun,
-                    },
-                })?;
-            }
-            ModuleCommand::Dev(args) => {
-                authoring::dev_module(args.repo_root.as_deref(), &args.project, &args.bun_bin)
-                    .await?;
-            }
+            ModuleCommand::Create(args) => create_module(args)?,
+            ModuleCommand::Dev(args) => dev_module(args).await?,
             ModuleCommand::Check(args) => {
                 authoring::check_module(&authoring::ModuleCheckOptions {
                     json: args.json,
@@ -203,20 +190,47 @@ async fn main() -> anyhow::Result<()> {
                     repo_root: args.repo_root,
                 })?;
             }
-            ModuleCommand::Verify(args) => {
-                authoring::verify_module(authoring::ModuleVerifyOptions {
-                    json: args.json,
-                    manifest: args.manifest,
-                    module_key: args.module_key,
-                    output: args.output,
-                    project: args.project,
-                    repo_root: args.repo_root,
-                })?;
-            }
+            ModuleCommand::Verify(args) => verify_module(args)?,
         },
     }
 
     Ok(())
+}
+
+fn create_module(args: ModuleCreateArgs) -> anyhow::Result<()> {
+    module::create_module(&module::ModuleCreateOptions {
+        capability: args.capability,
+        dir: args.dir,
+        dry_run: args.dry_run,
+        module_id: args.module_id,
+        no_install: args.no_install,
+        repo_root: args.repo_root,
+        recipe: match args.recipe {
+            ModuleRecipeArg::Stateless => module::ModuleRecipe::Stateless,
+            ModuleRecipeArg::Stateful => module::ModuleRecipe::Stateful,
+            ModuleRecipeArg::WebConsole => module::ModuleRecipe::WebConsole,
+            ModuleRecipeArg::ManagedWork => module::ModuleRecipe::ManagedWork,
+        },
+        runtime: match args.runtime {
+            ModuleRuntimeArg::Rust => module::ModuleRuntime::Rust,
+            ModuleRuntimeArg::Bun => module::ModuleRuntime::Bun,
+        },
+    })
+}
+
+async fn dev_module(args: ModuleDevArgs) -> anyhow::Result<()> {
+    authoring::dev_module(args.repo_root.as_deref(), &args.project, &args.bun_bin).await
+}
+
+fn verify_module(args: ModuleVerifyArgs) -> anyhow::Result<()> {
+    authoring::verify_module(authoring::ModuleVerifyOptions {
+        json: args.json,
+        manifest: args.manifest,
+        module_key: args.module_key,
+        output: args.output,
+        project: args.project,
+        repo_root: args.repo_root,
+    })
 }
 
 #[cfg(test)]
@@ -238,7 +252,10 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             names,
-            ["add", "check", "resolve", "run", "compose", "app", "module"]
+            [
+                "new", "dev", "verify", "add", "check", "resolve", "run", "compose", "app",
+                "module"
+            ]
         );
 
         let module = command
