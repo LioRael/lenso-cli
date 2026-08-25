@@ -109,6 +109,10 @@ struct ModuleCheckArgs {
     /// Emit the versioned authoring report as JSON.
     #[arg(long)]
     json: bool,
+
+    /// Regenerate source-derived Capability snapshots before checking them.
+    #[arg(long)]
+    update_contracts: bool,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -183,6 +187,7 @@ fn check_module(args: ModuleCheckArgs) -> anyhow::Result<()> {
         json: args.json,
         project: args.project,
         repo_root: args.repo_root,
+        update_contracts: args.update_contracts,
     })
 }
 

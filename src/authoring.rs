@@ -114,6 +114,7 @@ pub(crate) struct ModuleCheckOptions {
     pub(crate) json: bool,
     pub(crate) project: PathBuf,
     pub(crate) repo_root: Option<PathBuf>,
+    pub(crate) update_contracts: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -338,6 +339,16 @@ pub(crate) fn check_module(options: &ModuleCheckOptions) -> anyhow::Result<()> {
         }
     };
     let execution_classes = inferred_execution_classes(&loaded)?;
+    if execution_classes
+        .iter()
+        .any(|class| class == "lenso.native-rust@1")
+    {
+        checks.push(check_native_contract_source(
+            &root,
+            &project_path,
+            options.update_contracts,
+        )?);
+    }
     let check_options = CheckOptions::new(execution_classes.clone());
     match loaded.check(&root, &check_options) {
         Ok(report) => {
@@ -378,6 +389,46 @@ pub(crate) fn check_module(options: &ModuleCheckOptions) -> anyhow::Result<()> {
         anyhow::bail!("Module authoring check failed");
     }
     Ok(())
+}
+
+fn check_native_contract_source(
+    root: &Path,
+    project_path: &Path,
+    update: bool,
+) -> anyhow::Result<ModuleAuthoringCheck> {
+    let mut command = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+    command.args(["check", "--workspace", "--locked"]);
+    if update {
+        command.env("LENSO_UPDATE_CONTRACT_SNAPSHOT", "1");
+    }
+    let status = command
+        .current_dir(root)
+        .status()
+        .context("check source-derived Capability snapshots")?;
+    if status.success() {
+        return Ok(ok_check(
+            "contract-source",
+            "capability",
+            "Capability authoring",
+            project_path,
+            if update {
+                "source-derived contract artifacts updated and compiled"
+            } else {
+                "source-derived contract artifacts are fresh"
+            },
+        ));
+    }
+    Ok(ModuleAuthoringCheck {
+        id: "contract-source".to_owned(),
+        layer: "capability",
+        owner: "Capability authoring",
+        status: "failed",
+        path: project_path.display().to_string(),
+        message: format!("source-derived contract check failed with {status}"),
+        fix: Some(
+            "Fix the authored Rust contract or run `lenso check --update-contracts`.".to_owned(),
+        ),
+    })
 }
 
 #[allow(clippy::too_many_lines)]

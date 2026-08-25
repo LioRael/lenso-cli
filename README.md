@@ -33,7 +33,10 @@ lenso verify
 Users upgrading from the legacy nested and Plan-oriented commands should read
 the [0.4 / 0.12 migration guide](docs/migration-0.4.md).
 
-The Rust starter uses the public `lenso` facade. Its business source contains
+The Rust starter uses the public `lenso` facade. The Capability owner edits
+`capability/src/contract.rs` and runs `lenso check --update-contracts` after a
+contract change. Normal `lenso check` fails when the checked-in Descriptor,
+Schemas, or Rust projection drift from that source. Its business source contains
 `#[module]` and `#[provides(...)]`; Capability lowering, endpoints, the native
 factory, link-time registration, and the package-owned Module Descriptor are
 generated. Because the starter defines a new Capability, its locked portable
@@ -42,6 +45,11 @@ behavior. `check` emits fast authoring diagnostics, `dev` resolves and starts a
 fresh development generation, and `verify` records behavior and removal
 evidence. Descriptor, binding, Plan, and Runner stages stay behind those
 commands.
+
+Maintainers can run `scripts/measure-dx.sh` to capture comparable millisecond
+timings for scaffold, initial source generation, a fresh check, an incremental
+source check, and verification. The script reports measurements rather than
+embedding an unsupported performance threshold.
 
 ## Source-derived App Definitions
 
