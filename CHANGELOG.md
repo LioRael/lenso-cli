@@ -1,5 +1,11 @@
 ## lenso-cli@0.2.31
 
+## 0.12.1
+
+### Patch Changes
+
+- 5e9deca: Install the contract runtime at the Bun workspace root and make the starter's Domain Error probe pass so a newly generated Module typechecks and verifies immediately.
+
 ## 0.12.0
 
 ### Minor Changes
