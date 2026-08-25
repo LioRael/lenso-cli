@@ -553,7 +553,7 @@ fn write_document(path: &Path, document: &Value) -> Result<(), AuthoringError> {
 }
 
 fn app_error(path: &Path, detail: impl Into<String>) -> AuthoringError {
-    AuthoringError::AppEdit {
+    AuthoringError::ModuleDescriptor {
         path: path.to_owned(),
         detail: detail.into(),
     }
