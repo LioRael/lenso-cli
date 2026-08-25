@@ -12,6 +12,11 @@ Release-plz runs on pushes to `main`:
 2. `release` publishes the version from a merged release pull request through
    crates.io Trusted Publishing and creates the `lenso-cli@<version>` tag.
 
+Merge the generated PR with its `release` label and `chore: release` title
+intact. Release-plz verifies that the current `main` commit came from that
+release PR; overriding the squash subject can produce a successful workflow
+that correctly skips publication.
+
 The crates.io registry is the source of truth for existing versions. Public
 versions, tags, and the historical `CHANGELOG.md` are not rewritten. Configure
 a crates.io Trusted Publisher for `lenso-cli` before the first live publish
