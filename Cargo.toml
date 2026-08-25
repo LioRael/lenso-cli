@@ -58,6 +58,7 @@ lenso-bun-adapter = "0.1.1"
 lenso-contract-authoring-next = { package = "lenso-contract-authoring", version = "0.1.0", git = "https://github.com/LioRael/lenso-protocols", rev = "f6fda58d863d165610a65e15a190fa071828e831" }
 lenso-contract-codegen-next = { package = "lenso-contract-codegen", version = "0.6.1", git = "https://github.com/LioRael/lenso-protocols", rev = "f6fda58d863d165610a65e15a190fa071828e831" }
 lenso-kernel = "0.1.4"
+lenso-plugin-bundle = { version = "0.1.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "6d504b530b268fe6b08b5b4253956af05697f733" }
 lenso-runner = "0.1.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
