@@ -1,5 +1,14 @@
 ## lenso-cli@0.2.31
 
+## 0.12.0
+
+### Minor Changes
+
+- 6d68da4: Replace the legacy authoring command groups with the intent-level `new`, `dev`,
+  `check`, `verify`, and `app` workflow. Module authors no longer invoke nested
+  `module` commands, while App owners use `app add`, `app remove`, `app check`,
+  and `app resolve` for advanced App Definition work.
+
 ## 0.11.0
 
 ### Minor Changes
