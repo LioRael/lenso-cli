@@ -12,11 +12,13 @@ Release-plz runs on pushes to `main`:
 2. `release` publishes the version from a merged release pull request through
    crates.io Trusted Publishing and creates the `lenso-cli@<version>` tag.
 
-Merge the generated PR with its `release` label intact and preserve the final
-squash subject as `chore: release (#<PR>)`. Release-plz verifies that exact
-`main` commit identity; overriding the squash subject can produce a successful
-workflow that correctly skips publication. For a one-commit recovery PR, name
-the commit itself `chore: release` so GitHub produces the expected subject.
+Merge the generated PR with its `release` label intact, keep its
+`release-plz-` source-branch prefix, and do not customize the final squash
+subject. Release-plz verifies that the `main` commit is associated with a PR
+whose source branch has that prefix; a generic recovery PR can therefore
+produce a successful workflow that correctly skips publication. For a
+one-commit recovery PR, use the same branch prefix and name the commit
+`chore: release` so GitHub preserves the generated release-PR identity.
 
 The crates.io registry is the source of truth for existing versions. Public
 versions, tags, and the historical `CHANGELOG.md` are not rewritten. Configure
