@@ -9,11 +9,11 @@ repository.workspace = true
 description = "Authoring and composition resolver library for Lenso."
 
 [dependencies]
-lenso-app-plan = "0.1.5"
-lenso-bun-adapter = "0.1.1"
+lenso-app-plan = "0.2.0"
+lenso-bun-adapter = "0.1.2"
 lenso-contract-codegen = "0.6.1"
-lenso-kernel = "0.1.4"
-lenso-runner = "0.1.1"
+lenso-kernel = "0.1.12"
+lenso-runner = "0.1.9"
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -23,7 +23,7 @@ tokio.workspace = true
 futures = "0.3"
 lenso-contract-runtime = "0.1.0"
 lenso-module-authoring = "0.1.0"
-lenso-native-adapter = "0.1.1"
+lenso-native-adapter = "0.2.3"
 tempfile.workspace = true
 
 [lints]
