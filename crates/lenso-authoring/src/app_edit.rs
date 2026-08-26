@@ -637,6 +637,12 @@ pub static DESCRIPTOR: [u8; include_bytes!("descriptor.bin").len()] =
   "schema_version": 1,
   "manifest": "Cargo.toml",
   "host_package": "fixture-host",
+  "extensions": {
+    "example.product": {
+      "schema_version": 1,
+      "enabled": ["fixture@1"]
+    }
+  },
   "packages": {},
   "app": {
     "name": "fixture",
@@ -675,6 +681,13 @@ pub static DESCRIPTOR: [u8; include_bytes!("descriptor.bin").len()] =
                 .len(),
             1
         );
+        assert_eq!(
+            CargoAppDefinition::load(&definition_path)
+                .unwrap()
+                .extension("example.product")
+                .unwrap()["enabled"],
+            json!(["fixture@1"])
+        );
 
         remove_app_module(
             &definition_path,
@@ -685,6 +698,13 @@ pub static DESCRIPTOR: [u8; include_bytes!("descriptor.bin").len()] =
             },
         )
         .unwrap();
+        assert_eq!(
+            CargoAppDefinition::load(&definition_path)
+                .unwrap()
+                .extension("example.product")
+                .unwrap()["enabled"],
+            json!(["fixture@1"])
+        );
         assert!(
             fs::read_to_string(root.join("host/Cargo.toml"))
                 .unwrap()

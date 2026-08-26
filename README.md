@@ -110,6 +110,13 @@ same immutable Plan format consumed by the Kernel.
 `one` and `optional` ambiguities require an explicit App Definition decision;
 `many` providers are ordered deterministically.
 
+Products may keep additional App-owner intent in the optional top-level
+`extensions` object. Keys must be product-namespaced, and each product owns the
+value's schema and meaning. `lenso-authoring` preserves these JSON values and
+exposes them to product Hosts without interpreting them or adding them to the
+generic App Composition. Transactional `app add` and `app remove` edits retain
+unrelated extensions.
+
 ## Plugin Release bundles
 
 Plugin authors can turn already-built source artifacts into one immutable,

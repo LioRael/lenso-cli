@@ -41,6 +41,8 @@ pub struct CargoAppDefinition {
     packages: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     host_package: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    extensions: BTreeMap<String, Value>,
     app: AppDefinition,
 }
 
@@ -60,6 +62,16 @@ impl CargoAppDefinition {
     /// Cargo package whose dependency graph closes the statically linked Host.
     pub fn host_package(&self) -> Option<&str> {
         self.host_package.as_deref()
+    }
+
+    /// Product-owned App intent preserved without interpretation by generic authoring.
+    pub fn extensions(&self) -> &BTreeMap<String, Value> {
+        &self.extensions
+    }
+
+    /// Returns one namespaced product extension without assigning it generic semantics.
+    pub fn extension(&self, name: &str) -> Option<&Value> {
+        self.extensions.get(name)
     }
 
     pub const fn app(&self) -> &AppDefinition {
@@ -387,6 +399,12 @@ mod tests {
             "schema_version": 1,
             "manifest": "Cargo.toml",
             "host_package": "example-host",
+            "extensions": {
+                "example.product": {
+                    "schema_version": 1,
+                    "enabled": ["alpha@1", "beta@1"]
+                }
+            },
             "packages": {"example.tool": "example-tool"},
             "app": {
                 "name": "example",
@@ -401,9 +419,16 @@ mod tests {
         });
         let parsed: CargoAppDefinition = serde_json::from_value(definition).unwrap();
         assert_eq!(parsed.host_package(), Some("example-host"));
+        assert_eq!(parsed.extensions().len(), 1);
         assert_eq!(
-            serde_json::to_value(parsed).unwrap()["host_package"],
-            "example-host"
+            parsed.extension("example.product").unwrap()["enabled"],
+            serde_json::json!(["alpha@1", "beta@1"])
+        );
+        let serialized = serde_json::to_value(parsed).unwrap();
+        assert_eq!(serialized["host_package"], "example-host");
+        assert_eq!(
+            serialized["extensions"]["example.product"]["schema_version"],
+            1
         );
     }
 
