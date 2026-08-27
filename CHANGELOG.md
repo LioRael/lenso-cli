@@ -1,5 +1,13 @@
 ## lenso-cli@0.2.31
 
+## 0.14.0
+
+### Minor Changes
+
+- bd87924: Generate Agent Harness-compatible Tool Plugins by default, keep Cargo lock
+  version changes inside the Plugin workflow, and remove Module authoring from
+  normal help and documentation.
+
 ## 0.13.0
 
 ### Minor Changes
