@@ -51,8 +51,8 @@ inside its Plugin directory.
 
 The Host Catalog at `.lenso/host-catalog.json` is generated and locked to the
 current Host build. It is read-only execution authority, not App intent.
-`lenso app resolve` may export a derived Plan for diagnostics, but that output
-is never read back as authoring input.
+`app check`, `app show`, and `run` derive the App directly; there is no Plan
+file for an App owner to generate or manage.
 
 Runtime Drivers and Execution Adapters remain separate because they implement
 Host mechanics, not application behavior.

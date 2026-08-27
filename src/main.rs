@@ -82,6 +82,11 @@ fn reject_retired_invocation() -> anyhow::Result<()> {
                 "`lenso app {command}` is retired: change one Plugin with `lenso plugins add|configure|disable|enable|remove`"
             );
         }
+        [app, resolve, ..] if app == "app" && resolve == "resolve" => {
+            anyhow::bail!(
+                "`lenso app resolve` is retired: `app check`, `app show`, and `run` derive the App directly from the current Host and `plugins/`"
+            );
+        }
         [plugin, verify, ..] if plugin == "plugin" && verify == "verify" => {
             anyhow::bail!(
                 "`lenso plugin verify` is retired: `plugin pack` validates what it creates and `plugins add` independently verifies incoming bytes"
@@ -149,7 +154,7 @@ mod tests {
             app.get_subcommands()
                 .map(clap::Command::get_name)
                 .collect::<Vec<_>>(),
-            ["check", "show", "resolve"]
+            ["check", "show"]
         );
     }
 }
