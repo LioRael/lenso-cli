@@ -21,7 +21,7 @@ use lenso_wasm_component_adapter::{EXECUTION_CLASS, WasmComponentAdapter};
 use serde::Deserialize;
 use serde_json::Value;
 
-const GUEST_SDK_VERSION: &str = "0.1.3";
+const GUEST_SDK_VERSION: &str = "0.2.0";
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
 
 #[derive(Clone, Debug, Subcommand)]
