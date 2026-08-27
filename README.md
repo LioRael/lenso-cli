@@ -1,6 +1,6 @@
 # lenso-cli
 
-The authoring CLI for Lenso App Plans and Modules.
+The authoring CLI for installable Lenso Plugins, built-in Modules, and App Plans.
 
 This repository also owns the `lenso-authoring` library extracted from
 `LioRael/lenso` under ADR 0064. The library validates authoring inputs,
@@ -18,33 +18,51 @@ npm install -g @lenso/cli
 cargo install lenso-cli
 ```
 
-## Module authoring golden path
+## Plugin authoring golden path
 
-Ordinary Module authors use one intent-level workflow:
+Harness extension authors use one Plugin namespace from source creation through
+immutable packaging:
 
 ```sh
-lenso new greeting
-cd greeting
-lenso check
-lenso dev
-lenso verify
+lenso plugin new uppercase
+cd uppercase
+lenso plugin dev
+lenso plugin check
+lenso plugin pack
 ```
 
-Users upgrading from the legacy nested and Plan-oriented commands should read
-the [0.4 / 0.12 migration guide](docs/migration-0.4.md).
+The generated Rust/Wasm project contains one Plugin ID/version and one source
+declaration. That declaration produces both runtime behavior and the static
+descriptor evidence consumed by packaging. Authors do not write a Module,
+Manifest template, contribution array, digest, execution class, trust level, or
+Plan. `pack` builds and reopens the exact `.lenso-plugin` directory it writes;
+the Harness verifies received bytes again during installation. There is no
+normal `plugin verify` step.
 
-The Rust starter uses the public `lenso` facade. The Capability owner edits
-`capability/src/contract.rs` and runs `lenso check --update-contracts` after a
-contract change. Normal `lenso check` fails when the checked-in Descriptor,
-Schemas, or Rust projection drift from that source. Its business source contains
-`#[module]` and `#[provides(...)]`; Capability lowering, endpoints, the native
-factory, link-time registration, and the package-owned Module Descriptor are
-generated. Because the starter defines a new Capability, its locked portable
-contract lives in a separate `capability` crate rather than beside Module
-behavior. `check` emits fast authoring diagnostics, `dev` resolves and starts a
-fresh development generation, and `verify` records behavior and removal
-evidence. Descriptor, binding, Plan, and Runner stages stay behind those
-commands.
+The first public Plugin shape is one request-style Rust-authored Wasm Component.
+`plugin dev` runs the packaged Component through the production Wasm Execution
+Adapter. Bun, QuickJS, process, and native-dylib Plugin scaffolds are not yet
+claimed.
+
+Users upgrading from the earlier dual Module/Plugin workflow should read the
+[Plugin authoring migration guide](docs/migration-plugin-authoring.md).
+
+## Advanced built-in Module authoring
+
+App owners who intentionally compile behavior into their Host retain the
+existing workflow under an explicit namespace:
+
+```sh
+lenso module new greeting
+cd greeting
+lenso module check
+lenso module dev
+lenso module verify
+```
+
+The Rust starter uses the public `lenso` facade and generated Capability
+contracts. Module Descriptor, binding, Plan, and Runner stages remain available
+for this advanced built-in path.
 
 Maintainers can run `scripts/measure-dx.sh` to capture comparable millisecond
 timings for scaffold, initial source generation, a fresh check, an incremental
@@ -140,38 +158,20 @@ exposes them to product Hosts without interpreting them or adding them to the
 generic App Composition. Transactional `app add` and `app remove` edits retain
 unrelated extensions.
 
-## Plugin Release bundles
+## Plugin packages
 
-Plugin authors can turn already-built source artifacts into one immutable,
-self-verifying Release directory without hand-encoding WebAssembly Components
-or calculating digests:
+`plugin pack` derives one schema-V2 entry from source and Cargo metadata,
+componentizes the exact release Wasm, calculates its digest and size, and
+publishes a non-overwriting directory:
 
 ```sh
-cargo build --release --target wasm32-unknown-unknown
-
-lenso plugin build \
-  --manifest lenso-plugin.template.json \
-  --artifact agent-wasm=target/wasm32-unknown-unknown/release/agent_plugin.wasm \
-  --output dist/agent-plugin
-
-lenso plugin verify --bundle dist/agent-plugin
+lenso plugin check
+lenso plugin pack
 ```
 
-For a `wasm_component` Artifact, `plugin build` converts the Rust core Wasm
-module to a validated Component before recording its exact digest and size.
-QuickJS, process, native library, data, and product-metadata files use the same
-Bundle closure and verification rules. The command never executes publisher
-code, never overwrites an existing output, and does not grant permissions,
-admit a Release, or switch a running App Generation; those remain Host-owned
-operations.
-
-`dev` infers the execution class from the generated project. Native Rust
-scaffolds include a development Runner; production Runner composition remains
-App-owned. `verify` records behavior probes and a real removal-resolution
-proof in `.lenso/module-verification.json`.
-
-Use `--recipe stateless`, `stateful`, `web-console`, or `managed-work` to
-seed the generated `MODULE.md` card.
+Packaging reads descriptor evidence without instantiating publisher code. It
+does not grant permissions, admit a Release, or switch a running App
+Generation; those remain Harness-owned operations.
 
 ## Scope
 
@@ -179,21 +179,24 @@ The CLI exposes user intent rather than its internal check, resolution, recipe,
 Plan execution, and Adapter assembly stages:
 
 ```text
-lenso new
-lenso dev
-lenso check
-lenso verify
+lenso plugin new
+lenso plugin dev
+lenso plugin check
+lenso plugin pack
+lenso module new
+lenso module dev
+lenso module check
+lenso module verify
 lenso app add
 lenso app remove
 lenso app check
 lenso app resolve
-lenso plugin build
-lenso plugin verify
 ```
 
 `app check` and `app resolve` remain explicit advanced commands for App owners
-and Hosts that exchange canonical Plan bytes. They are not ordinary Module
-authoring steps.
+and Hosts that exchange canonical Plan bytes. Deprecated top-level
+`new/check/dev/verify` and template-based Plugin Bundle commands remain hidden
+for one compatibility window.
 
 Runtime extensions, product Modules, deployment systems, and Console operations
 belong to their owning repositories rather than this authoring CLI.

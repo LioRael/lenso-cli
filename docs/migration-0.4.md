@@ -1,5 +1,10 @@
 # Migrating to the intent-level CLI
 
+> Historical note: this page documents the 0.4 transition. The current public
+> workflow is `lenso plugin new → dev → check → pack`; built-in Module authoring
+> now lives explicitly under `lenso module`. See
+> [Plugin authoring migration](migration-plugin-authoring.md).
+
 Cargo `lenso-cli` 0.4 and npm `@lenso/cli` 0.12 intentionally reduce the
 public command surface. Ordinary Module authors now work with four top-level
 commands; App Definition editing remains under `lenso app`.

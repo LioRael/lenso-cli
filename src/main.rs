@@ -4,12 +4,12 @@ mod plugin;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-/// Build, diagnose, and verify Lenso Modules and App Definitions.
+/// Create, develop, check, and package Lenso Plugins.
 #[derive(Debug, Parser)]
 #[command(
     name = "lenso",
     version,
-    about = "Build, diagnose, and verify Lenso Modules and App Definitions",
+    about = "Create, develop, check, and package Lenso Plugins",
     propagate_version = true
 )]
 struct Cli {
@@ -19,7 +19,38 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Create, develop, check, and package an installable Plugin.
+    Plugin {
+        #[command(subcommand)]
+        command: plugin::PluginCommand,
+    },
+    /// Author advanced built-in App behavior.
+    Module {
+        #[command(subcommand)]
+        command: ModuleCommand,
+    },
+    /// Check and resolve source-derived App Definitions.
+    App {
+        #[command(subcommand)]
+        command: authoring::AppCommand,
+    },
     /// Create a new standalone Module project.
+    #[command(hide = true)]
+    New(ModuleCreateArgs),
+    /// Start the Module development loop in the current project.
+    #[command(hide = true)]
+    Dev(ModuleDevArgs),
+    /// Diagnose the current Module project with actionable checks.
+    #[command(hide = true)]
+    Check(ModuleCheckArgs),
+    /// Prove Module behavior, lifecycle, composition, and removal.
+    #[command(hide = true)]
+    Verify(ModuleVerifyArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum ModuleCommand {
+    /// Create a new standalone built-in Module project.
     New(ModuleCreateArgs),
     /// Start the Module development loop in the current project.
     Dev(ModuleDevArgs),
@@ -27,16 +58,6 @@ enum Command {
     Check(ModuleCheckArgs),
     /// Prove Module behavior, lifecycle, composition, and removal.
     Verify(ModuleVerifyArgs),
-    /// Check and resolve source-derived App Definitions.
-    App {
-        #[command(subcommand)]
-        command: authoring::AppCommand,
-    },
-    /// Build and verify immutable Plugin Release bundles.
-    Plugin {
-        #[command(subcommand)]
-        command: plugin::PluginCommand,
-    },
 }
 
 #[derive(Debug, Args, Clone)]
@@ -153,15 +174,41 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::New(args) => create_module(args)?,
-        Command::Dev(args) => dev_module(args).await?,
-        Command::Check(args) => check_module(args)?,
-        Command::Verify(args) => verify_module(args)?,
+        Command::Plugin { command } => plugin::plugin(command).await?,
+        Command::Module { command } => run_module_command(command).await?,
         Command::App { command } => authoring::app(command)?,
-        Command::Plugin { command } => plugin::plugin(command)?,
+        Command::New(args) => {
+            eprintln!("{}", compatibility_warning("new", "module new"));
+            create_module(args)?;
+        }
+        Command::Dev(args) => {
+            eprintln!("{}", compatibility_warning("dev", "module dev"));
+            dev_module(args).await?;
+        }
+        Command::Check(args) => {
+            eprintln!("{}", compatibility_warning("check", "module check"));
+            check_module(args)?;
+        }
+        Command::Verify(args) => {
+            eprintln!("{}", compatibility_warning("verify", "module verify"));
+            verify_module(args)?;
+        }
     }
 
     Ok(())
+}
+
+async fn run_module_command(command: ModuleCommand) -> anyhow::Result<()> {
+    match command {
+        ModuleCommand::New(args) => create_module(args),
+        ModuleCommand::Dev(args) => dev_module(args).await,
+        ModuleCommand::Check(args) => check_module(args),
+        ModuleCommand::Verify(args) => verify_module(args),
+    }
+}
+
+fn compatibility_warning(old: &str, new: &str) -> String {
+    format!("warning: `lenso {old}` is deprecated; use `lenso {new}`")
 }
 
 fn create_module(args: ModuleCreateArgs) -> anyhow::Result<()> {
@@ -220,13 +267,14 @@ mod tests {
     }
 
     #[test]
-    fn only_intent_level_commands_are_public() {
+    fn normal_help_exposes_plugin_module_and_app_namespaces() {
         let command = Cli::command();
         let names = command
             .get_subcommands()
+            .filter(|subcommand| !subcommand.is_hide_set())
             .map(clap::Command::get_name)
             .collect::<Vec<_>>();
-        assert_eq!(names, ["new", "dev", "check", "verify", "app", "plugin"]);
+        assert_eq!(names, ["plugin", "module", "app"]);
 
         let app = command
             .get_subcommands()
@@ -244,8 +292,37 @@ mod tests {
             .expect("plugin command");
         let plugin_names = plugin
             .get_subcommands()
+            .filter(|subcommand| !subcommand.is_hide_set())
             .map(clap::Command::get_name)
             .collect::<Vec<_>>();
-        assert_eq!(plugin_names, ["build", "verify"]);
+        assert_eq!(plugin_names, ["new", "dev", "check", "pack"]);
+
+        let module = command
+            .get_subcommands()
+            .find(|subcommand| subcommand.get_name() == "module")
+            .expect("module command");
+        let module_names = module
+            .get_subcommands()
+            .map(clap::Command::get_name)
+            .collect::<Vec<_>>();
+        assert_eq!(module_names, ["new", "dev", "check", "verify"]);
+    }
+
+    #[test]
+    fn deprecated_aliases_are_hidden_and_actionable() {
+        let command = Cli::command();
+        for name in ["new", "dev", "check", "verify"] {
+            assert!(
+                command
+                    .get_subcommands()
+                    .find(|subcommand| subcommand.get_name() == name)
+                    .expect("compatibility command")
+                    .is_hide_set()
+            );
+        }
+        assert_eq!(
+            compatibility_warning("check", "module check"),
+            "warning: `lenso check` is deprecated; use `lenso module check`"
+        );
     }
 }
