@@ -52,7 +52,7 @@ must_use_candidate = "allow"
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4", features = ["derive"] }
-lenso-app-plan = "0.2.0"
+lenso-app-plan = { version = "0.2.0", git = "https://github.com/LioRael/lenso", rev = "d25a785577354dbc942fa792fac3baff95c58515" }
 lenso-authoring = { path = "crates/lenso-authoring", version = "0.2.7" }
 lenso-bun-adapter = "0.1.2"
 lenso-contract-authoring-next = { package = "lenso-contract-authoring", version = "0.1.0", git = "https://github.com/LioRael/lenso-protocols", rev = "f6fda58d863d165610a65e15a190fa071828e831" }
@@ -65,6 +65,9 @@ serde_json = "1.0"
 sha2 = "0.11"
 tokio = { version = "1.52", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 uuid = { version = "1", features = ["v7"] }
+
+[patch.crates-io]
+lenso-app-plan = { git = "https://github.com/LioRael/lenso", rev = "d25a785577354dbc942fa792fac3baff95c58515" }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.30", features = ["signal"] }

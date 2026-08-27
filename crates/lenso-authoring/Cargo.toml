@@ -9,7 +9,7 @@ repository.workspace = true
 description = "Authoring and composition resolver library for Lenso."
 
 [dependencies]
-lenso-app-plan = "0.2.0"
+lenso-app-plan = { version = "0.2.0", git = "https://github.com/LioRael/lenso", rev = "d25a785577354dbc942fa792fac3baff95c58515" }
 lenso-bun-adapter = "0.1.2"
 lenso-contract-codegen = "0.6.1"
 lenso-kernel = "0.1.12"
