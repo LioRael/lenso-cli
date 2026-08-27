@@ -54,7 +54,6 @@ must_use_candidate = "allow"
 anyhow = "1.0"
 clap = { version = "4", features = ["derive"] }
 lenso-app-plan = { version = "0.3.0", git = "https://github.com/LioRael/lenso", rev = "cd35675a191d815b690c8889756dfe859a0e4d7b" }
-lenso-bun-adapter = "0.1.2"
 lenso-contract-authoring-next = { package = "lenso-contract-authoring", version = "0.1.1", git = "https://github.com/LioRael/lenso-protocols", rev = "239381609da51158d0aae5991bc0d074f742ef42" }
 lenso-contract-codegen-next = { package = "lenso-contract-codegen", version = "0.6.3", git = "https://github.com/LioRael/lenso-protocols", rev = "239381609da51158d0aae5991bc0d074f742ef42" }
 lenso-kernel = { version = "0.2.0", git = "https://github.com/LioRael/lenso", rev = "cd35675a191d815b690c8889756dfe859a0e4d7b" }
