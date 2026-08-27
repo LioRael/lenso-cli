@@ -17,6 +17,28 @@ use crate::{AuthoringError, canonical_json_bytes};
 const APP_DEFINITION_SCHEMA_VERSION: u32 = 1;
 const DESCRIPTOR_START: &[u8] = b"LENSO_MODULE_DESCRIPTOR_V1\0";
 const DESCRIPTOR_END: &[u8] = b"\0END_LENSO_MODULE_DESCRIPTOR_V1";
+const CARGO_PACKAGE_BUILD_ENVIRONMENT: &[&str] = &[
+    "CARGO_BIN_NAME",
+    "CARGO_CRATE_NAME",
+    "CARGO_MANIFEST_DIR",
+    "CARGO_MANIFEST_PATH",
+    "CARGO_PKG_AUTHORS",
+    "CARGO_PKG_DESCRIPTION",
+    "CARGO_PKG_HOMEPAGE",
+    "CARGO_PKG_LICENSE",
+    "CARGO_PKG_LICENSE_FILE",
+    "CARGO_PKG_NAME",
+    "CARGO_PKG_README",
+    "CARGO_PKG_REPOSITORY",
+    "CARGO_PKG_RUST_VERSION",
+    "CARGO_PKG_VERSION",
+    "CARGO_PKG_VERSION_MAJOR",
+    "CARGO_PKG_VERSION_MINOR",
+    "CARGO_PKG_VERSION_PATCH",
+    "CARGO_PKG_VERSION_PRE",
+    "CARGO_PRIMARY_PACKAGE",
+    "OUT_DIR",
+];
 
 fn default_definition_schema() -> u32 {
     APP_DEFINITION_SCHEMA_VERSION
@@ -101,34 +123,30 @@ impl CargoAppDefinition {
     }
 
     pub fn derive(&self, root: &Path) -> Result<AppComposition, AuthoringError> {
-        let selected_packages = self
-            .app
-            .modules()
-            .iter()
-            .map(|selection| {
-                self.packages
-                    .get(selection.package())
-                    .cloned()
-                    .ok_or_else(|| AuthoringError::ModuleDescriptor {
-                        path: root.join(&self.manifest),
-                        detail: format!(
-                            "Module selection `{}` has no Cargo package mapping for `{}`",
-                            selection.key(),
-                            selection.package()
-                        ),
-                    })
-            })
-            .collect::<Result<BTreeSet<_>, _>>()?;
+        let manifest = root.join(&self.manifest);
+        let selected_packages = self.selected_cargo_packages(&manifest)?;
         let artifacts = build_descriptor_artifacts(
-            &root.join(&self.manifest),
+            &manifest,
             selected_packages.iter().map(String::as_str),
             self.host_package(),
         )?;
         let catalog = catalog_from_artifacts(&artifacts)?;
+        self.derive_with_catalog(&catalog)
+    }
+
+    /// Derives this App from Module Descriptors already linked into a Host.
+    ///
+    /// This is the normal runtime path for a statically linked product. Cargo
+    /// artifact inspection remains available for authoring and validation.
+    pub fn derive_with_catalog(
+        &self,
+        catalog: &ModuleCatalog,
+    ) -> Result<AppComposition, AuthoringError> {
+        self.selected_cargo_packages(Path::new(&self.manifest))?;
         self.app
-            .derive(&catalog)
+            .derive(catalog)
             .map_err(|error| AuthoringError::ModuleDescriptor {
-                path: root.join(&self.manifest),
+                path: PathBuf::from(&self.manifest),
                 detail: error.to_string(),
             })
     }
@@ -143,6 +161,38 @@ impl CargoAppDefinition {
 
     pub fn resolve_canonical(&self, root: &Path) -> Result<Vec<u8>, AuthoringError> {
         self.resolve(root).map(|plan| canonical_json_bytes(&plan))
+    }
+
+    pub fn resolve_with_catalog_canonical(
+        &self,
+        catalog: &ModuleCatalog,
+    ) -> Result<Vec<u8>, AuthoringError> {
+        self.derive_with_catalog(catalog)?
+            .resolve()
+            .map(|plan| canonical_json_bytes(&plan))
+            .map_err(|error| AuthoringError::Plan {
+                detail: error.to_string(),
+            })
+    }
+
+    fn selected_cargo_packages(&self, manifest: &Path) -> Result<BTreeSet<String>, AuthoringError> {
+        self.app
+            .modules()
+            .iter()
+            .map(|selection| {
+                self.packages
+                    .get(selection.package())
+                    .cloned()
+                    .ok_or_else(|| AuthoringError::ModuleDescriptor {
+                        path: manifest.to_owned(),
+                        detail: format!(
+                            "Module selection `{}` has no Cargo package mapping for `{}`",
+                            selection.key(),
+                            selection.package()
+                        ),
+                    })
+            })
+            .collect()
     }
 }
 
@@ -256,6 +306,9 @@ fn descriptor_build_command(
         ])
         .arg("--manifest-path")
         .arg(manifest);
+    for variable in CARGO_PACKAGE_BUILD_ENVIRONMENT {
+        command.env_remove(variable);
+    }
     if let Some(host_package) = host_package {
         command.arg("--package").arg(host_package);
     } else {
@@ -459,5 +512,19 @@ mod tests {
                 .iter()
                 .any(|argument| argument == "example-local-module")
         );
+    }
+
+    #[test]
+    fn descriptor_build_does_not_inherit_package_build_environment() {
+        let packages = BTreeSet::from(["example-module".to_owned()]);
+        let command = descriptor_build_command(Path::new("Cargo.toml"), &packages, None);
+        let removed = command
+            .get_envs()
+            .filter_map(|(name, value)| value.is_none().then_some(name.to_string_lossy()))
+            .collect::<BTreeSet<_>>();
+
+        assert!(removed.contains("CARGO_MANIFEST_DIR"));
+        assert!(removed.contains("CARGO_PKG_NAME"));
+        assert!(removed.contains("OUT_DIR"));
     }
 }
