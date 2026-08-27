@@ -957,7 +957,7 @@ dependencies = [
 
 [[package]]
 name = "lenso-authoring"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "futures",
  "lenso-app-plan",
@@ -993,7 +993,7 @@ dependencies = [
 
 [[package]]
 name = "lenso-cli"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "clap",
