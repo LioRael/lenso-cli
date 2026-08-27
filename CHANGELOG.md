@@ -1,5 +1,17 @@
 ## lenso-cli@0.2.31
 
+## 0.13.0
+
+### Minor Changes
+
+- 42bc3b3: Add the unified `lenso plugin new`, `dev`, `check`, and `pack` workflow, move
+  built-in authoring under `lenso module`, and hide the deprecated dual-path
+  commands for one compatibility window.
+
+### Patch Changes
+
+- 38549ab: Allow static Module Instances to load reviewed TOML configuration from `config/modules/<instance>.toml` through `configuration_file`.
+
 ## 0.12.1
 
 ### Patch Changes
