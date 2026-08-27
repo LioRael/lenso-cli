@@ -1,8 +1,9 @@
 # Migrating to the intent-level CLI
 
 > Historical note: this page documents the 0.4 transition. The current public
-> workflow is `lenso plugin new → dev → check → pack`; built-in Module authoring
-> now lives explicitly under `lenso module`. See
+> workflow is `lenso plugin new → check → dev → pack`; former Module authoring
+> commands are hidden compatibility while embedded behavior moves into the
+> same Plugin model. See
 > [Plugin authoring migration](migration-plugin-authoring.md).
 
 Cargo `lenso-cli` 0.4 and npm `@lenso/cli` 0.12 intentionally reduce the
