@@ -1,6 +1,7 @@
 # lenso-cli
 
-The authoring CLI for Lenso Plugins and App intent.
+The CLI for authoring Plugins and changing an App through its `plugins/`
+directory.
 
 ## Install
 
@@ -12,10 +13,7 @@ cargo install lenso-cli
 
 The Cargo and npm packages use independent version lines.
 
-## Create a Plugin
-
-Application behavior uses one Plugin workflow from source creation through
-immutable packaging:
+## Author one Plugin
 
 ```sh
 lenso plugin new uppercase
@@ -26,39 +24,35 @@ lenso plugin dev --operation execute \
 lenso plugin pack
 ```
 
-The generated Rust/Wasm project contains one Plugin ID and version, one source
-declaration, and the Agent Harness Tool contract. Authors do not write a second
-implementation identity, Manifest template, contribution array, digest,
-execution class, trust level, or execution Plan.
+`pack` validates and reopens the exact `.lenso-plugin` Bundle it creates. A
+receiving Host independently validates those bytes again during installation.
 
-`pack` builds and reopens the exact `.lenso-plugin` directory it writes. The
-receiving Host validates the bytes again when the Plugin is added, so there is
-no normal `plugin verify` command.
+## Change an App
 
-The first public shape is a request-style Rust-authored Wasm Tool Plugin. Other
-execution targets must join this same Plugin workflow rather than introducing a
-second application-behavior abstraction.
-
-## App intent
-
-App owners can check and resolve the current source definition:
+The current Host supplies useful defaults and a generated Host Catalog. An App
+owner writes only differences under `plugins/`:
 
 ```sh
-lenso app check --definition lenso.app.json
-lenso app resolve --definition lenso.app.json \
-  --output .lenso/resolved-plan.json
+lenso plugins list
+lenso plugins add dist/uppercase.lenso-plugin
+lenso plugins configure company.uppercase default --file uppercase.toml
+lenso plugins disable company.uppercase default
+lenso plugins enable company.uppercase default
+lenso plugins remove company.uppercase default
+lenso app check
+lenso app show
+lenso run
 ```
 
-The current App Definition schema still contains compatibility-era internal
-field names. They are not the target authoring model and will migrate to Plugin
-selection after embedded Plugin authoring is available.
+Configuration lives at `plugins/<plugin-id>/<instance>.toml`; an empty file
+enables package defaults. `<instance>.disabled` is the explicit absence marker.
+Installed non-embedded behavior carries one exact `plugin.lenso-plugin` Bundle
+inside its Plugin directory.
 
-## Compatibility
-
-Retired authoring aliases remain hidden for a bounded transition period and
-print migration guidance. See the
-[authoring migration guide](docs/migration-plugin-authoring.md) when updating
-an older project.
+The Host Catalog at `.lenso/host-catalog.json` is generated and locked to the
+current Host build. It is read-only execution authority, not App intent.
+`lenso app resolve` may export a derived Plan for diagnostics, but that output
+is never read back as authoring input.
 
 Runtime Drivers and Execution Adapters remain separate because they implement
-Host mechanics rather than application behavior.
+Host mechanics, not application behavior.
