@@ -43,11 +43,8 @@ jobs:
             echo "$versions"
             exit 1
           fi
-      - name: Run clean-project Bun integration
-        run: cargo test --locked -p lenso-authoring bun_clean_project_add_resolve_reload_and_run_use_the_same_plan -- --ignored --test-threads=1
-      - name: Run published Bun scaffold regression
-        run: cargo test --locked -p lenso-cli bun_scaffold_install_typecheck_and_tests_succeed -- --ignored --test-threads=1
-      - run: cargo package --locked -p lenso-authoring --allow-dirty
+      - name: Run clean-room Plugin lifecycle
+        run: cargo test --locked -p lenso-cli clean_room_plugin_runs_new_check_dev_and_pack -- --ignored --test-threads=1
       - name: Detect CLI crate payload changes
         id: cli-crate
         shell: bash
@@ -60,17 +57,13 @@ jobs:
           fi
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
           if git diff --quiet "$BASE_SHA" HEAD -- \
-            Cargo.toml Cargo.lock README.md docs/migration-0.4.md src; then
+            Cargo.toml Cargo.lock README.md src; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
-      # A release-plz PR can bump lenso-authoring and lenso-cli atomically, but
-      # `cargo package` still resolves the CLI dependency from crates.io before
-      # the release workflow has published the library. Ordinary PRs and main
-      # CLI-payload PRs and main pushes retain the full package gate; CI/docs
-      # changes cannot affect the crate archive. The release workflow publishes
-      # workspace packages in dependency order.
+      # Release PRs run after their pinned provider crates are published.
+      # Ordinary CLI payload changes retain a package-content gate here.
       - name: Package CLI payload
         if: ${{ steps.cli-crate.outputs.changed == 'true' && !startsWith(github.head_ref, 'release-plz-') }}
         run: cargo package --locked -p lenso-cli --allow-dirty --no-verify
