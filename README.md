@@ -110,6 +110,29 @@ same immutable Plan format consumed by the Kernel.
 `one` and `optional` ambiguities require an explicit App Definition decision;
 `many` providers are ordered deterministically.
 
+For non-trivial static Module settings, keep one reviewed TOML file per
+Instance and reference it from the App Definition:
+
+```json
+{
+  "key": "text-tools",
+  "package": "example.text-tools",
+  "configuration_file": "config/modules/text-tools.toml"
+}
+```
+
+```toml
+prefix = "docs"
+max_items = 100
+```
+
+The path is intentionally fixed to `config/modules/<instance>.toml`.
+`configuration` and `configuration_file` are mutually exclusive. The TOML
+table is treated as the ordinary App-owned Module configuration overlay, merged
+with package defaults and validated against the package-owned Schema before a
+Plan is produced. Stateless Modules need neither field. The Kernel and resolved
+Plan have no file-reference concept.
+
 Products may keep additional App-owner intent in the optional top-level
 `extensions` object. Keys must be product-namespaced, and each product owns the
 value's schema and meaning. `lenso-authoring` preserves these JSON values and

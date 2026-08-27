@@ -49,3 +49,9 @@ Do not copy generated Module Descriptors, endpoint tables, or unambiguous
 bindings into the App Definition. Keep only package selections, stable Instance
 keys, configuration or secret references, optional lanes, and real ambiguity
 decisions.
+
+Large static Module settings may move from inline `configuration` to a reviewed
+`config/modules/<instance>.toml` file referenced by `configuration_file`. Do
+not set both fields. Resolution loads the TOML as the same Module configuration
+overlay, applies package defaults, validates the package Schema, and emits only
+the completed configuration into the immutable Plan.
