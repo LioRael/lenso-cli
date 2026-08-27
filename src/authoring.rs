@@ -304,7 +304,7 @@ pub(crate) async fn dev_module(
         [class] if class == "lenso.native-rust@1" => dev_native(&root, &project_path).await,
         [] => anyhow::bail!("Module project contains no Module Instances"),
         classes => anyhow::bail!(
-            "`lenso dev` supports one inferred execution class; found {}. Use an App Runner for mixed execution classes",
+            "`lenso module dev` supports one inferred execution class; found {}. Use an App Runner for mixed execution classes",
             classes.join(", ")
         ),
     }
@@ -426,7 +426,8 @@ fn check_native_contract_source(
         path: project_path.display().to_string(),
         message: format!("source-derived contract check failed with {status}"),
         fix: Some(
-            "Fix the authored Rust contract or run `lenso check --update-contracts`.".to_owned(),
+            "Fix the authored Rust contract or run `lenso module check --update-contracts`."
+                .to_owned(),
         ),
     })
 }
@@ -638,7 +639,7 @@ fn authoring_failure_check(error: &AuthoringError, fallback: &Path) -> ModuleAut
             "capability",
             "Capability authoring",
             path.as_path(),
-            "Regenerate the package-local bindings from this Descriptor, then rerun `lenso check`.",
+            "Regenerate the package-local bindings from this Descriptor, then rerun `lenso module check`.",
         ),
         AuthoringError::LockMismatch { .. } | AuthoringError::PackageManager { .. } => (
             "packages",
@@ -674,7 +675,7 @@ fn authoring_failure_check(error: &AuthoringError, fallback: &Path) -> ModuleAut
             "authoring",
             "Authoring CLI",
             fallback,
-            "Correct the reported authoring input and rerun `lenso check`.",
+            "Correct the reported authoring input and rerun `lenso module check`.",
         ),
     };
     ModuleAuthoringCheck {
