@@ -24,7 +24,8 @@ enum Command {
         #[command(subcommand)]
         command: plugin::PluginCommand,
     },
-    /// Author advanced built-in App behavior.
+    /// Temporary compatibility workflow for legacy built-in behavior.
+    #[command(hide = true)]
     Module {
         #[command(subcommand)]
         command: ModuleCommand,
@@ -175,7 +176,10 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Plugin { command } => plugin::plugin(command).await?,
-        Command::Module { command } => run_module_command(command).await?,
+        Command::Module { command } => {
+            eprintln!("{}", module_compatibility_warning());
+            run_module_command(command).await?;
+        }
         Command::App { command } => authoring::app(command)?,
         Command::New(args) => {
             eprintln!("{}", compatibility_warning("new", "module new"));
@@ -207,8 +211,14 @@ async fn run_module_command(command: ModuleCommand) -> anyhow::Result<()> {
     }
 }
 
-fn compatibility_warning(old: &str, new: &str) -> String {
-    format!("warning: `lenso {old}` is deprecated; use `lenso {new}`")
+fn compatibility_warning(old: &str, _: &str) -> String {
+    format!(
+        "warning: `lenso {old}` is retired Module compatibility; use `lenso plugin ...` for application behavior"
+    )
+}
+
+fn module_compatibility_warning() -> &'static str {
+    "warning: `lenso module ...` is hidden compatibility; Module is no longer a public application-behavior model"
 }
 
 fn create_module(args: ModuleCreateArgs) -> anyhow::Result<()> {
@@ -267,14 +277,14 @@ mod tests {
     }
 
     #[test]
-    fn normal_help_exposes_plugin_module_and_app_namespaces() {
+    fn normal_help_exposes_only_plugin_and_app_namespaces() {
         let command = Cli::command();
         let names = command
             .get_subcommands()
             .filter(|subcommand| !subcommand.is_hide_set())
             .map(clap::Command::get_name)
             .collect::<Vec<_>>();
-        assert_eq!(names, ["plugin", "module", "app"]);
+        assert_eq!(names, ["plugin", "app"]);
 
         let app = command
             .get_subcommands()
@@ -301,6 +311,7 @@ mod tests {
             .get_subcommands()
             .find(|subcommand| subcommand.get_name() == "module")
             .expect("module command");
+        assert!(module.is_hide_set());
         let module_names = module
             .get_subcommands()
             .map(clap::Command::get_name)
@@ -322,7 +333,8 @@ mod tests {
         }
         assert_eq!(
             compatibility_warning("check", "module check"),
-            "warning: `lenso check` is deprecated; use `lenso module check`"
+            "warning: `lenso check` is retired Module compatibility; use `lenso plugin ...` for application behavior"
         );
+        assert!(module_compatibility_warning().contains("hidden compatibility"));
     }
 }

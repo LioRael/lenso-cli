@@ -1,16 +1,25 @@
-# Plugin authoring migration
+# One Plugin authoring migration
 
-Installable Harness extensions now use one Plugin namespace. Module authoring
-remains available for behavior intentionally compiled into an App Host.
+Application behavior now uses one Plugin namespace. Installability no longer
+creates a second identity or authoring model.
 
-| Old | New |
+| Old | Current |
 | --- | --- |
-| `lenso new` | `lenso module new` for built-ins, or `lenso plugin new` for installable Harness extensions |
-| `lenso check` / `lenso dev` / `lenso verify` | matching explicit `lenso module` namespace for built-ins |
+| `lenso new` or `lenso module new` | `lenso plugin new` |
+| `lenso check` or `lenso module check` | `lenso plugin check` |
+| `lenso dev` or `lenso module dev` | `lenso plugin dev` |
 | `lenso plugin build --manifest ...` | `lenso plugin pack` |
-| `lenso plugin verify --bundle ...` | no normal replacement; `pack` and Harness `plugins add` validate automatically |
+| `lenso plugin verify --bundle ...` | no replacement; `pack` and the receiving Host validate automatically |
 
-The old top-level Module commands and template-based Plugin commands remain
-hidden compatibility aliases for one release window and print an actionable
-warning. New Plugin projects contain no Module declaration, Module Descriptor,
-Manifest template, contribution array, or Plan.
+The first supported target is a Rust/Wasm Tool Plugin for the Agent Harness.
+Legacy Module commands remain hidden only for a bounded compatibility period.
+They are not the replacement for embedded behavior.
+
+Host-linked behavior will join the same Plugin workflow through an embedded
+distribution target before compatibility commands are deleted. Until that
+target ships, existing built-in projects remain readable and buildable through
+the hidden commands, but new application behavior should not introduce another
+public Module identity.
+
+New Plugin projects contain no Module declaration, Module Descriptor, Manifest
+template, contribution array, or execution Plan.

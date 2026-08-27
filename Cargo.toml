@@ -3,12 +3,12 @@ name = "lenso-cli"
 version = "0.4.6"
 edition = "2024"
 license = "MIT"
-description = "Authoring CLI for Lenso Plugins, built-in Modules, and App Plans."
+description = "Authoring CLI for Lenso Plugins and App intent."
 repository = "https://github.com/LioRael/lenso-cli"
 homepage = "https://github.com/LioRael/lenso-cli"
 rust-version = "1.94"
 categories = ["command-line-utilities", "development-tools"]
-keywords = ["cli", "authoring", "plugins", "modules", "app-plan"]
+keywords = ["cli", "authoring", "plugins", "app-plan"]
 include = [
     "/src/**/*.rs",
     "/docs/migration-0.4.md",

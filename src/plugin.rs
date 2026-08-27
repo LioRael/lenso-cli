@@ -256,9 +256,27 @@ fn create(args: PluginNewArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+// Keep the complete four-file scaffold together so its single public identity
+// and forbidden author vocabulary remain reviewable in one place.
+#[allow(clippy::too_many_lines)]
 fn plugin_scaffold(plugin_id: &str) -> BTreeMap<PathBuf, String> {
     let package_name = plugin_id.replace('.', "-");
-    let capability_id = format!("{plugin_id}.tool@1");
+    let input_schema = serde_json::json!({
+        "additionalProperties": false,
+        "properties": { "text": { "maxLength": 4096, "type": "string" } },
+        "required": ["text"],
+        "type": "object",
+    })
+    .to_string();
+    let catalog = serde_json::json!({
+        "tools": [{
+            "name": plugin_id,
+            "description": "Process one UTF-8 string.",
+            "input_schema_json": input_schema,
+            "execution": "parallel_safe",
+        }],
+    })
+    .to_string();
     BTreeMap::from([
         (
             PathBuf::from("Cargo.toml"),
@@ -277,6 +295,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 lenso-guest-sdk = "{GUEST_SDK_VERSION}"
+serde = {{ version = "1", features = ["derive"] }}
+serde_json = "1"
 wit-bindgen = "0.60"
 
 [workspace]
@@ -286,19 +306,44 @@ wit-bindgen = "0.60"
         (
             PathBuf::from("src/lib.rs"),
             format!(
-                r#"wit_bindgen::generate!({{
+                r###"use serde::{{Deserialize, Serialize}};
+
+wit_bindgen::generate!({{
     path: "wit",
     world: "plugin",
 }});
+
+const CAPABILITY: &str = "lenso.agent.tool-provider@2";
+const TOOL: &str = "{plugin_id}";
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecuteRequest {{
+    name: String,
+    arguments_json: String,
+}}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolArguments {{
+    text: String,
+}}
+
+#[derive(Serialize)]
+struct ExecuteResponse {{
+    content_type: &'static str,
+    content: String,
+    metadata_json: &'static str,
+}}
 
 struct PluginComponent;
 
 lenso_guest_sdk::guest_request_plugin! {{
 impl Guest for PluginComponent {{
     provides: {{
-        capability_id: "{capability_id}",
-        descriptor_version: "1.0.0",
-        requests: ["run"],
+        capability_id: "lenso.agent.tool-provider@2",
+        descriptor_version: "2.0.0",
+        requests: ["catalog", "execute"],
     }}
 
     fn invoke(
@@ -306,16 +351,34 @@ impl Guest for PluginComponent {{
         operation: String,
         request_json: String,
     ) -> Result<String, String> {{
-        if capability != "{capability_id}" || operation != "run" {{
-            return Err("\"unsupported request\"".to_owned());
+        if capability != CAPABILITY {{
+            return Err("\"not_found\"".to_owned());
         }}
-        Ok(request_json)
+        match operation.as_str() {{
+            "catalog" => Ok(r##"{catalog}"##.to_owned()),
+            "execute" => {{
+                let request = serde_json::from_str::<ExecuteRequest>(&request_json)
+                    .map_err(|_| "\"invalid_arguments\"".to_owned())?;
+                if request.name != TOOL {{
+                    return Err("\"not_found\"".to_owned());
+                }}
+                let arguments = serde_json::from_str::<ToolArguments>(&request.arguments_json)
+                    .map_err(|_| "\"invalid_arguments\"".to_owned())?;
+                serde_json::to_string(&ExecuteResponse {{
+                    content_type: "text",
+                    content: arguments.text,
+                    metadata_json: r#"{{"provider":"external-wasm"}}"#,
+                }})
+                .map_err(|_| "\"execution_failed\"".to_owned())
+            }}
+            _ => Err("\"not_found\"".to_owned()),
+        }}
     }}
 }}
 }}
 
 export!(PluginComponent);
-"#
+"###
             ),
         ),
         (
@@ -325,7 +388,7 @@ export!(PluginComponent);
         (
             PathBuf::from("README.md"),
             format!(
-                "# {plugin_id}\n\nRust/Wasm Plugin providing `{capability_id}`. Edit `src/lib.rs`, then use one Plugin workflow:\n\n```sh\nlenso plugin dev\nlenso plugin check\nlenso plugin pack\n```\n\nCreate another project with `lenso plugin new <id>`.\n"
+                "# {plugin_id}\n\nRust/Wasm Tool Plugin for the Lenso Agent Harness. Edit `src/lib.rs`, then use one Plugin workflow:\n\n```sh\nlenso plugin check\nlenso plugin dev --operation execute --request-json '{{\"name\":\"{plugin_id}\",\"arguments_json\":\"{{\\\"text\\\":\\\"hello\\\"}}\"}}'\nlenso plugin pack\n```\n\nCreate another project with `lenso plugin new <id>`.\n"
             ),
         ),
     ])
@@ -468,6 +531,7 @@ fn pack(args: PluginPackArgs) -> anyhow::Result<()> {
 fn materialize(root: &Path, output: &Path) -> anyhow::Result<VerifiedBundle> {
     let manifest = root.join("Cargo.toml");
     let package = read_package(&manifest)?;
+    synchronize_plugin_lock(root, &package)?;
     let target_directory = cargo_target_directory(root)?;
     run_cargo(
         root,
@@ -484,6 +548,21 @@ fn materialize(root: &Path, output: &Path) -> anyhow::Result<VerifiedBundle> {
         output: output.to_path_buf(),
     })
     .with_context(|| format!("package Plugin `{}`", package.metadata.lenso.plugin_id))
+}
+
+fn synchronize_plugin_lock(root: &Path, package: &CargoPackage) -> anyhow::Result<()> {
+    run_cargo(
+        root,
+        &[
+            "update",
+            "--offline",
+            "--package",
+            &package.name,
+            "--precise",
+            &package.version,
+        ],
+        "synchronize Plugin version in Cargo.lock",
+    )
 }
 
 fn cargo_target_directory(root: &Path) -> anyhow::Result<PathBuf> {
@@ -732,6 +811,8 @@ mod tests {
 
         assert!(all.contains("guest_request_plugin!"));
         assert!(all.contains("plugin-id = \"uppercase\""));
+        assert!(all.contains("lenso.agent.tool-provider@2"));
+        assert!(all.contains("requests: [\"catalog\", \"execute\"]"));
         assert!(all.contains("lenso plugin new"));
         assert!(all.contains("lenso plugin dev"));
         assert!(all.contains("lenso plugin check"));
@@ -855,8 +936,9 @@ plugin-id = "second"
         .unwrap();
         dev(PluginDevArgs {
             repo_root: Some(project.clone()),
-            operation: None,
-            request_json: r#"{"text":"hello"}"#.to_owned(),
+            operation: Some("execute".to_owned()),
+            request_json: r#"{"name":"uppercase","arguments_json":"{\"text\":\"hello\"}"}"#
+                .to_owned(),
             json: true,
         })
         .await
