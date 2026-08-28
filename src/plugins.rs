@@ -242,9 +242,9 @@ fn read_bundle_descriptor(path: &Path, plugin_id: &str) -> anyhow::Result<Plugin
         &ImplementationPolicy {
             host_target: format!("{}-unknown-{}", env::consts::ARCH, env::consts::OS),
             execution_classes: vec![
-                ExecutionClassId::new("lenso.wasm-component@1"),
                 ExecutionClassId::new("lenso.quickjs@1"),
                 ExecutionClassId::new("lenso.process@1"),
+                ExecutionClassId::new("lenso.wasm-component@1"),
                 ExecutionClassId::new("lenso.bun-process@1"),
             ],
         },
