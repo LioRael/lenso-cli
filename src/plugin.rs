@@ -25,7 +25,8 @@ use lenso_wasm_component_adapter::{EXECUTION_CLASS as WASM_EXECUTION_CLASS, Wasm
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-const PLUGIN_SDK_REVISION: &str = "96d034ad72638b2ada5844cb9766a1fd8672fcf4";
+const PLUGIN_SDK_REVISION: &str = "7c54f4065012d41769fefbb41098a4657f1f4825";
+const AGENT_TOOL_SDK_REVISION: &str = "fd944a4ee56026be708b50c710635d1b17a59758";
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
 
 #[derive(Clone, Debug, Subcommand)]
@@ -283,7 +284,8 @@ runtime = "wasm"
 crate-type = ["cdylib"]
 
 [dependencies]
-lenso-plugin-sdk = {{ version = "0.1.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "{PLUGIN_SDK_REVISION}" }}
+lenso = {{ package = "lenso-plugin-sdk", version = "0.2.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "{PLUGIN_SDK_REVISION}" }}
+lenso-agent-tool-sdk = {{ version = "0.2.0", git = "https://github.com/LioRael/lenso-agent-harness", rev = "{AGENT_TOOL_SDK_REVISION}" }}
 schemars = "1"
 serde = {{ version = "1", features = ["derive"] }}
 
@@ -294,43 +296,40 @@ serde = {{ version = "1", features = ["derive"] }}
         (
             PathBuf::from("src/lib.rs"),
             format!(
-                r#"use lenso_plugin_sdk::AgentTool;
+                r#"use lenso_agent_tool_sdk::prelude::*;
 use schemars::JsonSchema;
-use serde::{{Deserialize, Serialize}};
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, serde::Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Arguments {{
     #[schemars(length(max = 4096))]
     text: String,
 }}
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum ToolError {{
-    InvalidArguments,
-}}
+#[lenso::plugin]
+#[derive(Clone, Copy, Debug, Default)]
+struct Plugin {{}}
 
-#[derive(Default)]
-struct Plugin;
-
-impl AgentTool for Plugin {{
-    type Arguments = Arguments;
-    type Error = ToolError;
-
-    const NAME: &'static str = "{plugin_id}";
-    const DESCRIPTION: &'static str = "Process one UTF-8 string.";
-
-    fn execute(&self, arguments: Arguments) -> Result<String, ToolError> {{
+#[lenso_agent_tool_sdk::tool_provider]
+impl Plugin {{
+    #[tool(
+        name = "{plugin_id}",
+        description = "Process one UTF-8 string.",
+        execution = "parallel_safe"
+    )]
+    fn execute(arguments: Arguments) -> Result<ExecuteResponse, ExecuteError> {{
         if arguments.text.is_empty() {{
-            Err(ToolError::InvalidArguments)
-        }} else {{
-            Ok(arguments.text)
+            return Err(ExecuteError::InvalidArguments);
         }}
+        Ok(ExecuteResponse {{
+            content: arguments.text,
+            content_type: ContentType::Text,
+            metadata_json: "{{}}"
+                .try_into()
+                .expect("static Tool metadata must be valid JSON"),
+        }})
     }}
 }}
-
-lenso_plugin_sdk::export_agent_tool!(Plugin);
 "#
             ),
         ),
@@ -1039,9 +1038,10 @@ mod tests {
         let author_source = files.get(Path::new("src/lib.rs")).unwrap();
         let all = files.values().cloned().collect::<String>();
 
-        assert!(author_source.contains("impl AgentTool for Plugin"));
-        assert!(author_source.contains("export_agent_tool!(Plugin)"));
-        assert!(author_source.contains("fn execute(&self, arguments: Arguments)"));
+        assert!(author_source.contains("#[lenso::plugin]"));
+        assert!(author_source.contains("#[lenso_agent_tool_sdk::tool_provider]"));
+        assert!(author_source.contains("#[tool("));
+        assert!(author_source.contains("fn execute(arguments: Arguments)"));
         assert!(all.contains("plugin-id = \"uppercase\""));
         assert!(all.contains("root-slot = \"tool-providers\""));
         assert!(all.contains("lenso plugin new"));
@@ -1085,7 +1085,8 @@ mod tests {
         let entrypoint = files.get(Path::new("src/main.rs")).unwrap();
 
         assert!(manifest.contains("runtime = \"process\""));
-        assert!(manifest.contains("lenso-plugin-sdk"));
+        assert!(manifest.contains("package = \"lenso-plugin-sdk\""));
+        assert!(manifest.contains("lenso-agent-tool-sdk"));
         assert_eq!(
             entrypoint,
             "// Cargo Process entrypoint; the SDK supplies main and protocol lowering.\ninclude!(\"lib.rs\");\n"
