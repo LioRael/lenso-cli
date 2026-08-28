@@ -26,12 +26,12 @@ use serde::Deserialize;
 use serde_json::Value;
 
 const GUEST_SDK_VERSION: &str = "0.2.0";
-const PROCESS_RUNTIME_REVISION: &str = "8cd4f848ff1d4e6e550ffb65c1e34d25d25c8644";
+const PROCESS_RUNTIME_REVISION: &str = "7f5acd577374157cb57c72c9dd0d4b0e054c53ce";
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum PluginCommand {
-    /// Create a portable Wasm or trusted Process Plugin project.
+    /// Create one ordinary Rust Plugin with portable Wasm and Process outputs.
     New(PluginNewArgs),
     /// Build and run the Plugin through its generated execution adapter.
     Dev(PluginDevArgs),
@@ -1346,6 +1346,13 @@ mod tests {
                 .count(),
             1
         );
+        let author_source = files.get(Path::new("src/plugin.rs")).unwrap();
+        for runtime_detail in ["wit_bindgen", "ProcessPlugin", "ProcessOutcome", "Guest"] {
+            assert!(
+                !author_source.contains(runtime_detail),
+                "author source leaked runtime detail `{runtime_detail}`"
+            );
+        }
     }
 
     #[test]
