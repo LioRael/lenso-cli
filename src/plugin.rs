@@ -25,7 +25,7 @@ use lenso_wasm_component_adapter::{EXECUTION_CLASS as WASM_EXECUTION_CLASS, Wasm
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-const PLUGIN_SDK_REVISION: &str = "7c3cdb5b02e3324df2c24463fe615c90c48dc244";
+const PLUGIN_SDK_REVISION: &str = "96d034ad72638b2ada5844cb9766a1fd8672fcf4";
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
 
 #[derive(Clone, Debug, Subcommand)]
