@@ -159,11 +159,15 @@ fn snapshot_plugin_root(root: &Path) -> anyhow::Result<PluginRootSnapshot> {
     let mut directories = read_entries(&plugin_root)?;
     directories.sort_by_key(fs::DirEntry::file_name);
     for entry in directories {
+        let name = utf8_name(&entry.path(), &entry.file_name())?;
+        if is_ignored_os_metadata(&name) {
+            continue;
+        }
         let file_type = entry.file_type()?;
         if !file_type.is_dir() {
             bail!("unknown Plugin Root entry: {}", entry.path().display());
         }
-        let plugin_id = utf8_name(&entry.path(), &entry.file_name())?;
+        let plugin_id = name;
         validate_path_identity(&plugin_id, "Plugin ID")?;
         reject_case_collision(&mut plugin_names, &plugin_id, "Plugin ID")?;
         scan_plugin_directory(
@@ -189,6 +193,9 @@ fn scan_plugin_directory(
     entries.sort_by_key(fs::DirEntry::file_name);
     for entry in entries {
         let name = utf8_name(&entry.path(), &entry.file_name())?;
+        if is_ignored_os_metadata(&name) {
+            continue;
+        }
         reject_case_collision(&mut normalized, &name, "Plugin filename")?;
         let file_type = entry.file_type()?;
         if name == BUNDLE_NAME {
@@ -224,6 +231,10 @@ fn scan_plugin_directory(
         }
     }
     Ok(())
+}
+
+fn is_ignored_os_metadata(name: &str) -> bool {
+    name == ".DS_Store"
 }
 
 fn read_bundle_descriptor(path: &Path, plugin_id: &str) -> anyhow::Result<PluginDescriptor> {
@@ -595,6 +606,29 @@ mod tests {
             resolved.instances()[0].id().to_string(),
             "example.agent/default"
         );
+    }
+
+    #[test]
+    fn macos_metadata_at_plugin_root_is_ignored() {
+        let root = fixture_root();
+        fs::create_dir(root.path().join("plugins")).unwrap();
+        fs::write(root.path().join("plugins/.DS_Store"), b"Finder metadata").unwrap();
+
+        let resolved = load_resolved_app(root.path()).unwrap();
+
+        assert_eq!(resolved.instances().len(), 1);
+    }
+
+    #[test]
+    fn macos_metadata_inside_plugin_directory_is_ignored() {
+        let root = fixture_root();
+        let plugin = root.path().join("plugins/example.agent");
+        fs::create_dir_all(&plugin).unwrap();
+        fs::write(plugin.join(".DS_Store"), b"Finder metadata").unwrap();
+
+        let resolved = load_resolved_app(root.path()).unwrap();
+
+        assert_eq!(resolved.instances().len(), 1);
     }
 
     #[test]

@@ -26,7 +26,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 const GUEST_SDK_VERSION: &str = "0.2.0";
-const PROCESS_RUNTIME_REVISION: &str = "38ca1becc5bd2d4dd5a78cdd3be53237c35679af";
+const PROCESS_RUNTIME_REVISION: &str = "8cd4f848ff1d4e6e550ffb65c1e34d25d25c8644";
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
 
 #[derive(Clone, Debug, Subcommand)]
@@ -309,7 +309,7 @@ publish = false
 
 [package.metadata.lenso]
 plugin-id = "{plugin_id}"
-root-slot = "tools"
+root-slot = "tool-providers"
 
 [package.metadata.lenso-cli]
 runtime = "wasm"
@@ -480,7 +480,7 @@ publish = false
 
 [package.metadata.lenso]
 plugin-id = "{plugin_id}"
-root-slot = "tools"
+root-slot = "tool-providers"
 
 [package.metadata.lenso-cli]
 runtime = "process"
@@ -917,80 +917,7 @@ fn materialize(root: &Path, output: &Path) -> anyhow::Result<VerifiedBundle> {
     synchronize_plugin_lock(root, &package)?;
     let target_directory = cargo_target_directory(root)?;
     match project_runtime(&package)? {
-        ProjectRuntime::Multi => {
-            run_cargo(
-                root,
-                &[
-                    "build",
-                    "--locked",
-                    "--release",
-                    "--lib",
-                    "--target",
-                    WASM_TARGET,
-                ],
-                "build Plugin Wasm implementation",
-            )?;
-            run_cargo(
-                root,
-                &["build", "--locked", "--release", "--bin", &package.name],
-                "build Plugin Process implementation",
-            )?;
-            let staging = tempfile::tempdir().context("stage Plugin implementations")?;
-            let wasm_bundle = staging.path().join("wasm");
-            build_source_plugin_bundle(&SourcePluginBuild {
-                package_manifest: manifest.clone(),
-                wasm_module: target_directory
-                    .join(WASM_TARGET)
-                    .join("release")
-                    .join(format!("{}.wasm", package.name.replace('-', "_"))),
-                output: wasm_bundle.clone(),
-            })?;
-            let process_bundle = staging.path().join("process");
-            let host_target = format!("{}-unknown-{}", env::consts::ARCH, env::consts::OS);
-            build_source_process_plugin_bundle(&SourceProcessPluginBuild {
-                package_manifest: manifest,
-                executable: target_directory.join("release").join(&package.name),
-                runtime_descriptor: root.join("lenso.generated.descriptor.json"),
-                target: host_target.clone(),
-                output: process_bundle.clone(),
-            })?;
-            let wasm_descriptor = v2_descriptor(&wasm_bundle)?;
-            let process_descriptor = v2_descriptor(&process_bundle)?;
-            if wasm_descriptor.contract() != process_descriptor.contract() {
-                bail!("Plugin implementations do not expose the same Contract");
-            }
-            let process_name = if cfg!(windows) {
-                "plugin.exe"
-            } else {
-                "plugin"
-            };
-            build_source_plugin_release_bundle(&SourcePluginReleaseBuild {
-                contract: wasm_descriptor.contract(),
-                implementations: vec![
-                    SourcePluginImplementation {
-                        id: "wasm".to_owned(),
-                        host_targets: vec!["*".to_owned()],
-                        artifact: wasm_bundle.join("plugin.wasm"),
-                        bundle_path: "implementations/wasm/plugin.wasm".to_owned(),
-                        media_type: "application/wasm".to_owned(),
-                        target: WASM_TARGET.to_owned(),
-                        entrypoint: "plugin".to_owned(),
-                        execution_class: ExecutionClassId::new(WASM_EXECUTION_CLASS),
-                    },
-                    SourcePluginImplementation {
-                        id: "process".to_owned(),
-                        host_targets: vec![host_target.clone()],
-                        artifact: process_bundle.join(process_name),
-                        bundle_path: format!("implementations/process/{process_name}"),
-                        media_type: "application/vnd.lenso.process".to_owned(),
-                        target: host_target,
-                        entrypoint: "plugin".to_owned(),
-                        execution_class: ExecutionClassId::new("lenso.process@1"),
-                    },
-                ],
-                output: output.to_path_buf(),
-            })
-        }
+        ProjectRuntime::Multi => materialize_multi(root, output, &package, &target_directory),
         ProjectRuntime::Wasm => {
             run_cargo(
                 root,
@@ -1001,11 +928,11 @@ fn materialize(root: &Path, output: &Path) -> anyhow::Result<VerifiedBundle> {
                 .join(WASM_TARGET)
                 .join("release")
                 .join(format!("{}.wasm", package.name.replace('-', "_")));
-            build_source_plugin_bundle(&SourcePluginBuild {
+            Ok(build_source_plugin_bundle(&SourcePluginBuild {
                 package_manifest: manifest,
                 wasm_module: artifact,
                 output: output.to_path_buf(),
-            })
+            })?)
         }
         ProjectRuntime::Process => {
             run_cargo(
@@ -1014,16 +941,100 @@ fn materialize(root: &Path, output: &Path) -> anyhow::Result<VerifiedBundle> {
                 "build Process Plugin",
             )?;
             let executable = target_directory.join("release").join(&package.name);
-            build_source_process_plugin_bundle(&SourceProcessPluginBuild {
-                package_manifest: manifest,
-                executable,
-                runtime_descriptor: root.join("lenso.generated.descriptor.json"),
-                target: format!("{}-unknown-{}", env::consts::ARCH, env::consts::OS),
-                output: output.to_path_buf(),
-            })
+            Ok(build_source_process_plugin_bundle(
+                &SourceProcessPluginBuild {
+                    package_manifest: manifest,
+                    executable,
+                    runtime_descriptor: root.join("lenso.generated.descriptor.json"),
+                    target: format!("{}-unknown-{}", env::consts::ARCH, env::consts::OS),
+                    output: output.to_path_buf(),
+                },
+            )?)
         }
     }
     .with_context(|| format!("package Plugin `{}`", package.metadata.lenso.plugin_id))
+}
+
+fn materialize_multi(
+    root: &Path,
+    output: &Path,
+    package: &CargoPackage,
+    target_directory: &Path,
+) -> anyhow::Result<VerifiedBundle> {
+    run_cargo(
+        root,
+        &[
+            "build",
+            "--locked",
+            "--release",
+            "--lib",
+            "--target",
+            WASM_TARGET,
+        ],
+        "build Plugin Wasm implementation",
+    )?;
+    run_cargo(
+        root,
+        &["build", "--locked", "--release", "--bin", &package.name],
+        "build Plugin Process implementation",
+    )?;
+    let staging = tempfile::tempdir().context("stage Plugin implementations")?;
+    let wasm_bundle = staging.path().join("wasm");
+    build_source_plugin_bundle(&SourcePluginBuild {
+        package_manifest: root.join("Cargo.toml"),
+        wasm_module: target_directory
+            .join(WASM_TARGET)
+            .join("release")
+            .join(format!("{}.wasm", package.name.replace('-', "_"))),
+        output: wasm_bundle.clone(),
+    })?;
+    let process_bundle = staging.path().join("process");
+    let host_target = format!("{}-unknown-{}", env::consts::ARCH, env::consts::OS);
+    build_source_process_plugin_bundle(&SourceProcessPluginBuild {
+        package_manifest: root.join("Cargo.toml"),
+        executable: target_directory.join("release").join(&package.name),
+        runtime_descriptor: root.join("lenso.generated.descriptor.json"),
+        target: host_target.clone(),
+        output: process_bundle.clone(),
+    })?;
+    let wasm_descriptor = v2_descriptor(&wasm_bundle)?;
+    let process_descriptor = v2_descriptor(&process_bundle)?;
+    if wasm_descriptor.contract() != process_descriptor.contract() {
+        bail!("Plugin implementations do not expose the same Contract");
+    }
+    let process_name = if cfg!(windows) {
+        "plugin.exe"
+    } else {
+        "plugin"
+    };
+    Ok(build_source_plugin_release_bundle(
+        &SourcePluginReleaseBuild {
+            contract: wasm_descriptor.contract(),
+            implementations: vec![
+                SourcePluginImplementation {
+                    id: "wasm".to_owned(),
+                    host_targets: vec!["*".to_owned()],
+                    artifact: wasm_bundle.join("plugin.wasm"),
+                    bundle_path: "implementations/wasm/plugin.wasm".to_owned(),
+                    media_type: "application/wasm".to_owned(),
+                    target: WASM_TARGET.to_owned(),
+                    entrypoint: "plugin".to_owned(),
+                    execution_class: ExecutionClassId::new(WASM_EXECUTION_CLASS),
+                },
+                SourcePluginImplementation {
+                    id: "process".to_owned(),
+                    host_targets: vec![host_target.clone()],
+                    artifact: process_bundle.join(process_name),
+                    bundle_path: format!("implementations/process/{process_name}"),
+                    media_type: "application/vnd.lenso.process".to_owned(),
+                    target: host_target,
+                    entrypoint: "plugin".to_owned(),
+                    execution_class: ExecutionClassId::new("lenso.process@1"),
+                },
+            ],
+            output: output.to_path_buf(),
+        },
+    )?)
 }
 
 fn v2_descriptor(root: &Path) -> anyhow::Result<lenso_app_plan::authoring::PluginDescriptor> {
@@ -1273,6 +1284,7 @@ mod tests {
         assert!(author_source.contains("pub fn execute(arguments: Arguments)"));
         assert!(author_source.contains("JsonSchema"));
         assert!(all.contains("plugin-id = \"uppercase\""));
+        assert!(all.contains("root-slot = \"tool-providers\""));
         assert!(all.contains("lenso.agent.tool-provider@2"));
         assert!(all.contains("requests: [\"catalog\", \"execute\"]"));
         assert!(all.contains("lenso plugin new"));
@@ -1314,6 +1326,7 @@ mod tests {
         assert!(generated_source.contains("impl ProcessPlugin for GeneratedPlugin"));
         assert!(generated_source.contains("lenso_process_sdk::serve"));
         assert!(manifest.contains("runtime = \"process\""));
+        assert!(manifest.contains("root-slot = \"tool-providers\""));
         assert!(files.contains_key(Path::new("lenso.generated.descriptor.json")));
     }
 
