@@ -57,10 +57,11 @@ lenso-app-plan = { version = "0.3.0", git = "https://github.com/LioRael/lenso", 
 lenso-contract-authoring-next = { package = "lenso-contract-authoring", version = "0.1.1", git = "https://github.com/LioRael/lenso-protocols", rev = "9d2774c767fd64a6cc63a5ac04360e9cb92816da" }
 lenso-contract-codegen-next = { package = "lenso-contract-codegen", version = "0.6.4", git = "https://github.com/LioRael/lenso-protocols", rev = "9d2774c767fd64a6cc63a5ac04360e9cb92816da" }
 lenso-kernel = { version = "0.2.0", git = "https://github.com/LioRael/lenso", rev = "cd35675a191d815b690c8889756dfe859a0e4d7b" }
-lenso-plugin-bundle = { version = "0.2.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "d15b45384b3ad7d8734dac06485b36c5e0d3eb79" }
-lenso-runner = { version = "0.2.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "d15b45384b3ad7d8734dac06485b36c5e0d3eb79" }
-lenso-runtime-codec = { version = "0.2.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "d15b45384b3ad7d8734dac06485b36c5e0d3eb79" }
-lenso-wasm-component-adapter = { version = "0.2.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "d15b45384b3ad7d8734dac06485b36c5e0d3eb79" }
+lenso-plugin-bundle = { version = "0.2.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "40922ad161cf5b8dbbb461c35846a975bd7ca217" }
+lenso-process-adapter = { version = "0.1.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "40922ad161cf5b8dbbb461c35846a975bd7ca217" }
+lenso-runner = { version = "0.2.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "40922ad161cf5b8dbbb461c35846a975bd7ca217" }
+lenso-runtime-codec = { version = "0.2.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "40922ad161cf5b8dbbb461c35846a975bd7ca217" }
+lenso-wasm-component-adapter = { version = "0.2.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "40922ad161cf5b8dbbb461c35846a975bd7ca217" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.11"
