@@ -2,8 +2,9 @@ use std::{
     any::Any,
     collections::BTreeMap,
     env, fs,
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 use anyhow::{Context, anyhow, bail};
@@ -16,7 +17,6 @@ use lenso_plugin_bundle::{
     SourcePluginBuild, SourceProcessPluginBuild, VerifiedBundle, build_source_plugin_bundle,
     build_source_process_plugin_bundle, extract_plugin_descriptor, verify_bundle_directory,
 };
-use lenso_process_adapter::{EXECUTION_CLASS as PROCESS_EXECUTION_CLASS, ProcessAdapter};
 use lenso_runtime_codec::{ArtifactCatalog, ArtifactHandle, JsonCapabilityCodec};
 use lenso_wasm_component_adapter::{EXECUTION_CLASS as WASM_EXECUTION_CLASS, WasmComponentAdapter};
 use serde::Deserialize;
@@ -146,13 +146,13 @@ enum ProjectRuntime {
     Process,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Eq, PartialEq)]
 struct PluginDescriptor {
     abi: String,
     capabilities: Vec<PluginCapability>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Eq, PartialEq)]
 struct PluginCapability {
     capability_id: String,
     descriptor_version: String,
@@ -626,6 +626,16 @@ async fn dev(args: PluginDevArgs) -> anyhow::Result<()> {
     }
     let request: Value = serde_json::from_str(&args.request_json)
         .context("Plugin development request is not valid JSON")?;
+    if runtime == ProjectRuntime::Process {
+        let response = invoke_dev_process(
+            &artifact_path,
+            &descriptor,
+            capability,
+            &operation,
+            &request,
+        )?;
+        return print_dev_response(&verified, capability, &operation, &response, args.json);
+    }
     let digest = verified
         .artifact_digests
         .first()
@@ -635,15 +645,11 @@ async fn dev(args: PluginDevArgs) -> anyhow::Result<()> {
     let artifacts = ArtifactCatalog::new()
         .with_artifact("plugin", artifact)
         .map_err(|error| runtime_error("register Plugin artifact", &error))?;
-    let execution_class = match runtime {
-        ProjectRuntime::Wasm => WASM_EXECUTION_CLASS,
-        ProjectRuntime::Process => PROCESS_EXECUTION_CLASS,
-    };
     let plan = ResolvedAppPlan::new(
         vec![
             PluginInstancePlan::new("plugin", &verified.plugin_id)
                 .with_entrypoint("plugin")
-                .with_execution_class(ExecutionClassId::new(execution_class))
+                .with_execution_class(ExecutionClassId::new(WASM_EXECUTION_CLASS))
                 .with_capability(CapabilityEndpointPlan::new(
                     &capability.capability_id,
                     &capability.descriptor_version,
@@ -652,19 +658,102 @@ async fn dev(args: PluginDevArgs) -> anyhow::Result<()> {
         ],
         Vec::new(),
     );
-    let response = match runtime {
-        ProjectRuntime::Wasm => {
-            let adapter =
-                WasmComponentAdapter::new(artifacts).with_codec(DynamicJsonCodec::new(capability));
-            invoke_dev_adapter(&adapter, &plan, &operation, request).await?
-        }
-        ProjectRuntime::Process => {
-            let adapter =
-                ProcessAdapter::new(artifacts).with_codec(DynamicJsonCodec::new(capability));
-            invoke_dev_adapter(&adapter, &plan, &operation, request).await?
-        }
-    };
+    let adapter =
+        WasmComponentAdapter::new(artifacts).with_codec(DynamicJsonCodec::new(capability));
+    let response = invoke_dev_adapter(&adapter, &plan, &operation, request).await?;
     print_dev_response(&verified, capability, &operation, &response, args.json)
+}
+
+fn invoke_dev_process(
+    executable: &Path,
+    expected_descriptor: &PluginDescriptor,
+    capability: &PluginCapability,
+    operation: &str,
+    request: &Value,
+) -> anyhow::Result<Value> {
+    const MAX_FRAME_BYTES: usize = 1024 * 1024;
+    let mut child = Command::new(executable)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .with_context(|| format!("start Process Plugin `{}`", executable.display()))?;
+    let mut input = child.stdin.take().context("open Process Plugin stdin")?;
+    let output = child.stdout.take().context("open Process Plugin stdout")?;
+    let mut output = BufReader::new(output);
+
+    let result = (|| {
+        let ready = read_process_frame(&mut output, MAX_FRAME_BYTES)?;
+        if ready.get("type").and_then(Value::as_str) != Some("ready")
+            || ready.get("protocol").and_then(Value::as_str) != Some("lenso.process-stdio@1")
+        {
+            bail!("Process Plugin did not complete the expected readiness handshake");
+        }
+        let actual_descriptor = serde_json::from_value::<PluginDescriptor>(
+            ready
+                .get("descriptor")
+                .cloned()
+                .context("Process Plugin readiness omitted its descriptor")?,
+        )
+        .context("Process Plugin readiness descriptor is invalid")?;
+        if &actual_descriptor != expected_descriptor {
+            bail!("Process Plugin readiness descriptor differs from packaged source evidence");
+        }
+
+        write_process_frame(
+            &mut input,
+            &serde_json::json!({
+                "type": "invoke",
+                "id": 1,
+                "capability": capability.capability_id,
+                "operation": operation,
+                "request": request,
+            }),
+        )?;
+        let response = read_process_frame(&mut output, MAX_FRAME_BYTES)?;
+        if response.get("type").and_then(Value::as_str) != Some("result")
+            || response.get("id").and_then(Value::as_u64) != Some(1)
+        {
+            bail!("Process Plugin returned an unexpected result frame");
+        }
+        if let Some(value) = response.get("ok") {
+            return Ok(value.clone());
+        }
+        if let Some(error) = response.get("error") {
+            bail!("Plugin returned Domain Error: {error}");
+        }
+        if let Some(failure) = response.get("failure").and_then(Value::as_str) {
+            bail!("Process Plugin failed: {failure}");
+        }
+        bail!("Process Plugin result contains no terminal outcome")
+    })();
+
+    let _ = write_process_frame(&mut input, &serde_json::json!({ "type": "shutdown" }));
+    drop(input);
+    if result.is_err() {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+    result
+}
+
+fn read_process_frame(reader: &mut impl BufRead, limit: usize) -> anyhow::Result<Value> {
+    let mut line = String::new();
+    let read = reader.read_line(&mut line)?;
+    if read == 0 {
+        bail!("Process Plugin closed stdout before returning a frame");
+    }
+    if line.len() > limit {
+        bail!("Process Plugin frame exceeds the development limit");
+    }
+    serde_json::from_str(&line).context("Process Plugin returned invalid framed JSON")
+}
+
+fn write_process_frame(writer: &mut impl Write, frame: &Value) -> anyhow::Result<()> {
+    serde_json::to_writer(&mut *writer, frame)?;
+    writer.write_all(b"\n")?;
+    writer.flush()?;
+    Ok(())
 }
 
 async fn invoke_dev_adapter(

@@ -752,7 +752,6 @@ dependencies = [
  "lenso-contract-codegen",
  "lenso-kernel",
  "lenso-plugin-bundle",
- "lenso-process-adapter",
  "lenso-runner",
  "lenso-runtime-codec",
  "lenso-wasm-component-adapter",
@@ -820,29 +819,6 @@ dependencies = [
  "toml",
  "wasmparser",
  "wit-component",
-]
-
-[[package]]
-name = "lenso-process-adapter"
-version = "0.1.0"
-source = "git+https://github.com/LioRael/lenso-runtime-rust?rev=40922ad161cf5b8dbbb461c35846a975bd7ca217#40922ad161cf5b8dbbb461c35846a975bd7ca217"
-dependencies = [
- "futures",
- "lenso-app-plan",
- "lenso-kernel",
- "lenso-process-sdk",
- "lenso-runtime-codec",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "lenso-process-sdk"
-version = "0.1.0"
-source = "git+https://github.com/LioRael/lenso-runtime-rust?rev=40922ad161cf5b8dbbb461c35846a975bd7ca217#40922ad161cf5b8dbbb461c35846a975bd7ca217"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]
