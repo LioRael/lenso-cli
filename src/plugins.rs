@@ -6,11 +6,14 @@ use std::{
 
 use anyhow::{Context, bail};
 use clap::{Args, Subcommand};
+use lenso_app_plan::ExecutionClassId;
 use lenso_app_plan::authoring::{
     HostCatalog, PluginDescriptor, PluginInstanceId, PluginRootInstance, PluginRootSnapshot,
     ResolvedApp, resolve_plugin_root,
 };
-use lenso_plugin_bundle::{MANIFEST_FILE, PluginManifestV2, verify_bundle_directory};
+use lenso_plugin_bundle::{
+    ImplementationPolicy, read_bundle_manifest, resolve_implementation, verify_bundle_directory,
+};
 
 const PLUGIN_ROOT: &str = "plugins";
 const HOST_CATALOG: &str = ".lenso/host-catalog.json";
@@ -232,11 +235,21 @@ fn read_bundle_descriptor(path: &Path, plugin_id: &str) -> anyhow::Result<Plugin
             verified.plugin_id
         );
     }
-    let bytes = fs::read(path.join(MANIFEST_FILE))?;
-    let manifest: PluginManifestV2 = serde_json::from_slice(&bytes)
+    let manifest = read_bundle_manifest(path)
         .with_context(|| format!("read Plugin Manifest {}", path.display()))?;
-    let descriptor: PluginDescriptor = serde_json::from_value(manifest.entry.descriptor)
-        .with_context(|| format!("read portable Plugin Descriptor {}", path.display()))?;
+    let descriptor = resolve_implementation(
+        &manifest,
+        &ImplementationPolicy {
+            host_target: format!("{}-unknown-{}", env::consts::ARCH, env::consts::OS),
+            execution_classes: vec![
+                ExecutionClassId::new("lenso.quickjs@1"),
+                ExecutionClassId::new("lenso.process@1"),
+                ExecutionClassId::new("lenso.wasm-component@1"),
+                ExecutionClassId::new("lenso.bun-process@1"),
+            ],
+        },
+    )?
+    .descriptor;
     if descriptor.plugin_id() != plugin_id
         || descriptor.release_version() != verified.release_version
     {
@@ -522,6 +535,12 @@ fn copy_bundle(source: &Path, destination: &Path) -> anyhow::Result<()> {
 fn copy_directory(source: &Path, destination: &Path) -> anyhow::Result<()> {
     for entry in read_entries(source)? {
         let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            let child = destination.join(entry.file_name());
+            fs::create_dir_all(&child)?;
+            copy_directory(&entry.path(), &child)?;
+            continue;
+        }
         if !file_type.is_file() {
             bail!(
                 "Plugin Bundle contains a non-file entry: {}",
