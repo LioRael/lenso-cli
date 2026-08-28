@@ -24,12 +24,13 @@ lenso plugin dev --operation execute \
 lenso plugin pack
 ```
 
-The generated Rust project keeps business behavior in `src/plugin.rs` as
-ordinary typed Rust. Lenso owns the generated Wasm Component lowering, WIT,
-Capability descriptor, schema projection, and wire dispatch.
+The generated project is ordinary typed Rust in `src/lib.rs`. The portable SDK
+owns Wasm Component lowering, WIT, Capability descriptors, schema projection,
+and Process wire dispatch at compile time; target-specific generated files are
+not checked into the Plugin project.
 
-By default, a Rust Plugin project has one editable `src/plugin.rs` and produces
-both portable Wasm and trusted Process implementations. `pack` places both in
+By default, one editable `src/lib.rs` produces both portable Wasm and trusted
+Process implementations. `pack` places both in
 one V3 `.lenso-plugin` Release; the Host selects one implementation before Plan
 resolution and never falls back after startup. Legacy single-output projects
 remain readable.
