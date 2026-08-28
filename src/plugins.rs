@@ -19,6 +19,10 @@ const PLUGIN_ROOT: &str = "plugins";
 const HOST_CATALOG: &str = ".lenso/host-catalog.json";
 const BUNDLE_NAME: &str = "plugin.lenso-plugin";
 const MAX_CONFIGURATION_BYTES: u64 = 256 * 1024;
+const MAX_RESOURCE_FILES: usize = 4_096;
+const MAX_RESOURCE_FILE_BYTES: u64 = 1024 * 1024;
+const MAX_RESOURCE_TOTAL_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_RESOURCE_DEPTH: usize = 32;
 
 #[derive(Clone, Debug, Subcommand)]
 pub(crate) enum PluginsCommand {
@@ -189,6 +193,8 @@ fn scan_plugin_directory(
     disabled: &mut Vec<PluginInstanceId>,
 ) -> anyhow::Result<()> {
     let mut normalized = BTreeMap::<String, String>::new();
+    let mut configured_instances = BTreeSet::new();
+    let mut resource_directories = BTreeMap::<String, PathBuf>::new();
     let mut entries = read_entries(directory)?;
     entries.sort_by_key(fs::DirEntry::file_name);
     for entry in entries {
@@ -208,6 +214,11 @@ fn scan_plugin_directory(
             releases.push(read_bundle_descriptor(&entry.path(), plugin_id)?);
             continue;
         }
+        if file_type.is_dir() {
+            validate_instance_filename(&name)?;
+            resource_directories.insert(name, entry.path());
+            continue;
+        }
         if !file_type.is_file() {
             bail!(
                 "Plugin entries cannot be symlinks or special files: {}",
@@ -216,6 +227,7 @@ fn scan_plugin_directory(
         }
         if let Some(instance) = name.strip_suffix(".toml") {
             validate_instance_filename(instance)?;
+            configured_instances.insert(instance.to_owned());
             instances.push(
                 PluginRootInstance::new(plugin_id, instance)
                     .with_configuration(read_configuration(&entry.path())?),
@@ -228,6 +240,80 @@ fn scan_plugin_directory(
             disabled.push(PluginInstanceId::new(plugin_id, instance));
         } else {
             bail!("unknown Plugin file: {}", entry.path().display());
+        }
+    }
+    for (instance, resource_directory) in resource_directories {
+        if !configured_instances.contains(&instance) {
+            bail!(
+                "orphan Plugin resource directory without `{instance}.toml`: {}",
+                resource_directory.display()
+            );
+        }
+        validate_resource_directory(&resource_directory)?;
+    }
+    Ok(())
+}
+
+fn validate_resource_directory(path: &Path) -> anyhow::Result<()> {
+    let mut file_count = 0_usize;
+    let mut total_size = 0_u64;
+    let mut pending = vec![(path.to_path_buf(), 0_usize)];
+    while let Some((directory, depth)) = pending.pop() {
+        if depth > MAX_RESOURCE_DEPTH {
+            bail!(
+                "Plugin resource directory exceeds {MAX_RESOURCE_DEPTH} levels: {}",
+                directory.display()
+            );
+        }
+        let mut entries = read_entries(&directory)?;
+        entries.sort_by_key(fs::DirEntry::file_name);
+        for entry in entries {
+            let entry_path = entry.path();
+            let name = utf8_name(&entry_path, &entry.file_name())?;
+            if is_ignored_os_metadata(&name) {
+                continue;
+            }
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                pending.push((entry_path, depth + 1));
+                continue;
+            }
+            if !file_type.is_file() {
+                bail!(
+                    "Plugin resources cannot contain symlinks or special files: {}",
+                    entry_path.display()
+                );
+            }
+            if file_count == MAX_RESOURCE_FILES {
+                bail!(
+                    "Plugin resources exceed {MAX_RESOURCE_FILES} files: {}",
+                    path.display()
+                );
+            }
+            let metadata = fs::symlink_metadata(&entry_path)?;
+            if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+                bail!(
+                    "Plugin resources must be regular files: {}",
+                    entry_path.display()
+                );
+            }
+            if metadata.len() > MAX_RESOURCE_FILE_BYTES {
+                bail!("Plugin resource exceeds 1 MiB: {}", entry_path.display());
+            }
+            let bytes = fs::read(&entry_path)?;
+            let byte_count = u64::try_from(bytes.len()).with_context(|| {
+                format!("Plugin resource is too large: {}", entry_path.display())
+            })?;
+            if byte_count > MAX_RESOURCE_FILE_BYTES {
+                bail!("Plugin resource exceeds 1 MiB: {}", entry_path.display());
+            }
+            total_size = total_size
+                .checked_add(byte_count)
+                .with_context(|| format!("Plugin resource size overflow: {}", path.display()))?;
+            if total_size > MAX_RESOURCE_TOTAL_BYTES {
+                bail!("Plugin resources exceed 16 MiB: {}", path.display());
+            }
+            file_count += 1;
         }
     }
     Ok(())
@@ -629,6 +715,58 @@ mod tests {
         let resolved = load_resolved_app(root.path()).unwrap();
 
         assert_eq!(resolved.instances().len(), 1);
+    }
+
+    #[test]
+    fn accepts_a_bounded_resource_directory_paired_with_an_instance() {
+        let root = fixture_root();
+        let plugin = root.path().join("plugins/example.agent");
+        fs::create_dir_all(plugin.join("default/prompts")).unwrap();
+        fs::write(plugin.join("default.toml"), "").unwrap();
+        fs::write(plugin.join("default/prompts/system.md"), "hello").unwrap();
+        fs::write(plugin.join("default/prompts/.DS_Store"), "metadata").unwrap();
+
+        let resolved = load_resolved_app(root.path()).unwrap();
+
+        assert!(
+            resolved
+                .instances()
+                .iter()
+                .any(|instance| instance.id().to_string() == "example.agent/default")
+        );
+    }
+
+    #[test]
+    fn rejects_an_orphan_resource_directory() {
+        let root = fixture_root();
+        let resources = root.path().join("plugins/example.agent/custom");
+        fs::create_dir_all(&resources).unwrap();
+        fs::write(resources.join("prompt.md"), "orphan").unwrap();
+
+        let error = load_resolved_app(root.path()).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("orphan Plugin resource directory")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_resource_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = fixture_root();
+        let plugin = root.path().join("plugins/example.agent");
+        fs::create_dir_all(plugin.join("custom")).unwrap();
+        fs::write(plugin.join("custom.toml"), "").unwrap();
+        fs::write(root.path().join("secret"), "not admitted").unwrap();
+        symlink(root.path().join("secret"), plugin.join("custom/secret")).unwrap();
+
+        let error = load_resolved_app(root.path()).unwrap_err();
+
+        assert!(error.to_string().contains("cannot contain symlinks"));
     }
 
     #[test]
