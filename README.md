@@ -56,6 +56,9 @@ lenso run
 
 Configuration lives at `plugins/<plugin-id>/<instance>.toml`; an empty file
 enables package defaults. `<instance>.disabled` is the explicit absence marker.
+Optional structured files live beside it under
+`plugins/<plugin-id>/<instance>/`; `app check` validates the bounded regular-file
+tree before the Host snapshots it into a Generation.
 Installed non-embedded behavior carries one exact `plugin.lenso-plugin` Bundle
 inside its Plugin directory.
 
