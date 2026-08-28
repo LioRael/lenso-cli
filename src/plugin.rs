@@ -2,8 +2,9 @@ use std::{
     any::Any,
     collections::BTreeMap,
     env, fs,
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 use anyhow::{Context, anyhow, bail};
@@ -13,22 +14,23 @@ use lenso_app_plan::{
 };
 use lenso_kernel::{CancellationToken, ExecutionAdapter, InvocationContext, RuntimeFailure};
 use lenso_plugin_bundle::{
-    SourcePluginBuild, VerifiedBundle, build_source_plugin_bundle, extract_plugin_descriptor,
-    verify_bundle_directory,
+    SourcePluginBuild, SourceProcessPluginBuild, VerifiedBundle, build_source_plugin_bundle,
+    build_source_process_plugin_bundle, extract_plugin_descriptor, verify_bundle_directory,
 };
 use lenso_runtime_codec::{ArtifactCatalog, ArtifactHandle, JsonCapabilityCodec};
-use lenso_wasm_component_adapter::{EXECUTION_CLASS, WasmComponentAdapter};
+use lenso_wasm_component_adapter::{EXECUTION_CLASS as WASM_EXECUTION_CLASS, WasmComponentAdapter};
 use serde::Deserialize;
 use serde_json::Value;
 
 const GUEST_SDK_VERSION: &str = "0.2.0";
+const PROCESS_RUNTIME_REVISION: &str = "40922ad161cf5b8dbbb461c35846a975bd7ca217";
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum PluginCommand {
-    /// Create a Rust/Wasm Plugin project.
+    /// Create a portable Wasm or trusted Process Plugin project.
     New(PluginNewArgs),
-    /// Build and run the Plugin through the Wasm Component Adapter.
+    /// Build and run the Plugin through its generated execution adapter.
     Dev(PluginDevArgs),
     /// Validate Plugin source and generated descriptor evidence.
     Check(PluginCheckArgs),
@@ -46,8 +48,8 @@ pub struct PluginNewArgs {
     /// New Plugin project directory. Defaults to the Plugin id.
     #[arg(long)]
     dir: Option<PathBuf>,
-    /// Plugin runtime. The first public Plugin shape supports Rust/Wasm only.
-    #[arg(long, value_enum, default_value_t = PluginRuntimeArg::Rust)]
+    /// Plugin runtime. Rust compiles to portable Wasm; Process compiles a trusted native executable.
+    #[arg(long, value_enum, default_value_t = PluginRuntimeArg::Wasm)]
     runtime: PluginRuntimeArg,
     /// Skip lockfile generation and the initial compile check.
     #[arg(long)]
@@ -59,11 +61,9 @@ pub struct PluginNewArgs {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum PluginRuntimeArg {
-    Rust,
-    Bun,
-    QuickJs,
+    #[value(alias = "rust")]
+    Wasm,
     Process,
-    NativeDylib,
 }
 
 #[derive(Args, Clone, Debug)]
@@ -125,6 +125,8 @@ struct CargoTargetMetadata {
 #[derive(Debug, Deserialize)]
 struct CargoMetadata {
     lenso: LensoMetadata,
+    #[serde(default, rename = "lenso-cli")]
+    lenso_cli: Option<LensoCliMetadata>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -134,12 +136,23 @@ struct LensoMetadata {
 }
 
 #[derive(Debug, Deserialize)]
+struct LensoCliMetadata {
+    runtime: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProjectRuntime {
+    Wasm,
+    Process,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq)]
 struct PluginDescriptor {
     abi: String,
     capabilities: Vec<PluginCapability>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Eq, PartialEq)]
 struct PluginCapability {
     capability_id: String,
     descriptor_version: String,
@@ -156,15 +169,6 @@ pub async fn plugin(command: PluginCommand) -> anyhow::Result<()> {
 }
 
 fn create(args: PluginNewArgs) -> anyhow::Result<()> {
-    if args.runtime != PluginRuntimeArg::Rust {
-        bail!(
-            "Plugin runtime `{}` is not supported yet; the first public Plugin shape is Rust/Wasm (`--runtime rust`)",
-            args.runtime
-                .to_possible_value()
-                .expect("ValueEnum variant")
-                .get_name()
-        );
-    }
     validate_plugin_id(&args.plugin_id)?;
     let base = args.repo_root.unwrap_or(env::current_dir()?);
     let target = args
@@ -176,7 +180,10 @@ fn create(args: PluginNewArgs) -> anyhow::Result<()> {
             target.display()
         );
     }
-    let files = plugin_scaffold(&args.plugin_id);
+    let files = match args.runtime {
+        PluginRuntimeArg::Wasm => plugin_scaffold(&args.plugin_id),
+        PluginRuntimeArg::Process => process_plugin_scaffold(&args.plugin_id),
+    };
     if args.dry_run {
         println!("Plugin dry run for {}:", target.display());
         for path in files.keys() {
@@ -201,37 +208,22 @@ fn create(args: PluginNewArgs) -> anyhow::Result<()> {
         .with_context(|| format!("publish Plugin scaffold {}", target.display()))?;
     if !args.no_install {
         run_cargo(&target, &["generate-lockfile"], "generate Plugin lockfile")?;
-        run_cargo(
-            &target,
-            &["check", "--locked", "--target", WASM_TARGET],
-            "check generated Plugin",
-        )?;
+        let check_args = if args.runtime == PluginRuntimeArg::Wasm {
+            vec!["check", "--locked", "--target", WASM_TARGET]
+        } else {
+            vec!["check", "--locked"]
+        };
+        run_cargo(&target, &check_args, "check generated Plugin")?;
     }
     println!("Created Plugin project at {}.", target.display());
     Ok(())
 }
 
-// Keep the complete four-file scaffold together so its single public identity
+// Keep the complete scaffold together so its single public identity
 // and forbidden author vocabulary remain reviewable in one place.
 #[allow(clippy::too_many_lines)]
 fn plugin_scaffold(plugin_id: &str) -> BTreeMap<PathBuf, String> {
     let package_name = plugin_id.replace('.', "-");
-    let input_schema = serde_json::json!({
-        "additionalProperties": false,
-        "properties": { "text": { "maxLength": 4096, "type": "string" } },
-        "required": ["text"],
-        "type": "object",
-    })
-    .to_string();
-    let catalog = serde_json::json!({
-        "tools": [{
-            "name": plugin_id,
-            "description": "Process one UTF-8 string.",
-            "input_schema_json": input_schema,
-            "execution": "parallel_safe",
-        }],
-    })
-    .to_string();
     BTreeMap::from([
         (
             PathBuf::from("Cargo.toml"),
@@ -246,11 +238,15 @@ publish = false
 plugin-id = "{plugin_id}"
 root-slot = "tools"
 
+[package.metadata.lenso-cli]
+runtime = "wasm"
+
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
 lenso-guest-sdk = "{GUEST_SDK_VERSION}"
+schemars = "1"
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
 wit-bindgen = "0.60"
@@ -261,8 +257,41 @@ wit-bindgen = "0.60"
         ),
         (
             PathBuf::from("src/lib.rs"),
+            "mod plugin;\n\n// Generated execution lowering. Edit `plugin.rs`, not this file.\ninclude!(\"lenso.generated.rs\");\n".to_owned(),
+        ),
+        (
+            PathBuf::from("src/plugin.rs"),
+            r#"use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Arguments {
+    #[schemars(length(max = 4096))]
+    pub text: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolError {
+    InvalidArguments,
+}
+
+pub fn execute(arguments: Arguments) -> Result<String, ToolError> {
+    if arguments.text.is_empty() {
+        Err(ToolError::InvalidArguments)
+    } else {
+        Ok(arguments.text)
+    }
+}
+"#
+            .to_owned(),
+        ),
+        (
+            PathBuf::from("src/lenso.generated.rs"),
             format!(
-                r###"use serde::{{Deserialize, Serialize}};
+                r##"// Generated by `lenso plugin new`. Do not edit.
+use serde::{{Deserialize, Serialize}};
 
 wit_bindgen::generate!({{
     path: "wit",
@@ -279,17 +308,26 @@ struct ExecuteRequest {{
     arguments_json: String,
 }}
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ToolArguments {{
-    text: String,
-}}
-
 #[derive(Serialize)]
 struct ExecuteResponse {{
     content_type: &'static str,
     content: String,
     metadata_json: &'static str,
+}}
+
+fn catalog() -> Result<String, String> {{
+    let schema = schemars::schema_for!(crate::plugin::Arguments);
+    let input_schema_json = serde_json::to_string(&schema)
+        .map_err(|_| "\"execution_failed\"".to_owned())?;
+    serde_json::to_string(&serde_json::json!({{
+        "tools": [{{
+            "name": TOOL,
+            "description": "Process one UTF-8 string.",
+            "input_schema_json": input_schema_json,
+            "execution": "parallel_safe",
+        }}],
+    }}))
+    .map_err(|_| "\"execution_failed\"".to_owned())
 }}
 
 struct PluginComponent;
@@ -311,18 +349,21 @@ impl Guest for PluginComponent {{
             return Err("\"not_found\"".to_owned());
         }}
         match operation.as_str() {{
-            "catalog" => Ok(r##"{catalog}"##.to_owned()),
+            "catalog" => catalog(),
             "execute" => {{
                 let request = serde_json::from_str::<ExecuteRequest>(&request_json)
                     .map_err(|_| "\"invalid_arguments\"".to_owned())?;
                 if request.name != TOOL {{
                     return Err("\"not_found\"".to_owned());
                 }}
-                let arguments = serde_json::from_str::<ToolArguments>(&request.arguments_json)
+                let arguments = serde_json::from_str::<crate::plugin::Arguments>(&request.arguments_json)
                     .map_err(|_| "\"invalid_arguments\"".to_owned())?;
+                let content = crate::plugin::execute(arguments)
+                    .map_err(|error| serde_json::to_string(&error)
+                        .unwrap_or_else(|_| "\"execution_failed\"".to_owned()))?;
                 serde_json::to_string(&ExecuteResponse {{
                     content_type: "text",
-                    content: arguments.text,
+                    content,
                     metadata_json: r#"{{"provider":"external-wasm"}}"#,
                 }})
                 .map_err(|_| "\"execution_failed\"".to_owned())
@@ -334,7 +375,7 @@ impl Guest for PluginComponent {{
 }}
 
 export!(PluginComponent);
-"###
+"##
             ),
         ),
         (
@@ -344,7 +385,179 @@ export!(PluginComponent);
         (
             PathBuf::from("README.md"),
             format!(
-                "# {plugin_id}\n\nRust/Wasm Tool Plugin for the Lenso Agent Harness. Edit `src/lib.rs`, then use one Plugin workflow:\n\n```sh\nlenso plugin check\nlenso plugin dev --operation execute --request-json '{{\"name\":\"{plugin_id}\",\"arguments_json\":\"{{\\\"text\\\":\\\"hello\\\"}}\"}}'\nlenso plugin pack\n```\n\nCreate another project with `lenso plugin new <id>`.\n"
+                "# {plugin_id}\n\nRust Plugin for the Lenso Agent Harness, packaged as an isolated Wasm Component. Edit only `src/plugin.rs`; Lenso owns the generated execution bridge.\n\n```sh\nlenso plugin check\nlenso plugin dev --operation execute --request-json '{{\"name\":\"{plugin_id}\",\"arguments_json\":\"{{\\\"text\\\":\\\"hello\\\"}}\"}}'\nlenso plugin pack\n```\n\nCreate another project with `lenso plugin new <id>`.\n"
+            ),
+        ),
+    ])
+}
+
+#[allow(clippy::too_many_lines)]
+fn process_plugin_scaffold(plugin_id: &str) -> BTreeMap<PathBuf, String> {
+    let package_name = plugin_id.replace('.', "-");
+    let descriptor = r#"{"abi":"lenso.json-request@1","capabilities":[{"capability_id":"lenso.agent.tool-provider@2","descriptor_version":"2.0.0","request_operations":["catalog","execute"]}]}"#;
+    BTreeMap::from([
+        (
+            PathBuf::from("Cargo.toml"),
+            format!(
+                r#"[package]
+name = "{package_name}"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[package.metadata.lenso]
+plugin-id = "{plugin_id}"
+root-slot = "tools"
+
+[package.metadata.lenso-cli]
+runtime = "process"
+
+[dependencies]
+lenso-process-sdk = {{ version = "0.1.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "{PROCESS_RUNTIME_REVISION}" }}
+schemars = "1"
+serde = {{ version = "1", features = ["derive"] }}
+serde_json = "1"
+
+[workspace]
+"#
+            ),
+        ),
+        (
+            PathBuf::from("src/main.rs"),
+            "mod plugin;\n\n// Generated execution lowering. Edit `plugin.rs`, not this file.\ninclude!(\"lenso.generated.rs\");\n"
+                .to_owned(),
+        ),
+        (
+            PathBuf::from("src/plugin.rs"),
+            r#"use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Arguments {
+    #[schemars(length(max = 4096))]
+    pub text: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolError {
+    InvalidArguments,
+}
+
+pub fn execute(arguments: Arguments) -> Result<String, ToolError> {
+    if arguments.text.is_empty() {
+        Err(ToolError::InvalidArguments)
+    } else {
+        Ok(arguments.text)
+    }
+}
+"#
+            .to_owned(),
+        ),
+        (
+            PathBuf::from("src/lenso.generated.rs"),
+            format!(
+                r##"// Generated by `lenso plugin new`. Do not edit.
+use lenso_process_sdk::{{ProcessOutcome, ProcessPlugin}};
+use serde::{{Deserialize, Serialize}};
+use serde_json::{{Value, json}};
+
+const CAPABILITY: &str = "lenso.agent.tool-provider@2";
+const TOOL: &str = "{plugin_id}";
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecuteRequest {{
+    name: String,
+    arguments_json: String,
+}}
+
+#[derive(Serialize)]
+struct ExecuteResponse {{
+    content_type: &'static str,
+    content: String,
+    metadata_json: &'static str,
+}}
+
+#[derive(Debug)]
+struct GeneratedPlugin;
+
+impl GeneratedPlugin {{
+    fn catalog() -> ProcessOutcome {{
+        let schema = schemars::schema_for!(crate::plugin::Arguments);
+        let input_schema_json = match serde_json::to_string(&schema) {{
+            Ok(schema) => schema,
+            Err(error) => return ProcessOutcome::Failure(error.to_string()),
+        }};
+        ProcessOutcome::Success(json!({{
+            "tools": [{{
+                "name": TOOL,
+                "description": "Process one UTF-8 string.",
+                "input_schema_json": input_schema_json,
+                "execution": "parallel_safe",
+            }}],
+        }}))
+    }}
+}}
+
+impl ProcessPlugin for GeneratedPlugin {{
+    fn descriptor(&self) -> Value {{
+        serde_json::from_str(include_str!("../lenso.generated.descriptor.json"))
+            .expect("generated descriptor is valid JSON")
+    }}
+
+    fn invoke(&self, capability: &str, operation: &str, request: Value) -> ProcessOutcome {{
+        if capability != CAPABILITY {{
+            return ProcessOutcome::DomainError(json!("not_found"));
+        }}
+        match operation {{
+            "catalog" => Self::catalog(),
+            "execute" => {{
+                let request = match serde_json::from_value::<ExecuteRequest>(request) {{
+                    Ok(request) => request,
+                    Err(_) => return ProcessOutcome::DomainError(json!("invalid_arguments")),
+                }};
+                if request.name != TOOL {{
+                    return ProcessOutcome::DomainError(json!("not_found"));
+                }}
+                let arguments = match serde_json::from_str::<crate::plugin::Arguments>(&request.arguments_json) {{
+                    Ok(arguments) => arguments,
+                    Err(_) => return ProcessOutcome::DomainError(json!("invalid_arguments")),
+                }};
+                match crate::plugin::execute(arguments) {{
+                    Ok(content) => match serde_json::to_value(ExecuteResponse {{
+                        content_type: "text",
+                        content,
+                        metadata_json: r#"{{"provider":"external-process"}}"#,
+                    }}) {{
+                        Ok(value) => ProcessOutcome::Success(value),
+                        Err(error) => ProcessOutcome::Failure(error.to_string()),
+                    }},
+                    Err(error) => ProcessOutcome::DomainError(
+                        serde_json::to_value(error).unwrap_or_else(|_| json!("execution_failed")),
+                    ),
+                }}
+            }}
+            _ => ProcessOutcome::DomainError(json!("not_found")),
+        }}
+    }}
+}}
+
+fn main() {{
+    lenso_process_sdk::serve(&GeneratedPlugin).expect("serve Lenso Process Plugin");
+}}
+"##
+            ),
+        ),
+        (
+            PathBuf::from("lenso.generated.descriptor.json"),
+            format!("{descriptor}\n"),
+        ),
+        (
+            PathBuf::from("README.md"),
+            format!(
+                "# {plugin_id}\n\nTrusted native Process Plugin for the Lenso Agent Harness. Edit only `src/plugin.rs`; Lenso owns the generated protocol bridge and descriptor. Process Plugins are not sandboxed, so install only trusted bundles.\n\n```sh\nlenso plugin check\nlenso plugin dev --operation execute --request-json '{{\"name\":\"{plugin_id}\",\"arguments_json\":\"{{\\\"text\\\":\\\"hello\\\"}}\"}}'\nlenso plugin pack\n```\n"
             ),
         ),
     ])
@@ -378,12 +591,25 @@ fn check(args: PluginCheckArgs) -> anyhow::Result<()> {
 
 async fn dev(args: PluginDevArgs) -> anyhow::Result<()> {
     let root = project_root(args.repo_root)?;
+    let package = read_package(&root.join("Cargo.toml"))?;
+    let runtime = project_runtime(&package)?;
     let temporary = tempfile::tempdir().context("create Plugin dev directory")?;
     let output = temporary.path().join("dev.lenso-plugin");
     let verified = materialize(&root, &output)?;
-    let component_path = output.join("plugin.wasm");
-    let component = fs::read(&component_path)?;
-    let descriptor = parse_descriptor(&component)?;
+    let artifact_path = output.join(if runtime == ProjectRuntime::Wasm {
+        "plugin.wasm"
+    } else if cfg!(windows) {
+        "plugin.exe"
+    } else {
+        "plugin"
+    });
+    let artifact_bytes = fs::read(&artifact_path)?;
+    let descriptor = match runtime {
+        ProjectRuntime::Wasm => parse_descriptor(&artifact_bytes)?,
+        ProjectRuntime::Process => {
+            parse_descriptor_bytes(&fs::read(root.join("lenso.generated.descriptor.json"))?)?
+        }
+    };
     let capability = one_capability(&descriptor)?;
     let operation = args.operation.unwrap_or_else(|| {
         capability
@@ -400,22 +626,30 @@ async fn dev(args: PluginDevArgs) -> anyhow::Result<()> {
     }
     let request: Value = serde_json::from_str(&args.request_json)
         .context("Plugin development request is not valid JSON")?;
+    if runtime == ProjectRuntime::Process {
+        let response = invoke_dev_process(
+            &artifact_path,
+            &descriptor,
+            capability,
+            &operation,
+            &request,
+        )?;
+        return print_dev_response(&verified, capability, &operation, &response, args.json);
+    }
     let digest = verified
         .artifact_digests
         .first()
         .ok_or_else(|| anyhow!("Plugin Bundle contains no executable artifact"))?;
-    let artifact = ArtifactHandle::open(&component_path, digest, component.len() as u64)
+    let artifact = ArtifactHandle::open(&artifact_path, digest, artifact_bytes.len() as u64)
         .map_err(|error| runtime_error("open Plugin artifact", &error))?;
     let artifacts = ArtifactCatalog::new()
         .with_artifact("plugin", artifact)
         .map_err(|error| runtime_error("register Plugin artifact", &error))?;
-    let codec = DynamicJsonCodec::new(capability);
-    let adapter = WasmComponentAdapter::new(artifacts).with_codec(codec);
     let plan = ResolvedAppPlan::new(
         vec![
             PluginInstancePlan::new("plugin", &verified.plugin_id)
                 .with_entrypoint("plugin")
-                .with_execution_class(ExecutionClassId::new(EXECUTION_CLASS))
+                .with_execution_class(ExecutionClassId::new(WASM_EXECUTION_CLASS))
                 .with_capability(CapabilityEndpointPlan::new(
                     &capability.capability_id,
                     &capability.descriptor_version,
@@ -424,8 +658,112 @@ async fn dev(args: PluginDevArgs) -> anyhow::Result<()> {
         ],
         Vec::new(),
     );
+    let adapter =
+        WasmComponentAdapter::new(artifacts).with_codec(DynamicJsonCodec::new(capability));
+    let response = invoke_dev_adapter(&adapter, &plan, &operation, request).await?;
+    print_dev_response(&verified, capability, &operation, &response, args.json)
+}
+
+fn invoke_dev_process(
+    executable: &Path,
+    expected_descriptor: &PluginDescriptor,
+    capability: &PluginCapability,
+    operation: &str,
+    request: &Value,
+) -> anyhow::Result<Value> {
+    const MAX_FRAME_BYTES: usize = 1024 * 1024;
+    let mut child = Command::new(executable)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .with_context(|| format!("start Process Plugin `{}`", executable.display()))?;
+    let mut input = child.stdin.take().context("open Process Plugin stdin")?;
+    let output = child.stdout.take().context("open Process Plugin stdout")?;
+    let mut output = BufReader::new(output);
+
+    let result = (|| {
+        let ready = read_process_frame(&mut output, MAX_FRAME_BYTES)?;
+        if ready.get("type").and_then(Value::as_str) != Some("ready")
+            || ready.get("protocol").and_then(Value::as_str) != Some("lenso.process-stdio@1")
+        {
+            bail!("Process Plugin did not complete the expected readiness handshake");
+        }
+        let actual_descriptor = serde_json::from_value::<PluginDescriptor>(
+            ready
+                .get("descriptor")
+                .cloned()
+                .context("Process Plugin readiness omitted its descriptor")?,
+        )
+        .context("Process Plugin readiness descriptor is invalid")?;
+        if &actual_descriptor != expected_descriptor {
+            bail!("Process Plugin readiness descriptor differs from packaged source evidence");
+        }
+
+        write_process_frame(
+            &mut input,
+            &serde_json::json!({
+                "type": "invoke",
+                "id": 1,
+                "capability": capability.capability_id,
+                "operation": operation,
+                "request": request,
+            }),
+        )?;
+        let response = read_process_frame(&mut output, MAX_FRAME_BYTES)?;
+        if response.get("type").and_then(Value::as_str) != Some("result")
+            || response.get("id").and_then(Value::as_u64) != Some(1)
+        {
+            bail!("Process Plugin returned an unexpected result frame");
+        }
+        if let Some(value) = response.get("ok") {
+            return Ok(value.clone());
+        }
+        if let Some(error) = response.get("error") {
+            bail!("Plugin returned Domain Error: {error}");
+        }
+        if let Some(failure) = response.get("failure").and_then(Value::as_str) {
+            bail!("Process Plugin failed: {failure}");
+        }
+        bail!("Process Plugin result contains no terminal outcome")
+    })();
+
+    let _ = write_process_frame(&mut input, &serde_json::json!({ "type": "shutdown" }));
+    drop(input);
+    if result.is_err() {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+    result
+}
+
+fn read_process_frame(reader: &mut impl BufRead, limit: usize) -> anyhow::Result<Value> {
+    let mut line = String::new();
+    let read = reader.read_line(&mut line)?;
+    if read == 0 {
+        bail!("Process Plugin closed stdout before returning a frame");
+    }
+    if line.len() > limit {
+        bail!("Process Plugin frame exceeds the development limit");
+    }
+    serde_json::from_str(&line).context("Process Plugin returned invalid framed JSON")
+}
+
+fn write_process_frame(writer: &mut impl Write, frame: &Value) -> anyhow::Result<()> {
+    serde_json::to_writer(&mut *writer, frame)?;
+    writer.write_all(b"\n")?;
+    writer.flush()?;
+    Ok(())
+}
+
+async fn invoke_dev_adapter(
+    adapter: &impl ExecutionAdapter,
+    plan: &ResolvedAppPlan,
+    operation: &str,
+    request: Value,
+) -> anyhow::Result<Value> {
     let generation = adapter
-        .recreate(&plan, "plugin")
+        .recreate(plan, "plugin")
         .map_err(|error| runtime_error("prepare Plugin generation", &error))?;
     let endpoint = generation
         .endpoints()
@@ -433,7 +771,7 @@ async fn dev(args: PluginDevArgs) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow!("Plugin produced no request endpoint"))?;
     let outcome = endpoint
         .invoke(
-            &operation,
+            operation,
             Box::new(request),
             InvocationContext::new(1, None, CancellationToken::new()),
         )
@@ -448,7 +786,17 @@ async fn dev(args: PluginDevArgs) -> anyhow::Result<()> {
         })?
         .downcast::<Value>()
         .map_err(|_| anyhow!("Plugin returned a response with an unexpected type"))?;
-    if args.json {
+    Ok(*response)
+}
+
+fn print_dev_response(
+    verified: &VerifiedBundle,
+    capability: &PluginCapability,
+    operation: &str,
+    response: &Value,
+    json: bool,
+) -> anyhow::Result<()> {
+    if json {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
@@ -457,7 +805,7 @@ async fn dev(args: PluginDevArgs) -> anyhow::Result<()> {
                 "plugin_id": verified.plugin_id,
                 "capability_id": capability.capability_id,
                 "operation": operation,
-                "response": *response,
+                "response": response,
             }))?
         );
     } else {
@@ -489,20 +837,39 @@ fn materialize(root: &Path, output: &Path) -> anyhow::Result<VerifiedBundle> {
     let package = read_package(&manifest)?;
     synchronize_plugin_lock(root, &package)?;
     let target_directory = cargo_target_directory(root)?;
-    run_cargo(
-        root,
-        &["build", "--locked", "--release", "--target", WASM_TARGET],
-        "build Plugin Wasm",
-    )?;
-    let artifact = target_directory
-        .join(WASM_TARGET)
-        .join("release")
-        .join(format!("{}.wasm", package.name.replace('-', "_")));
-    build_source_plugin_bundle(&SourcePluginBuild {
-        package_manifest: manifest,
-        wasm_module: artifact,
-        output: output.to_path_buf(),
-    })
+    match project_runtime(&package)? {
+        ProjectRuntime::Wasm => {
+            run_cargo(
+                root,
+                &["build", "--locked", "--release", "--target", WASM_TARGET],
+                "build Plugin Wasm",
+            )?;
+            let artifact = target_directory
+                .join(WASM_TARGET)
+                .join("release")
+                .join(format!("{}.wasm", package.name.replace('-', "_")));
+            build_source_plugin_bundle(&SourcePluginBuild {
+                package_manifest: manifest,
+                wasm_module: artifact,
+                output: output.to_path_buf(),
+            })
+        }
+        ProjectRuntime::Process => {
+            run_cargo(
+                root,
+                &["build", "--locked", "--release"],
+                "build Process Plugin",
+            )?;
+            let executable = target_directory.join("release").join(&package.name);
+            build_source_process_plugin_bundle(&SourceProcessPluginBuild {
+                package_manifest: manifest,
+                executable,
+                runtime_descriptor: root.join("lenso.generated.descriptor.json"),
+                target: format!("{}-unknown-{}", env::consts::ARCH, env::consts::OS),
+                output: output.to_path_buf(),
+            })
+        }
+    }
     .with_context(|| format!("package Plugin `{}`", package.metadata.lenso.plugin_id))
 }
 
@@ -549,10 +916,27 @@ fn read_package(manifest: &Path) -> anyhow::Result<CargoPackage> {
     Ok(document.package)
 }
 
+fn project_runtime(package: &CargoPackage) -> anyhow::Result<ProjectRuntime> {
+    match package
+        .metadata
+        .lenso_cli
+        .as_ref()
+        .map_or("wasm", |metadata| metadata.runtime.as_str())
+    {
+        "wasm" => Ok(ProjectRuntime::Wasm),
+        "process" => Ok(ProjectRuntime::Process),
+        runtime => bail!("unsupported Plugin project runtime `{runtime}`"),
+    }
+}
+
 fn parse_descriptor(component: &[u8]) -> anyhow::Result<PluginDescriptor> {
     let bytes = extract_plugin_descriptor(component)?;
+    parse_descriptor_bytes(&bytes)
+}
+
+fn parse_descriptor_bytes(bytes: &[u8]) -> anyhow::Result<PluginDescriptor> {
     let descriptor: PluginDescriptor =
-        serde_json::from_slice(&bytes).context("parse generated Plugin descriptor")?;
+        serde_json::from_slice(bytes).context("parse generated Plugin descriptor")?;
     if descriptor.abi != "lenso.json-request@1" {
         bail!(
             "unsupported Plugin descriptor ABI `{}`; expected request-only V1",
@@ -706,6 +1090,21 @@ mod tests {
         let all = files.values().cloned().collect::<String>();
 
         assert!(all.contains("guest_request_plugin!"));
+        let author_source = files.get(Path::new("src/plugin.rs")).unwrap();
+        for internal in [
+            "wit_bindgen",
+            "guest_request_plugin",
+            "request_json",
+            "arguments_json",
+            "lenso.agent.tool-provider",
+        ] {
+            assert!(
+                !author_source.contains(internal),
+                "author source leaked `{internal}`"
+            );
+        }
+        assert!(author_source.contains("pub fn execute(arguments: Arguments)"));
+        assert!(author_source.contains("JsonSchema"));
         assert!(all.contains("plugin-id = \"uppercase\""));
         assert!(all.contains("lenso.agent.tool-provider@2"));
         assert!(all.contains("requests: [\"catalog\", \"execute\"]"));
@@ -726,19 +1125,29 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_plugin_runtime_fails_with_the_supported_shape() {
-        let root = tempfile::tempdir().unwrap();
-        let error = create(PluginNewArgs {
-            plugin_id: "uppercase".to_owned(),
-            repo_root: Some(root.path().to_path_buf()),
-            dir: None,
-            runtime: PluginRuntimeArg::Bun,
-            no_install: true,
-            dry_run: false,
-        })
-        .unwrap_err();
+    fn process_plugin_scaffold_keeps_protocol_lowering_generated() {
+        let files = process_plugin_scaffold("uppercase");
+        let author_source = files.get(Path::new("src/plugin.rs")).unwrap();
+        let generated_source = files.get(Path::new("src/lenso.generated.rs")).unwrap();
+        let manifest = files.get(Path::new("Cargo.toml")).unwrap();
 
-        assert!(error.to_string().contains("Rust/Wasm"));
+        assert!(author_source.contains("pub fn execute(arguments: Arguments)"));
+        for internal in [
+            "ProcessPlugin",
+            "ProcessOutcome",
+            "descriptor",
+            "request_json",
+            "arguments_json",
+        ] {
+            assert!(
+                !author_source.contains(internal),
+                "author source leaked `{internal}`"
+            );
+        }
+        assert!(generated_source.contains("impl ProcessPlugin for GeneratedPlugin"));
+        assert!(generated_source.contains("lenso_process_sdk::serve"));
+        assert!(manifest.contains("runtime = \"process\""));
+        assert!(files.contains_key(Path::new("lenso.generated.descriptor.json")));
     }
 
     #[test]
@@ -776,7 +1185,7 @@ plugin-id = "second"
             plugin_id: "uppercase".to_owned(),
             repo_root: Some(root.path().to_path_buf()),
             dir: None,
-            runtime: PluginRuntimeArg::Rust,
+            runtime: PluginRuntimeArg::Wasm,
             no_install: false,
             dry_run: false,
         })
@@ -814,5 +1223,43 @@ plugin-id = "second"
             })
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "clean-room test downloads git dependencies and compiles a native executable"]
+    async fn clean_room_process_plugin_runs_new_check_dev_and_pack() {
+        let root = tempfile::tempdir().unwrap();
+        create(PluginNewArgs {
+            plugin_id: "uppercase".to_owned(),
+            repo_root: Some(root.path().to_path_buf()),
+            dir: None,
+            runtime: PluginRuntimeArg::Process,
+            no_install: false,
+            dry_run: false,
+        })
+        .unwrap();
+        let project = root.path().join("uppercase");
+        check(PluginCheckArgs {
+            repo_root: Some(project.clone()),
+            json: true,
+        })
+        .unwrap();
+        dev(PluginDevArgs {
+            repo_root: Some(project.clone()),
+            operation: Some("execute".to_owned()),
+            request_json: r#"{"name":"uppercase","arguments_json":"{\"text\":\"hello\"}"}"#
+                .to_owned(),
+            json: true,
+        })
+        .await
+        .unwrap();
+        let output = project.join("dist/uppercase.lenso-plugin");
+        pack(PluginPackArgs {
+            repo_root: Some(project),
+            output: Some(output.clone()),
+            json: true,
+        })
+        .unwrap();
+        verify_bundle_directory(&output).unwrap();
     }
 }

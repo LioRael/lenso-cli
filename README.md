@@ -24,6 +24,10 @@ lenso plugin dev --operation execute \
 lenso plugin pack
 ```
 
+The generated Rust project keeps business behavior in `src/plugin.rs` as
+ordinary typed Rust. Lenso owns the generated Wasm Component lowering, WIT,
+Capability descriptor, schema projection, and wire dispatch.
+
 `pack` validates and reopens the exact `.lenso-plugin` Bundle it creates. A
 receiving Host independently validates those bytes again during installation.
 
