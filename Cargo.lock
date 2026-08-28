@@ -735,7 +735,7 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 [[package]]
 name = "lenso-app-plan"
 version = "0.3.0"
-source = "git+https://github.com/LioRael/lenso?rev=cd35675a191d815b690c8889756dfe859a0e4d7b#cd35675a191d815b690c8889756dfe859a0e4d7b"
+source = "git+https://github.com/LioRael/lenso?rev=b8c7d3bfd7b900965f7782016b92f6c891fa98e5#b8c7d3bfd7b900965f7782016b92f6c891fa98e5"
 dependencies = [
  "serde",
  "serde_json",
@@ -798,7 +798,7 @@ dependencies = [
 [[package]]
 name = "lenso-kernel"
 version = "0.2.0"
-source = "git+https://github.com/LioRael/lenso?rev=cd35675a191d815b690c8889756dfe859a0e4d7b#cd35675a191d815b690c8889756dfe859a0e4d7b"
+source = "git+https://github.com/LioRael/lenso?rev=b8c7d3bfd7b900965f7782016b92f6c891fa98e5#b8c7d3bfd7b900965f7782016b92f6c891fa98e5"
 dependencies = [
  "futures",
  "lenso-app-plan",
@@ -807,7 +807,7 @@ dependencies = [
 [[package]]
 name = "lenso-plugin-bundle"
 version = "0.2.0"
-source = "git+https://github.com/LioRael/lenso-runtime-rust?rev=40922ad161cf5b8dbbb461c35846a975bd7ca217#40922ad161cf5b8dbbb461c35846a975bd7ca217"
+source = "git+https://github.com/LioRael/lenso-runtime-rust?rev=38ca1becc5bd2d4dd5a78cdd3be53237c35679af#38ca1becc5bd2d4dd5a78cdd3be53237c35679af"
 dependencies = [
  "hex",
  "lenso-app-plan",
@@ -824,7 +824,7 @@ dependencies = [
 [[package]]
 name = "lenso-runner"
 version = "0.2.0"
-source = "git+https://github.com/LioRael/lenso-runtime-rust?rev=40922ad161cf5b8dbbb461c35846a975bd7ca217#40922ad161cf5b8dbbb461c35846a975bd7ca217"
+source = "git+https://github.com/LioRael/lenso-runtime-rust?rev=38ca1becc5bd2d4dd5a78cdd3be53237c35679af#38ca1becc5bd2d4dd5a78cdd3be53237c35679af"
 dependencies = [
  "cpu-time",
  "futures",
@@ -836,7 +836,7 @@ dependencies = [
 [[package]]
 name = "lenso-runtime-codec"
 version = "0.2.0"
-source = "git+https://github.com/LioRael/lenso-runtime-rust?rev=40922ad161cf5b8dbbb461c35846a975bd7ca217#40922ad161cf5b8dbbb461c35846a975bd7ca217"
+source = "git+https://github.com/LioRael/lenso-runtime-rust?rev=38ca1becc5bd2d4dd5a78cdd3be53237c35679af#38ca1becc5bd2d4dd5a78cdd3be53237c35679af"
 dependencies = [
  "futures",
  "hex",
@@ -850,7 +850,7 @@ dependencies = [
 [[package]]
 name = "lenso-wasm-component-adapter"
 version = "0.2.0"
-source = "git+https://github.com/LioRael/lenso-runtime-rust?rev=40922ad161cf5b8dbbb461c35846a975bd7ca217#40922ad161cf5b8dbbb461c35846a975bd7ca217"
+source = "git+https://github.com/LioRael/lenso-runtime-rust?rev=38ca1becc5bd2d4dd5a78cdd3be53237c35679af#38ca1becc5bd2d4dd5a78cdd3be53237c35679af"
 dependencies = [
  "futures",
  "lenso-app-plan",
