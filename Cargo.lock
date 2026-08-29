@@ -807,7 +807,7 @@ dependencies = [
 [[package]]
 name = "lenso-plugin-bundle"
 version = "0.2.0"
-source = "git+https://github.com/LioRael/lenso-runtime-rust?rev=8cd4f848ff1d4e6e550ffb65c1e34d25d25c8644#8cd4f848ff1d4e6e550ffb65c1e34d25d25c8644"
+source = "git+https://github.com/LioRael/lenso-runtime-rust?rev=6bd5b88f3c6610581fcc4306c6cf356f71f7c611#6bd5b88f3c6610581fcc4306c6cf356f71f7c611"
 dependencies = [
  "hex",
  "lenso-app-plan",
