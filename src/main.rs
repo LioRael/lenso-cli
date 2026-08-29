@@ -130,7 +130,7 @@ fn run(args: RunArgs) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
 
     #[test]
     fn public_command_tree_contains_only_plugin_app_owner_and_run_workflows() {
@@ -162,6 +162,33 @@ mod tests {
                 .map(clap::Command::get_name)
                 .collect::<Vec<_>>(),
             ["init", "check", "show"]
+        );
+    }
+
+    #[test]
+    fn plugin_new_accepts_web_as_an_explicit_authoring_path() {
+        let parsed =
+            Cli::try_parse_from(["lenso", "plugin", "new", "company.greetings-http", "--web"])
+                .unwrap();
+        let RootCommand::Plugin {
+            command: plugin::PluginCommand::New(arguments),
+        } = parsed.command
+        else {
+            panic!("expected plugin new");
+        };
+        assert!(arguments.web);
+
+        assert!(
+            Cli::try_parse_from([
+                "lenso",
+                "plugin",
+                "new",
+                "company.greetings-http",
+                "--web",
+                "--runtime",
+                "wasm",
+            ])
+            .is_err()
         );
     }
 }

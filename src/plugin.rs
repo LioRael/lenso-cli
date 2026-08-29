@@ -29,7 +29,7 @@ const WASM_TARGET: &str = "wasm32-unknown-unknown";
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum PluginCommand {
-    /// Create one ordinary Rust Plugin with portable Wasm and Process outputs.
+    /// Create an Agent Tool Plugin, or a linked Web Plugin with `--web`.
     New(PluginNewArgs),
     /// Build and run the Plugin through its SDK-selected execution adapter.
     Dev(PluginDevArgs),
@@ -52,6 +52,9 @@ pub struct PluginNewArgs {
     /// Implementation outputs. Multi builds Wasm and a native Process from the same source.
     #[arg(long, value_enum, default_value_t = PluginRuntimeArg::Multi)]
     runtime: PluginRuntimeArg,
+    /// Create a linked native Rust HTTP Endpoint Plugin instead of an Agent Tool Plugin.
+    #[arg(long, conflicts_with = "runtime")]
+    pub(crate) web: bool,
     /// Skip lockfile generation and the initial compile check.
     #[arg(long)]
     no_install: bool,
