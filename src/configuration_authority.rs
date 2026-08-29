@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use super::{
     MAX_CONFIGURATION_BYTES, PLUGIN_ROOT, PluginRootAuthoringState, atomic_write,
     inspect_plugin_root, load_host_catalog, lock_plugin_root, snapshot_plugin_root,
-    validate_instance_filename, validate_path_identity,
+    validate_existing_plugin_id, validate_instance_filename,
 };
 
 const PROPOSAL_SCHEMA: &str = "lenso.plugin-configuration-proposal.v1";
@@ -348,7 +348,7 @@ pub fn propose_instance_configuration(
     instance: &str,
     bytes: &[u8],
 ) -> anyhow::Result<PluginConfigurationProposal> {
-    validate_path_identity(plugin_id, "Plugin ID")?;
+    validate_existing_plugin_id(plugin_id)?;
     validate_instance_filename(instance)?;
     let host = load_host_catalog(root)?;
     let current = snapshot_plugin_root(root)?;

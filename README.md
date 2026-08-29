@@ -16,13 +16,13 @@ The Cargo and npm packages use independent version lines.
 ## Author one Plugin
 
 ```sh
-lenso plugin new uppercase
-cd uppercase
+lenso plugin new company.uppercase
+cd company.uppercase
 lenso plugin check
 lenso plugin dev --operation execute \
-  --request-json '{"name":"uppercase","arguments_json":"{\"text\":\"hello\"}"}'
+  --request-json '{"name":"company.uppercase","arguments_json":"{\"text\":\"hello\"}"}'
 lenso plugin dev --watch --operation execute \
-  --request-json '{"name":"uppercase","arguments_json":"{\"text\":\"hello\"}"}'
+  --request-json '{"name":"company.uppercase","arguments_json":"{\"text\":\"hello\"}"}'
 lenso plugin pack
 ```
 
@@ -32,7 +32,12 @@ and Process wire dispatch at compile time; target-specific generated files are
 not checked into the Plugin project.
 
 By default, one editable `src/lib.rs` produces both portable Wasm and trusted
-Process implementations. `pack` places both in
+Process implementations. `dev` builds only the fastest declared local
+implementation (`Process` for a multi-output Rust project); use
+`--implementation wasm|process|all` when selecting or comparing a path.
+File notifications with debounce drive `--watch`, with bounded polling only as
+a platform fallback. `check` and `pack` still build every declared
+implementation, and `pack` places both in
 one V3 `.lenso-plugin` Release; the Host selects one implementation before Plan
 resolution and never falls back after startup. Legacy single-output projects
 remain readable.
@@ -41,8 +46,13 @@ remain readable.
 and reopens its exact contents. `plugins add` accepts that archive and legacy
 Bundle directories. A
 receiving Host independently validates those bytes again during installation.
-`check` and `dev` use development artifacts for a fast edit loop; `pack` is the
+`check` and `dev` use development artifacts; `pack` is the
 release-profile proof and remains the only distribution build.
+
+New Plugins and catalog Releases use the canonical namespaced Plugin ID v1
+grammar (`company.uppercase`) and exact Semantic Versions. Existing
+unnamespaced projects remain readable with an explicit migration warning; see
+[`docs/migration-plugin-authoring.md`](docs/migration-plugin-authoring.md).
 
 ## Change an App
 
@@ -51,7 +61,7 @@ owner writes only differences under `plugins/`:
 
 ```sh
 lenso plugins list
-lenso plugins add dist/uppercase.lenso-plugin
+lenso plugins add dist/company.uppercase-0.1.0.lenso-plugin
 lenso plugins search uppercase
 lenso plugins install company.uppercase --version 1.2.3
 lenso plugins update company.uppercase --version 1.3.0
@@ -87,3 +97,10 @@ file for an App owner to generate or manage.
 
 Runtime Drivers and Execution Adapters remain separate because they implement
 Host mechanics, not application behavior.
+
+## Local framework contributors
+
+Maintainers of a sibling-repository framework checkout can install the
+non-product `lenso-workspace` and `lenso-pr` helpers from
+[`tools/contributor`](tools/contributor/README.md). They are intentionally not
+part of the public CLI, Cargo package, npm package, or release workflow.

@@ -4,6 +4,7 @@ mod catalog;
 mod doctor;
 mod plugin;
 mod plugins;
+mod watch;
 
 use std::{env, path::PathBuf, process::Command};
 
