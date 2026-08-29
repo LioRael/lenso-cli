@@ -74,14 +74,14 @@ must_use_candidate = "allow"
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4", features = ["derive"], optional = true }
-lenso-app-plan = { version = "0.3.0", git = "https://github.com/LioRael/lenso", rev = "b8c7d3bfd7b900965f7782016b92f6c891fa98e5" }
+lenso-app-plan = { version = "0.3.0", git = "https://github.com/LioRael/lenso", rev = "8599db7e4a214ed92f32089f81d14c833d4becf6" }
 lenso-contract-authoring-next = { package = "lenso-contract-authoring", version = "0.1.1", git = "https://github.com/LioRael/lenso-protocols", rev = "9d2774c767fd64a6cc63a5ac04360e9cb92816da", optional = true }
 lenso-contract-codegen-next = { package = "lenso-contract-codegen", version = "0.6.4", git = "https://github.com/LioRael/lenso-protocols", rev = "9d2774c767fd64a6cc63a5ac04360e9cb92816da", optional = true }
-lenso-kernel = { version = "0.2.0", git = "https://github.com/LioRael/lenso", rev = "b8c7d3bfd7b900965f7782016b92f6c891fa98e5", optional = true }
-lenso-plugin-bundle = { version = "0.2.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "6bd5b88f3c6610581fcc4306c6cf356f71f7c611" }
-lenso-runner = { version = "0.2.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "8cd4f848ff1d4e6e550ffb65c1e34d25d25c8644", optional = true }
-lenso-runtime-codec = { version = "0.2.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "8cd4f848ff1d4e6e550ffb65c1e34d25d25c8644", optional = true }
-lenso-wasm-component-adapter = { version = "0.2.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "8cd4f848ff1d4e6e550ffb65c1e34d25d25c8644", optional = true }
+lenso-kernel = { version = "0.2.0", git = "https://github.com/LioRael/lenso", rev = "8599db7e4a214ed92f32089f81d14c833d4becf6", optional = true }
+lenso-plugin-bundle = { version = "0.2.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "89815107385475c8b5be378bdcf5e21aa74e02f0" }
+lenso-runner = { version = "0.2.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "89815107385475c8b5be378bdcf5e21aa74e02f0", optional = true }
+lenso-runtime-codec = { version = "0.2.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "89815107385475c8b5be378bdcf5e21aa74e02f0", optional = true }
+lenso-wasm-component-adapter = { version = "0.2.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "89815107385475c8b5be378bdcf5e21aa74e02f0", optional = true }
 serde = { version = "1.0", features = ["derive"], optional = true }
 serde_json = "1.0"
 sha2 = { version = "0.11", optional = true }
