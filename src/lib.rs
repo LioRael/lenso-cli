@@ -23,7 +23,8 @@ use lenso_plugin_bundle::{
 mod configuration_authority;
 
 pub use configuration_authority::{
-    PluginConfigurationApplication, PluginConfigurationDiagnostic, PluginConfigurationProposal,
+    LocalPluginRootAuthority, PluginConfigurationApplication, PluginConfigurationAuthority,
+    PluginConfigurationAuthoritySource, PluginConfigurationDiagnostic, PluginConfigurationProposal,
     PluginConfigurationProposalStatus, PluginConfigurationPublication, PluginRootRevision,
     PluginRootRevisionConflict, PluginRootRevisionParseError, propose_instance_configuration,
     publish_instance_configuration,
