@@ -2,6 +2,7 @@ use std::{
     error::Error,
     fmt,
     fmt::Write as _,
+    fs,
     path::{Path, PathBuf},
     str,
     str::FromStr,
@@ -23,6 +24,7 @@ use super::{
 
 const PROPOSAL_SCHEMA: &str = "lenso.plugin-configuration-proposal.v1";
 const PUBLICATION_SCHEMA: &str = "lenso.plugin-configuration-publication.v1";
+const SOURCE_DIGEST_SCHEMA: &str = "lenso.plugin-configuration-source.v1";
 
 /// Stable provenance for the authority that owns Plugin configuration publication.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -223,6 +225,7 @@ impl Error for PluginRootRevisionConflict {}
 pub struct PluginConfigurationProposal {
     schema: &'static str,
     base_revision: PluginRootRevision,
+    base_source_digest: PluginConfigurationSourceDigest,
     candidate_revision: PluginRootRevision,
     digest: String,
     status: PluginConfigurationProposalStatus,
@@ -240,6 +243,10 @@ impl PluginConfigurationProposal {
 
     pub const fn base_revision(&self) -> &PluginRootRevision {
         &self.base_revision
+    }
+
+    pub const fn base_source_digest(&self) -> &PluginConfigurationSourceDigest {
+        &self.base_source_digest
     }
 
     pub const fn candidate_revision(&self) -> &PluginRootRevision {
@@ -309,6 +316,7 @@ impl PluginConfigurationDiagnostic {
 pub struct PluginConfigurationPublication {
     schema: &'static str,
     base_revision: PluginRootRevision,
+    base_source_digest: PluginConfigurationSourceDigest,
     revision: PluginRootRevision,
     proposal_digest: String,
     resolved: ResolvedApp,
@@ -321,6 +329,10 @@ impl PluginConfigurationPublication {
 
     pub const fn base_revision(&self) -> &PluginRootRevision {
         &self.base_revision
+    }
+
+    pub const fn base_source_digest(&self) -> &PluginConfigurationSourceDigest {
+        &self.base_source_digest
     }
 
     pub const fn revision(&self) -> &PluginRootRevision {
@@ -350,14 +362,17 @@ pub fn propose_instance_configuration(
 ) -> anyhow::Result<PluginConfigurationProposal> {
     validate_existing_plugin_id(plugin_id)?;
     validate_instance_filename(instance)?;
+    let _lock = lock_plugin_root(root)?;
     let host = load_host_catalog(root)?;
     let current = snapshot_plugin_root(root)?;
     let current_revision = revision_for_snapshot(&current)?;
     ensure_revision(expected_revision, &current_revision)?;
+    let base_source_digest = source_digest_for_instance(root, plugin_id, instance)?;
     build_proposal(
         &host,
         &current,
         current_revision,
+        base_source_digest,
         plugin_id,
         instance,
         bytes,
@@ -374,11 +389,15 @@ pub fn publish_instance_configuration(
     let current = snapshot_plugin_root(root)?;
     let current_revision = revision_for_snapshot(&current)?;
     ensure_revision(&proposal.base_revision, &current_revision)?;
+    let current_source_digest =
+        source_digest_for_instance(root, &proposal.plugin_id, &proposal.instance_key)?;
+    ensure_source_digest(&proposal.base_source_digest, &current_source_digest)?;
 
     let verified = build_proposal(
         &host,
         &current,
         current_revision,
+        current_source_digest,
         &proposal.plugin_id,
         &proposal.instance_key,
         &proposal.toml,
@@ -415,6 +434,7 @@ pub fn publish_instance_configuration(
     Ok(PluginConfigurationPublication {
         schema: PUBLICATION_SCHEMA,
         base_revision: proposal.base_revision.clone(),
+        base_source_digest: proposal.base_source_digest.clone(),
         revision,
         proposal_digest: proposal.digest.clone(),
         resolved,
@@ -425,6 +445,7 @@ fn build_proposal(
     host: &HostCatalog,
     current: &PluginRootSnapshot,
     base_revision: PluginRootRevision,
+    base_source_digest: PluginConfigurationSourceDigest,
     plugin_id: &str,
     instance: &str,
     bytes: &[u8],
@@ -444,8 +465,15 @@ fn build_proposal(
         current.disabled().iter().cloned(),
     );
     let candidate_revision = revision_for_snapshot(&candidate)?;
-    let authority = serde_json::to_vec(&(PROPOSAL_SCHEMA, host, current, &candidate, bytes))
-        .context("encode Plugin configuration proposal authority")?;
+    let authority = serde_json::to_vec(&(
+        PROPOSAL_SCHEMA,
+        host,
+        current,
+        base_source_digest.as_str(),
+        &candidate,
+        bytes,
+    ))
+    .context("encode Plugin configuration proposal authority")?;
     let digest = sha256_digest(&authority);
     let (status, application, diagnostics) = match resolve_plugin_root(host, &candidate) {
         Ok(_) => (
@@ -480,6 +508,7 @@ fn build_proposal(
     Ok(PluginConfigurationProposal {
         schema: PROPOSAL_SCHEMA,
         base_revision,
+        base_source_digest,
         candidate_revision,
         digest,
         status,
@@ -529,6 +558,132 @@ fn ensure_revision(
     .into())
 }
 
+/// A digest of the exact target configuration source, including absence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PluginConfigurationSourceDigest(String);
+
+impl PluginConfigurationSourceDigest {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Digests one exact target configuration source or its explicit absence.
+    pub fn for_source(
+        plugin_id: &str,
+        instance: &str,
+        bytes: Option<&[u8]>,
+    ) -> anyhow::Result<Self> {
+        validate_existing_plugin_id(plugin_id)?;
+        validate_instance_filename(instance)?;
+        Ok(source_digest_for_bytes(plugin_id, instance, bytes))
+    }
+}
+
+impl fmt::Display for PluginConfigurationSourceDigest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// Exact configuration source changed after a proposal was reviewed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PluginConfigurationSourceConflict {
+    expected: PluginConfigurationSourceDigest,
+    current: PluginConfigurationSourceDigest,
+}
+
+impl PluginConfigurationSourceConflict {
+    pub const fn expected(&self) -> &PluginConfigurationSourceDigest {
+        &self.expected
+    }
+
+    pub const fn current(&self) -> &PluginConfigurationSourceDigest {
+        &self.current
+    }
+}
+
+impl fmt::Display for PluginConfigurationSourceConflict {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Plugin configuration source conflict: expected {}, current {}",
+            self.expected, self.current
+        )
+    }
+}
+
+impl Error for PluginConfigurationSourceConflict {}
+
+pub(crate) fn source_digest_for_bytes(
+    plugin_id: &str,
+    instance: &str,
+    bytes: Option<&[u8]>,
+) -> PluginConfigurationSourceDigest {
+    let mut authority = Sha256::new();
+    update_digest_component(&mut authority, SOURCE_DIGEST_SCHEMA.as_bytes());
+    update_digest_component(&mut authority, plugin_id.as_bytes());
+    update_digest_component(&mut authority, instance.as_bytes());
+    match bytes {
+        Some(bytes) => {
+            authority.update([1]);
+            update_digest_component(&mut authority, bytes);
+        }
+        None => authority.update([0]),
+    }
+    PluginConfigurationSourceDigest(encode_sha256(authority.finalize()))
+}
+
+fn source_digest_for_instance(
+    root: &Path,
+    plugin_id: &str,
+    instance: &str,
+) -> anyhow::Result<PluginConfigurationSourceDigest> {
+    let path = root
+        .join(PLUGIN_ROOT)
+        .join(plugin_id)
+        .join(format!("{instance}.toml"));
+    let bytes = match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => Some(
+            fs::read(&path)
+                .with_context(|| format!("read Plugin configuration source {}", path.display()))?,
+        ),
+        Ok(_) => bail!(
+            "Plugin configuration source must be a regular file: {}",
+            path.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("inspect Plugin configuration source {}", path.display())
+            });
+        }
+    };
+    Ok(source_digest_for_bytes(
+        plugin_id,
+        instance,
+        bytes.as_deref(),
+    ))
+}
+
+fn ensure_source_digest(
+    expected: &PluginConfigurationSourceDigest,
+    current: &PluginConfigurationSourceDigest,
+) -> anyhow::Result<()> {
+    if expected == current {
+        return Ok(());
+    }
+    Err(PluginConfigurationSourceConflict {
+        expected: expected.clone(),
+        current: current.clone(),
+    }
+    .into())
+}
+
+fn update_digest_component(authority: &mut Sha256, bytes: &[u8]) {
+    authority.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
+    authority.update(bytes);
+}
+
 pub(crate) fn revision_for_snapshot(
     snapshot: &PluginRootSnapshot,
 ) -> anyhow::Result<PluginRootRevision> {
@@ -538,7 +693,11 @@ pub(crate) fn revision_for_snapshot(
 }
 
 fn sha256_digest(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
+    encode_sha256(Sha256::digest(bytes))
+}
+
+fn encode_sha256(digest: impl AsRef<[u8]>) -> String {
+    let digest = digest.as_ref();
     let mut encoded = String::with_capacity(7 + digest.len() * 2);
     encoded.push_str("sha256:");
     for byte in digest {
@@ -601,12 +760,22 @@ mod tests {
             PluginConfigurationApplication::AppGeneration
         );
         assert_eq!(proposal.base_revision(), &base);
+        assert!(
+            proposal
+                .base_source_digest()
+                .as_str()
+                .starts_with("sha256:")
+        );
         assert_ne!(proposal.candidate_revision(), &base);
         assert!(proposal.digest().starts_with("sha256:"));
         assert!(!configuration_path(root.path()).exists());
 
         let publication = publish_instance_configuration(root.path(), &proposal).unwrap();
         assert_eq!(publication.base_revision(), &base);
+        assert_eq!(
+            publication.base_source_digest(),
+            proposal.base_source_digest()
+        );
         assert_eq!(publication.revision(), proposal.candidate_revision());
         assert_eq!(publication.proposal_digest(), proposal.digest());
         assert_eq!(
@@ -725,6 +894,30 @@ mod tests {
     }
 
     #[test]
+    fn formatting_only_source_change_rejects_stale_publication_without_overwrite() {
+        let root = fixture_root();
+        let base = inspect_plugin_root(root.path()).unwrap().revision().clone();
+        let initial = proposal(root.path(), &base, b"greeting = \"hello\"\n");
+        let initial = publish_instance_configuration(root.path(), &initial).unwrap();
+        let stale = proposal(root.path(), initial.revision(), b"greeting = \"goodbye\"\n");
+        let external = b"# keep this human note\n\ngreeting=\"hello\"\n";
+        fs::write(configuration_path(root.path()), external).unwrap();
+
+        assert_eq!(
+            inspect_plugin_root(root.path()).unwrap().revision(),
+            initial.revision()
+        );
+        let error = publish_instance_configuration(root.path(), &stale).unwrap_err();
+        let conflict = error
+            .downcast_ref::<PluginConfigurationSourceConflict>()
+            .unwrap();
+
+        assert_eq!(conflict.expected(), stale.base_source_digest());
+        assert_ne!(conflict.current(), stale.base_source_digest());
+        assert_eq!(fs::read(configuration_path(root.path())).unwrap(), external);
+    }
+
+    #[test]
     fn proposal_digest_closes_the_exact_reviewed_toml() {
         let root = fixture_root();
         let base = inspect_plugin_root(root.path()).unwrap().revision().clone();
@@ -747,6 +940,21 @@ mod tests {
 
         assert_eq!(compact.candidate_revision(), formatted.candidate_revision());
         assert_ne!(compact.digest(), formatted.digest());
+    }
+
+    #[test]
+    fn source_digest_domains_raw_bytes_absence_and_instance_identity() {
+        let absent =
+            PluginConfigurationSourceDigest::for_source("example.agent", "default", None).unwrap();
+        let empty =
+            PluginConfigurationSourceDigest::for_source("example.agent", "default", Some(b""))
+                .unwrap();
+        let other_instance =
+            PluginConfigurationSourceDigest::for_source("example.agent", "secondary", None)
+                .unwrap();
+
+        assert_ne!(absent, empty);
+        assert_ne!(absent, other_instance);
     }
 
     #[test]
