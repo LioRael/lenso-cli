@@ -21,6 +21,8 @@ cd uppercase
 lenso plugin check
 lenso plugin dev --operation execute \
   --request-json '{"name":"uppercase","arguments_json":"{\"text\":\"hello\"}"}'
+lenso plugin dev --watch --operation execute \
+  --request-json '{"name":"uppercase","arguments_json":"{\"text\":\"hello\"}"}'
 lenso plugin pack
 ```
 
@@ -35,8 +37,12 @@ one V3 `.lenso-plugin` Release; the Host selects one implementation before Plan
 resolution and never falls back after startup. Legacy single-output projects
 remain readable.
 
-`pack` validates and reopens the exact `.lenso-plugin` Bundle it creates. A
+`pack` writes one portable `.lenso-plugin` archive, then extracts, validates,
+and reopens its exact contents. `plugins add` accepts that archive and legacy
+Bundle directories. A
 receiving Host independently validates those bytes again during installation.
+`check` and `dev` use development artifacts for a fast edit loop; `pack` is the
+release-profile proof and remains the only distribution build.
 
 ## Change an App
 
@@ -46,6 +52,11 @@ owner writes only differences under `plugins/`:
 ```sh
 lenso plugins list
 lenso plugins add dist/uppercase.lenso-plugin
+lenso plugins search uppercase
+lenso plugins install company.uppercase --version 1.2.3
+lenso plugins update company.uppercase --version 1.3.0
+lenso plugins history company.uppercase
+lenso plugins rollback company.uppercase --version 1.2.3
 lenso plugins configure company.uppercase default --file uppercase.toml
 lenso plugins disable company.uppercase default
 lenso plugins enable company.uppercase default
@@ -62,6 +73,12 @@ Optional structured files live beside it under
 tree before the Host snapshots it into a Generation.
 Installed non-embedded behavior carries one exact `plugin.lenso-plugin` Bundle
 inside its Plugin directory.
+
+Catalog installation always requires an exact version. Downloaded archive and
+manifest digests are checked before candidate resolution; admitted archives are
+retained under `.lenso/plugin-store/` so update and rollback never depend on a
+mutable remote. There is no implicit latest-version selection or runtime
+fallback.
 
 The Host Catalog at `.lenso/host-catalog.json` is generated and locked to the
 current Host build. It is read-only execution authority, not App intent.

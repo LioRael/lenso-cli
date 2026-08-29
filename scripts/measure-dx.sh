@@ -31,13 +31,13 @@ target_dir="$("$cargo_bin" metadata --no-deps --format-version 1 | python3 -c 'i
 lenso_bin="$target_dir/debug/lenso"
 
 printf 'metric\tduration_ms\n'
-measure scaffold "$lenso_bin" new greeting --repo-root "$bench_root" --no-install
+measure scaffold "$lenso_bin" plugin new greeting --repo-root "$bench_root" --runtime wasm --no-install
 (
   cd "$project_root"
   "$cargo_bin" generate-lockfile --quiet
 )
-measure contract_update env CARGO="$cargo_bin" "$lenso_bin" check --repo-root "$project_root" --update-contracts
-measure fresh_check env CARGO="$cargo_bin" "$lenso_bin" check --repo-root "$project_root"
-touch "$project_root/capability/src/contract.rs"
-measure incremental_check env CARGO="$cargo_bin" "$lenso_bin" check --repo-root "$project_root"
-measure verify env CARGO="$cargo_bin" "$lenso_bin" verify --repo-root "$project_root"
+measure fresh_check env CARGO="$cargo_bin" "$lenso_bin" plugin check --repo-root "$project_root"
+touch "$project_root/src/lib.rs"
+measure incremental_check env CARGO="$cargo_bin" "$lenso_bin" plugin check --repo-root "$project_root"
+measure dev_invoke env CARGO="$cargo_bin" "$lenso_bin" plugin dev --repo-root "$project_root" --operation execute --request-json '{"name":"greeting","arguments_json":"{\"text\":\"hello\"}"}'
+measure release_pack env CARGO="$cargo_bin" "$lenso_bin" plugin pack --repo-root "$project_root"
