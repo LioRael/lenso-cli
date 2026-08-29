@@ -5,12 +5,14 @@ use std::{
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    time::{Duration, SystemTime},
 };
 
 use anyhow::{Context, anyhow, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use lenso_app_plan::{
     CapabilityEndpointPlan, ExecutionClassId, PluginInstancePlan, ResolvedAppPlan,
+    authoring::PluginContract,
 };
 use lenso_kernel::{CancellationToken, ExecutionAdapter, InvocationContext, RuntimeFailure};
 use lenso_plugin_bundle::{
@@ -21,9 +23,13 @@ use lenso_plugin_bundle::{
     verify_bundle_directory,
 };
 use lenso_runtime_codec::{ArtifactCatalog, ArtifactHandle, JsonCapabilityCodec};
-use lenso_wasm_component_adapter::{EXECUTION_CLASS as WASM_EXECUTION_CLASS, WasmComponentAdapter};
+use lenso_wasm_component_adapter::{
+    EXECUTION_CLASS as WASM_EXECUTION_CLASS, WasmComponentAdapter, WasmComponentLimits,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::archive::{archive_bundle, with_bundle_directory};
 
 const PLUGIN_SDK_REVISION: &str = "7c54f4065012d41769fefbb41098a4657f1f4825";
 const AGENT_TOOL_SDK_REVISION: &str = "fd944a4ee56026be708b50c710635d1b17a59758";
@@ -37,7 +43,7 @@ pub enum PluginCommand {
     Dev(PluginDevArgs),
     /// Validate Plugin source and generated descriptor evidence.
     Check(PluginCheckArgs),
-    /// Build and verify one immutable `.lenso-plugin` directory.
+    /// Build and verify one immutable `.lenso-plugin` archive.
     Pack(PluginPackArgs),
 }
 
@@ -68,6 +74,8 @@ enum PluginRuntimeArg {
     #[value(alias = "rust")]
     Wasm,
     Process,
+    /// TypeScript Plugin executed through the Bun child-process Adapter.
+    Bun,
 }
 
 #[derive(Args, Clone, Debug)]
@@ -94,6 +102,9 @@ pub struct PluginDevArgs {
     /// Emit a stable JSON result.
     #[arg(long)]
     json: bool,
+    /// Rebuild and rerun after source or manifest changes.
+    #[arg(long)]
+    watch: bool,
 }
 
 #[derive(Args, Clone, Debug)]
@@ -101,7 +112,7 @@ pub struct PluginPackArgs {
     /// Plugin project root. Defaults to the current directory.
     #[arg(long)]
     repo_root: Option<PathBuf>,
-    /// Output `.lenso-plugin` directory. Defaults under `dist/`.
+    /// Output `.lenso-plugin` archive. Defaults under `dist/`.
     #[arg(long)]
     output: Option<PathBuf>,
     /// Emit a stable JSON result.
@@ -152,6 +163,30 @@ enum ProjectRuntime {
     Multi,
     Wasm,
     Process,
+    Bun,
+}
+
+#[derive(Debug, Deserialize)]
+struct BunPackageDocument {
+    #[serde(rename = "name")]
+    _name: String,
+    version: String,
+    #[serde(default)]
+    lenso: Option<BunPackageMetadata>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BunPackageMetadata {
+    plugin_id: String,
+    root_slot: String,
+    runtime: String,
+}
+
+#[derive(Clone, Debug)]
+struct BunPackage {
+    version: String,
+    metadata: BunPackageMetadata,
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -192,6 +227,7 @@ fn create(args: PluginNewArgs) -> anyhow::Result<()> {
         PluginRuntimeArg::Multi => multi_plugin_scaffold(&args.plugin_id),
         PluginRuntimeArg::Wasm => plugin_scaffold(&args.plugin_id),
         PluginRuntimeArg::Process => process_plugin_scaffold(&args.plugin_id),
+        PluginRuntimeArg::Bun => bun_plugin_scaffold(&args.plugin_id),
     };
     if args.dry_run {
         println!("Plugin dry run for {}:", target.display());
@@ -216,15 +252,26 @@ fn create(args: PluginNewArgs) -> anyhow::Result<()> {
     fs::rename(staging.path(), &target)
         .with_context(|| format!("publish Plugin scaffold {}", target.display()))?;
     if !args.no_install {
-        run_cargo(&target, &["generate-lockfile"], "generate Plugin lockfile")?;
-        if args.runtime != PluginRuntimeArg::Process {
+        if args.runtime == PluginRuntimeArg::Bun {
+            run_bun(&target, &["install"], "install Bun Plugin dependencies")?;
+            run_bun(&target, &["run", "check"], "check generated Bun Plugin")?;
+        } else {
+            run_cargo(&target, &["generate-lockfile"], "generate Plugin lockfile")?;
+        }
+        if matches!(
+            args.runtime,
+            PluginRuntimeArg::Multi | PluginRuntimeArg::Wasm
+        ) {
             run_cargo(
                 &target,
                 &["check", "--locked", "--lib", "--target", WASM_TARGET],
                 "check generated Wasm implementation",
             )?;
         }
-        if args.runtime != PluginRuntimeArg::Wasm {
+        if matches!(
+            args.runtime,
+            PluginRuntimeArg::Multi | PluginRuntimeArg::Process
+        ) {
             run_cargo(
                 &target,
                 &[
@@ -239,6 +286,135 @@ fn create(args: PluginNewArgs) -> anyhow::Result<()> {
     }
     println!("Created Plugin project at {}.", target.display());
     Ok(())
+}
+
+fn bun_plugin_scaffold(plugin_id: &str) -> BTreeMap<PathBuf, String> {
+    let package_name = plugin_id.replace('.', "-");
+    BTreeMap::from([
+        (
+            PathBuf::from("package.json"),
+            format!(
+                r#"{{
+  "name": "{package_name}",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {{
+    "check": "tsc --noEmit"
+  }},
+  "dependencies": {{
+    "@lenso/bun": "0.2.0"
+  }},
+  "devDependencies": {{
+    "@types/bun": "1.4.0",
+    "typescript": "7.0.2"
+  }},
+  "lenso": {{
+    "pluginId": "{plugin_id}",
+    "rootSlot": "tool-providers",
+    "runtime": "bun"
+  }}
+}}
+"#
+            ),
+        ),
+        (
+            PathBuf::from("tsconfig.json"),
+            r#"{
+  "compilerOptions": {
+    "lib": ["ES2023"],
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "noEmit": true,
+    "strict": true,
+    "allowImportingTsExtensions": true,
+    "types": ["bun"]
+  },
+  "include": ["src/**/*.ts"]
+}
+"#
+            .to_owned(),
+        ),
+        (
+            PathBuf::from("src/plugin.ts"),
+            format!(
+                r#"import {{ definePlugin }} from "@lenso/bun";
+import {{
+  bindToolProviderProvider,
+  type ToolProviderProvider,
+}} from "@lenso/bun/capabilities/agent-tool-provider";
+
+const tool: ToolProviderProvider = {{
+  async catalog() {{
+    return {{
+      ok: true,
+      value: {{
+        tools: [{{
+          description: "Process one UTF-8 string.",
+          input_schema_json: JSON.stringify({{
+            type: "object",
+            additionalProperties: false,
+            properties: {{ text: {{ type: "string", maxLength: 4096 }} }},
+            required: ["text"],
+          }}),
+          name: "{plugin_id}",
+        }}],
+      }},
+    }};
+  }},
+  async execute(_context, request) {{
+    if (request.name !== "{plugin_id}") {{
+      return {{ ok: false, error: {{ kind: "domain", error: "not_found" }} }};
+    }}
+    let arguments_: unknown;
+    try {{
+      arguments_ = JSON.parse(request.arguments_json);
+    }} catch {{
+      return {{ ok: false, error: {{ kind: "domain", error: "invalid_arguments" }} }};
+    }}
+    if (
+      typeof arguments_ !== "object" ||
+      arguments_ === null ||
+      !("text" in arguments_) ||
+      typeof arguments_.text !== "string" ||
+      arguments_.text.length === 0 ||
+      arguments_.text.length > 4096
+    ) {{
+      return {{ ok: false, error: {{ kind: "domain", error: "invalid_arguments" }} }};
+    }}
+    return {{
+      ok: true,
+      value: {{ content: arguments_.text, content_type: "text", metadata_json: "{{}}" }},
+    }};
+  }},
+}};
+
+export default definePlugin({{ providers: [bindToolProviderProvider(tool)] }});
+"#
+            ),
+        ),
+        (
+            PathBuf::from("src/lenso.bun.generated.ts"),
+            "import { serve } from \"@lenso/bun\";\nimport plugin from \"./plugin.ts\";\n\nserve(plugin);\n"
+                .to_owned(),
+        ),
+        (
+            PathBuf::from("src/lenso.describe.generated.ts"),
+            "import plugin from \"./plugin.ts\";\n\nconsole.log(JSON.stringify({\n  abi: \"lenso.json-request@1\",\n  capabilities: plugin.providers.map(({ descriptor }) => ({\n    capability_id: descriptor.capability_id,\n    descriptor_version: descriptor.descriptor_version,\n    request_operations: [...descriptor.operations],\n  })),\n}));\n"
+                .to_owned(),
+        ),
+        (
+            PathBuf::from("src/lenso.invoke.generated.ts"),
+            "import plugin from \"./plugin.ts\";\n\nconst [, , capability, operation, request = \"{}\"] = Bun.argv;\nconst provider = plugin.providers.find(({ descriptor }) => descriptor.capability_id === capability);\nif (!provider) throw new Error(`unknown capability ${capability}`);\nconst outcome = await provider.invokeRequest(operation, {\n  requestId: \"0\" as never,\n  cancelled: false,\n  extensions: Object.freeze({}),\n}, JSON.parse(request));\nswitch (outcome.kind) {\n  case \"success\": console.log(JSON.stringify({ ok: outcome.value })); break;\n  case \"domain\": console.log(JSON.stringify({ error: outcome.value })); break;\n  case \"runtime\": throw new Error(`Plugin runtime failure: ${outcome.failure.kind}`);\n}\n"
+                .to_owned(),
+        ),
+        (
+            PathBuf::from("README.md"),
+            format!(
+                "# {plugin_id}\n\nTyped Bun Plugin using the official `@lenso/bun` Capability projection. The generated files own runtime lowering; edit `src/plugin.ts`.\n\n```sh\nlenso plugin check\nlenso plugin dev --operation execute --request-json '{{\"name\":\"{plugin_id}\",\"arguments_json\":\"{{\\\"text\\\":\\\"hello\\\"}}\"}}'\nlenso plugin dev --watch\nlenso plugin pack\n```\n"
+            ),
+        ),
+    ])
 }
 
 fn multi_plugin_scaffold(plugin_id: &str) -> BTreeMap<PathBuf, String> {
@@ -366,7 +542,7 @@ fn check(args: PluginCheckArgs) -> anyhow::Result<()> {
     let root = project_root(args.repo_root)?;
     let temporary = tempfile::tempdir().context("create Plugin check directory")?;
     let output = temporary.path().join("checked.lenso-plugin");
-    let verified = materialize(&root, &output)?;
+    let verified = materialize(&root, &output, BuildProfile::Development)?;
     if args.json {
         println!(
             "{}",
@@ -389,12 +565,47 @@ fn check(args: PluginCheckArgs) -> anyhow::Result<()> {
 }
 
 async fn dev(args: PluginDevArgs) -> anyhow::Result<()> {
-    let root = project_root(args.repo_root)?;
+    if !args.watch {
+        return dev_once(&args).await;
+    }
+    let root = project_root(args.repo_root.clone())?;
+    let mut fingerprint = source_fingerprint(&root)?;
+    dev_once(&args).await?;
+    if !args.json {
+        println!(
+            "Watching {} for Plugin changes. Press Ctrl-C to stop.",
+            root.display()
+        );
+    }
+    loop {
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                result.context("listen for Ctrl-C")?;
+                return Ok(());
+            }
+            () = tokio::time::sleep(Duration::from_millis(250)) => {
+                let next = source_fingerprint(&root)?;
+                if next != fingerprint {
+                    fingerprint = next;
+                    if let Err(error) = dev_once(&args).await {
+                        eprintln!("Plugin rebuild failed: {error:#}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn dev_once(args: &PluginDevArgs) -> anyhow::Result<()> {
+    let root = project_root(args.repo_root.clone())?;
+    if let Some(package) = read_bun_package(&root)? {
+        return dev_bun(&root, &package, args);
+    }
     let package = read_package(&root.join("Cargo.toml"))?;
     let runtime = project_runtime(&package)?;
     let temporary = tempfile::tempdir().context("create Plugin dev directory")?;
     let output = temporary.path().join("dev.lenso-plugin");
-    let verified = materialize(&root, &output)?;
+    let verified = materialize(&root, &output, BuildProfile::Development)?;
     let dev_class = if runtime == ProjectRuntime::Process {
         "lenso.process@1"
     } else {
@@ -412,9 +623,10 @@ async fn dev(args: PluginDevArgs) -> anyhow::Result<()> {
     let descriptor = match runtime {
         ProjectRuntime::Wasm | ProjectRuntime::Multi => parse_descriptor(&artifact_bytes)?,
         ProjectRuntime::Process => read_process_descriptor(&artifact_path)?,
+        ProjectRuntime::Bun => unreachable!("Bun development dispatches before Cargo metadata"),
     };
     let capability = one_capability(&descriptor)?;
-    let operation = args.operation.unwrap_or_else(|| {
+    let operation = args.operation.clone().unwrap_or_else(|| {
         capability
             .request_operations
             .first()
@@ -461,8 +673,12 @@ async fn dev(args: PluginDevArgs) -> anyhow::Result<()> {
         ],
         Vec::new(),
     );
-    let adapter =
-        WasmComponentAdapter::new(artifacts).with_codec(DynamicJsonCodec::new(capability));
+    let adapter = WasmComponentAdapter::new(artifacts)
+        .with_limits(WasmComponentLimits {
+            max_component_bytes: artifact_bytes.len(),
+            ..WasmComponentLimits::default()
+        })
+        .with_codec(DynamicJsonCodec::new(capability));
     let response = invoke_dev_adapter(&adapter, &plan, &operation, request).await?;
     print_dev_response(&verified, capability, &operation, &response, args.json)
 }
@@ -657,38 +873,232 @@ fn print_dev_response(
 
 fn pack(args: PluginPackArgs) -> anyhow::Result<()> {
     let root = project_root(args.repo_root)?;
-    let package = read_package(&root.join("Cargo.toml"))?;
+    let bun_package = read_bun_package(&root)?;
+    let (plugin_id, version) = if let Some(package) = bun_package.as_ref() {
+        (&package.metadata.plugin_id, &package.version)
+    } else {
+        let package = read_package(&root.join("Cargo.toml"))?;
+        let output = args.output.unwrap_or_else(|| {
+            root.join("dist").join(format!(
+                "{}-{}.lenso-plugin",
+                package.metadata.lenso.plugin_id, package.version
+            ))
+        });
+        return pack_to(&root, &output, args.json);
+    };
     let output = args.output.unwrap_or_else(|| {
-        root.join("dist").join(format!(
-            "{}-{}.lenso-plugin",
-            package.metadata.lenso.plugin_id, package.version
-        ))
+        root.join("dist")
+            .join(format!("{plugin_id}-{version}.lenso-plugin"))
     });
-    let verified = materialize(&root, &output)?;
-    let reopened = verify_bundle_directory(&output)
-        .with_context(|| format!("reopen packed Plugin `{}`", output.display()))?;
+    pack_to(&root, &output, args.json)
+}
+
+fn pack_to(root: &Path, output: &Path, json: bool) -> anyhow::Result<()> {
+    let staging = tempfile::tempdir().context("stage packed Plugin Bundle")?;
+    let directory = staging.path().join("bundle");
+    let verified = materialize(root, &directory, BuildProfile::Release)?;
+    archive_bundle(&directory, output)?;
+    let reopened = with_bundle_directory(&output, |directory| {
+        verify_bundle_directory(directory)
+            .with_context(|| format!("reopen packed Plugin `{}`", output.display()))
+    })?;
     if verified != reopened {
         bail!("packed Plugin verification result changed after publication");
     }
-    print_verified(&reopened, Some(&output), args.json)
+    print_verified(&reopened, Some(output), json)
 }
 
-fn materialize(root: &Path, output: &Path) -> anyhow::Result<VerifiedBundle> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BuildProfile {
+    Development,
+    Release,
+}
+
+impl BuildProfile {
+    const fn directory(self) -> &'static str {
+        match self {
+            Self::Development => "debug",
+            Self::Release => "release",
+        }
+    }
+
+    fn cargo_args<'a>(self, arguments: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
+        let mut output = vec!["build", "--locked"];
+        if self == Self::Release {
+            output.push("--release");
+        }
+        output.extend(arguments);
+        output
+    }
+}
+
+fn read_bun_package(root: &Path) -> anyhow::Result<Option<BunPackage>> {
+    let path = root.join("package.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    let document: BunPackageDocument =
+        serde_json::from_slice(&bytes).context("parse Bun Plugin package.json")?;
+    let Some(metadata) = document.lenso else {
+        return Ok(None);
+    };
+    if metadata.runtime != "bun" {
+        bail!(
+            "unsupported package.json Lenso runtime `{}`; expected `bun`",
+            metadata.runtime
+        );
+    }
+    validate_plugin_id(&metadata.plugin_id)?;
+    if metadata.root_slot.trim().is_empty() {
+        bail!("Bun Plugin rootSlot must not be empty");
+    }
+    if document.version.trim().is_empty() {
+        bail!("Bun Plugin version must not be empty");
+    }
+    Ok(Some(BunPackage {
+        version: document.version,
+        metadata,
+    }))
+}
+
+fn materialize_bun(
+    root: &Path,
+    output: &Path,
+    package: &BunPackage,
+    profile: BuildProfile,
+) -> anyhow::Result<VerifiedBundle> {
+    run_bun(root, &["run", "check"], "typecheck Bun Plugin")?;
+    let staging = tempfile::tempdir().context("stage Bun Plugin implementation")?;
+    let artifact = staging.path().join("plugin.js");
+    let artifact_text = artifact.to_string_lossy().into_owned();
+    let mut arguments = vec![
+        "build",
+        "src/lenso.bun.generated.ts",
+        "--target=bun",
+        "--format=esm",
+        "--outfile",
+        artifact_text.as_str(),
+    ];
+    if profile == BuildProfile::Release {
+        arguments.push("--minify");
+    }
+    run_bun(root, &arguments, "build Bun Plugin implementation")?;
+    let descriptor = describe_bun_plugin(root)?;
+    let contract = descriptor.capabilities.iter().fold(
+        PluginContract::new(
+            &package.metadata.plugin_id,
+            &package.version,
+            &package.metadata.root_slot,
+        ),
+        |contract, capability| {
+            contract.with_capability(CapabilityEndpointPlan::new(
+                &capability.capability_id,
+                &capability.descriptor_version,
+                capability.request_operations.clone(),
+            ))
+        },
+    );
+    Ok(build_source_plugin_release_bundle(
+        &SourcePluginReleaseBuild {
+            contract,
+            implementations: vec![SourcePluginImplementation {
+                id: "bun".to_owned(),
+                host_targets: vec!["*".to_owned()],
+                artifact,
+                bundle_path: "implementations/bun/plugin.js".to_owned(),
+                media_type: "application/javascript".to_owned(),
+                target: "javascript-bun".to_owned(),
+                entrypoint: "plugin.js".to_owned(),
+                execution_class: ExecutionClassId::bun_child_process(),
+            }],
+            output: output.to_path_buf(),
+        },
+    )?)
+}
+
+fn describe_bun_plugin(root: &Path) -> anyhow::Result<PluginDescriptor> {
+    let output = run_bun_output(
+        root,
+        &["run", "src/lenso.describe.generated.ts"],
+        "describe Bun Plugin",
+    )?;
+    let descriptor = parse_descriptor_bytes(&output)?;
+    one_capability(&descriptor)?;
+    Ok(descriptor)
+}
+
+fn dev_bun(root: &Path, package: &BunPackage, args: &PluginDevArgs) -> anyhow::Result<()> {
+    let temporary = tempfile::tempdir().context("create Bun Plugin dev directory")?;
+    let verified = materialize_bun(
+        root,
+        &temporary.path().join("dev.lenso-plugin"),
+        package,
+        BuildProfile::Development,
+    )?;
+    let descriptor = describe_bun_plugin(root)?;
+    let capability = one_capability(&descriptor)?;
+    let operation = args.operation.clone().unwrap_or_else(|| {
+        capability
+            .request_operations
+            .first()
+            .expect("validated operation")
+            .clone()
+    });
+    if !capability.request_operations.contains(&operation) {
+        bail!(
+            "Plugin Capability `{}` does not declare operation `{operation}`",
+            capability.capability_id
+        );
+    }
+    let request: Value = serde_json::from_str(&args.request_json)
+        .context("Plugin development request is not valid JSON")?;
+    let request_json = serde_json::to_string(&request)?;
+    let output = run_bun_output(
+        root,
+        &[
+            "run",
+            "src/lenso.invoke.generated.ts",
+            "--",
+            &capability.capability_id,
+            &operation,
+            &request_json,
+        ],
+        "invoke Bun Plugin",
+    )?;
+    let outcome: Value =
+        serde_json::from_slice(&output).context("Bun Plugin returned invalid JSON")?;
+    if let Some(response) = outcome.get("ok") {
+        return print_dev_response(&verified, capability, &operation, response, args.json);
+    }
+    if let Some(error) = outcome.get("error") {
+        bail!("Plugin returned Domain Error: {error}");
+    }
+    bail!("Bun Plugin returned no terminal outcome")
+}
+
+fn materialize(
+    root: &Path,
+    output: &Path,
+    profile: BuildProfile,
+) -> anyhow::Result<VerifiedBundle> {
+    if let Some(package) = read_bun_package(root)? {
+        return materialize_bun(root, output, &package, profile);
+    }
     let manifest = root.join("Cargo.toml");
     let package = read_package(&manifest)?;
     synchronize_plugin_lock(root, &package)?;
     let target_directory = cargo_target_directory(root)?;
     match project_runtime(&package)? {
-        ProjectRuntime::Multi => materialize_multi(root, output, &package, &target_directory),
+        ProjectRuntime::Multi => {
+            materialize_multi(root, output, &package, &target_directory, profile)
+        }
         ProjectRuntime::Wasm => {
-            run_cargo(
-                root,
-                &["build", "--locked", "--release", "--target", WASM_TARGET],
-                "build Plugin Wasm",
-            )?;
+            let arguments = profile.cargo_args(["--target", WASM_TARGET]);
+            run_cargo(root, &arguments, "build Plugin Wasm")?;
             let artifact = target_directory
                 .join(WASM_TARGET)
-                .join("release")
+                .join(profile.directory())
                 .join(format!("{}.wasm", package.name.replace('-', "_")));
             Ok(build_source_plugin_bundle(&SourcePluginBuild {
                 package_manifest: manifest,
@@ -697,12 +1107,11 @@ fn materialize(root: &Path, output: &Path) -> anyhow::Result<VerifiedBundle> {
             })?)
         }
         ProjectRuntime::Process => {
-            run_cargo(
-                root,
-                &["build", "--locked", "--release", "--bin", &package.name],
-                "build Process Plugin",
-            )?;
-            let executable = target_directory.join("release").join(&package.name);
+            let arguments = profile.cargo_args(["--bin", package.name.as_str()]);
+            run_cargo(root, &arguments, "build Process Plugin")?;
+            let executable = target_directory
+                .join(profile.directory())
+                .join(&package.name);
             let descriptor = tempfile::NamedTempFile::new().context("stage Process descriptor")?;
             serde_json::to_writer(descriptor.as_file(), &read_process_descriptor(&executable)?)?;
             Ok(build_source_process_plugin_bundle(
@@ -715,6 +1124,7 @@ fn materialize(root: &Path, output: &Path) -> anyhow::Result<VerifiedBundle> {
                 },
             )?)
         }
+        ProjectRuntime::Bun => unreachable!("Bun projects do not use Cargo metadata"),
     }
     .with_context(|| format!("package Plugin `{}`", package.metadata.lenso.plugin_id))
 }
@@ -724,22 +1134,14 @@ fn materialize_multi(
     output: &Path,
     package: &CargoPackage,
     target_directory: &Path,
+    profile: BuildProfile,
 ) -> anyhow::Result<VerifiedBundle> {
+    let wasm_arguments = profile.cargo_args(["--lib", "--target", WASM_TARGET]);
+    run_cargo(root, &wasm_arguments, "build Plugin Wasm implementation")?;
+    let process_arguments = profile.cargo_args(["--bin", package.name.as_str()]);
     run_cargo(
         root,
-        &[
-            "build",
-            "--locked",
-            "--release",
-            "--lib",
-            "--target",
-            WASM_TARGET,
-        ],
-        "build Plugin Wasm implementation",
-    )?;
-    run_cargo(
-        root,
-        &["build", "--locked", "--release", "--bin", &package.name],
+        &process_arguments,
         "build Plugin Process implementation",
     )?;
     let staging = tempfile::tempdir().context("stage Plugin implementations")?;
@@ -748,13 +1150,15 @@ fn materialize_multi(
         package_manifest: root.join("Cargo.toml"),
         wasm_module: target_directory
             .join(WASM_TARGET)
-            .join("release")
+            .join(profile.directory())
             .join(format!("{}.wasm", package.name.replace('-', "_"))),
         output: wasm_bundle.clone(),
     })?;
     let process_bundle = staging.path().join("process");
     let host_target = format!("{}-unknown-{}", env::consts::ARCH, env::consts::OS);
-    let executable = target_directory.join("release").join(&package.name);
+    let executable = target_directory
+        .join(profile.directory())
+        .join(&package.name);
     let runtime_descriptor = staging.path().join("process-descriptor.json");
     fs::write(
         &runtime_descriptor,
@@ -873,6 +1277,7 @@ fn project_runtime(package: &CargoPackage) -> anyhow::Result<ProjectRuntime> {
     match metadata.runtime.as_deref().unwrap_or("wasm") {
         "wasm" => Ok(ProjectRuntime::Wasm),
         "process" => Ok(ProjectRuntime::Process),
+        "bun" => Ok(ProjectRuntime::Bun),
         runtime => bail!("unsupported Plugin project runtime `{runtime}`"),
     }
 }
@@ -912,6 +1317,43 @@ fn project_root(root: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     )
 }
 
+fn source_fingerprint(root: &Path) -> anyhow::Result<Vec<(PathBuf, u64, SystemTime)>> {
+    let mut pending = vec![root.join("src")];
+    let mut files = [
+        root.join("Cargo.toml"),
+        root.join("Cargo.lock"),
+        root.join("package.json"),
+        root.join("bun.lock"),
+        root.join("tsconfig.json"),
+    ]
+    .into_iter()
+    .filter(|path| path.exists())
+    .collect::<Vec<_>>();
+    while let Some(directory) = pending.pop() {
+        if !directory.exists() {
+            continue;
+        }
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if file_type.is_file() {
+                files.push(entry.path());
+            }
+        }
+    }
+    files.sort();
+    files
+        .into_iter()
+        .map(|path| {
+            let metadata = fs::metadata(&path)
+                .with_context(|| format!("inspect watched Plugin source {}", path.display()))?;
+            Ok((path, metadata.len(), metadata.modified()?))
+        })
+        .collect()
+}
+
 fn validate_plugin_id(plugin_id: &str) -> anyhow::Result<()> {
     if plugin_id.is_empty()
         || !plugin_id
@@ -940,6 +1382,36 @@ fn run_cargo(root: &Path, args: &[&str], action: &str) -> anyhow::Result<()> {
         bail!("{action} failed with {status}");
     }
     Ok(())
+}
+
+fn run_bun(root: &Path, args: &[&str], action: &str) -> anyhow::Result<()> {
+    let bun = env::var_os("BUN_BIN").unwrap_or_else(|| "bun".into());
+    let status = Command::new(bun)
+        .args(args)
+        .current_dir(root)
+        .status()
+        .with_context(|| action.to_owned())?;
+    if !status.success() {
+        bail!("{action} failed with {status}");
+    }
+    Ok(())
+}
+
+fn run_bun_output(root: &Path, args: &[&str], action: &str) -> anyhow::Result<Vec<u8>> {
+    let bun = env::var_os("BUN_BIN").unwrap_or_else(|| "bun".into());
+    let output = Command::new(bun)
+        .args(args)
+        .current_dir(root)
+        .output()
+        .with_context(|| action.to_owned())?;
+    if !output.status.success() {
+        bail!(
+            "{action} failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(output.stdout)
 }
 
 fn runtime_error(action: &str, error: &RuntimeFailure) -> anyhow::Error {
@@ -1079,6 +1551,21 @@ mod tests {
     }
 
     #[test]
+    fn bun_plugin_scaffold_uses_generated_runtime_lowering() {
+        let files = bun_plugin_scaffold("example.echo");
+        let package = files.get(Path::new("package.json")).unwrap();
+        let author = files.get(Path::new("src/plugin.ts")).unwrap();
+        let runtime = files.get(Path::new("src/lenso.bun.generated.ts")).unwrap();
+
+        assert!(package.contains("\"runtime\": \"bun\""));
+        assert!(package.contains("\"@lenso/bun\": \"0.2.0\""));
+        assert!(author.contains("bindToolProviderProvider"));
+        assert!(author.contains("definePlugin"));
+        assert!(!author.contains("serve("));
+        assert!(runtime.contains("serve(plugin)"));
+    }
+
+    #[test]
     fn process_plugin_scaffold_uses_the_sdk_owned_lowering() {
         let files = process_plugin_scaffold("uppercase");
         let manifest = files.get(Path::new("Cargo.toml")).unwrap();
@@ -1169,6 +1656,7 @@ plugin-id = "second"
             request_json: r#"{"name":"uppercase","arguments_json":"{\"text\":\"hello\"}"}"#
                 .to_owned(),
             json: true,
+            watch: false,
         })
         .await
         .unwrap();
@@ -1179,9 +1667,12 @@ plugin-id = "second"
             json: true,
         })
         .unwrap();
-        verify_bundle_directory(&output).unwrap();
-        fs::write(output.join("plugin.wasm"), b"changed after pack").unwrap();
-        assert!(verify_bundle_directory(&output).is_err());
+        with_bundle_directory(&output, |directory| {
+            verify_bundle_directory(directory)
+                .map(|_| ())
+                .map_err(Into::into)
+        })
+        .unwrap();
         assert!(
             pack(PluginPackArgs {
                 repo_root: Some(project),
@@ -1217,6 +1708,7 @@ plugin-id = "second"
             request_json: r#"{"name":"uppercase","arguments_json":"{\"text\":\"hello\"}"}"#
                 .to_owned(),
             json: true,
+            watch: false,
         })
         .await
         .unwrap();
@@ -1227,6 +1719,11 @@ plugin-id = "second"
             json: true,
         })
         .unwrap();
-        verify_bundle_directory(&output).unwrap();
+        with_bundle_directory(&output, |directory| {
+            verify_bundle_directory(directory)
+                .map(|_| ())
+                .map_err(Into::into)
+        })
+        .unwrap();
     }
 }

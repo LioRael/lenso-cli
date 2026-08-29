@@ -89,6 +89,8 @@ tempfile.workspace = true
 tokio = { version = "1.52", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"], optional = true }
 toml.workspace = true
 uuid = { version = "1", features = ["v7"] }
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.30", features = ["signal"], optional = true }

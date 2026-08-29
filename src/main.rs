@@ -1,4 +1,7 @@
 mod app;
+mod archive;
+mod catalog;
+mod doctor;
 mod plugin;
 mod plugins;
 
@@ -39,6 +42,8 @@ enum RootCommand {
     },
     /// Start the current Host with its derived App.
     Run(RunArgs),
+    /// Diagnose the current Host, Plugin Root, toolchain, and App resolution.
+    Doctor(doctor::DoctorArgs),
 }
 
 #[derive(Clone, Debug, Args)]
@@ -59,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
         RootCommand::Plugins { command } => plugins::plugins(command),
         RootCommand::App { command } => app::app(command),
         RootCommand::Run(args) => run(args),
+        RootCommand::Doctor(args) => doctor::doctor(args),
     }
 }
 
@@ -132,7 +138,7 @@ mod tests {
             .get_subcommands()
             .map(clap::Command::get_name)
             .collect::<Vec<_>>();
-        assert_eq!(names, ["plugin", "plugins", "app", "run"]);
+        assert_eq!(names, ["plugin", "plugins", "app", "run", "doctor"]);
 
         let plugin = command
             .get_subcommands()
@@ -154,7 +160,7 @@ mod tests {
             app.get_subcommands()
                 .map(clap::Command::get_name)
                 .collect::<Vec<_>>(),
-            ["check", "show"]
+            ["init", "check", "show"]
         );
     }
 }
