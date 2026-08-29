@@ -32,7 +32,8 @@ mod configuration_authority;
 pub use configuration_authority::{
     LocalPluginRootAuthority, PluginConfigurationApplication, PluginConfigurationAuthority,
     PluginConfigurationAuthoritySource, PluginConfigurationDiagnostic, PluginConfigurationProposal,
-    PluginConfigurationProposalStatus, PluginConfigurationPublication, PluginRootRevision,
+    PluginConfigurationProposalStatus, PluginConfigurationPublication,
+    PluginConfigurationSourceConflict, PluginConfigurationSourceDigest, PluginRootRevision,
     PluginRootRevisionConflict, PluginRootRevisionParseError, propose_instance_configuration,
     publish_instance_configuration,
 };
@@ -64,6 +65,7 @@ pub struct PluginInstanceAuthoringState {
     origin: PluginInstanceOrigin,
     selection: PluginInstanceSelection,
     root_configuration_toml: Option<String>,
+    source_digest: PluginConfigurationSourceDigest,
 }
 
 /// Authority that introduced one visible Plugin Instance.
@@ -102,6 +104,10 @@ impl PluginInstanceAuthoringState {
 
     pub fn root_configuration_toml(&self) -> Option<&str> {
         self.root_configuration_toml.as_deref()
+    }
+
+    pub const fn source_digest(&self) -> &PluginConfigurationSourceDigest {
+        &self.source_digest
     }
 
     pub const fn is_disabled_by_root(&self) -> bool {
@@ -241,6 +247,7 @@ pub fn inspect_plugin_root(root: &Path) -> anyhow::Result<PluginRootAuthoringSta
             } else {
                 None
             };
+            let source_digest = instance_source_digest(&id, root_configuration_toml.as_deref());
             let host_disableable = host_defaults.get(&id).copied();
             instances.push(PluginInstanceAuthoringState {
                 origin: host_disableable.map_or(PluginInstanceOrigin::PluginRoot, |disableable| {
@@ -252,6 +259,7 @@ pub fn inspect_plugin_root(root: &Path) -> anyhow::Result<PluginRootAuthoringSta
                     PluginInstanceSelection::DisabledByRoot
                 },
                 root_configuration_toml,
+                source_digest,
                 id,
             });
         }
@@ -263,6 +271,17 @@ pub fn inspect_plugin_root(root: &Path) -> anyhow::Result<PluginRootAuthoringSta
         });
     }
     Ok(authoring_state(revision, resolved, plugins))
+}
+
+fn instance_source_digest(
+    id: &PluginInstanceId,
+    source: Option<&str>,
+) -> PluginConfigurationSourceDigest {
+    configuration_authority::source_digest_for_bytes(
+        id.plugin_id(),
+        id.instance_key(),
+        source.map(str::as_bytes),
+    )
 }
 
 fn authoring_state(
@@ -1099,6 +1118,7 @@ mod tests {
         assert!(instance.is_host_default());
         assert!(!instance.is_disableable());
         assert_eq!(instance.root_configuration_toml(), Some(""));
+        assert!(instance.source_digest().as_str().starts_with("sha256:"));
         assert!(instance.has_root_difference());
     }
 
