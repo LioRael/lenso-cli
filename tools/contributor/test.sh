@@ -14,7 +14,26 @@ cleanup_fixture() {
 trap cleanup_fixture EXIT
 
 mkdir -p "$fixture_root/bin" "$fixture_root/framework"
+real_git="$(command -v git)"
 real_rg="$(command -v rg || true)"
+cat > "$fixture_root/bin/git" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case " $* " in
+  *" fetch origin "*)
+    if [ "${LENSO_GIT_TRANSIENT_ONCE:-false}" = "true" ] \
+      && [ ! -e "$LENSO_GIT_TRANSIENT_STATE" ]; then
+      : > "$LENSO_GIT_TRANSIENT_STATE"
+      printf 'fatal: LibreSSL SSL_connect: SSL_ERROR_SYSCALL\n' >&2
+      exit 1
+    fi
+    if [ "${LENSO_GIT_SKIP_FETCH:-false}" = "true" ]; then
+      exit 0
+    fi
+    ;;
+esac
+exec "$LENSO_REAL_GIT" "$@"
+EOF
 cat > "$fixture_root/bin/wt" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -26,6 +45,22 @@ if [ "${1:-}" != "-C" ]; then
   exit 2
 fi
 repository="$2"
+if [ "${3:-}" = "remove" ]; then
+  target=""
+  for argument in "$@"; do
+    target="$argument"
+  done
+  branch="$(git -C "$target" symbolic-ref --quiet --short HEAD)"
+  path="$(git -C "$target" rev-parse --show-toplevel)"
+  jq -cn --arg branch "$branch" --arg path "$path" '[{
+    branch:$branch,
+    branch_checked_out_at:null,
+    branch_outcome:"deleted",
+    kind:"worktree",
+    path:$path
+  }]'
+  exit 0
+fi
 branch="$(git -C "$repository" symbolic-ref --quiet --short HEAD)"
 path="$(git -C "$repository" rev-parse --show-toplevel)"
 dirty=false
@@ -82,30 +117,45 @@ if [ "${1:-}" = "repo" ] && [ "${2:-}" = "view" ]; then
   exit 0
 fi
 if [ "${1:-}" = "pr" ] && [ "${2:-}" = "checks" ]; then
-  printf '%s\n' '[{"bucket":"pending","name":"fixture","state":"IN_PROGRESS","link":"https://github.com/LioRael/example/actions/1"}]'
-  exit 8
+  if [ "${LENSO_FIXTURE_CHECKS_PASS:-false}" = "true" ]; then
+    printf '%s\n' '[{"bucket":"pass","name":"fixture","state":"SUCCESS","link":"https://github.com/LioRael/example/actions/1"}]'
+    exit 0
+  else
+    printf '%s\n' '[{"bucket":"pending","name":"fixture","state":"IN_PROGRESS","link":"https://github.com/LioRael/example/actions/1"}]'
+    exit 8
+  fi
 fi
 if [ "${1:-}" = "pr" ] && [ "${2:-}" = "view" ]; then
   jq -cn \
     --arg branch "$LENSO_FIXTURE_BRANCH" \
-    --arg head "${LENSO_FIXTURE_PR_HEAD:-0000000000000000000000000000000000000000}" '{
-    state:"OPEN",
+    --arg head "${LENSO_FIXTURE_PR_HEAD:-0000000000000000000000000000000000000000}" \
+    --arg merge "${LENSO_FIXTURE_MERGE_COMMIT:-}" \
+    --arg state "$(if [ -n "${LENSO_FIXTURE_MERGE_STATE:-}" ] && [ -e "$LENSO_FIXTURE_MERGE_STATE" ]; then printf MERGED; else printf OPEN; fi)" '{
+    state:$state,
     isDraft:false,
     mergeable:"MERGEABLE",
     mergeStateStatus:"CLEAN",
     headRefName:$branch,
     baseRefName:"main",
     headRefOid:$head,
-    mergeCommit:null,
+    mergeCommit:(if $state == "MERGED" then {oid:$merge} else null end),
     url:"https://github.com/LioRael/example/pull/8",
     title:"Fixture PR"
   }'
   exit 0
 fi
+if [ "${1:-}" = "pr" ] && [ "${2:-}" = "merge" ]; then
+  : > "$LENSO_FIXTURE_MERGE_STATE"
+  exit 0
+fi
+if [ "${1:-}" = "api" ]; then
+  printf '%s\n' "$LENSO_FIXTURE_TREE"
+  exit 0
+fi
 printf 'unexpected gh invocation in contributor fixture\n' >&2
 exit 99
 EOF
-chmod +x "$fixture_root/bin/wt" "$fixture_root/bin/rg" "$fixture_root/bin/gh"
+chmod +x "$fixture_root/bin/git" "$fixture_root/bin/wt" "$fixture_root/bin/rg" "$fixture_root/bin/gh"
 
 git init --bare "$fixture_root/origin.git" >/dev/null
 git clone "$fixture_root/origin.git" "$fixture_root/framework/example" >/dev/null 2>&1
@@ -119,6 +169,7 @@ git -C "$fixture_root/framework/example" remote set-head origin main
 
 export PATH="$fixture_root/bin:$PATH"
 export LENSO_FRAMEWORK_ROOT="$fixture_root/framework"
+export LENSO_REAL_GIT="$real_git"
 export LENSO_GH_LOG="$fixture_root/gh.log"
 export LENSO_REAL_RG="$real_rg"
 export LENSO_FIXTURE_BRANCH="$(git -C "$fixture_root/framework/example" symbolic-ref --short HEAD)"
@@ -221,6 +272,32 @@ grep -q 'required PR checks are not observable: quality' \
   "$fixture_root/pr-missing-required.err"
 grep -q -- '--merge requires at least one explicit --required-check' \
   "$fixture_root/pr-implicit-required.err"
+
+fixture_head="$(git -C "$fixture_root/framework/example" rev-parse HEAD)"
+fixture_tree="$(git -C "$fixture_root/framework/example" show -s --format=%T HEAD)"
+LENSO_FIXTURE_PR_HEAD="$fixture_head" \
+LENSO_FIXTURE_CHECKS_PASS=true \
+LENSO_FIXTURE_MERGE_STATE="$fixture_root/pr-merged" \
+LENSO_FIXTURE_MERGE_COMMIT="$fixture_head" \
+LENSO_FIXTURE_TREE="$fixture_tree" \
+LENSO_GIT_SKIP_FETCH=true \
+LENSO_GIT_TRANSIENT_ONCE=true \
+LENSO_GIT_TRANSIENT_STATE="$fixture_root/git-transient-once" \
+$pr_tool finish \
+  --repo "$fixture_root/framework/example" \
+  --pr 8 \
+  --worktree "$fixture_root/framework/example" \
+  --required-check fixture \
+  --merge \
+  --json > "$fixture_root/pr-complete.json" 2> "$fixture_root/pr-complete.err"
+jq -e --arg head "$fixture_head" --arg tree "$fixture_tree" '
+  .status == "complete"
+  and .mergeCommit == $head
+  and .tree == $tree
+  and .removal.kind == "worktree"
+  and .removal.branch_outcome == "deleted"
+' >/dev/null "$fixture_root/pr-complete.json"
+grep -q 'WARN transient Git fetch failure; retrying' "$fixture_root/pr-complete.err"
 
 set +e
 LENSO_RG_FAIL=true $workspace_tool release-status --no-fetch --json \
