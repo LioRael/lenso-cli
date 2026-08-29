@@ -733,6 +733,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
+name = "lenso-app-authoring"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lenso-app-plan",
+ "lenso-plugin-bundle",
+ "serde_json",
+ "tempfile",
+ "toml",
+ "uuid",
+]
+
+[[package]]
 name = "lenso-app-plan"
 version = "0.3.0"
 source = "git+https://github.com/LioRael/lenso?rev=b8c7d3bfd7b900965f7782016b92f6c891fa98e5#b8c7d3bfd7b900965f7782016b92f6c891fa98e5"
@@ -747,6 +760,7 @@ version = "0.4.8"
 dependencies = [
  "anyhow",
  "clap",
+ "lenso-app-authoring",
  "lenso-app-plan",
  "lenso-contract-authoring",
  "lenso-contract-codegen",
