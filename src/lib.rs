@@ -20,9 +20,19 @@ use lenso_plugin_bundle::{
     ImplementationPolicy, read_bundle_manifest, resolve_implementation, verify_bundle_directory,
 };
 
+mod configuration_authority;
+
+pub use configuration_authority::{
+    PluginConfigurationApplication, PluginConfigurationDiagnostic, PluginConfigurationProposal,
+    PluginConfigurationProposalStatus, PluginConfigurationPublication, PluginRootRevision,
+    PluginRootRevisionConflict, PluginRootRevisionParseError, propose_instance_configuration,
+    publish_instance_configuration,
+};
+
 const PLUGIN_ROOT: &str = "plugins";
 const HOST_CATALOG: &str = ".lenso/host-catalog.json";
 const BUNDLE_NAME: &str = "plugin.lenso-plugin";
+const AUTHORING_LOCK: &str = ".lenso/plugin-root-authoring.lock";
 const MAX_CONFIGURATION_BYTES: u64 = 256 * 1024;
 const MAX_RESOURCE_FILES: usize = 4_096;
 const MAX_RESOURCE_FILE_BYTES: u64 = 1024 * 1024;
@@ -125,11 +135,16 @@ impl PluginAuthoringState {
 /// Complete read-only management projection for the current Plugin Root.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PluginRootAuthoringState {
+    revision: PluginRootRevision,
     resolved: ResolvedApp,
     plugins: Vec<PluginAuthoringState>,
 }
 
 impl PluginRootAuthoringState {
+    pub const fn revision(&self) -> &PluginRootRevision {
+        &self.revision
+    }
+
     pub const fn resolved(&self) -> &ResolvedApp {
         &self.resolved
     }
@@ -143,6 +158,7 @@ impl PluginRootAuthoringState {
 pub fn inspect_plugin_root(root: &Path) -> anyhow::Result<PluginRootAuthoringState> {
     let host = load_host_catalog(root)?;
     let snapshot = snapshot_plugin_root(root)?;
+    let revision = configuration_authority::revision_for_snapshot(&snapshot)?;
     let resolved = resolve_plugin_root(&host, &snapshot).map_err(anyhow::Error::msg)?;
     let enabled = resolved
         .instances()
@@ -238,7 +254,19 @@ pub fn inspect_plugin_root(root: &Path) -> anyhow::Result<PluginRootAuthoringSta
             instances,
         });
     }
-    Ok(PluginRootAuthoringState { resolved, plugins })
+    Ok(authoring_state(revision, resolved, plugins))
+}
+
+fn authoring_state(
+    revision: PluginRootRevision,
+    resolved: ResolvedApp,
+    plugins: Vec<PluginAuthoringState>,
+) -> PluginRootAuthoringState {
+    PluginRootAuthoringState {
+        revision,
+        resolved,
+        plugins,
+    }
 }
 
 fn load_host_catalog(root: &Path) -> anyhow::Result<HostCatalog> {
@@ -536,6 +564,7 @@ pub fn add_bundle(root: &Path, bundle: &Path) -> anyhow::Result<(String, String,
     let verified = verify_bundle_directory(bundle)
         .with_context(|| format!("verify Plugin Bundle {}", bundle.display()))?;
     let descriptor = read_bundle_descriptor(bundle, &verified.plugin_id)?;
+    let _lock = lock_plugin_root(root)?;
     let host = load_host_catalog(root)?;
     let current = snapshot_plugin_root(root)?;
     if current
@@ -568,33 +597,11 @@ pub fn configure_instance(
     instance: &str,
     bytes: &[u8],
 ) -> anyhow::Result<ResolvedApp> {
-    validate_path_identity(plugin_id, "Plugin ID")?;
-    validate_instance_filename(instance)?;
-    let temporary = tempfile::NamedTempFile::new()?;
-    fs::write(temporary.path(), bytes)?;
-    let configuration = read_configuration(temporary.path())?;
-    let host = load_host_catalog(root)?;
-    let current = snapshot_plugin_root(root)?;
-    let id = PluginInstanceId::new(plugin_id, instance);
-    let mut instances = current
-        .instances()
-        .iter()
-        .filter(|instance| instance.id() != &id)
-        .cloned()
-        .collect::<Vec<_>>();
-    instances.push(PluginRootInstance::new(plugin_id, instance).with_configuration(configuration));
-    let candidate = PluginRootSnapshot::new(
-        current.releases().iter().cloned(),
-        instances,
-        current.disabled().iter().cloned(),
-    );
-    let resolved = resolve_plugin_root(&host, &candidate).map_err(anyhow::Error::msg)?;
-    let path = root
-        .join(PLUGIN_ROOT)
-        .join(plugin_id)
-        .join(format!("{instance}.toml"));
-    atomic_write(&path, bytes)?;
-    Ok(resolved)
+    let base_revision = inspect_plugin_root(root)?.revision().clone();
+    let proposal =
+        propose_instance_configuration(root, &base_revision, plugin_id, instance, bytes)?;
+    let publication = publish_instance_configuration(root, &proposal)?;
+    Ok(publication.into_resolved())
 }
 
 /// Atomically changes one Instance selection marker after candidate resolution.
@@ -606,6 +613,7 @@ pub fn set_instance_disabled(
 ) -> anyhow::Result<ResolvedApp> {
     validate_path_identity(plugin_id, "Plugin ID")?;
     validate_instance_filename(instance)?;
+    let _lock = lock_plugin_root(root)?;
     let host = load_host_catalog(root)?;
     let current = snapshot_plugin_root(root)?;
     let id = PluginInstanceId::new(plugin_id, instance);
@@ -642,6 +650,7 @@ pub fn remove_instance_difference(
 ) -> anyhow::Result<ResolvedApp> {
     validate_path_identity(plugin_id, "Plugin ID")?;
     validate_instance_filename(instance)?;
+    let _lock = lock_plugin_root(root)?;
     let host = load_host_catalog(root)?;
     let current = snapshot_plugin_root(root)?;
     let id = PluginInstanceId::new(plugin_id, instance);
@@ -668,6 +677,7 @@ pub fn remove_instance_difference(
 /// Moves one root-supplied Plugin to recoverable trash after validating the remaining App.
 pub fn remove_plugin(root: &Path, plugin_id: &str) -> anyhow::Result<(ResolvedApp, PathBuf)> {
     validate_path_identity(plugin_id, "Plugin ID")?;
+    let _lock = lock_plugin_root(root)?;
     let host = load_host_catalog(root)?;
     let current = snapshot_plugin_root(root)?;
     let candidate = PluginRootSnapshot::new(
@@ -710,6 +720,22 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
         .map_err(|error| error.error)
         .with_context(|| format!("commit Plugin file {}", path.display()))?;
     Ok(())
+}
+
+fn lock_plugin_root(root: &Path) -> anyhow::Result<fs::File> {
+    let path = root.join(AUTHORING_LOCK);
+    let parent = path.parent().context("Plugin Root lock has no parent")?;
+    fs::create_dir_all(parent)?;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("open Plugin Root authoring lock {}", path.display()))?;
+    file.lock()
+        .with_context(|| format!("lock Plugin Root authoring authority {}", path.display()))?;
+    Ok(file)
 }
 
 fn copy_bundle(source: &Path, destination: &Path) -> anyhow::Result<()> {
