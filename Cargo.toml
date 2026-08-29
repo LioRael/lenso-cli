@@ -20,6 +20,10 @@ include = [
 name = "lenso"
 path = "src/main.rs"
 
+[lib]
+name = "lenso_app_authoring"
+path = "src/lib.rs"
+
 [workspace]
 resolver = "2"
 members = []
