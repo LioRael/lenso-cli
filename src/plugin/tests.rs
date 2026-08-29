@@ -1,7 +1,63 @@
 use super::scaffold::{
     bun_plugin_scaffold, create, multi_plugin_scaffold, plugin_scaffold, process_plugin_scaffold,
+    web_plugin_scaffold,
 };
 use super::*;
+
+#[test]
+fn web_plugin_scaffold_uses_canonical_endpoint_authoring() {
+    let files = web_plugin_scaffold("company.greetings-http");
+    let manifest = files.get(Path::new("Cargo.toml")).unwrap();
+    let source = files.get(Path::new("src/lib.rs")).unwrap();
+    let readme = files.get(Path::new("README.md")).unwrap();
+
+    assert!(manifest.contains("plugin-id = \"company.greetings-http\""));
+    assert!(manifest.contains("root-slot = \"web\""));
+    assert!(manifest.contains("lenso-capability-http-endpoint"));
+    assert!(source.contains("#[lenso::plugin]"));
+    assert!(source.contains("#[endpoint]"));
+    assert!(source.contains("#[query("));
+    assert!(source.contains("Result<(StatusCode, Json<Greeting>), Problem>"));
+    assert!(source.contains("EndpointTest"));
+    assert!(!source.contains("NativeModuleFactory"));
+    assert!(!readme.contains("lenso plugin pack"));
+}
+
+#[test]
+fn web_plugin_new_writes_the_complete_project() {
+    let root = tempfile::tempdir().unwrap();
+    create(PluginNewArgs {
+        plugin_id: "company.greetings-http".to_owned(),
+        repo_root: Some(root.path().to_path_buf()),
+        dir: None,
+        runtime: PluginRuntimeArg::Multi,
+        web: true,
+        no_install: true,
+        dry_run: false,
+    })
+    .unwrap();
+
+    let project = root.path().join("company.greetings-http");
+    for path in ["Cargo.toml", "src/lib.rs", "README.md"] {
+        assert!(project.join(path).is_file(), "missing generated {path}");
+    }
+}
+
+#[test]
+#[ignore = "clean-room test downloads pinned Web dependencies and runs generated tests"]
+fn clean_room_web_plugin_runs_generated_tests() {
+    let root = tempfile::tempdir().unwrap();
+    create(PluginNewArgs {
+        plugin_id: "company.greetings-http".to_owned(),
+        repo_root: Some(root.path().to_path_buf()),
+        dir: None,
+        runtime: PluginRuntimeArg::Multi,
+        web: true,
+        no_install: false,
+        dry_run: false,
+    })
+    .unwrap();
+}
 
 #[test]
 fn rust_plugin_scaffold_exposes_only_portable_authoring() {
@@ -170,6 +226,7 @@ async fn clean_room_plugin_runs_new_check_dev_and_pack() {
         repo_root: Some(root.path().to_path_buf()),
         dir: None,
         runtime: PluginRuntimeArg::Wasm,
+        web: false,
         no_install: false,
         dry_run: false,
     })
@@ -223,6 +280,7 @@ async fn clean_room_multi_plugin_auto_dev_runs_the_process_build() {
         repo_root: Some(root.path().to_path_buf()),
         dir: None,
         runtime: PluginRuntimeArg::Multi,
+        web: false,
         no_install: false,
         dry_run: false,
     })
@@ -250,6 +308,7 @@ async fn clean_room_process_plugin_runs_new_check_dev_and_pack() {
         repo_root: Some(root.path().to_path_buf()),
         dir: None,
         runtime: PluginRuntimeArg::Process,
+        web: false,
         no_install: false,
         dry_run: false,
     })

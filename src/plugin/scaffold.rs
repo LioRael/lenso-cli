@@ -11,6 +11,8 @@ use super::{PluginNewArgs, PluginRuntimeArg, WASM_TARGET, run_bun, run_cargo};
 
 const PLUGIN_SDK_REVISION: &str = "7c54f4065012d41769fefbb41098a4657f1f4825";
 const AGENT_TOOL_SDK_REVISION: &str = "fd944a4ee56026be708b50c710635d1b17a59758";
+const LENSO_NATIVE_REVISION: &str = "b763a63adc20f1ccc9955e784c0d04c21489126b";
+const LENSO_WEB_REVISION: &str = "d4943b1ffd30c90d2621ef4b9884adbb1e206bbc";
 
 pub(super) fn create(args: PluginNewArgs) -> anyhow::Result<()> {
     validate_plugin_id_v1(&args.plugin_id)?;
@@ -24,11 +26,15 @@ pub(super) fn create(args: PluginNewArgs) -> anyhow::Result<()> {
             target.display()
         );
     }
-    let files = match args.runtime {
-        PluginRuntimeArg::Multi => multi_plugin_scaffold(&args.plugin_id),
-        PluginRuntimeArg::Wasm => plugin_scaffold(&args.plugin_id),
-        PluginRuntimeArg::Process => process_plugin_scaffold(&args.plugin_id),
-        PluginRuntimeArg::Bun => bun_plugin_scaffold(&args.plugin_id),
+    let files = if args.web {
+        web_plugin_scaffold(&args.plugin_id)
+    } else {
+        match args.runtime {
+            PluginRuntimeArg::Multi => multi_plugin_scaffold(&args.plugin_id),
+            PluginRuntimeArg::Wasm => plugin_scaffold(&args.plugin_id),
+            PluginRuntimeArg::Process => process_plugin_scaffold(&args.plugin_id),
+            PluginRuntimeArg::Bun => bun_plugin_scaffold(&args.plugin_id),
+        }
     };
     if args.dry_run {
         println!("Plugin dry run for {}:", target.display());
@@ -53,26 +59,37 @@ pub(super) fn create(args: PluginNewArgs) -> anyhow::Result<()> {
     fs::rename(staging.path(), &target)
         .with_context(|| format!("publish Plugin scaffold {}", target.display()))?;
     if !args.no_install {
-        if args.runtime == PluginRuntimeArg::Bun {
+        if args.web {
+            run_cargo(
+                &target,
+                &["generate-lockfile"],
+                "generate Web Plugin lockfile",
+            )?;
+            run_cargo(&target, &["test", "--locked"], "test generated Web Plugin")?;
+        } else if args.runtime == PluginRuntimeArg::Bun {
             run_bun(&target, &["install"], "install Bun Plugin dependencies")?;
             run_bun(&target, &["run", "check"], "check generated Bun Plugin")?;
         } else {
             run_cargo(&target, &["generate-lockfile"], "generate Plugin lockfile")?;
         }
-        if matches!(
-            args.runtime,
-            PluginRuntimeArg::Multi | PluginRuntimeArg::Wasm
-        ) {
+        if !args.web
+            && matches!(
+                args.runtime,
+                PluginRuntimeArg::Multi | PluginRuntimeArg::Wasm
+            )
+        {
             run_cargo(
                 &target,
                 &["check", "--locked", "--lib", "--target", WASM_TARGET],
                 "check generated Wasm implementation",
             )?;
         }
-        if matches!(
-            args.runtime,
-            PluginRuntimeArg::Multi | PluginRuntimeArg::Process
-        ) {
+        if !args.web
+            && matches!(
+                args.runtime,
+                PluginRuntimeArg::Multi | PluginRuntimeArg::Process
+            )
+        {
             run_cargo(
                 &target,
                 &[
@@ -87,6 +104,184 @@ pub(super) fn create(args: PluginNewArgs) -> anyhow::Result<()> {
     }
     println!("Created Plugin project at {}.", target.display());
     Ok(())
+}
+
+#[allow(clippy::too_many_lines)] // The generated, copyable source is kept in one visible template.
+pub(super) fn web_plugin_scaffold(plugin_id: &str) -> BTreeMap<PathBuf, String> {
+    let package_name = plugin_id.replace('.', "-");
+    let manifest = format!(
+        r#"[package]
+name = "{package_name}"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[package.metadata.lenso]
+plugin-id = "{plugin_id}"
+root-slot = "web"
+
+[dependencies]
+lenso = {{ version = "0.5.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "{LENSO_NATIVE_REVISION}" }}
+lenso-capability-http-endpoint = {{ version = "0.2.6", git = "https://github.com/LioRael/lenso-web", rev = "{LENSO_WEB_REVISION}" }}
+serde = {{ version = "1", features = ["derive"] }}
+
+[dev-dependencies]
+futures = "0.3"
+
+[workspace]
+"#
+    );
+    let source = r#"use std::{
+    cell::{Cell, RefCell},
+    collections::BTreeMap,
+    rc::Rc,
+};
+
+use lenso_capability_http_endpoint::{
+    prelude::*,
+    response::{Problem, StatusCode},
+};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CreateGreeting {
+    name: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct SearchGreetings {
+    term: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct Greeting {
+    id: String,
+    message: String,
+}
+
+#[lenso::plugin]
+#[derive(Clone, Debug, Default)]
+pub struct GreetingsHttp {
+    next_id: Rc<Cell<u64>>,
+    greetings: Rc<RefCell<BTreeMap<String, Greeting>>>,
+}
+
+#[endpoint]
+impl GreetingsHttp {
+    #[post("greetings.create", "/greetings")]
+    async fn create(
+        &self,
+        Json(input): Json<CreateGreeting>,
+    ) -> Result<(StatusCode, Json<Greeting>), Problem> {
+        // A real Plugin normally awaits its business Capability here.
+        std::future::ready(()).await;
+        let name = input.name.trim();
+        if name.is_empty() {
+            return Err(Problem::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_name",
+                "name must not be empty",
+            ));
+        }
+
+        let sequence = self.next_id.get() + 1;
+        self.next_id.set(sequence);
+        let greeting = Greeting {
+            id: format!("greeting-{sequence}"),
+            message: format!("Hello, {name}!"),
+        };
+        self.greetings
+            .borrow_mut()
+            .insert(greeting.id.clone(), greeting.clone());
+        Ok((StatusCode::CREATED, Json(greeting)))
+    }
+
+    #[query("greetings.search", "/greetings/search")]
+    async fn search(
+        &self,
+        Json(input): Json<SearchGreetings>,
+    ) -> Result<Json<Vec<Greeting>>, Problem> {
+        std::future::ready(()).await;
+        let greetings = self
+            .greetings
+            .borrow()
+            .values()
+            .filter(|greeting| greeting.message.contains(&input.term))
+            .cloned()
+            .collect();
+        Ok(Json(greetings))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::executor::block_on;
+    use lenso_capability_http_endpoint::testing::EndpointTest;
+
+    use super::*;
+
+    #[test]
+    fn creates_and_queries_a_greeting_without_opening_a_socket() {
+        block_on(async {
+            let endpoint = EndpointTest::new(GreetingsHttp::default());
+            let created = endpoint
+                .request("greetings.create")
+                .json(&CreateGreeting {
+                    name: "Lenso".to_owned(),
+                })
+                .unwrap()
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(created.status(), StatusCode::CREATED);
+
+            let found = endpoint
+                .request("greetings.search")
+                .json(&SearchGreetings {
+                    term: "Lenso".to_owned(),
+                })
+                .unwrap()
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(found.status(), StatusCode::OK);
+            assert_eq!(found.json::<Vec<Greeting>>().unwrap().len(), 1);
+        });
+    }
+
+    #[test]
+    fn turns_business_rejections_into_problem_responses() {
+        let response = block_on(async {
+            EndpointTest::new(GreetingsHttp::default())
+                .request("greetings.create")
+                .json(&CreateGreeting {
+                    name: String::new(),
+                })
+                .unwrap()
+                .send()
+                .await
+                .unwrap()
+        });
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.header("content-type"),
+            Some("application/problem+json; charset=utf-8")
+        );
+    }
+}
+"#
+    .to_owned();
+    let readme = format!(
+        "# {plugin_id}\n\nLinked native Rust Web Plugin using `#[lenso::plugin]` and `#[endpoint]`. The generated test invokes typed Endpoint operations without opening a socket.\n\n```sh\ncargo test --locked\n```\n\nAdd this crate as a dependency of your Host, link the Plugin type, and mount the Host's `web` root slot.\n"
+    );
+
+    BTreeMap::from([
+        (PathBuf::from("Cargo.toml"), manifest),
+        (PathBuf::from("src/lib.rs"), source),
+        (PathBuf::from("README.md"), readme),
+    ])
 }
 
 pub(super) fn bun_plugin_scaffold(plugin_id: &str) -> BTreeMap<PathBuf, String> {

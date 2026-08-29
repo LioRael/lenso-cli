@@ -42,6 +42,24 @@ one V3 `.lenso-plugin` Release; the Host selects one implementation before Plan
 resolution and never falls back after startup. Legacy single-output projects
 remain readable.
 
+## Author one Web Plugin
+
+```sh
+lenso plugin new company.greetings-http --web
+cd company.greetings-http
+cargo test --locked
+```
+
+This path generates a linked native Rust Plugin with `#[lenso::plugin]` and a
+typed `#[endpoint]` implementation. Its starter operations demonstrate both
+`#[post]` and body-carrying `#[query]` requests, typed success responses, and
+RFC 9457 Problem responses. The generated test uses `EndpointTest`, so the
+Plugin is exercised without opening a socket.
+
+Web Plugins are linked into a Host and mounted through its `web` root slot;
+they are not portable Agent Tool bundles, so the generated README does not
+direct users to `lenso plugin pack`.
+
 `pack` writes one portable `.lenso-plugin` archive, then extracts, validates,
 and reopens its exact contents. `plugins add` accepts that archive and legacy
 Bundle directories. A
