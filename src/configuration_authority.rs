@@ -1,4 +1,12 @@
-use std::{error::Error, fmt, fmt::Write as _, path::Path, str, str::FromStr};
+use std::{
+    error::Error,
+    fmt,
+    fmt::Write as _,
+    path::{Path, PathBuf},
+    str,
+    str::FromStr,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::{Context, bail};
 use lenso_app_plan::authoring::{
@@ -8,12 +16,133 @@ use lenso_app_plan::authoring::{
 use sha2::{Digest, Sha256};
 
 use super::{
-    MAX_CONFIGURATION_BYTES, PLUGIN_ROOT, atomic_write, load_host_catalog, lock_plugin_root,
-    snapshot_plugin_root, validate_instance_filename, validate_path_identity,
+    MAX_CONFIGURATION_BYTES, PLUGIN_ROOT, PluginRootAuthoringState, atomic_write,
+    inspect_plugin_root, load_host_catalog, lock_plugin_root, snapshot_plugin_root,
+    validate_instance_filename, validate_path_identity,
 };
 
 const PROPOSAL_SCHEMA: &str = "lenso.plugin-configuration-proposal.v1";
 const PUBLICATION_SCHEMA: &str = "lenso.plugin-configuration-publication.v1";
+
+/// Stable provenance for the authority that owns Plugin configuration publication.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PluginConfigurationAuthoritySource {
+    kind: String,
+    reference: String,
+}
+
+impl PluginConfigurationAuthoritySource {
+    /// Creates one Host-trusted authority identity.
+    pub fn new(kind: impl Into<String>, reference: impl Into<String>) -> anyhow::Result<Self> {
+        let kind = kind.into();
+        let reference = reference.into();
+        if kind.is_empty()
+            || kind.len() > 64
+            || !kind.bytes().all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'_' | b'-' | b'.')
+            })
+        {
+            bail!("Plugin configuration authority kind is invalid");
+        }
+        if reference.is_empty() || reference.len() > 256 || reference.chars().any(char::is_control)
+        {
+            bail!("Plugin configuration authority reference is invalid");
+        }
+        Ok(Self { kind, reference })
+    }
+
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
+
+    pub fn reference(&self) -> &str {
+        &self.reference
+    }
+}
+
+/// Host-side port for inspecting, proposing, and publishing Plugin configuration.
+///
+/// Implementations own authoring storage and compare-and-swap publication. They
+/// do not own App Generation staging, routing, or Kernel execution.
+pub trait PluginConfigurationAuthority: fmt::Debug + Send + Sync {
+    fn source(&self) -> PluginConfigurationAuthoritySource;
+
+    fn inspect(&self) -> anyhow::Result<PluginRootAuthoringState>;
+
+    fn propose(
+        &self,
+        expected_revision: &PluginRootRevision,
+        plugin_id: &str,
+        instance: &str,
+        bytes: &[u8],
+    ) -> anyhow::Result<PluginConfigurationProposal>;
+
+    fn publish(
+        &self,
+        proposal: &PluginConfigurationProposal,
+    ) -> anyhow::Result<PluginConfigurationPublication>;
+}
+
+/// Default configuration authority backed by one visible App Plugin Root.
+#[derive(Clone, Debug)]
+pub struct LocalPluginRootAuthority {
+    root: PathBuf,
+    access: Arc<Mutex<()>>,
+}
+
+impl LocalPluginRootAuthority {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: root.into(),
+            access: Arc::new(Mutex::new(())),
+        }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    fn lock(&self) -> anyhow::Result<std::sync::MutexGuard<'_, ()>> {
+        self.access
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Plugin configuration authority lock is poisoned"))
+    }
+}
+
+impl PluginConfigurationAuthority for LocalPluginRootAuthority {
+    fn source(&self) -> PluginConfigurationAuthoritySource {
+        PluginConfigurationAuthoritySource {
+            kind: "local_plugin_root".to_owned(),
+            reference: "app".to_owned(),
+        }
+    }
+
+    fn inspect(&self) -> anyhow::Result<PluginRootAuthoringState> {
+        let _guard = self.lock()?;
+        inspect_plugin_root(&self.root)
+    }
+
+    fn propose(
+        &self,
+        expected_revision: &PluginRootRevision,
+        plugin_id: &str,
+        instance: &str,
+        bytes: &[u8],
+    ) -> anyhow::Result<PluginConfigurationProposal> {
+        let _guard = self.lock()?;
+        propose_instance_configuration(&self.root, expected_revision, plugin_id, instance, bytes)
+    }
+
+    fn publish(
+        &self,
+        proposal: &PluginConfigurationProposal,
+    ) -> anyhow::Result<PluginConfigurationPublication> {
+        let _guard = self.lock()?;
+        publish_instance_configuration(&self.root, proposal)
+    }
+}
 
 /// A deterministic semantic revision of one App's Plugin Root.
 ///
@@ -483,6 +612,35 @@ mod tests {
         assert_eq!(
             fs::read_to_string(configuration_path(root.path())).unwrap(),
             "greeting = \"hello\"\n"
+        );
+    }
+
+    #[test]
+    fn local_authority_dispatches_through_the_host_port() {
+        let root = fixture_root();
+        let authority: Arc<dyn PluginConfigurationAuthority> =
+            Arc::new(LocalPluginRootAuthority::new(root.path()));
+        let source = authority.source();
+        let base = authority.inspect().unwrap().revision().clone();
+
+        let proposal = authority
+            .propose(
+                &base,
+                "example.agent",
+                "default",
+                b"greeting = \"authority\"\n",
+            )
+            .unwrap();
+        assert!(!configuration_path(root.path()).exists());
+
+        let publication = authority.publish(&proposal).unwrap();
+
+        assert_eq!(source.kind(), "local_plugin_root");
+        assert_eq!(source.reference(), "app");
+        assert_eq!(publication.revision(), proposal.candidate_revision());
+        assert_eq!(
+            authority.inspect().unwrap().revision(),
+            publication.revision()
         );
     }
 
