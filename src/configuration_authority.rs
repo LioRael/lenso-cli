@@ -444,7 +444,7 @@ fn build_proposal(
         current.disabled().iter().cloned(),
     );
     let candidate_revision = revision_for_snapshot(&candidate)?;
-    let authority = serde_json::to_vec(&(host, current, &candidate))
+    let authority = serde_json::to_vec(&(PROPOSAL_SCHEMA, host, current, &candidate, bytes))
         .context("encode Plugin configuration proposal authority")?;
     let digest = sha256_digest(&authority);
     let (status, application, diagnostics) = match resolve_plugin_root(host, &candidate) {
@@ -722,6 +722,31 @@ mod tests {
 
         let reformatted = inspect_plugin_root(root.path()).unwrap();
         assert_eq!(reformatted.revision(), publication.revision());
+    }
+
+    #[test]
+    fn proposal_digest_closes_the_exact_reviewed_toml() {
+        let root = fixture_root();
+        let base = inspect_plugin_root(root.path()).unwrap().revision().clone();
+        let compact = propose_instance_configuration(
+            root.path(),
+            &base,
+            "example.agent",
+            "default",
+            b"greeting=\"hello\"\n",
+        )
+        .unwrap();
+        let formatted = propose_instance_configuration(
+            root.path(),
+            &base,
+            "example.agent",
+            "default",
+            b"greeting = \"hello\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(compact.candidate_revision(), formatted.candidate_revision());
+        assert_ne!(compact.digest(), formatted.digest());
     }
 
     #[test]
