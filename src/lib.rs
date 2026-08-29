@@ -4,6 +4,8 @@
 //! before changing visible App-owned files. Runtime Generation staging and
 //! switching remain the responsibility of the running Host.
 
+pub mod identity;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
@@ -17,7 +19,12 @@ use lenso_app_plan::authoring::{
     ResolvedApp, resolve_plugin_root,
 };
 use lenso_plugin_bundle::{
-    ImplementationPolicy, read_bundle_manifest, resolve_implementation, verify_bundle_directory,
+    ImplementationPolicy, VerifiedBundle, read_bundle_manifest, resolve_implementation,
+    verify_bundle_directory,
+};
+
+use crate::identity::{
+    classify_existing_plugin_id, validate_plugin_id_v1, validate_release_version,
 };
 
 mod configuration_authority;
@@ -318,7 +325,7 @@ fn snapshot_plugin_root(root: &Path) -> anyhow::Result<PluginRootSnapshot> {
             bail!("unknown Plugin Root entry: {}", entry.path().display());
         }
         let plugin_id = name;
-        validate_path_identity(&plugin_id, "Plugin ID")?;
+        validate_existing_plugin_id(&plugin_id)?;
         reject_case_collision(&mut plugin_names, &plugin_id, "Plugin ID")?;
         scan_plugin_directory(
             &entry.path(),
@@ -470,8 +477,17 @@ fn is_ignored_os_metadata(name: &str) -> bool {
 }
 
 fn read_bundle_descriptor(path: &Path, plugin_id: &str) -> anyhow::Result<PluginDescriptor> {
+    validate_existing_plugin_id(plugin_id)?;
     let verified = verify_bundle_directory(path)
         .with_context(|| format!("verify Plugin Bundle {}", path.display()))?;
+    read_verified_bundle_descriptor(path, plugin_id, &verified)
+}
+
+fn read_verified_bundle_descriptor(
+    path: &Path,
+    plugin_id: &str,
+    verified: &VerifiedBundle,
+) -> anyhow::Result<PluginDescriptor> {
     if verified.plugin_id != plugin_id {
         bail!(
             "Plugin Bundle ID `{}` does not match directory `{plugin_id}`",
@@ -534,6 +550,11 @@ fn validate_instance_filename(instance: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn validate_existing_plugin_id(plugin_id: &str) -> anyhow::Result<()> {
+    validate_path_identity(plugin_id, "Plugin ID")?;
+    classify_existing_plugin_id(plugin_id).map(|_| ())
+}
+
 fn validate_path_identity(value: &str, label: &str) -> anyhow::Result<()> {
     if value.trim() != value
         || value.is_empty()
@@ -562,33 +583,287 @@ fn reject_case_collision(
 
 /// Adds one verified external Plugin Bundle after resolving the complete candidate App.
 pub fn add_bundle(root: &Path, bundle: &Path) -> anyhow::Result<(String, String, ResolvedApp)> {
+    prepare_bundle_mutation(root, bundle, BundleMutation::Add)?.commit()
+}
+
+/// Desired root-Bundle mutation validated before visible bytes change.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BundleMutation {
+    Add,
+    Replace,
+    /// Restore bytes already retained for a legacy or v1 root Plugin.
+    Restore,
+}
+
+/// Stable staged bytes and candidate resolution for one pending Bundle mutation.
+///
+/// Callers may inspect the verified identity before committing, which lets a
+/// catalog compare its signed metadata without re-reading or re-hashing the
+/// Bundle. The staged directory is removed automatically unless `commit` is
+/// called.
+#[derive(Debug)]
+pub struct PreparedBundleMutation {
+    authority: fs::File,
+    destination: PathBuf,
+    mutation: BundleMutation,
+    resolved: ResolvedApp,
+    staging: tempfile::TempDir,
+    verified: VerifiedBundle,
+}
+
+impl PreparedBundleMutation {
+    pub const fn verified(&self) -> &VerifiedBundle {
+        &self.verified
+    }
+
+    pub const fn resolved(&self) -> &ResolvedApp {
+        &self.resolved
+    }
+
+    pub fn destination(&self) -> &Path {
+        &self.destination
+    }
+
+    /// Atomically makes the already-validated staged Bundle visible.
+    pub fn commit(self) -> anyhow::Result<(String, String, ResolvedApp)> {
+        let Self {
+            authority,
+            destination,
+            mutation,
+            resolved,
+            staging,
+            verified,
+        } = self;
+        let commit = commit_staged_bundle(&destination, mutation, staging);
+        drop(authority);
+        commit?;
+        Ok((verified.plugin_id, verified.release_version, resolved))
+    }
+}
+
+fn commit_staged_bundle(
+    destination: &Path,
+    mutation: BundleMutation,
+    staging: tempfile::TempDir,
+) -> anyhow::Result<()> {
+    commit_staged_bundle_with(
+        destination,
+        mutation,
+        staging,
+        atomic_publish_bundle,
+        tempfile::TempDir::close,
+    )
+}
+
+fn commit_staged_bundle_with<Publish, Retire>(
+    destination: &Path,
+    mutation: BundleMutation,
+    staging: tempfile::TempDir,
+    publish: Publish,
+    retire: Retire,
+) -> anyhow::Result<()>
+where
+    Publish: FnOnce(&Path, &Path, BundleMutation) -> std::io::Result<()>,
+    Retire: FnOnce(tempfile::TempDir) -> std::io::Result<()>,
+{
+    let parent = destination
+        .parent()
+        .context("Bundle destination has no parent")?;
+    if mutation == BundleMutation::Add && destination.exists() {
+        bail!("Plugin Bundle already exists: {}", destination.display());
+    }
+    let created_parent = mutation == BundleMutation::Add && !parent.exists();
+    if mutation == BundleMutation::Add {
+        fs::create_dir_all(parent)?;
+    }
+    let publication =
+        publish(staging.path(), destination, mutation).with_context(|| match mutation {
+            BundleMutation::Add => format!("commit Plugin Bundle {}", destination.display()),
+            BundleMutation::Replace | BundleMutation::Restore => {
+                format!("atomically replace Plugin Bundle {}", destination.display())
+            }
+        });
+    if let Err(error) = publication {
+        if created_parent
+            && let Err(cleanup_error) = fs::remove_dir(parent)
+            && cleanup_error.kind() != std::io::ErrorKind::NotFound
+            && cleanup_error.kind() != std::io::ErrorKind::DirectoryNotEmpty
+        {
+            return Err(error.context(format!(
+                "also failed to remove empty Plugin directory {}: {cleanup_error}",
+                parent.display()
+            )));
+        }
+        return Err(error);
+    }
+
+    if mutation != BundleMutation::Add
+        && let Err(error) = retire(staging)
+    {
+        // EXCHANGE is the commit point: the new Bundle is already visible and
+        // the old one is isolated at the hidden staging path. Cleanup failure
+        // must not misreport a successfully committed mutation as rejected.
+        eprintln!("warning: Plugin Bundle committed, but retired Bundle cleanup failed: {error}");
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn atomic_publish_bundle(
+    staging: &Path,
+    destination: &Path,
+    mutation: BundleMutation,
+) -> std::io::Result<()> {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+
+    let flags = match mutation {
+        BundleMutation::Add => RenameFlags::NOREPLACE,
+        BundleMutation::Replace | BundleMutation::Restore => RenameFlags::EXCHANGE,
+    };
+    renameat_with(CWD, staging, CWD, destination, flags).map_err(std::io::Error::from)
+}
+
+#[cfg(windows)]
+fn atomic_publish_bundle(
+    staging: &Path,
+    destination: &Path,
+    mutation: BundleMutation,
+) -> std::io::Result<()> {
+    match mutation {
+        // MoveFileW is intentionally used without a replacement flag: it is
+        // one atomic rename and fails if a concurrent writer won the target.
+        BundleMutation::Add => winsafe::MoveFile(
+            staging.to_str().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Plugin Bundle staging path is not Unicode",
+                )
+            })?,
+            destination.to_str().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Plugin Bundle destination path is not Unicode",
+                )
+            })?,
+        )
+        .map_err(|error| std::io::Error::from_raw_os_error(error.raw() as i32)),
+        BundleMutation::Replace | BundleMutation::Restore => Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "atomic Plugin Bundle replacement is unavailable on this platform",
+        )),
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_vendor = "apple", windows)))]
+fn atomic_publish_bundle(
+    _staging: &Path,
+    _destination: &Path,
+    _mutation: BundleMutation,
+) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "atomic Plugin Bundle publication is unavailable on this platform",
+    ))
+}
+
+/// Copies one candidate into stable staging, validates it once, and resolves
+/// the complete candidate App before any Plugin Root bytes change.
+pub fn prepare_bundle_mutation(
+    root: &Path,
+    bundle: &Path,
+    mutation: BundleMutation,
+) -> anyhow::Result<PreparedBundleMutation> {
+    let staging = tempfile::Builder::new()
+        .prefix(".plugin-bundle-")
+        .tempdir_in(root)?;
+    copy_directory(bundle, staging.path())?;
+    let (verified, descriptor) = verify_bundle_mutation(staging.path(), mutation)?;
+    let authority = lock_plugin_root(root)?;
+    let resolved = resolve_bundle_mutation(root, mutation, &verified, descriptor)?;
+    let destination = root
+        .join(PLUGIN_ROOT)
+        .join(&verified.plugin_id)
+        .join(BUNDLE_NAME);
+    Ok(PreparedBundleMutation {
+        authority,
+        destination,
+        mutation,
+        resolved,
+        staging,
+        verified,
+    })
+}
+
+/// Verifies one Bundle and resolves the complete candidate App for an add or replacement.
+///
+/// `prepare_bundle_mutation` is the preferred mutation boundary because it
+/// also owns stable staged bytes and the atomic commit.
+pub fn validate_bundle_mutation(
+    root: &Path,
+    bundle: &Path,
+    mutation: BundleMutation,
+) -> anyhow::Result<(lenso_plugin_bundle::VerifiedBundle, ResolvedApp)> {
+    let (verified, descriptor) = verify_bundle_mutation(bundle, mutation)?;
+    let _lock = lock_plugin_root(root)?;
+    let resolved = resolve_bundle_mutation(root, mutation, &verified, descriptor)?;
+    Ok((verified, resolved))
+}
+
+fn verify_bundle_mutation(
+    bundle: &Path,
+    mutation: BundleMutation,
+) -> anyhow::Result<(VerifiedBundle, PluginDescriptor)> {
     let verified = verify_bundle_directory(bundle)
         .with_context(|| format!("verify Plugin Bundle {}", bundle.display()))?;
-    let descriptor = read_bundle_descriptor(bundle, &verified.plugin_id)?;
-    let _lock = lock_plugin_root(root)?;
+    match mutation {
+        BundleMutation::Add | BundleMutation::Replace => {
+            validate_plugin_id_v1(&verified.plugin_id)?;
+        }
+        BundleMutation::Restore => {
+            classify_existing_plugin_id(&verified.plugin_id)?;
+        }
+    }
+    validate_release_version(&verified.release_version)?;
+    let descriptor = read_verified_bundle_descriptor(bundle, &verified.plugin_id, &verified)?;
+    Ok((verified, descriptor))
+}
+
+fn resolve_bundle_mutation(
+    root: &Path,
+    mutation: BundleMutation,
+    verified: &VerifiedBundle,
+    descriptor: PluginDescriptor,
+) -> anyhow::Result<ResolvedApp> {
     let host = load_host_catalog(root)?;
     let current = snapshot_plugin_root(root)?;
-    if current
+    let has_current = current
         .releases()
         .iter()
-        .any(|release| release.plugin_id() == verified.plugin_id)
-    {
-        bail!("Plugin `{}` already has a root Bundle", verified.plugin_id);
+        .any(|release| release.plugin_id() == verified.plugin_id);
+    match (mutation, has_current) {
+        (BundleMutation::Add, true) => {
+            bail!("Plugin `{}` already has a root Bundle", verified.plugin_id)
+        }
+        (BundleMutation::Replace | BundleMutation::Restore, false) => {
+            bail!(
+                "Plugin `{}` has no root Bundle to update",
+                verified.plugin_id
+            )
+        }
+        _ => {}
     }
     let candidate = PluginRootSnapshot::new(
-        current.releases().iter().cloned().chain([descriptor]),
+        current
+            .releases()
+            .iter()
+            .filter(|release| release.plugin_id() != verified.plugin_id)
+            .cloned()
+            .chain([descriptor]),
         current.instances().iter().cloned(),
         current.disabled().iter().cloned(),
     );
     let resolved = resolve_plugin_root(&host, &candidate).map_err(anyhow::Error::msg)?;
-    let plugin_directory = root.join(PLUGIN_ROOT).join(&verified.plugin_id);
-    fs::create_dir_all(&plugin_directory)?;
-    copy_bundle(bundle, &plugin_directory.join(BUNDLE_NAME))?;
-    Ok((
-        verified.plugin_id,
-        verified.release_version.clone(),
-        resolved,
-    ))
+    Ok(resolved)
 }
 
 /// Atomically writes one typed Instance patch after resolving the complete candidate App.
@@ -612,7 +887,7 @@ pub fn set_instance_disabled(
     instance: &str,
     disabled_state: bool,
 ) -> anyhow::Result<ResolvedApp> {
-    validate_path_identity(plugin_id, "Plugin ID")?;
+    validate_existing_plugin_id(plugin_id)?;
     validate_instance_filename(instance)?;
     let _lock = lock_plugin_root(root)?;
     let host = load_host_catalog(root)?;
@@ -649,7 +924,7 @@ pub fn remove_instance_difference(
     plugin_id: &str,
     instance: &str,
 ) -> anyhow::Result<ResolvedApp> {
-    validate_path_identity(plugin_id, "Plugin ID")?;
+    validate_existing_plugin_id(plugin_id)?;
     validate_instance_filename(instance)?;
     let _lock = lock_plugin_root(root)?;
     let host = load_host_catalog(root)?;
@@ -677,7 +952,7 @@ pub fn remove_instance_difference(
 
 /// Moves one root-supplied Plugin to recoverable trash after validating the remaining App.
 pub fn remove_plugin(root: &Path, plugin_id: &str) -> anyhow::Result<(ResolvedApp, PathBuf)> {
-    validate_path_identity(plugin_id, "Plugin ID")?;
+    validate_existing_plugin_id(plugin_id)?;
     let _lock = lock_plugin_root(root)?;
     let host = load_host_catalog(root)?;
     let current = snapshot_plugin_root(root)?;
@@ -738,24 +1013,6 @@ fn lock_plugin_root(root: &Path) -> anyhow::Result<fs::File> {
         .with_context(|| format!("lock Plugin Root authoring authority {}", path.display()))?;
     Ok(file)
 }
-
-fn copy_bundle(source: &Path, destination: &Path) -> anyhow::Result<()> {
-    if destination.exists() {
-        bail!("Plugin Bundle already exists: {}", destination.display());
-    }
-    let parent = destination
-        .parent()
-        .context("Bundle destination has no parent")?;
-    let staging = tempfile::Builder::new()
-        .prefix(".plugin-bundle-")
-        .tempdir_in(parent)?;
-    copy_directory(source, staging.path())?;
-    let staging_path = staging.keep();
-    fs::rename(&staging_path, destination)
-        .with_context(|| format!("commit Plugin Bundle {}", destination.display()))?;
-    Ok(())
-}
-
 fn copy_directory(source: &Path, destination: &Path) -> anyhow::Result<()> {
     for entry in read_entries(source)? {
         let file_type = entry.file_type()?;
@@ -996,5 +1253,156 @@ mod tests {
             reject_case_collision(&mut normalized, "example.agent", "Plugin ID").unwrap_err();
 
         assert!(error.to_string().contains("case-colliding Plugin IDs"));
+    }
+
+    #[test]
+    fn add_replace_and_restore_publish_failures_leave_visible_bytes_unchanged() {
+        for mutation in [
+            BundleMutation::Add,
+            BundleMutation::Replace,
+            BundleMutation::Restore,
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let destination = root
+                .path()
+                .join("plugins/example.agent/plugin.lenso-plugin");
+            if mutation == BundleMutation::Add {
+                fs::create_dir(root.path().join("plugins")).unwrap();
+            } else {
+                fs::create_dir_all(&destination).unwrap();
+                fs::write(destination.join("marker"), "old").unwrap();
+            }
+            let staging = tempfile::tempdir_in(root.path()).unwrap();
+            fs::write(staging.path().join("marker"), "new").unwrap();
+
+            let error = commit_staged_bundle_with(
+                &destination,
+                mutation,
+                staging,
+                |_, _, _| {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "injected publish failure",
+                    ))
+                },
+                |_| panic!("retirement cannot run before publication succeeds"),
+            )
+            .unwrap_err();
+
+            assert!(error.to_string().contains("Plugin Bundle"));
+            if mutation == BundleMutation::Add {
+                assert!(!destination.exists());
+                assert!(!destination.parent().unwrap().exists());
+            } else {
+                assert_eq!(
+                    fs::read_to_string(destination.join("marker")).unwrap(),
+                    "old"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn portable_bundle_add_publishes_with_one_atomic_rename() {
+        let root = tempfile::tempdir().unwrap();
+        let destination = root
+            .path()
+            .join("plugins/example.agent/plugin.lenso-plugin");
+        let staging = tempfile::tempdir_in(root.path()).unwrap();
+        fs::write(staging.path().join("marker"), "new").unwrap();
+
+        commit_staged_bundle(&destination, BundleMutation::Add, staging).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(destination.join("marker")).unwrap(),
+            "new"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+    #[test]
+    fn portable_bundle_add_never_replaces_a_concurrent_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("destination");
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join("marker"), "old").unwrap();
+        let staging = tempfile::tempdir_in(root.path()).unwrap();
+        fs::write(staging.path().join("marker"), "new").unwrap();
+
+        atomic_publish_bundle(staging.path(), &destination, BundleMutation::Add).unwrap_err();
+
+        assert_eq!(
+            fs::read_to_string(destination.join("marker")).unwrap(),
+            "old"
+        );
+        assert_eq!(
+            fs::read_to_string(staging.path().join("marker")).unwrap(),
+            "new"
+        );
+    }
+
+    #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
+    #[test]
+    fn portable_bundle_replace_fails_closed_when_exchange_is_unavailable() {
+        let root = tempfile::tempdir().unwrap();
+        let destination = root
+            .path()
+            .join("plugins/example.agent/plugin.lenso-plugin");
+        fs::create_dir_all(&destination).unwrap();
+        fs::write(destination.join("marker"), "old").unwrap();
+        let staging = tempfile::tempdir_in(root.path()).unwrap();
+        fs::write(staging.path().join("marker"), "new").unwrap();
+
+        let error =
+            commit_staged_bundle(&destination, BundleMutation::Replace, staging).unwrap_err();
+
+        assert_eq!(
+            error
+                .root_cause()
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .kind(),
+            std::io::ErrorKind::Unsupported
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("marker")).unwrap(),
+            "old"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+    #[test]
+    fn replace_and_restore_commit_atomically_even_when_retirement_cleanup_fails() {
+        for mutation in [BundleMutation::Replace, BundleMutation::Restore] {
+            let root = tempfile::tempdir().unwrap();
+            let destination = root
+                .path()
+                .join("plugins/example.agent/plugin.lenso-plugin");
+            fs::create_dir_all(&destination).unwrap();
+            fs::write(destination.join("marker"), "old").unwrap();
+            let staging = tempfile::tempdir_in(root.path()).unwrap();
+            fs::write(staging.path().join("marker"), "new").unwrap();
+            let mut retired = None;
+
+            commit_staged_bundle_with(
+                &destination,
+                mutation,
+                staging,
+                atomic_publish_bundle,
+                |staging| {
+                    retired = Some(staging.keep());
+                    Err(std::io::Error::other("injected cleanup failure"))
+                },
+            )
+            .unwrap();
+
+            assert_eq!(
+                fs::read_to_string(destination.join("marker")).unwrap(),
+                "new"
+            );
+            let retired = retired.unwrap();
+            assert_eq!(fs::read_to_string(retired.join("marker")).unwrap(), "old");
+            fs::remove_dir_all(retired).unwrap();
+        }
     }
 }

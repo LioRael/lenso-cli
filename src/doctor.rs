@@ -1,4 +1,10 @@
-use std::{path::PathBuf, process::Command};
+use std::{
+    collections::BTreeSet,
+    env,
+    ffi::OsStr,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use clap::Args;
 use serde::Serialize;
@@ -25,15 +31,27 @@ struct Check {
 pub(crate) fn doctor(args: DoctorArgs) -> anyhow::Result<()> {
     let root = project_root(args.root)?;
     let mut checks = Vec::new();
-    checks.push(command_check("cargo", &["--version"]));
-    checks.push(command_check("rustc", &["--version"]));
-    checks.push(command_check("bun", &["--version"]));
     checks.push(path_check(
         "host_catalog",
-        root.join(".lenso/host-catalog.json"),
+        &root.join(".lenso/host-catalog.json"),
     ));
-    checks.push(path_check("host_executable", root.join(".lenso/host")));
-    checks.push(match load_resolved_app(&root) {
+    checks.push(path_check("host_executable", &root.join(".lenso/host")));
+    let resolution = load_resolved_app(&root);
+    if let Ok(app) = &resolution {
+        for tool in required_external_tools(
+            app.plan()
+                .plugin_instances()
+                .iter()
+                .map(|instance| instance.execution_class().as_str()),
+        ) {
+            let executable = match tool {
+                "bun" => env::var_os("BUN_BIN").unwrap_or_else(|| "bun".into()),
+                _ => tool.into(),
+            };
+            checks.push(command_check(tool, &executable, &["--version"]));
+        }
+    }
+    checks.push(match resolution {
         Ok(app) => Check {
             name: "app_resolution",
             status: "passed",
@@ -75,8 +93,24 @@ pub(crate) fn doctor(args: DoctorArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn command_check(name: &'static str, arguments: &[&str]) -> Check {
-    match Command::new(name).args(arguments).output() {
+fn required_external_tools<'a>(
+    execution_classes: impl IntoIterator<Item = &'a str>,
+) -> BTreeSet<&'static str> {
+    execution_classes
+        .into_iter()
+        .filter_map(|execution_class| match execution_class {
+            // Bun is an external executable selected at runtime. Native Rust,
+            // Process, Wasm, and QuickJS implementations are already hosted or
+            // bundled, so Cargo and rustc are authoring tools rather than App
+            // runtime prerequisites.
+            "lenso.bun-process@1" => Some("bun"),
+            _ => None,
+        })
+        .collect()
+}
+
+fn command_check(name: &'static str, executable: &OsStr, arguments: &[&str]) -> Check {
+    match Command::new(executable).args(arguments).output() {
         Ok(output) if output.status.success() => Check {
             name,
             status: "passed",
@@ -89,8 +123,11 @@ fn command_check(name: &'static str, arguments: &[&str]) -> Check {
         },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Check {
             name,
-            status: "skipped",
-            detail: "not installed; required only for matching Plugin execution classes".to_owned(),
+            status: "failed",
+            detail: format!(
+                "{} is required by the resolved App execution classes but was not found",
+                executable.to_string_lossy()
+            ),
         },
         Err(error) => Check {
             name,
@@ -100,7 +137,7 @@ fn command_check(name: &'static str, arguments: &[&str]) -> Check {
     }
 }
 
-fn path_check(name: &'static str, path: PathBuf) -> Check {
+fn path_check(name: &'static str, path: &Path) -> Check {
     match path.symlink_metadata() {
         Ok(metadata) if metadata.file_type().is_file() => Check {
             name,
@@ -124,5 +161,39 @@ fn path_check(name: &'static str, path: PathBuf) -> Check {
             status: "failed",
             detail: format!("{}: {error}", path.display()),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bun_is_required_only_when_the_resolved_plan_selects_bun() {
+        assert_eq!(
+            required_external_tools(["lenso.bun-process@1"]),
+            BTreeSet::from(["bun"])
+        );
+        assert!(
+            required_external_tools([
+                "lenso.native-rust@1",
+                "lenso.process@1",
+                "lenso.wasm-component@1",
+                "lenso.quickjs@1",
+            ])
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_missing_selected_runtime_fails_closed() {
+        let check = command_check(
+            "bun",
+            OsStr::new("/definitely-missing-lenso-doctor-runtime"),
+            &["--version"],
+        );
+
+        assert_eq!(check.status, "failed");
+        assert!(check.detail.contains("required by the resolved App"));
     }
 }

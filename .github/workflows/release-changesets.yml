@@ -10,6 +10,8 @@ on:
       - "pnpm-lock.yaml"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "contracts/**"
+      - "docs/migration-plugin-authoring.md"
       - "src/**"
       - "templates/**"
       - "bin/**"
