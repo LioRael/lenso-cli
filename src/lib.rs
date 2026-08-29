@@ -36,6 +36,211 @@ pub fn load_resolved_app(root: &Path) -> anyhow::Result<ResolvedApp> {
     resolve_plugin_root(&host, &snapshot).map_err(anyhow::Error::msg)
 }
 
+/// Read-only authoring state for one Plugin Instance.
+///
+/// This describes only the App-owned difference and the Host policy needed to
+/// present it safely. The resolved Plan remains Host-owned runtime input.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PluginInstanceAuthoringState {
+    id: PluginInstanceId,
+    origin: PluginInstanceOrigin,
+    selection: PluginInstanceSelection,
+    root_configuration_toml: Option<String>,
+}
+
+/// Authority that introduced one visible Plugin Instance.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PluginInstanceOrigin {
+    HostDefault { disableable: bool },
+    PluginRoot,
+}
+
+/// Current desired selection derived from the Plugin Root.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PluginInstanceSelection {
+    Enabled,
+    DisabledByRoot,
+}
+
+impl PluginInstanceAuthoringState {
+    pub const fn id(&self) -> &PluginInstanceId {
+        &self.id
+    }
+
+    pub const fn is_enabled(&self) -> bool {
+        matches!(self.selection, PluginInstanceSelection::Enabled)
+    }
+
+    pub const fn is_host_default(&self) -> bool {
+        matches!(self.origin, PluginInstanceOrigin::HostDefault { .. })
+    }
+
+    pub const fn is_disableable(&self) -> bool {
+        match self.origin {
+            PluginInstanceOrigin::HostDefault { disableable } => disableable,
+            PluginInstanceOrigin::PluginRoot => true,
+        }
+    }
+
+    pub fn root_configuration_toml(&self) -> Option<&str> {
+        self.root_configuration_toml.as_deref()
+    }
+
+    pub const fn is_disabled_by_root(&self) -> bool {
+        matches!(self.selection, PluginInstanceSelection::DisabledByRoot)
+    }
+
+    pub const fn has_root_difference(&self) -> bool {
+        self.root_configuration_toml.is_some() || self.is_disabled_by_root()
+    }
+}
+
+/// Read-only authoring state for one Plugin Release visible to the App owner.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PluginAuthoringState {
+    plugin_id: String,
+    release_version: String,
+    root_supplied: bool,
+    instances: Vec<PluginInstanceAuthoringState>,
+}
+
+impl PluginAuthoringState {
+    pub fn plugin_id(&self) -> &str {
+        &self.plugin_id
+    }
+
+    pub fn release_version(&self) -> &str {
+        &self.release_version
+    }
+
+    pub const fn is_root_supplied(&self) -> bool {
+        self.root_supplied
+    }
+
+    pub fn instances(&self) -> &[PluginInstanceAuthoringState] {
+        &self.instances
+    }
+}
+
+/// Complete read-only management projection for the current Plugin Root.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PluginRootAuthoringState {
+    resolved: ResolvedApp,
+    plugins: Vec<PluginAuthoringState>,
+}
+
+impl PluginRootAuthoringState {
+    pub const fn resolved(&self) -> &ResolvedApp {
+        &self.resolved
+    }
+
+    pub fn plugins(&self) -> &[PluginAuthoringState] {
+        &self.plugins
+    }
+}
+
+/// Inspects the current Host Catalog and Plugin Root without changing either.
+pub fn inspect_plugin_root(root: &Path) -> anyhow::Result<PluginRootAuthoringState> {
+    let host = load_host_catalog(root)?;
+    let snapshot = snapshot_plugin_root(root)?;
+    let resolved = resolve_plugin_root(&host, &snapshot).map_err(anyhow::Error::msg)?;
+    let enabled = resolved
+        .instances()
+        .iter()
+        .map(|instance| instance.id().clone())
+        .collect::<BTreeSet<_>>();
+    let disabled = snapshot.disabled().iter().cloned().collect::<BTreeSet<_>>();
+    let root_instances = snapshot
+        .instances()
+        .iter()
+        .map(|instance| instance.id().clone())
+        .collect::<BTreeSet<_>>();
+    let host_defaults = host
+        .defaults()
+        .iter()
+        .map(|instance| (instance.id().clone(), instance.is_disableable()))
+        .collect::<BTreeMap<_, _>>();
+
+    let ids = root_instances
+        .iter()
+        .chain(disabled.iter())
+        .chain(host_defaults.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let root_releases = snapshot
+        .releases()
+        .iter()
+        .map(|release| release.plugin_id().to_owned())
+        .collect::<BTreeSet<_>>();
+    let mut releases = host
+        .plugins()
+        .iter()
+        .map(|release| {
+            (
+                release.descriptor().plugin_id().to_owned(),
+                release.descriptor().release_version().to_owned(),
+            )
+        })
+        .chain(snapshot.releases().iter().map(|release| {
+            (
+                release.plugin_id().to_owned(),
+                release.release_version().to_owned(),
+            )
+        }))
+        .collect::<BTreeMap<_, _>>();
+    for id in &ids {
+        releases
+            .entry(id.plugin_id().to_owned())
+            .or_insert_with(String::new);
+    }
+
+    let mut plugins = Vec::with_capacity(releases.len());
+    for (plugin_id, release_version) in releases {
+        let plugin_ids = ids
+            .iter()
+            .filter(|id| id.plugin_id() == plugin_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut instances = Vec::with_capacity(plugin_ids.len());
+        for id in plugin_ids {
+            let configuration_path = root
+                .join(PLUGIN_ROOT)
+                .join(id.plugin_id())
+                .join(format!("{}.toml", id.instance_key()));
+            let root_configuration_toml = if root_instances.contains(&id) {
+                Some(fs::read_to_string(&configuration_path).with_context(|| {
+                    format!(
+                        "read Plugin configuration source {}",
+                        configuration_path.display()
+                    )
+                })?)
+            } else {
+                None
+            };
+            let host_disableable = host_defaults.get(&id).copied();
+            instances.push(PluginInstanceAuthoringState {
+                origin: host_disableable.map_or(PluginInstanceOrigin::PluginRoot, |disableable| {
+                    PluginInstanceOrigin::HostDefault { disableable }
+                }),
+                selection: if enabled.contains(&id) {
+                    PluginInstanceSelection::Enabled
+                } else {
+                    PluginInstanceSelection::DisabledByRoot
+                },
+                root_configuration_toml,
+                id,
+            });
+        }
+        plugins.push(PluginAuthoringState {
+            root_supplied: root_releases.contains(&plugin_id),
+            plugin_id,
+            release_version,
+            instances,
+        });
+    }
+    Ok(PluginRootAuthoringState { resolved, plugins })
+}
+
 fn load_host_catalog(root: &Path) -> anyhow::Result<HostCatalog> {
     let path = root.join(HOST_CATALOG);
     let metadata = fs::symlink_metadata(&path).with_context(|| {
@@ -587,6 +792,61 @@ mod tests {
             resolved.instances()[0].id().to_string(),
             "example.agent/default"
         );
+    }
+
+    #[test]
+    fn inspection_separates_host_defaults_from_root_differences() {
+        let root = fixture_root();
+        let plugin = root.path().join("plugins/example.agent");
+        fs::create_dir_all(&plugin).unwrap();
+        fs::write(plugin.join("default.toml"), "").unwrap();
+
+        let state = inspect_plugin_root(root.path()).unwrap();
+        let plugin = state
+            .plugins()
+            .iter()
+            .find(|plugin| plugin.plugin_id() == "example.agent")
+            .unwrap();
+        let instance = &plugin.instances()[0];
+
+        assert_eq!(plugin.release_version(), "1.0.0");
+        assert!(!plugin.is_root_supplied());
+        assert!(instance.is_enabled());
+        assert!(instance.is_host_default());
+        assert!(!instance.is_disableable());
+        assert_eq!(instance.root_configuration_toml(), Some(""));
+        assert!(instance.has_root_difference());
+    }
+
+    #[test]
+    fn inspection_reports_disabled_host_default_without_losing_the_instance() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".lenso")).unwrap();
+        let host = HostCatalog::new(
+            [HostSlot::optional("optional")],
+            [HostPluginRelease::new(PluginDescriptor::new(
+                "example.optional",
+                "1.0.0",
+                "optional",
+            ))],
+            [HostDefaultPlugin::new("example.optional", "default").disableable()],
+        );
+        fs::write(
+            root.path().join(HOST_CATALOG),
+            serde_json::to_vec(&host).unwrap(),
+        )
+        .unwrap();
+        let plugin = root.path().join("plugins/example.optional");
+        fs::create_dir_all(&plugin).unwrap();
+        fs::write(plugin.join("default.disabled"), "").unwrap();
+
+        let state = inspect_plugin_root(root.path()).unwrap();
+        let instance = &state.plugins()[0].instances()[0];
+
+        assert!(!instance.is_enabled());
+        assert!(instance.is_host_default());
+        assert!(instance.is_disableable());
+        assert!(instance.is_disabled_by_root());
     }
 
     #[test]
