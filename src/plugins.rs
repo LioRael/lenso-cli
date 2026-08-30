@@ -1,5 +1,6 @@
 use std::{
     env, fs,
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -336,8 +337,8 @@ fn install(args: CatalogMutationArgs, replace: bool) -> anyhow::Result<()> {
             matches.len()
         );
     };
-    let temporary = tempfile::NamedTempFile::new().context("stage catalog Plugin Bundle")?;
-    download_bundle(release, temporary.path())?;
+    let mut temporary = tempfile::NamedTempFile::new().context("stage catalog Plugin Bundle")?;
+    download_bundle(release, temporary.as_file_mut())?;
     with_bundle_directory(temporary.path(), |bundle| {
         install_catalog_bundle(&root, release, bundle, temporary.path(), replace)
     })?;
@@ -474,15 +475,42 @@ fn retain_archive(
     let destination = plugin_store(root, plugin_id).join(format!("{version}.lenso-plugin"));
     fs::create_dir_all(destination.parent().expect("store path has a parent"))?;
     if destination.exists() {
-        let current = fs::read(&destination)?;
-        let candidate = fs::read(archive)?;
-        if current != candidate {
+        if !archives_equal(&destination, archive)? {
             bail!("retained Plugin Release `{plugin_id}@{version}` has different immutable bytes");
         }
         return Ok(());
     }
     fs::copy(archive, &destination)?;
     Ok(())
+}
+
+fn archives_equal(left: &Path, right: &Path) -> anyhow::Result<bool> {
+    let length = fs::metadata(left)?.len();
+    if length != fs::metadata(right)?.len() {
+        return Ok(false);
+    }
+    readers_equal_exact(fs::File::open(left)?, fs::File::open(right)?, length)
+}
+
+fn readers_equal_exact(
+    mut left: impl Read,
+    mut right: impl Read,
+    mut remaining: u64,
+) -> anyhow::Result<bool> {
+    let mut left_buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    let mut right_buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    while remaining != 0 {
+        let chunk = usize::try_from(remaining.min(left_buffer.len() as u64))?;
+        left.read_exact(&mut left_buffer[..chunk])?;
+        right.read_exact(&mut right_buffer[..chunk])?;
+        if left_buffer[..chunk] != right_buffer[..chunk] {
+            return Ok(false);
+        }
+        remaining -= u64::try_from(chunk)?;
+    }
+    let mut left_extra = [0_u8; 1];
+    let mut right_extra = [0_u8; 1];
+    Ok(left.read(&mut left_extra)? == 0 && right.read(&mut right_extra)? == 0)
 }
 
 fn retain_current_bundle(root: &Path, plugin_id: &str, bundle: &Path) -> anyhow::Result<()> {
@@ -498,4 +526,55 @@ fn retain_current_bundle(root: &Path, plugin_id: &str, bundle: &Path) -> anyhow:
 
 fn validate_existing_cli_plugin_id(plugin_id: &str) -> anyhow::Result<()> {
     lenso_app_authoring::identity::classify_existing_plugin_id(plugin_id).map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Cursor, Read};
+
+    use super::{archives_equal, readers_equal_exact};
+
+    struct ShortReader {
+        inner: Cursor<Vec<u8>>,
+        maximum: usize,
+    }
+
+    impl Read for ShortReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let length = buffer.len().min(self.maximum);
+            self.inner.read(&mut buffer[..length])
+        }
+    }
+
+    #[test]
+    fn immutable_archive_comparison_is_exact() {
+        let directory = tempfile::tempdir().unwrap();
+        let left = directory.path().join("left.bundle");
+        let right = directory.path().join("right.bundle");
+        std::fs::write(&left, vec![b'a'; 128 * 1024]).unwrap();
+        std::fs::write(&right, vec![b'a'; 128 * 1024]).unwrap();
+        assert!(archives_equal(&left, &right).unwrap());
+
+        std::fs::write(&right, vec![b'a'; 128 * 1024 - 1]).unwrap();
+        assert!(!archives_equal(&left, &right).unwrap());
+        let mut changed = vec![b'a'; 128 * 1024];
+        changed[96 * 1024] = b'b';
+        std::fs::write(&right, changed).unwrap();
+        assert!(!archives_equal(&left, &right).unwrap());
+    }
+
+    #[test]
+    fn archive_comparison_tolerates_different_short_read_boundaries() {
+        let bytes = vec![b'a'; 128 * 1024 + 17];
+        let left = ShortReader {
+            inner: Cursor::new(bytes.clone()),
+            maximum: 7,
+        };
+        let right = ShortReader {
+            inner: Cursor::new(bytes.clone()),
+            maximum: 113,
+        };
+
+        assert!(readers_equal_exact(left, right, bytes.len() as u64).unwrap());
+    }
 }
