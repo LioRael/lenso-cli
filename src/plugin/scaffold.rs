@@ -465,7 +465,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 lenso = {{ package = "lenso-plugin-sdk", version = "0.2.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "{PLUGIN_SDK_REVISION}" }}
-lenso-agent-tool-sdk = {{ version = "0.2.0", git = "https://github.com/LioRael/lenso-agent-harness", rev = "{AGENT_TOOL_SDK_REVISION}" }}
+lenso-agent-tool-sdk = {{ version = "0.2.0", git = "https://github.com/LioRael/lenso-agent", rev = "{AGENT_TOOL_SDK_REVISION}" }}
 schemars = "1"
 serde = {{ version = "1", features = ["derive"] }}
 
@@ -516,7 +516,7 @@ impl Plugin {{
         (
             PathBuf::from("README.md"),
             format!(
-                "# {plugin_id}\n\nOrdinary Rust Plugin for the Lenso Agent Harness, packaged as an isolated Wasm Component. The SDK owns the execution bridge.\n\n```sh\nlenso plugin check\nlenso plugin dev --operation execute --request-json '{{\"name\":\"{plugin_id}\",\"arguments_json\":\"{{\\\"text\\\":\\\"hello\\\"}}\"}}'\nlenso plugin pack\n```\n\nCreate another project with `lenso plugin new <id>`.\n"
+                "# {plugin_id}\n\nOrdinary Rust Plugin for Lenso Agent, packaged as an isolated Wasm Component. The SDK owns the execution bridge.\n\n```sh\nlenso plugin check\nlenso plugin dev --operation execute --request-json '{{\"name\":\"{plugin_id}\",\"arguments_json\":\"{{\\\"text\\\":\\\"hello\\\"}}\"}}'\nlenso plugin pack\n```\n\nCreate another project with `lenso plugin new <id>`.\n"
             ),
         ),
     ])
