@@ -98,6 +98,7 @@ lenso plugins enable company.uppercase default
 lenso plugins remove company.uppercase default
 lenso app check
 lenso app show
+lenso sessions list
 lenso run
 ```
 
@@ -122,3 +123,16 @@ file for an App owner to generate or manage.
 
 Runtime Drivers and Execution Adapters remain separate because they implement
 Host mechanics, not application behavior.
+
+### App commands
+
+The CLI keeps its authoring and maintenance roots static: `plugin`, `plugins`,
+`app`, `run`, and `doctor`. Any other root command is validated against the
+current App and forwarded unchanged to `.lenso/host`. The Host's selected
+`lenso.terminal.command` aggregate and `lenso.terminal.cli` surface own dynamic
+catalog discovery, help, argument parsing, execution, and the Generation lease.
+
+For example, a Host with a selected Session command provider may expose
+`lenso sessions list` and `lenso sessions show --help`. Removing that provider
+removes those paths without changing this CLI. Static maintenance roots remain
+reserved and cannot be shadowed by App commands.
