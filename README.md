@@ -122,10 +122,3 @@ file for an App owner to generate or manage.
 
 Runtime Drivers and Execution Adapters remain separate because they implement
 Host mechanics, not application behavior.
-
-## Local framework contributors
-
-Maintainers of a sibling-repository framework checkout can install the
-non-product `lenso-workspace` and `lenso-pr` helpers from
-[`tools/contributor`](tools/contributor/README.md). They are intentionally not
-part of the public CLI, Cargo package, npm package, or release workflow.
