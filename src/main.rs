@@ -17,6 +17,7 @@ use clap::{Args, Parser, Subcommand};
     name = "lenso",
     version,
     about = "Create and run Lenso Apps made only from Plugins",
+    after_help = "Other root commands are delegated to the current Host's terminal Plugins.",
     propagate_version = true
 )]
 struct Cli {
@@ -59,7 +60,11 @@ struct RunArgs {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    reject_retired_invocation()?;
+    let arguments = env::args().skip(1).collect::<Vec<_>>();
+    reject_retired_invocation(&arguments)?;
+    if should_delegate_to_host(&arguments) {
+        return run_host_command(arguments);
+    }
     match Cli::parse().command {
         RootCommand::Plugin { command } => plugin::plugin(command).await,
         RootCommand::Plugins { command } => plugins::plugins(command),
@@ -69,14 +74,13 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-fn reject_retired_invocation() -> anyhow::Result<()> {
-    let arguments = env::args().skip(1).collect::<Vec<_>>();
+fn reject_retired_invocation(arguments: &[String]) -> anyhow::Result<()> {
     if arguments.iter().any(|argument| argument == "--definition") {
         anyhow::bail!(
             "`--definition` is retired: the current Host plus `plugins/` derive the App; use `lenso app check` or `lenso app show`"
         );
     }
-    match arguments.as_slice() {
+    match arguments {
         [command, ..]
             if ["module", "new", "dev", "check", "verify"].contains(&command.as_str()) =>
         {
@@ -103,8 +107,29 @@ fn reject_retired_invocation() -> anyhow::Result<()> {
     }
 }
 
+fn should_delegate_to_host(arguments: &[String]) -> bool {
+    let Some(first) = arguments.first().map(String::as_str) else {
+        return false;
+    };
+    !first.starts_with('-') && !matches!(first, "plugin" | "plugins" | "app" | "run" | "doctor")
+}
+
+fn run_host_command(arguments: Vec<String>) -> anyhow::Result<()> {
+    run_current_host(arguments)
+}
+
 fn run(args: RunArgs) -> anyhow::Result<()> {
-    let root = plugins::project_root(args.root)?;
+    let mut arguments = vec!["run".to_owned()];
+    arguments.extend(args.host_args);
+    run_current_host_at(args.root, arguments)
+}
+
+fn run_current_host(arguments: Vec<String>) -> anyhow::Result<()> {
+    run_current_host_at(None, arguments)
+}
+
+fn run_current_host_at(root: Option<PathBuf>, arguments: Vec<String>) -> anyhow::Result<()> {
+    let root = plugins::project_root(root)?;
     plugins::load_resolved_app(&root)?;
     let host = root.join(".lenso/host");
     let metadata = std::fs::symlink_metadata(&host)
@@ -116,8 +141,7 @@ fn run(args: RunArgs) -> anyhow::Result<()> {
         );
     }
     let status = Command::new(&host)
-        .arg("run")
-        .args(args.host_args)
+        .args(arguments)
         .current_dir(&root)
         .status()
         .with_context(|| format!("start current Host {}", host.display()))?;
@@ -162,6 +186,84 @@ mod tests {
                 .map(clap::Command::get_name)
                 .collect::<Vec<_>>(),
             ["init", "check", "show"]
+        );
+    }
+
+    #[test]
+    fn root_help_explains_dynamic_app_command_delegation() {
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("delegated to the current Host's terminal Plugins"));
+    }
+
+    #[test]
+    fn static_maintenance_roots_stay_local_and_app_roots_delegate() {
+        for command in ["plugin", "plugins", "app", "run", "doctor"] {
+            assert!(!should_delegate_to_host(&[command.to_owned()]));
+        }
+        for argument in ["--help", "-h", "--version", "-V"] {
+            assert!(!should_delegate_to_host(&[argument.to_owned()]));
+        }
+        assert!(should_delegate_to_host(&["sessions".to_owned()]));
+        assert!(should_delegate_to_host(&[
+            "project".to_owned(),
+            "status".to_owned(),
+            "--json".to_owned(),
+        ]));
+    }
+
+    #[test]
+    fn retired_roots_fail_before_host_delegation() {
+        for command in ["module", "new", "dev", "check", "verify"] {
+            let error = reject_retired_invocation(&[command.to_owned()]).unwrap_err();
+            assert!(error.to_string().contains("retired"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn app_commands_are_forwarded_unchanged_to_the_validated_current_host() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        use lenso_app_plan::authoring::HostCatalog;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        fs::create_dir(root.join(".lenso")).unwrap();
+        fs::create_dir(root.join("plugins")).unwrap();
+        fs::write(
+            root.join(".lenso/host-catalog.json"),
+            serde_json::to_vec(&HostCatalog::new([], [], [])).unwrap(),
+        )
+        .unwrap();
+        let host = root.join(".lenso/host");
+        fs::write(
+            &host,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > .lenso/forwarded-args\npwd > .lenso/forwarded-cwd\n",
+        )
+        .unwrap();
+        fs::set_permissions(&host, fs::Permissions::from_mode(0o755)).unwrap();
+
+        run_current_host_at(
+            Some(root.to_path_buf()),
+            ["sessions", "show", "s-123", "--json"]
+                .map(str::to_owned)
+                .to_vec(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(root.join(".lenso/forwarded-args")).unwrap(),
+            "sessions\nshow\ns-123\n--json\n"
+        );
+        assert_eq!(
+            fs::canonicalize(root).unwrap(),
+            fs::canonicalize(
+                fs::read_to_string(root.join(".lenso/forwarded-cwd"))
+                    .unwrap()
+                    .trim()
+            )
+            .unwrap()
         );
     }
 
