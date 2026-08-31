@@ -24,10 +24,13 @@ use super::{
 };
 
 pub(super) async fn run(args: PluginDevArgs) -> anyhow::Result<()> {
+    let root = project_root(args.repo_root.clone())?;
+    if super::web_dev::is_web_plugin(&root)? {
+        return super::web_dev::run(args).await;
+    }
     if !args.watch {
         return dev_once(&args).await;
     }
-    let root = project_root(args.repo_root.clone())?;
     let mut watcher = SourceWatcher::new(&root)?;
     dev_once(&args).await?;
     if !args.json {

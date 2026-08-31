@@ -14,13 +14,16 @@ fn web_plugin_scaffold_uses_canonical_endpoint_authoring() {
     assert!(manifest.contains("plugin-id = \"company.greetings-http\""));
     assert!(manifest.contains("root-slot = \"web\""));
     assert!(manifest.contains("lenso-capability-http-endpoint"));
+    assert!(manifest.contains("version = \"0.2.8\""));
     assert!(source.contains("#[lenso::plugin]"));
     assert!(source.contains("#[endpoint]"));
     assert!(source.contains("#[query("));
     assert!(source.contains("Result<(StatusCode, Json<Greeting>), Problem>"));
     assert!(source.contains("EndpointTest"));
+    assert!(source.contains("pub const fn link()"));
     assert!(!source.contains("NativeModuleFactory"));
     assert!(!readme.contains("lenso plugin pack"));
+    assert!(readme.contains("lenso plugin dev"));
 }
 
 #[test]
@@ -57,6 +60,26 @@ fn clean_room_web_plugin_runs_generated_tests() {
         dry_run: false,
     })
     .unwrap();
+}
+
+#[test]
+#[ignore = "clean-room test downloads pinned Web dependencies and builds the generated dev Host"]
+fn clean_room_web_plugin_builds_generated_dev_host() {
+    let root = tempfile::tempdir().unwrap();
+    create(PluginNewArgs {
+        plugin_id: "company.greetings-http".to_owned(),
+        repo_root: Some(root.path().to_path_buf()),
+        dir: None,
+        runtime: PluginRuntimeArg::Multi,
+        web: true,
+        no_install: false,
+        dry_run: false,
+    })
+    .unwrap();
+    let project = root.path().join("company.greetings-http");
+    let package = read_package(&project.join("Cargo.toml")).unwrap();
+    let host = super::web_dev::DevHost::prepare(&project, &package).unwrap();
+    host.build().unwrap();
 }
 
 #[test]

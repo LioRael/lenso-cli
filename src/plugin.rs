@@ -24,6 +24,7 @@ use lenso_app_authoring::identity::{
 
 mod dev;
 mod scaffold;
+mod web_dev;
 
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
 
@@ -155,6 +156,8 @@ struct CargoMetadata {
 #[serde(rename_all = "kebab-case")]
 struct LensoMetadata {
     plugin_id: String,
+    #[serde(default)]
+    root_slot: String,
 }
 
 #[derive(Debug, Deserialize)]

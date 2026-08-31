@@ -11,8 +11,9 @@ use super::{PluginNewArgs, PluginRuntimeArg, WASM_TARGET, run_bun, run_cargo};
 
 const PLUGIN_SDK_REVISION: &str = "7c54f4065012d41769fefbb41098a4657f1f4825";
 const AGENT_TOOL_SDK_REVISION: &str = "fd944a4ee56026be708b50c710635d1b17a59758";
-const LENSO_NATIVE_REVISION: &str = "b763a63adc20f1ccc9955e784c0d04c21489126b";
-const LENSO_WEB_REVISION: &str = "d4943b1ffd30c90d2621ef4b9884adbb1e206bbc";
+pub(super) const LENSO_APP_PLAN_REVISION: &str = "8599db7e4a214ed92f32089f81d14c833d4becf6";
+pub(super) const LENSO_NATIVE_REVISION: &str = "89815107385475c8b5be378bdcf5e21aa74e02f0";
+pub(super) const LENSO_WEB_REVISION: &str = "42efe4fe9aa249bdb19ed366b25b8358e30b68ab";
 
 pub(super) fn create(args: PluginNewArgs) -> anyhow::Result<()> {
     validate_plugin_id_v1(&args.plugin_id)?;
@@ -122,7 +123,7 @@ root-slot = "web"
 
 [dependencies]
 lenso = {{ version = "0.5.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "{LENSO_NATIVE_REVISION}" }}
-lenso-capability-http-endpoint = {{ version = "0.2.6", git = "https://github.com/LioRael/lenso-web", rev = "{LENSO_WEB_REVISION}" }}
+lenso-capability-http-endpoint = {{ version = "0.2.8", git = "https://github.com/LioRael/lenso-web", rev = "{LENSO_WEB_REVISION}" }}
 serde = {{ version = "1", features = ["derive"] }}
 
 [dev-dependencies]
@@ -166,6 +167,9 @@ pub struct GreetingsHttp {
     next_id: Rc<Cell<u64>>,
     greetings: Rc<RefCell<BTreeMap<String, Greeting>>>,
 }
+
+/// Keeps this Plugin's generated factory linked into a native Host binary.
+pub const fn link() {}
 
 #[endpoint]
 impl GreetingsHttp {
@@ -274,7 +278,7 @@ mod tests {
 "#
     .to_owned();
     let readme = format!(
-        "# {plugin_id}\n\nLinked native Rust Web Plugin using `#[lenso::plugin]` and `#[endpoint]`. The generated test invokes typed Endpoint operations without opening a socket.\n\n```sh\ncargo test --locked\n```\n\nAdd this crate as a dependency of your Host, link the Plugin type, and mount the Host's `web` root slot.\n"
+        "# {plugin_id}\n\nLinked native Rust Web Plugin using `#[lenso::plugin]` and `#[endpoint]`.\n\n```sh\ncargo test --locked\nlenso plugin dev\n```\n\nThe generated tests invoke typed Endpoint operations without opening a socket. `lenso plugin dev` builds a temporary native Host, mounts this Plugin through the `web` root slot, starts a loopback Web Ingress listener, and prints the real HTTP routes. Add `--watch` to rebuild and restart after source changes.\n"
     );
 
     BTreeMap::from([
