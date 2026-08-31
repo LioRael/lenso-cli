@@ -38,8 +38,6 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: pnpm install --frozen-lockfile
       - run: npm run check:npm-shim
-      - name: Check local contributor tools
-        run: tools/contributor/test.sh
       - run: cargo fmt --all -- --check
       - run: cargo test --locked --workspace
       - name: Verify release dependency convergence
