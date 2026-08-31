@@ -48,6 +48,8 @@ remain readable.
 lenso plugin new company.greetings-http --web
 cd company.greetings-http
 cargo test --locked
+lenso plugin dev
+# In another terminal, call one of the printed HTTP routes.
 ```
 
 This path generates a linked native Rust Plugin with `#[lenso::plugin]` and a
@@ -55,6 +57,11 @@ typed `#[endpoint]` implementation. Its starter operations demonstrate both
 `#[post]` and body-carrying `#[query]` requests, typed success responses, and
 RFC 9457 Problem responses. The generated test uses `EndpointTest`, so the
 Plugin is exercised without opening a socket.
+
+`lenso plugin dev` builds a temporary native Host, mounts the generated Plugin
+through Web Ingress, prints its real listener address and route table, and emits
+request ID, method, path, status, and latency for each request. Add `--watch` to
+rebuild and restart after source changes.
 
 Web Plugins are linked into a Host and mounted through its `web` root slot;
 they are not portable Agent Tool bundles, so the generated README does not
