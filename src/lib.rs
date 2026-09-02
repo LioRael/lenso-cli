@@ -28,6 +28,7 @@ use crate::identity::{
 };
 
 mod configuration_authority;
+mod selection_authority;
 
 pub use configuration_authority::{
     LocalPluginRootAuthority, PluginConfigurationApplication, PluginConfigurationAuthority,
@@ -36,6 +37,9 @@ pub use configuration_authority::{
     PluginConfigurationSourceConflict, PluginConfigurationSourceDigest, PluginRootRevision,
     PluginRootRevisionConflict, PluginRootRevisionParseError, propose_instance_configuration,
     publish_instance_configuration,
+};
+pub use selection_authority::{
+    PluginSelectionAuthority, PluginSelectionPublication, set_instance_enabled_fenced,
 };
 
 const PLUGIN_ROOT: &str = "plugins";
@@ -906,11 +910,26 @@ pub fn set_instance_disabled(
     instance: &str,
     disabled_state: bool,
 ) -> anyhow::Result<ResolvedApp> {
+    set_instance_disabled_inner(root, plugin_id, instance, disabled_state, None)
+        .map(|(_, _, resolved)| resolved)
+}
+
+fn set_instance_disabled_inner(
+    root: &Path,
+    plugin_id: &str,
+    instance: &str,
+    disabled_state: bool,
+    expected_revision: Option<&PluginRootRevision>,
+) -> anyhow::Result<(PluginRootRevision, PluginRootRevision, ResolvedApp)> {
     validate_existing_plugin_id(plugin_id)?;
     validate_instance_filename(instance)?;
     let _lock = lock_plugin_root(root)?;
     let host = load_host_catalog(root)?;
     let current = snapshot_plugin_root(root)?;
+    let base_revision = configuration_authority::revision_for_snapshot(&current)?;
+    if let Some(expected_revision) = expected_revision {
+        configuration_authority::ensure_revision(expected_revision, &base_revision)?;
+    }
     let id = PluginInstanceId::new(plugin_id, instance);
     let mut disabled = current.disabled().iter().cloned().collect::<BTreeSet<_>>();
     if disabled_state {
@@ -923,6 +942,7 @@ pub fn set_instance_disabled(
         current.instances().iter().cloned(),
         disabled,
     );
+    let candidate_revision = configuration_authority::revision_for_snapshot(&candidate)?;
     let resolved = resolve_plugin_root(&host, &candidate).map_err(anyhow::Error::msg)?;
     let marker = root
         .join(PLUGIN_ROOT)
@@ -934,7 +954,7 @@ pub fn set_instance_disabled(
         fs::remove_file(&marker)
             .with_context(|| format!("remove disabled marker {}", marker.display()))?;
     }
-    Ok(resolved)
+    Ok((base_revision, candidate_revision, resolved))
 }
 
 /// Removes one App-owned Instance difference after validating the remaining App.
@@ -1151,6 +1171,88 @@ mod tests {
         assert!(instance.is_host_default());
         assert!(instance.is_disableable());
         assert!(instance.is_disabled_by_root());
+    }
+
+    #[test]
+    fn local_selection_authority_disables_and_enables_one_instance() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".lenso")).unwrap();
+        let host = HostCatalog::new(
+            [HostSlot::optional("optional")],
+            [HostPluginRelease::new(PluginDescriptor::new(
+                "example.optional",
+                "1.0.0",
+                "optional",
+            ))],
+            [HostDefaultPlugin::new("example.optional", "default").disableable()],
+        );
+        fs::write(
+            root.path().join(HOST_CATALOG),
+            serde_json::to_vec(&host).unwrap(),
+        )
+        .unwrap();
+        let authority = LocalPluginRootAuthority::new(root.path());
+        let base = inspect_plugin_root(root.path()).unwrap().revision().clone();
+
+        let disabled = authority
+            .set_enabled(&base, "example.optional", "default", false)
+            .unwrap();
+        assert_eq!(disabled.base_revision(), &base);
+        assert!(!disabled.enabled());
+        assert_eq!(disabled.plugin_id(), "example.optional");
+        assert_eq!(disabled.instance(), "default");
+        assert!(
+            root.path()
+                .join("plugins/example.optional/default.disabled")
+                .is_file()
+        );
+
+        let enabled = authority
+            .set_enabled(disabled.revision(), "example.optional", "default", true)
+            .unwrap();
+        assert!(enabled.enabled());
+        assert!(
+            !root
+                .path()
+                .join("plugins/example.optional/default.disabled")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn local_selection_authority_rejects_a_stale_revision_without_mutating() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".lenso")).unwrap();
+        let host = HostCatalog::new(
+            [HostSlot::optional("optional")],
+            [HostPluginRelease::new(PluginDescriptor::new(
+                "example.optional",
+                "1.0.0",
+                "optional",
+            ))],
+            [HostDefaultPlugin::new("example.optional", "default").disableable()],
+        );
+        fs::write(
+            root.path().join(HOST_CATALOG),
+            serde_json::to_vec(&host).unwrap(),
+        )
+        .unwrap();
+        let authority = LocalPluginRootAuthority::new(root.path());
+        let stale = inspect_plugin_root(root.path()).unwrap().revision().clone();
+        authority
+            .set_enabled(&stale, "example.optional", "default", false)
+            .unwrap();
+
+        let error = authority
+            .set_enabled(&stale, "example.optional", "default", true)
+            .unwrap_err();
+
+        assert!(error.downcast_ref::<PluginRootRevisionConflict>().is_some());
+        assert!(
+            root.path()
+                .join("plugins/example.optional/default.disabled")
+                .is_file()
+        );
     }
 
     #[test]

@@ -106,7 +106,7 @@ impl LocalPluginRootAuthority {
         &self.root
     }
 
-    fn lock(&self) -> anyhow::Result<std::sync::MutexGuard<'_, ()>> {
+    pub(crate) fn lock(&self) -> anyhow::Result<std::sync::MutexGuard<'_, ()>> {
         self.access
             .lock()
             .map_err(|_| anyhow::anyhow!("Plugin configuration authority lock is poisoned"))
@@ -544,7 +544,7 @@ fn parse_configuration(bytes: &[u8]) -> anyhow::Result<serde_json::Value> {
     serde_json::to_value(table).context("convert Plugin configuration to portable values")
 }
 
-fn ensure_revision(
+pub(crate) fn ensure_revision(
     expected: &PluginRootRevision,
     current: &PluginRootRevision,
 ) -> anyhow::Result<()> {
