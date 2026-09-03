@@ -22,6 +22,7 @@ use lenso_plugin_bundle::{
     ImplementationPolicy, VerifiedBundle, read_bundle_manifest, resolve_implementation,
     verify_bundle_directory,
 };
+use serde_json::Value;
 
 use crate::identity::{
     classify_existing_plugin_id, validate_plugin_id_v1, validate_release_version,
@@ -126,6 +127,8 @@ impl PluginInstanceAuthoringState {
 /// Read-only authoring state for one Plugin Release visible to the App owner.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PluginAuthoringState {
+    configuration_defaults: Value,
+    configuration_schema: Option<Value>,
     plugin_id: String,
     release_version: String,
     root_supplied: bool,
@@ -133,6 +136,14 @@ pub struct PluginAuthoringState {
 }
 
 impl PluginAuthoringState {
+    pub const fn configuration_schema(&self) -> Option<&Value> {
+        self.configuration_schema.as_ref()
+    }
+
+    pub const fn configuration_defaults(&self) -> &Value {
+        &self.configuration_defaults
+    }
+
     pub fn plugin_id(&self) -> &str {
         &self.plugin_id
     }
@@ -210,26 +221,35 @@ pub fn inspect_plugin_root(root: &Path) -> anyhow::Result<PluginRootAuthoringSta
         .plugins()
         .iter()
         .map(|release| {
+            let descriptor = release.descriptor();
             (
-                release.descriptor().plugin_id().to_owned(),
-                release.descriptor().release_version().to_owned(),
+                descriptor.plugin_id().to_owned(),
+                (
+                    descriptor.release_version().to_owned(),
+                    descriptor.configuration_schema().cloned(),
+                    descriptor.configuration_defaults().clone(),
+                ),
             )
         })
         .chain(snapshot.releases().iter().map(|release| {
             (
                 release.plugin_id().to_owned(),
-                release.release_version().to_owned(),
+                (
+                    release.release_version().to_owned(),
+                    release.configuration_schema().cloned(),
+                    release.configuration_defaults().clone(),
+                ),
             )
         }))
         .collect::<BTreeMap<_, _>>();
     for id in &ids {
         releases
             .entry(id.plugin_id().to_owned())
-            .or_insert_with(String::new);
+            .or_insert_with(|| (String::new(), None, Value::Object(Default::default())));
     }
 
     let mut plugins = Vec::with_capacity(releases.len());
-    for (plugin_id, release_version) in releases {
+    for (plugin_id, (release_version, configuration_schema, configuration_defaults)) in releases {
         let plugin_ids = ids
             .iter()
             .filter(|id| id.plugin_id() == plugin_id)
@@ -268,6 +288,8 @@ pub fn inspect_plugin_root(root: &Path) -> anyhow::Result<PluginRootAuthoringSta
             });
         }
         plugins.push(PluginAuthoringState {
+            configuration_defaults,
+            configuration_schema,
             root_supplied: root_releases.contains(&plugin_id),
             plugin_id,
             release_version,
