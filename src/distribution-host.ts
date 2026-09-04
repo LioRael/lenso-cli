@@ -46,6 +46,7 @@ function relativeFile(directory: string, relative: string): string {
 
 /** Verifies the complete immutable distribution before any process is started. */
 export function verifyDistribution(directory = __dirname): { lock: DistributionLock; identity: string } {
+  const verifiesExecutableMode = process.platform !== "win32";
   const lockPath = path.join(directory, ".lenso", "distribution.lock.json");
   const metadata = lstatSync(lockPath);
   if (!metadata.isFile() || metadata.isSymbolicLink()) throw new Error("distribution lock must be a regular file");
@@ -75,7 +76,7 @@ export function verifyDistribution(directory = __dirname): { lock: DistributionL
     if (artifact.length !== file.size || digest(artifact) !== file.sha256) {
       throw new Error(`distribution artifact failed integrity: ${file.path}`);
     }
-    if (file.executable && (fileMetadata.mode & 0o111) === 0) {
+    if (verifiesExecutableMode && file.executable && (fileMetadata.mode & 0o111) === 0) {
       throw new Error(`distribution artifact is not executable: ${file.path}`);
     }
   }

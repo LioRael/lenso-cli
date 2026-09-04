@@ -101,8 +101,8 @@ jobs:
         if: matrix.smoke
         run: |
           node bin/lenso.js --version
-          node bin/lenso.js app add --help
-          node bin/lenso.js app remove --help
+          node bin/lenso.js plugins add --help
+          node bin/lenso.js plugins remove --help
       - name: Upload npm distribution binary
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
