@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     env, fs,
     path::{Path, PathBuf},
     process::Command,
@@ -447,7 +448,6 @@ fn describe_bun_plugin(root: &Path) -> anyhow::Result<PluginDescriptor> {
         "describe Bun Plugin",
     )?;
     let descriptor = parse_descriptor_bytes(&output)?;
-    one_capability(&descriptor)?;
     Ok(descriptor)
 }
 
@@ -768,17 +768,36 @@ fn parse_descriptor_bytes(bytes: &[u8]) -> anyhow::Result<PluginDescriptor> {
             descriptor.abi
         );
     }
-    one_capability(&descriptor)?;
+    validate_capabilities(&descriptor)?;
     Ok(descriptor)
+}
+
+fn validate_capabilities(descriptor: &PluginDescriptor) -> anyhow::Result<()> {
+    if descriptor.capabilities.len() > 256 {
+        bail!("Plugin descriptor exceeds 256 provided Capabilities");
+    }
+    let mut seen = BTreeSet::new();
+    for capability in &descriptor.capabilities {
+        if !seen.insert(&capability.capability_id) {
+            bail!(
+                "Plugin descriptor repeats provided Capability `{}`",
+                capability.capability_id
+            );
+        }
+        if capability.request_operations.is_empty() {
+            bail!(
+                "Plugin Capability `{}` must declare at least one request operation",
+                capability.capability_id
+            );
+        }
+    }
+    Ok(())
 }
 
 fn one_capability(descriptor: &PluginDescriptor) -> anyhow::Result<&PluginCapability> {
     let [capability] = descriptor.capabilities.as_slice() else {
-        bail!("the first public Plugin shape requires exactly one provided Capability");
+        bail!("Plugin dev invocation requires exactly one provided Capability");
     };
-    if capability.request_operations.is_empty() {
-        bail!("Plugin Capability must declare at least one request operation");
-    }
     Ok(capability)
 }
 

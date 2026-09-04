@@ -40,6 +40,42 @@ fn bun_descriptor_lowers_named_dependencies_into_the_plugin_contract() {
 }
 
 #[test]
+fn bun_descriptor_accepts_a_providerless_lifecycle_plugin() {
+    let descriptor = parse_descriptor_bytes(
+        br#"{
+            "abi":"lenso.json-request@1",
+            "capabilities":[],
+            "required_capabilities":[{
+                "requirement_id":"store",
+                "capability_id":"company.notes-store@1",
+                "descriptor_version":"1.0.0",
+                "cardinality":"one"
+            }]
+        }"#,
+    )
+    .unwrap();
+
+    assert!(descriptor.capabilities.is_empty());
+    assert_eq!(descriptor.required_capabilities[0].requirement_id, "store");
+}
+
+#[test]
+fn bun_descriptor_rejects_duplicate_providers() {
+    let error = parse_descriptor_bytes(
+        br#"{
+            "abi":"lenso.json-request@1",
+            "capabilities":[
+                {"capability_id":"company.notes@1","descriptor_version":"1.0.0","request_operations":["read"]},
+                {"capability_id":"company.notes@1","descriptor_version":"1.0.0","request_operations":["write"]}
+            ]
+        }"#,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("repeats provided Capability"));
+}
+
+#[test]
 fn web_plugin_scaffold_uses_canonical_endpoint_authoring() {
     let files = web_plugin_scaffold("company.greetings-http");
     let manifest = files.get(Path::new("Cargo.toml")).unwrap();
