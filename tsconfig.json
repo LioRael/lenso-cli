@@ -1,6 +1,6 @@
 {
   "compilerOptions": {
-    "declaration": false,
+    "declaration": true,
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "module": "NodeNext",
@@ -14,5 +14,5 @@
     "target": "ES2022",
     "types": ["node"]
   },
-  "include": ["src/lenso.ts"]
+  "include": ["src/lenso.ts", "src/host.ts", "src/host-extract.ts", "src/host-owner.ts", "src/host-app.ts", "src/distribution-host.ts"]
 }

@@ -79,6 +79,19 @@ grammar (`company.uppercase`) and exact Semantic Versions. Existing
 unnamespaced projects remain readable with an explicit migration warning; see
 [`docs/migration-plugin-authoring.md`](docs/migration-plugin-authoring.md).
 
+## Author a Host in TypeScript
+
+The initial [TypeScript Host authoring path](docs/typescript-host-authoring.md)
+adds `lenso app build` for static `defineHost` declarations and verified Plugin
+bundles. Hosts stay closed unless exact extension releases are admitted, with
+Instance limits and optional effective-configuration ceilings. The same authority
+is consumed by check, configure, and installation. `lenso app prepare` turns that
+output plus explicit precompiled target artifacts and notices into a new,
+digest-locked directory with a generated `host.js`, same-cohort resolver, and
+Instance-addressed selected Plugin artifacts. The coordinated Bun runtime branch
+assembles and recovers the admitted Generation and preserves named dependency
+imports; released artifact cohorts are not included yet.
+
 ## Change an App
 
 The current Host supplies useful defaults and a generated Host Catalog. An App
@@ -93,6 +106,8 @@ lenso plugins update company.uppercase --version 1.3.0
 lenso plugins history company.uppercase
 lenso plugins rollback company.uppercase --version 1.2.3
 lenso plugins configure company.uppercase default --file uppercase.toml
+lenso plugins bind company.copy source company.store --provider-instance source
+lenso plugins bind company.copy cache --absent
 lenso plugins disable company.uppercase default
 lenso plugins enable company.uppercase default
 lenso plugins remove company.uppercase default
@@ -107,6 +122,9 @@ enables package defaults. `<instance>.disabled` is the explicit absence marker.
 Optional structured files live beside it under
 `plugins/<plugin-id>/<instance>/`; `app check` validates the bounded regular-file
 tree before the Host snapshots it into a Generation.
+Named single-dependency choices live in `plugins/dependencies.json` and are
+changed through `plugins bind`. They preserve exact provider intent, including
+explicit absence for optional requirements, across unrelated installations.
 Installed non-embedded behavior carries one exact `plugin.lenso-plugin` Bundle
 inside its Plugin directory.
 

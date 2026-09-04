@@ -19,11 +19,13 @@ try {
     process.exit(compile.status ?? 1);
   }
 
-  assert.deepEqual(
-    readFileSync(path.join(root, "bin", "lenso.js")),
-    readFileSync(path.join(tempDir, "lenso.js")),
-    "bin/lenso.js is stale; run pnpm build:shim and commit the generated output",
-  );
+  for (const file of ["lenso.js", "lenso.d.ts", "host.js", "host.d.ts", "host-extract.js", "host-extract.d.ts", "host-owner.js", "host-owner.d.ts", "host-app.js", "host-app.d.ts", "distribution-host.js", "distribution-host.d.ts"]) {
+    assert.deepEqual(
+      readFileSync(path.join(root, "bin", file)),
+      readFileSync(path.join(tempDir, file)),
+      `bin/${file} is stale; run pnpm build:shim and commit the generated output`,
+    );
+  }
   console.log("generated npm shim is up to date");
 } finally {
   rmSync(tempDir, { force: true, recursive: true });

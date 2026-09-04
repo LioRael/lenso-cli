@@ -11,16 +11,24 @@
   "bin": {
     "lenso": "bin/lenso.js"
   },
+  "exports": {
+    "./host": {
+      "types": "./bin/host.d.ts",
+      "default": "./bin/host.js"
+    }
+  },
   "files": [
     "bin",
-    "vendor"
+    "vendor",
+    "docs/typescript-host-authoring.md"
   ],
   "scripts": {
     "build:shim": "node node_modules/typescript/bin/tsc -p tsconfig.json",
     "changeset": "changeset",
     "check:npm-publish": "node scripts/check-npm-publish.mjs",
     "check:shim-generated": "pnpm build:shim && node scripts/check-shim-generated.mjs",
-    "check:npm-shim": "pnpm check:shim-generated && node scripts/check-npm-shim.mjs",
+    "check:npm-shim": "pnpm check:shim-generated && node scripts/check-npm-shim.mjs && node --test scripts/host-extract.test.mjs scripts/host-owner.test.mjs scripts/distribution-host.test.mjs",
+    "check:host-owner-native": "pnpm build:shim && node --test scripts/host-owner-native.test.mjs",
     "package:npm": "pnpm build:shim && node scripts/package-npm.mjs",
     "prepack": "pnpm build:shim && node scripts/package-npm.mjs",
     "prepublishOnly": "node scripts/check-npm-publish.mjs",
@@ -31,6 +39,9 @@
     "@changesets/cli": "2.31.1",
     "@types/node": "25.9.4",
     "typescript": "7.0.2"
+  },
+  "dependencies": {
+    "typescript-parser": "npm:typescript@5.9.3"
   },
   "publishConfig": {
     "access": "public"

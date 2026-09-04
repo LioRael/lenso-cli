@@ -185,7 +185,7 @@ mod tests {
             app.get_subcommands()
                 .map(clap::Command::get_name)
                 .collect::<Vec<_>>(),
-            ["init", "check", "show"]
+            ["build", "prepare", "init", "check", "show"]
         );
     }
 

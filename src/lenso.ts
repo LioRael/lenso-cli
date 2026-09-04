@@ -99,7 +99,15 @@ function run(): void {
     process.exit(1);
   }
 
-  const child = spawn(exe, process.argv.slice(2), { stdio: "inherit" });
+  const child = spawn(exe, process.argv.slice(2), {
+    stdio: "inherit",
+    env: {
+      ...process.env,
+      LENSO_HOST_EXTRACTOR: path.join(__dirname, "host-extract.js"),
+      LENSO_HOST_JS_RUNTIME: process.execPath,
+      LENSO_HOST_DISTRIBUTION_LIB: __dirname,
+    },
+  });
   const stopForwardingSignals = forwardTerminationSignals(process, child);
   child.on("error", (error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") {

@@ -9,10 +9,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use crate::host_authoring::HostInput;
 use anyhow::{Context, bail};
 use lenso_app_plan::authoring::{
-    HostCatalog, PluginInstanceId, PluginRootInstance, PluginRootResolutionError,
-    PluginRootSnapshot, ResolvedApp, resolve_plugin_root,
+    PluginInstanceId, PluginRootInstance, PluginRootResolutionError, PluginRootSnapshot,
+    ResolvedApp,
 };
 use sha2::{Digest, Sha256};
 
@@ -364,7 +365,7 @@ pub fn propose_instance_configuration(
     validate_instance_filename(instance)?;
     let _lock = lock_plugin_root(root)?;
     let host = load_host_catalog(root)?;
-    let current = snapshot_plugin_root(root)?;
+    let current = snapshot_plugin_root(root, &host)?;
     let current_revision = revision_for_snapshot(&current)?;
     ensure_revision(expected_revision, &current_revision)?;
     let base_source_digest = source_digest_for_instance(root, plugin_id, instance)?;
@@ -386,7 +387,7 @@ pub fn publish_instance_configuration(
 ) -> anyhow::Result<PluginConfigurationPublication> {
     let _lock = lock_plugin_root(root)?;
     let host = load_host_catalog(root)?;
-    let current = snapshot_plugin_root(root)?;
+    let current = snapshot_plugin_root(root, &host)?;
     let current_revision = revision_for_snapshot(&current)?;
     ensure_revision(&proposal.base_revision, &current_revision)?;
     let current_source_digest =
@@ -425,7 +426,7 @@ pub fn publish_instance_configuration(
         .join(&proposal.plugin_id)
         .join(format!("{}.toml", proposal.instance_key));
     atomic_write(&path, &proposal.toml)?;
-    let published = snapshot_plugin_root(root)?;
+    let published = snapshot_plugin_root(root, &host)?;
     let revision = revision_for_snapshot(&published)?;
     if revision != proposal.candidate_revision {
         bail!("published Plugin Root does not match the reviewed candidate revision");
@@ -442,7 +443,7 @@ pub fn publish_instance_configuration(
 }
 
 fn build_proposal(
-    host: &HostCatalog,
+    host: &HostInput,
     current: &PluginRootSnapshot,
     base_revision: PluginRootRevision,
     base_source_digest: PluginConfigurationSourceDigest,
@@ -459,10 +460,13 @@ fn build_proposal(
         .cloned()
         .collect::<Vec<_>>();
     instances.push(PluginRootInstance::new(plugin_id, instance).with_configuration(configuration));
-    let candidate = PluginRootSnapshot::new(
-        current.releases().iter().cloned(),
-        instances,
-        current.disabled().iter().cloned(),
+    let candidate = crate::preserve_dependency_selections(
+        PluginRootSnapshot::new(
+            current.releases().iter().cloned(),
+            instances,
+            current.disabled().iter().cloned(),
+        ),
+        current,
     );
     let candidate_revision = revision_for_snapshot(&candidate)?;
     let authority = serde_json::to_vec(&(
@@ -475,7 +479,7 @@ fn build_proposal(
     ))
     .context("encode Plugin configuration proposal authority")?;
     let digest = sha256_digest(&authority);
-    let (status, application, diagnostics) = match resolve_plugin_root(host, &candidate) {
+    let (status, application, diagnostics) = match host.resolve(&candidate) {
         Ok(_) => (
             PluginConfigurationProposalStatus::Ready,
             if candidate_revision == base_revision {
@@ -522,6 +526,7 @@ fn build_proposal(
 
 fn resolution_error_code(error: &PluginRootResolutionError) -> &'static str {
     match error {
+        PluginRootResolutionError::InvalidHostConfiguration(_) => "host_admission_denied",
         PluginRootResolutionError::AmbiguousSlot { .. } => "ambiguous_slot",
         PluginRootResolutionError::AmbiguousCapability { .. } => "ambiguous_capability",
         PluginRootResolutionError::InvalidConfiguration { .. } => "invalid_configuration",
@@ -728,7 +733,7 @@ mod tests {
                 },
                 "additionalProperties": false
             }));
-        let host = HostCatalog::new(
+        let host = lenso_app_plan::authoring::HostCatalog::new(
             [HostSlot::one("agent")],
             [HostPluginRelease::new(descriptor)],
             [HostDefaultPlugin::new("example.agent", "default")],
