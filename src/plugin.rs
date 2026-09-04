@@ -218,6 +218,8 @@ struct BunPackage {
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct PluginDescriptor {
     abi: String,
+    #[serde(default)]
+    configuration_schema: Option<Value>,
     capabilities: Vec<PluginCapability>,
     #[serde(default)]
     required_capabilities: Vec<PluginRequirement>,
@@ -422,6 +424,9 @@ fn contract_from_bun_descriptor(
             ))
         },
     );
+    if let Some(schema) = &descriptor.configuration_schema {
+        contract = contract.with_configuration_schema(schema.clone());
+    }
     for requirement in &descriptor.required_capabilities {
         if requirement.cardinality != "one" {
             bail!(

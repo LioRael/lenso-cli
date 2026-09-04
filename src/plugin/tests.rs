@@ -9,6 +9,7 @@ fn bun_descriptor_lowers_named_dependencies_into_the_plugin_contract() {
     let descriptor = parse_descriptor_bytes(
         br#"{
             "abi":"lenso.json-request@1",
+            "configuration_schema":{"type":"object","required":["prefix"]},
             "capabilities":[{
                 "capability_id":"company.notes@1",
                 "descriptor_version":"1.0.0",
@@ -35,6 +36,10 @@ fn bun_descriptor_lowers_named_dependencies_into_the_plugin_contract() {
     let contract = contract_from_bun_descriptor(&package, &descriptor).unwrap();
     let requirement = &contract.required_capabilities()[0];
 
+    assert_eq!(
+        contract.configuration_schema(),
+        Some(&serde_json::json!({"type":"object","required":["prefix"]}))
+    );
     assert_eq!(requirement.requirement_id(), "store");
     assert_eq!(requirement.capability_id(), "company.notes-store@1");
 }
