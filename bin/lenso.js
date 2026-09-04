@@ -68,7 +68,15 @@ function run() {
         console.error(`lenso: bundled binary is not executable: ${message}`);
         process.exit(1);
     }
-    const child = (0, node_child_process_1.spawn)(exe, process.argv.slice(2), { stdio: "inherit" });
+    const child = (0, node_child_process_1.spawn)(exe, process.argv.slice(2), {
+        stdio: "inherit",
+        env: {
+            ...process.env,
+            LENSO_HOST_EXTRACTOR: node_path_1.default.join(__dirname, "host-extract.js"),
+            LENSO_HOST_JS_RUNTIME: process.execPath,
+            LENSO_HOST_DISTRIBUTION_LIB: __dirname,
+        },
+    });
     const stopForwardingSignals = forwardTerminationSignals(process, child);
     child.on("error", (error) => {
         if (error.code === "ENOENT") {

@@ -8,8 +8,9 @@ use anyhow::{Context, bail};
 use clap::{Args, Subcommand};
 pub(crate) use lenso_app_authoring::load_resolved_app;
 use lenso_app_authoring::{
-    BundleMutation, add_bundle, configure_instance, prepare_bundle_mutation,
-    remove_instance_difference, remove_plugin, set_instance_disabled,
+    BundleMutation, DEPENDENCY_SELECTIONS_SCHEMA, DependencySelectionsDocument, add_bundle,
+    configure_instance, prepare_bundle_mutation, remove_instance_difference, remove_plugin,
+    set_dependency_selection, set_dependency_selections, set_instance_disabled,
 };
 use lenso_app_plan::authoring::PluginInstanceId;
 use lenso_plugin_bundle::verify_bundle_directory;
@@ -32,6 +33,8 @@ pub(crate) enum PluginsCommand {
     Add(AddArgs),
     /// Write direct configuration for one Plugin Instance.
     Configure(ConfigureArgs),
+    /// Save one exact provider choice for a named Plugin dependency.
+    Bind(BindArgs),
     /// Disable one Plugin Instance without deleting its configuration.
     Disable(InstanceArgs),
     /// Re-enable one disabled Plugin Instance.
@@ -91,6 +94,31 @@ pub(crate) struct InstanceArgs {
     /// App-local Instance key.
     #[arg(default_value = "default")]
     instance: String,
+    /// App project root. Defaults to the current directory.
+    #[arg(long)]
+    root: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct BindArgs {
+    /// Consumer Plugin ID.
+    consumer_plugin_id: Option<String>,
+    /// Consumer-local requirement identity.
+    requirement: Option<String>,
+    /// Provider Plugin ID. Omit together with `--absent` for an optional dependency.
+    provider_plugin_id: Option<String>,
+    /// Consumer App-local Instance key.
+    #[arg(long, default_value = "default")]
+    consumer_instance: String,
+    /// Provider App-local Instance key.
+    #[arg(long, default_value = "default", requires = "provider_plugin_id")]
+    provider_instance: String,
+    /// Preserve an explicit absence for an optional dependency.
+    #[arg(long, conflicts_with = "provider_plugin_id")]
+    absent: bool,
+    /// JSON selection document to apply atomically when several requirements are ambiguous.
+    #[arg(long)]
+    file: Option<PathBuf>,
     /// App project root. Defaults to the current directory.
     #[arg(long)]
     root: Option<PathBuf>,
@@ -163,6 +191,7 @@ pub(crate) fn plugins(command: PluginsCommand) -> anyhow::Result<()> {
         PluginsCommand::List(args) => list(args),
         PluginsCommand::Add(args) => add(args),
         PluginsCommand::Configure(args) => configure(args),
+        PluginsCommand::Bind(args) => bind(args),
         PluginsCommand::Disable(args) => disable(args),
         PluginsCommand::Enable(args) => enable(args),
         PluginsCommand::Remove(args) => remove(args),
@@ -239,6 +268,58 @@ fn configure(args: ConfigureArgs) -> anyhow::Result<()> {
     configure_instance(&root, &args.plugin_id, &args.instance, &bytes)?;
     let id = PluginInstanceId::new(&args.plugin_id, &args.instance);
     println!("Configured Plugin Instance `{id}`.");
+    Ok(())
+}
+
+fn bind(args: BindArgs) -> anyhow::Result<()> {
+    if let Some(file) = args.file {
+        if args.consumer_plugin_id.is_some()
+            || args.requirement.is_some()
+            || args.provider_plugin_id.is_some()
+            || args.absent
+        {
+            bail!("use either positional dependency selection arguments or `--file`");
+        }
+        let document: DependencySelectionsDocument = serde_json::from_slice(
+            &fs::read(&file).with_context(|| format!("read {}", file.display()))?,
+        )
+        .with_context(|| format!("invalid dependency selections: {}", file.display()))?;
+        if document.schema != DEPENDENCY_SELECTIONS_SCHEMA {
+            bail!(
+                "unsupported dependency selection schema `{}`",
+                document.schema
+            );
+        }
+        let count = document.selections.len();
+        let root = project_root(args.root)?;
+        set_dependency_selections(&root, document.selections)?;
+        println!("Applied {count} dependency selections.");
+        return Ok(());
+    }
+    if !args.absent && args.provider_plugin_id.is_none() {
+        bail!("provide a provider Plugin ID or use `--absent`");
+    }
+    let consumer_plugin_id = args
+        .consumer_plugin_id
+        .as_deref()
+        .context("provide a consumer Plugin ID or use `--file`")?;
+    let requirement = args
+        .requirement
+        .as_deref()
+        .context("provide a requirement identity or use `--file`")?;
+    let root = project_root(args.root)?;
+    let consumer = PluginInstanceId::new(consumer_plugin_id, &args.consumer_instance);
+    let provider = args
+        .provider_plugin_id
+        .as_deref()
+        .map(|plugin_id| PluginInstanceId::new(plugin_id, &args.provider_instance));
+    set_dependency_selection(&root, consumer.clone(), requirement, provider.clone())?;
+    match provider {
+        Some(provider) => {
+            println!("Bound `{consumer}` requirement `{requirement}` to `{provider}`.");
+        }
+        None => println!("Left `{consumer}` optional requirement `{requirement}` absent."),
+    }
     Ok(())
 }
 

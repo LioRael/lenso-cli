@@ -13,6 +13,7 @@ include = [
     "/src/**/*.rs",
     "/contracts/*.json",
     "/docs/migration-plugin-authoring.md",
+    "/docs/typescript-host-authoring.md",
     "/README.md",
     "/Cargo.toml",
 ]
@@ -38,7 +39,6 @@ cli = [
     "dep:lenso-wasm-component-adapter",
     "dep:nix",
     "dep:notify",
-    "dep:serde",
     "dep:tokio",
     "dep:url",
 ]
@@ -76,17 +76,17 @@ must_use_candidate = "allow"
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4", features = ["derive"], optional = true }
-lenso-app-plan = { version = "0.3.0" }
+lenso-app-plan = { version = "0.4.1" }
 lenso-contract-authoring-next = { package = "lenso-contract-authoring", version = "0.1.1", optional = true }
-lenso-contract-codegen-next = { package = "lenso-contract-codegen", version = "0.6.4", optional = true }
-lenso-kernel = { version = "0.2.0", optional = true }
-lenso-plugin-bundle = { version = "0.2.0" }
-lenso-runner = { version = "0.2.0", optional = true }
-lenso-runtime-codec = { version = "0.2.0", optional = true }
-lenso-wasm-component-adapter = { version = "0.2.0", optional = true }
+lenso-contract-codegen-next = { package = "lenso-contract-codegen", version = "0.7.3", optional = true }
+lenso-kernel = { version = "0.3.2", optional = true }
+lenso-plugin-bundle = { version = "0.2.2" }
+lenso-runner = { version = "0.2.2", optional = true }
+lenso-runtime-codec = { version = "0.3.0", optional = true }
+lenso-wasm-component-adapter = { version = "0.2.2", optional = true }
 notify = { version = "8.2", optional = true }
 semver = "1.0"
-serde = { version = "1.0", features = ["derive"], optional = true }
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.11"
 rustix = { version = "1.1", features = ["fs"] }
@@ -97,6 +97,7 @@ uuid = { version = "1", features = ["v7"] }
 ureq = { version = "2.12", default-features = false, features = ["tls"] }
 url = { version = "2.5", optional = true }
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
+jsonschema = { version = "0.47.0", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.30", features = ["signal"], optional = true }

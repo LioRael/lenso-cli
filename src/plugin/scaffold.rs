@@ -323,7 +323,7 @@ pub(super) fn bun_plugin_scaffold(plugin_id: &str) -> BTreeMap<PathBuf, String> 
         ),
         (
             PathBuf::from("src/lenso.describe.generated.ts"),
-            "import plugin from \"./plugin.ts\";\n\nconsole.log(JSON.stringify({\n  abi: \"lenso.json-request@1\",\n  capabilities: plugin.providers.map(({ descriptor }) => ({\n    capability_id: descriptor.capability_id,\n    descriptor_version: descriptor.descriptor_version,\n    request_operations: [...descriptor.operations],\n  })),\n}));\n"
+            "import { describePortablePlugin } from \"@lenso/bun\";\nimport plugin from \"./plugin.ts\";\n\nconsole.log(JSON.stringify(describePortablePlugin(plugin)));\n"
                 .to_owned(),
         ),
         (
@@ -351,7 +351,7 @@ fn bun_package_manifest(plugin_id: &str, package_name: &str) -> String {
     "check": "tsc --noEmit"
   }},
   "dependencies": {{
-    "@lenso/bun": "0.2.0"
+    "@lenso/bun": "0.3.0"
   }},
   "devDependencies": {{
     "@types/bun": "1.4.0",

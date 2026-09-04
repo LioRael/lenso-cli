@@ -5,6 +5,41 @@ use super::scaffold::{
 use super::*;
 
 #[test]
+fn bun_descriptor_lowers_named_dependencies_into_the_plugin_contract() {
+    let descriptor = parse_descriptor_bytes(
+        br#"{
+            "abi":"lenso.json-request@1",
+            "capabilities":[{
+                "capability_id":"company.notes@1",
+                "descriptor_version":"1.0.0",
+                "request_operations":["list"]
+            }],
+            "required_capabilities":[{
+                "requirement_id":"store",
+                "capability_id":"company.notes-store@1",
+                "descriptor_version":"1.0.0",
+                "cardinality":"one"
+            }]
+        }"#,
+    )
+    .unwrap();
+    let package = BunPackage {
+        version: "1.0.0".to_owned(),
+        metadata: BunPackageMetadata {
+            plugin_id: "company.notes".to_owned(),
+            root_slot: "notes".to_owned(),
+            runtime: "bun".to_owned(),
+        },
+    };
+
+    let contract = contract_from_bun_descriptor(&package, &descriptor).unwrap();
+    let requirement = &contract.required_capabilities()[0];
+
+    assert_eq!(requirement.requirement_id(), "store");
+    assert_eq!(requirement.capability_id(), "company.notes-store@1");
+}
+
+#[test]
 fn web_plugin_scaffold_uses_canonical_endpoint_authoring() {
     let files = web_plugin_scaffold("company.greetings-http");
     let manifest = files.get(Path::new("Cargo.toml")).unwrap();
@@ -136,7 +171,7 @@ fn bun_plugin_scaffold_uses_generated_runtime_lowering() {
     let runtime = files.get(Path::new("src/lenso.bun.generated.ts")).unwrap();
 
     assert!(package.contains("\"runtime\": \"bun\""));
-    assert!(package.contains("\"@lenso/bun\": \"0.2.0\""));
+    assert!(package.contains("\"@lenso/bun\": \"0.3.0\""));
     assert!(author.contains("bindToolProviderProvider"));
     assert!(author.contains("definePlugin"));
     assert!(!author.contains("serve("));

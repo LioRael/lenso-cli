@@ -6,7 +6,9 @@ use std::{
 
 use anyhow::{Context, bail};
 use clap::{Args, Subcommand, ValueEnum};
-use lenso_app_plan::{CapabilityEndpointPlan, ExecutionClassId, authoring::PluginContract};
+use lenso_app_plan::{
+    CapabilityEndpointPlan, CapabilityRequirementPlan, ExecutionClassId, authoring::PluginContract,
+};
 use lenso_plugin_bundle::{
     PluginManifest, SourcePluginBuild, SourcePluginImplementation, SourcePluginReleaseBuild,
     SourceProcessPluginBuild, VerifiedBundle, build_source_plugin_bundle,
@@ -216,6 +218,8 @@ struct BunPackage {
 struct PluginDescriptor {
     abi: String,
     capabilities: Vec<PluginCapability>,
+    #[serde(default)]
+    required_capabilities: Vec<PluginRequirement>,
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -223,6 +227,14 @@ struct PluginCapability {
     capability_id: String,
     descriptor_version: String,
     request_operations: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct PluginRequirement {
+    requirement_id: String,
+    capability_id: String,
+    descriptor_version: String,
+    cardinality: String,
 }
 
 pub async fn plugin(command: PluginCommand) -> anyhow::Result<()> {
@@ -372,20 +384,7 @@ fn materialize_bun(
     }
     run_bun(root, &arguments, "build Bun Plugin implementation")?;
     let descriptor = describe_bun_plugin(root)?;
-    let contract = descriptor.capabilities.iter().fold(
-        PluginContract::new(
-            &package.metadata.plugin_id,
-            &package.version,
-            &package.metadata.root_slot,
-        ),
-        |contract, capability| {
-            contract.with_capability(CapabilityEndpointPlan::new(
-                &capability.capability_id,
-                &capability.descriptor_version,
-                capability.request_operations.clone(),
-            ))
-        },
-    );
+    let contract = contract_from_bun_descriptor(package, &descriptor)?;
     let verified = build_source_plugin_release_bundle(&SourcePluginReleaseBuild {
         contract,
         implementations: vec![SourcePluginImplementation {
@@ -401,6 +400,44 @@ fn materialize_bun(
         output: output.to_path_buf(),
     })?;
     Ok((verified, descriptor))
+}
+
+fn contract_from_bun_descriptor(
+    package: &BunPackage,
+    descriptor: &PluginDescriptor,
+) -> anyhow::Result<PluginContract> {
+    let mut contract = descriptor.capabilities.iter().fold(
+        PluginContract::new(
+            &package.metadata.plugin_id,
+            &package.version,
+            &package.metadata.root_slot,
+        )
+        .with_authoring_version(2),
+        |contract, capability| {
+            contract.with_capability(CapabilityEndpointPlan::new(
+                &capability.capability_id,
+                &capability.descriptor_version,
+                capability.request_operations.clone(),
+            ))
+        },
+    );
+    for requirement in &descriptor.required_capabilities {
+        if requirement.cardinality != "one" {
+            bail!(
+                "Bun Plugin requirement `{}` uses unsupported cardinality `{}`",
+                requirement.requirement_id,
+                requirement.cardinality
+            );
+        }
+        contract = contract.with_requirement(
+            CapabilityRequirementPlan::one(
+                &requirement.capability_id,
+                &requirement.descriptor_version,
+            )
+            .with_requirement_id(&requirement.requirement_id),
+        );
+    }
+    Ok(contract)
 }
 
 fn describe_bun_plugin(root: &Path) -> anyhow::Result<PluginDescriptor> {

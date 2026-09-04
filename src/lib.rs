@@ -4,7 +4,10 @@
 //! before changing visible App-owned files. Runtime Generation staging and
 //! switching remain the responsibility of the running Host.
 
+pub mod host_authoring;
 pub mod identity;
+
+use host_authoring::{GeneratedHostBuild, HOST_BUILD, HostInput};
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -15,14 +18,16 @@ use std::{
 use anyhow::{Context, bail};
 use lenso_app_plan::ExecutionClassId;
 use lenso_app_plan::authoring::{
-    HostCatalog, PluginDescriptor, PluginInstanceId, PluginRootInstance, PluginRootSnapshot,
-    ResolvedApp, resolve_plugin_root,
+    DependencyChoice, PluginDescriptor, PluginInstanceId, PluginRootInstance, PluginRootSnapshot,
+    ResolvedApp,
 };
 use lenso_plugin_bundle::{
     ImplementationPolicy, VerifiedBundle, read_bundle_manifest, resolve_implementation,
     verify_bundle_directory,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 
 use crate::identity::{
     classify_existing_plugin_id, validate_plugin_id_v1, validate_release_version,
@@ -46,6 +51,8 @@ pub use selection_authority::{
 const PLUGIN_ROOT: &str = "plugins";
 const HOST_CATALOG: &str = ".lenso/host-catalog.json";
 const BUNDLE_NAME: &str = "plugin.lenso-plugin";
+const DEPENDENCY_SELECTIONS: &str = "dependencies.json";
+pub const DEPENDENCY_SELECTIONS_SCHEMA: &str = "lenso.plugin-dependencies.v1";
 const AUTHORING_LOCK: &str = ".lenso/plugin-root-authoring.lock";
 const MAX_CONFIGURATION_BYTES: u64 = 256 * 1024;
 const MAX_RESOURCE_FILES: usize = 4_096;
@@ -56,8 +63,77 @@ const MAX_RESOURCE_DEPTH: usize = 32;
 /// Resolves the App selected by one project root's Host Catalog and Plugin Root.
 pub fn load_resolved_app(root: &Path) -> anyhow::Result<ResolvedApp> {
     let host = load_host_catalog(root)?;
-    let snapshot = snapshot_plugin_root(root)?;
-    resolve_plugin_root(&host, &snapshot).map_err(anyhow::Error::msg)
+    let snapshot = snapshot_plugin_root(root, &host)?;
+    host.resolve(&snapshot).map_err(anyhow::Error::msg)
+}
+
+/// Exact runtime input resolved from immutable distribution authority and one external Root.
+#[derive(Clone, Debug, Serialize)]
+pub struct RuntimeAppResolution {
+    schema: &'static str,
+    app_id: String,
+    authority_digest: String,
+    host_build_digest: String,
+    plugin_root_revision: String,
+    plan: lenso_app_plan::ResolvedAppPlan,
+}
+
+/// Resolves an external Plugin Root without allowing it to replace distribution authority.
+pub fn resolve_runtime_app(root: &Path, host_build: &Path) -> anyhow::Result<RuntimeAppResolution> {
+    let root = fs::canonicalize(root).context("locate external App root")?;
+    if !fs::metadata(&root)?.is_dir() {
+        bail!("external App root must be a directory: {}", root.display());
+    }
+    for competing in [HOST_BUILD, HOST_CATALOG] {
+        match fs::symlink_metadata(root.join(competing)) {
+            Ok(_) => bail!(
+                "external App root cannot replace distribution Host authority with `{competing}`"
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("inspect external Host authority"),
+        }
+    }
+    let metadata = fs::symlink_metadata(host_build)
+        .with_context(|| format!("inspect distribution Host build {}", host_build.display()))?;
+    if !metadata.file_type().is_file() {
+        bail!(
+            "distribution Host build must be a regular file: {}",
+            host_build.display()
+        );
+    }
+    let host_bytes = fs::read(host_build)
+        .with_context(|| format!("read distribution Host build {}", host_build.display()))?;
+    let host: GeneratedHostBuild =
+        serde_json::from_slice(&host_bytes).context("invalid distribution Host build")?;
+    host.validate()?;
+    let snapshot = snapshot_plugin_root(&root, &HostInput::Generated(host.clone()))?;
+    let plugin_root_revision = configuration_authority::revision_for_snapshot(&snapshot)?;
+    let resolved = host.resolve(&snapshot).map_err(anyhow::Error::msg)?;
+    let host_build_digest = runtime_sha256(&host_bytes);
+    let authority = serde_json::to_vec(&serde_json::json!({
+        "schema": "lenso.runtime-authority.v1",
+        "host_build_digest": host_build_digest,
+        "plugin_root_revision": plugin_root_revision.as_str(),
+    }))?;
+    Ok(RuntimeAppResolution {
+        schema: "lenso.runtime-app-resolution.v1",
+        app_id: host.host_id().to_owned(),
+        authority_digest: runtime_sha256(&authority),
+        host_build_digest,
+        plugin_root_revision: plugin_root_revision.as_str().to_owned(),
+        plan: resolved.plan().clone(),
+    })
+}
+
+fn runtime_sha256(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut value = String::with_capacity(71);
+    value.push_str("sha256:");
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(value, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    value
 }
 
 /// Read-only authoring state for one Plugin Instance.
@@ -184,11 +260,15 @@ impl PluginRootAuthoringState {
 }
 
 /// Inspects the current Host Catalog and Plugin Root without changing either.
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeps one atomic read-only Root projection"
+)]
 pub fn inspect_plugin_root(root: &Path) -> anyhow::Result<PluginRootAuthoringState> {
     let host = load_host_catalog(root)?;
-    let snapshot = snapshot_plugin_root(root)?;
+    let snapshot = snapshot_plugin_root(root, &host)?;
     let revision = configuration_authority::revision_for_snapshot(&snapshot)?;
-    let resolved = resolve_plugin_root(&host, &snapshot).map_err(anyhow::Error::msg)?;
+    let resolved = host.resolve(&snapshot).map_err(anyhow::Error::msg)?;
     let enabled = resolved
         .instances()
         .iter()
@@ -245,7 +325,13 @@ pub fn inspect_plugin_root(root: &Path) -> anyhow::Result<PluginRootAuthoringSta
     for id in &ids {
         releases
             .entry(id.plugin_id().to_owned())
-            .or_insert_with(|| (String::new(), None, Value::Object(Default::default())));
+            .or_insert_with(|| {
+                (
+                    String::new(),
+                    None,
+                    Value::Object(serde_json::Map::default()),
+                )
+            });
     }
 
     let mut plugins = Vec::with_capacity(releases.len());
@@ -322,7 +408,28 @@ fn authoring_state(
     }
 }
 
-fn load_host_catalog(root: &Path) -> anyhow::Result<HostCatalog> {
+fn load_host_catalog(root: &Path) -> anyhow::Result<HostInput> {
+    let generated = root.join(HOST_BUILD);
+    match fs::symlink_metadata(&generated) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_file() {
+                bail!("Host build must be a regular file: {}", generated.display());
+            }
+            match fs::symlink_metadata(root.join(HOST_CATALOG)) {
+                Ok(_) => bail!(
+                    "competing Host authorities: install one complete Host build instead of mixing authority files"
+                ),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).context("inspect existing Host Catalog authority"),
+            }
+            let build: GeneratedHostBuild = serde_json::from_slice(&fs::read(&generated)?)
+                .context("invalid generated Host build")?;
+            build.validate()?;
+            return Ok(HostInput::Generated(build));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("inspect generated Host build"),
+    }
     let path = root.join(HOST_CATALOG);
     let metadata = fs::symlink_metadata(&path).with_context(|| {
         format!(
@@ -335,10 +442,11 @@ fn load_host_catalog(root: &Path) -> anyhow::Result<HostCatalog> {
     }
     let bytes = fs::read(&path).with_context(|| format!("read Host Catalog {}", path.display()))?;
     serde_json::from_slice(&bytes)
+        .map(HostInput::Legacy)
         .with_context(|| format!("Host Catalog is invalid: {}", path.display()))
 }
 
-fn snapshot_plugin_root(root: &Path) -> anyhow::Result<PluginRootSnapshot> {
+fn snapshot_plugin_root(root: &Path, host: &HostInput) -> anyhow::Result<PluginRootSnapshot> {
     let plugin_root = root.join(PLUGIN_ROOT);
     match fs::symlink_metadata(&plugin_root) {
         Ok(metadata) if metadata.file_type().is_dir() => {}
@@ -357,6 +465,7 @@ fn snapshot_plugin_root(root: &Path) -> anyhow::Result<PluginRootSnapshot> {
     let mut releases = Vec::new();
     let mut instances = Vec::new();
     let mut disabled = Vec::new();
+    let mut dependency_selections = None;
     let mut plugin_names = BTreeMap::<String, String>::new();
     let mut directories = read_entries(&plugin_root)?;
     directories.sort_by_key(fs::DirEntry::file_name);
@@ -366,6 +475,26 @@ fn snapshot_plugin_root(root: &Path) -> anyhow::Result<PluginRootSnapshot> {
             continue;
         }
         let file_type = entry.file_type()?;
+        if name == DEPENDENCY_SELECTIONS {
+            if !file_type.is_file() {
+                bail!(
+                    "Plugin dependency selections must be a regular file: {}",
+                    entry.path().display()
+                );
+            }
+            let document: DependencySelectionsDocument = serde_json::from_slice(
+                &fs::read(entry.path()).context("read Plugin dependency selections")?,
+            )
+            .context("invalid Plugin dependency selections")?;
+            if document.schema != DEPENDENCY_SELECTIONS_SCHEMA {
+                bail!(
+                    "unsupported Plugin dependency selection schema `{}`",
+                    document.schema
+                );
+            }
+            dependency_selections = Some(document.selections);
+            continue;
+        }
         if !file_type.is_dir() {
             bail!("unknown Plugin Root entry: {}", entry.path().display());
         }
@@ -378,9 +507,32 @@ fn snapshot_plugin_root(root: &Path) -> anyhow::Result<PluginRootSnapshot> {
             &mut releases,
             &mut instances,
             &mut disabled,
+            host,
         )?;
     }
-    Ok(PluginRootSnapshot::new(releases, instances, disabled))
+    let snapshot = PluginRootSnapshot::new(releases, instances, disabled);
+    Ok(match dependency_selections {
+        Some(selections) => snapshot.with_dependency_choices(selections),
+        None => snapshot,
+    })
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DependencySelectionsDocument {
+    pub schema: String,
+    pub selections: Vec<DependencyChoice>,
+}
+
+fn preserve_dependency_selections(
+    candidate: PluginRootSnapshot,
+    current: &PluginRootSnapshot,
+) -> PluginRootSnapshot {
+    if current.dependency_selection_adopted() {
+        candidate.with_dependency_choices(current.dependency_choices().to_vec())
+    } else {
+        candidate
+    }
 }
 
 fn scan_plugin_directory(
@@ -389,6 +541,7 @@ fn scan_plugin_directory(
     releases: &mut Vec<PluginDescriptor>,
     instances: &mut Vec<PluginRootInstance>,
     disabled: &mut Vec<PluginInstanceId>,
+    host: &HostInput,
 ) -> anyhow::Result<()> {
     let mut normalized = BTreeMap::<String, String>::new();
     let mut configured_instances = BTreeSet::new();
@@ -409,7 +562,7 @@ fn scan_plugin_directory(
                     entry.path().display()
                 );
             }
-            releases.push(read_bundle_descriptor(&entry.path(), plugin_id)?);
+            releases.push(read_bundle_descriptor(&entry.path(), plugin_id, host)?);
             continue;
         }
         if file_type.is_dir() {
@@ -521,11 +674,18 @@ fn is_ignored_os_metadata(name: &str) -> bool {
     name == ".DS_Store"
 }
 
-fn read_bundle_descriptor(path: &Path, plugin_id: &str) -> anyhow::Result<PluginDescriptor> {
+fn read_bundle_descriptor(
+    path: &Path,
+    plugin_id: &str,
+    host: &HostInput,
+) -> anyhow::Result<PluginDescriptor> {
     validate_existing_plugin_id(plugin_id)?;
     let verified = verify_bundle_directory(path)
         .with_context(|| format!("verify Plugin Bundle {}", path.display()))?;
-    read_verified_bundle_descriptor(path, plugin_id, &verified)
+    if verified.plugin_id != plugin_id {
+        bail!("Plugin Bundle ID does not match its directory");
+    }
+    host.select_bundle(path, &verified)
 }
 
 fn read_verified_bundle_descriptor(
@@ -822,9 +982,10 @@ pub fn prepare_bundle_mutation(
         .prefix(".plugin-bundle-")
         .tempdir_in(root)?;
     copy_directory(bundle, staging.path())?;
-    let (verified, descriptor) = verify_bundle_mutation(staging.path(), mutation)?;
     let authority = lock_plugin_root(root)?;
-    let resolved = resolve_bundle_mutation(root, mutation, &verified, descriptor)?;
+    let host = load_host_catalog(root)?;
+    let (verified, descriptor) = verify_bundle_mutation(staging.path(), mutation, &host)?;
+    let resolved = resolve_bundle_mutation(root, mutation, &verified, descriptor, &host)?;
     let destination = root
         .join(PLUGIN_ROOT)
         .join(&verified.plugin_id)
@@ -848,15 +1009,17 @@ pub fn validate_bundle_mutation(
     bundle: &Path,
     mutation: BundleMutation,
 ) -> anyhow::Result<(lenso_plugin_bundle::VerifiedBundle, ResolvedApp)> {
-    let (verified, descriptor) = verify_bundle_mutation(bundle, mutation)?;
     let _lock = lock_plugin_root(root)?;
-    let resolved = resolve_bundle_mutation(root, mutation, &verified, descriptor)?;
+    let host = load_host_catalog(root)?;
+    let (verified, descriptor) = verify_bundle_mutation(bundle, mutation, &host)?;
+    let resolved = resolve_bundle_mutation(root, mutation, &verified, descriptor, &host)?;
     Ok((verified, resolved))
 }
 
 fn verify_bundle_mutation(
     bundle: &Path,
     mutation: BundleMutation,
+    host: &HostInput,
 ) -> anyhow::Result<(VerifiedBundle, PluginDescriptor)> {
     let verified = verify_bundle_directory(bundle)
         .with_context(|| format!("verify Plugin Bundle {}", bundle.display()))?;
@@ -869,7 +1032,7 @@ fn verify_bundle_mutation(
         }
     }
     validate_release_version(&verified.release_version)?;
-    let descriptor = read_verified_bundle_descriptor(bundle, &verified.plugin_id, &verified)?;
+    let descriptor = host.select_bundle(bundle, &verified)?;
     Ok((verified, descriptor))
 }
 
@@ -878,9 +1041,9 @@ fn resolve_bundle_mutation(
     mutation: BundleMutation,
     verified: &VerifiedBundle,
     descriptor: PluginDescriptor,
+    host: &HostInput,
 ) -> anyhow::Result<ResolvedApp> {
-    let host = load_host_catalog(root)?;
-    let current = snapshot_plugin_root(root)?;
+    let current = snapshot_plugin_root(root, host)?;
     let has_current = current
         .releases()
         .iter()
@@ -897,17 +1060,20 @@ fn resolve_bundle_mutation(
         }
         _ => {}
     }
-    let candidate = PluginRootSnapshot::new(
-        current
-            .releases()
-            .iter()
-            .filter(|release| release.plugin_id() != verified.plugin_id)
-            .cloned()
-            .chain([descriptor]),
-        current.instances().iter().cloned(),
-        current.disabled().iter().cloned(),
+    let candidate = preserve_dependency_selections(
+        PluginRootSnapshot::new(
+            current
+                .releases()
+                .iter()
+                .filter(|release| release.plugin_id() != verified.plugin_id)
+                .cloned()
+                .chain([descriptor]),
+            current.instances().iter().cloned(),
+            current.disabled().iter().cloned(),
+        ),
+        &current,
     );
-    let resolved = resolve_plugin_root(&host, &candidate).map_err(anyhow::Error::msg)?;
+    let resolved = host.resolve(&candidate).map_err(anyhow::Error::msg)?;
     Ok(resolved)
 }
 
@@ -936,6 +1102,101 @@ pub fn set_instance_disabled(
         .map(|(_, _, resolved)| resolved)
 }
 
+/// Saves one exact App-owned dependency choice after validating the complete candidate App.
+pub fn set_dependency_selection(
+    root: &Path,
+    consumer: PluginInstanceId,
+    requirement_id: &str,
+    provider: Option<PluginInstanceId>,
+) -> anyhow::Result<ResolvedApp> {
+    let selection = DependencyChoice {
+        consumer,
+        requirement_id: requirement_id.to_owned(),
+        provider,
+    };
+    set_dependency_selections(root, [selection])
+}
+
+/// Atomically applies one or more App-owned dependency choices as one validated candidate.
+pub fn set_dependency_selections(
+    root: &Path,
+    replacements: impl IntoIterator<Item = DependencyChoice>,
+) -> anyhow::Result<ResolvedApp> {
+    let replacements = replacements.into_iter().collect::<Vec<_>>();
+    if replacements.is_empty() {
+        bail!("at least one dependency selection is required");
+    }
+    let mut replacement_keys = BTreeSet::new();
+    for selection in &replacements {
+        validate_existing_plugin_id(selection.consumer.plugin_id())?;
+        validate_instance_filename(selection.consumer.instance_key())?;
+        if selection.requirement_id.trim().is_empty() {
+            bail!("dependency requirement identity must not be empty");
+        }
+        if let Some(provider) = &selection.provider {
+            validate_existing_plugin_id(provider.plugin_id())?;
+            validate_instance_filename(provider.instance_key())?;
+        }
+        if !replacement_keys.insert((&selection.consumer, selection.requirement_id.as_str())) {
+            bail!(
+                "duplicate dependency selection for `{}` requirement `{}`",
+                selection.consumer,
+                selection.requirement_id
+            );
+        }
+    }
+    let _lock = lock_plugin_root(root)?;
+    let host = load_host_catalog(root)?;
+    let current = snapshot_plugin_root(root, &host)?;
+    let mut selections = current.dependency_choices().to_vec();
+    selections.retain(|selection| {
+        !replacement_keys.contains(&(&selection.consumer, selection.requirement_id.as_str()))
+    });
+    drop(replacement_keys);
+    selections.extend(replacements);
+    selections.sort_by(|left, right| {
+        left.consumer
+            .cmp(&right.consumer)
+            .then_with(|| left.requirement_id.cmp(&right.requirement_id))
+    });
+    let (resolved, selections) = resolve_adopted_dependencies(&host, &current, selections)?;
+    let document = DependencySelectionsDocument {
+        schema: DEPENDENCY_SELECTIONS_SCHEMA.to_owned(),
+        selections,
+    };
+    let bytes = serde_json::to_vec_pretty(&document).context("encode dependency selections")?;
+    atomic_write(&root.join(PLUGIN_ROOT).join(DEPENDENCY_SELECTIONS), &bytes)?;
+    Ok(resolved)
+}
+
+fn resolve_adopted_dependencies(
+    host: &HostInput,
+    current: &PluginRootSnapshot,
+    mut selections: Vec<DependencyChoice>,
+) -> anyhow::Result<(ResolvedApp, Vec<DependencyChoice>)> {
+    selections.sort_by(|left, right| {
+        left.consumer
+            .cmp(&right.consumer)
+            .then_with(|| left.requirement_id.cmp(&right.requirement_id))
+    });
+    let candidate = PluginRootSnapshot::new(
+        current.releases().iter().cloned(),
+        current.instances().iter().cloned(),
+        current.disabled().iter().cloned(),
+    )
+    .with_dependency_choices(selections);
+    let proposed = host.propose(&candidate).map_err(anyhow::Error::msg)?;
+    let selections = proposed.dependency_choices().to_vec();
+    let materialized = PluginRootSnapshot::new(
+        current.releases().iter().cloned(),
+        current.instances().iter().cloned(),
+        current.disabled().iter().cloned(),
+    )
+    .with_dependency_choices(selections.clone());
+    let resolved = host.resolve(&materialized).map_err(anyhow::Error::msg)?;
+    Ok((resolved, selections))
+}
+
 fn set_instance_disabled_inner(
     root: &Path,
     plugin_id: &str,
@@ -947,7 +1208,7 @@ fn set_instance_disabled_inner(
     validate_instance_filename(instance)?;
     let _lock = lock_plugin_root(root)?;
     let host = load_host_catalog(root)?;
-    let current = snapshot_plugin_root(root)?;
+    let current = snapshot_plugin_root(root, &host)?;
     let base_revision = configuration_authority::revision_for_snapshot(&current)?;
     if let Some(expected_revision) = expected_revision {
         configuration_authority::ensure_revision(expected_revision, &base_revision)?;
@@ -959,13 +1220,16 @@ fn set_instance_disabled_inner(
     } else if !disabled.remove(&id) {
         bail!("Plugin Instance `{id}` is not disabled");
     }
-    let candidate = PluginRootSnapshot::new(
-        current.releases().iter().cloned(),
-        current.instances().iter().cloned(),
-        disabled,
+    let candidate = preserve_dependency_selections(
+        PluginRootSnapshot::new(
+            current.releases().iter().cloned(),
+            current.instances().iter().cloned(),
+            disabled,
+        ),
+        &current,
     );
     let candidate_revision = configuration_authority::revision_for_snapshot(&candidate)?;
-    let resolved = resolve_plugin_root(&host, &candidate).map_err(anyhow::Error::msg)?;
+    let resolved = host.resolve(&candidate).map_err(anyhow::Error::msg)?;
     let marker = root
         .join(PLUGIN_ROOT)
         .join(plugin_id)
@@ -989,22 +1253,25 @@ pub fn remove_instance_difference(
     validate_instance_filename(instance)?;
     let _lock = lock_plugin_root(root)?;
     let host = load_host_catalog(root)?;
-    let current = snapshot_plugin_root(root)?;
+    let current = snapshot_plugin_root(root, &host)?;
     let id = PluginInstanceId::new(plugin_id, instance);
-    let candidate = PluginRootSnapshot::new(
-        current.releases().iter().cloned(),
-        current
-            .instances()
-            .iter()
-            .filter(|item| item.id() != &id)
-            .cloned(),
-        current
-            .disabled()
-            .iter()
-            .filter(|item| *item != &id)
-            .cloned(),
+    let candidate = preserve_dependency_selections(
+        PluginRootSnapshot::new(
+            current.releases().iter().cloned(),
+            current
+                .instances()
+                .iter()
+                .filter(|item| item.id() != &id)
+                .cloned(),
+            current
+                .disabled()
+                .iter()
+                .filter(|item| *item != &id)
+                .cloned(),
+        ),
+        &current,
     );
-    let resolved = resolve_plugin_root(&host, &candidate).map_err(anyhow::Error::msg)?;
+    let resolved = host.resolve(&candidate).map_err(anyhow::Error::msg)?;
     let plugin_directory = root.join(PLUGIN_ROOT).join(plugin_id);
     remove_if_exists(&plugin_directory.join(format!("{instance}.toml")))?;
     remove_if_exists(&plugin_directory.join(format!("{instance}.disabled")))?;
@@ -1016,25 +1283,28 @@ pub fn remove_plugin(root: &Path, plugin_id: &str) -> anyhow::Result<(ResolvedAp
     validate_existing_plugin_id(plugin_id)?;
     let _lock = lock_plugin_root(root)?;
     let host = load_host_catalog(root)?;
-    let current = snapshot_plugin_root(root)?;
-    let candidate = PluginRootSnapshot::new(
-        current
-            .releases()
-            .iter()
-            .filter(|release| release.plugin_id() != plugin_id)
-            .cloned(),
-        current
-            .instances()
-            .iter()
-            .filter(|instance| instance.id().plugin_id() != plugin_id)
-            .cloned(),
-        current
-            .disabled()
-            .iter()
-            .filter(|instance| instance.plugin_id() != plugin_id)
-            .cloned(),
+    let current = snapshot_plugin_root(root, &host)?;
+    let candidate = preserve_dependency_selections(
+        PluginRootSnapshot::new(
+            current
+                .releases()
+                .iter()
+                .filter(|release| release.plugin_id() != plugin_id)
+                .cloned(),
+            current
+                .instances()
+                .iter()
+                .filter(|instance| instance.id().plugin_id() != plugin_id)
+                .cloned(),
+            current
+                .disabled()
+                .iter()
+                .filter(|instance| instance.plugin_id() != plugin_id)
+                .cloned(),
+        ),
+        &current,
     );
-    let resolved = resolve_plugin_root(&host, &candidate).map_err(anyhow::Error::msg)?;
+    let resolved = host.resolve(&candidate).map_err(anyhow::Error::msg)?;
     let plugin_directory = root.join(PLUGIN_ROOT).join(plugin_id);
     if !plugin_directory.exists() {
         bail!("Plugin `{plugin_id}` has no Plugin Root directory");
@@ -1105,7 +1375,10 @@ fn remove_if_exists(path: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lenso_app_plan::authoring::{HostDefaultPlugin, HostPluginRelease, HostSlot};
+    use lenso_app_plan::authoring::{
+        HostBinding, HostCatalog, HostDefaultPlugin, HostPluginRelease, HostSlot,
+    };
+    use lenso_app_plan::{CapabilityEndpointPlan, CapabilityRequirementPlan};
 
     fn fixture_root() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
@@ -1137,6 +1410,246 @@ mod tests {
             resolved.instances()[0].id().to_string(),
             "example.agent/default"
         );
+    }
+
+    #[test]
+    fn dependency_choice_is_materialized_and_survives_a_new_compatible_provider() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".lenso")).unwrap();
+        let consumer = PluginDescriptor::new("example.copy", "1.0.0", "copy")
+            .with_authoring(2, "lenso.test-authoring@2")
+            .with_requirement(
+                CapabilityRequirementPlan::one("example.store@1", "1.0.0")
+                    .with_requirement_id("source"),
+            );
+        let store = |plugin_id: &str| {
+            PluginDescriptor::new(plugin_id, "1.0.0", "store").with_capability(
+                CapabilityEndpointPlan::new("example.store@1", "1.0.0", ["get"]),
+            )
+        };
+        let host = HostCatalog::new(
+            [HostSlot::one("copy"), HostSlot::many("store")],
+            [
+                HostPluginRelease::new(consumer.clone()),
+                HostPluginRelease::new(store("example.store.a")),
+            ],
+            [
+                HostDefaultPlugin::new("example.copy", "default"),
+                HostDefaultPlugin::new("example.store.a", "default"),
+            ],
+        )
+        .with_bindings([HostBinding::new(
+            PluginInstanceId::new("example.copy", "default"),
+            "example.store@1",
+            "store",
+        )
+        .with_requirement_id("source")
+        .selectable(None)]);
+        fs::write(
+            root.path().join(HOST_CATALOG),
+            serde_json::to_vec(&host).unwrap(),
+        )
+        .unwrap();
+
+        set_dependency_selection(
+            root.path(),
+            PluginInstanceId::new("example.copy", "default"),
+            "source",
+            Some(PluginInstanceId::new("example.store.a", "default")),
+        )
+        .unwrap();
+        assert!(root.path().join("plugins/dependencies.json").is_file());
+
+        let expanded = HostCatalog::new(
+            [HostSlot::one("copy"), HostSlot::many("store")],
+            [
+                HostPluginRelease::new(consumer),
+                HostPluginRelease::new(store("example.store.a")),
+                HostPluginRelease::new(store("example.store.b")),
+            ],
+            [
+                HostDefaultPlugin::new("example.copy", "default"),
+                HostDefaultPlugin::new("example.store.a", "default"),
+                HostDefaultPlugin::new("example.store.b", "default"),
+            ],
+        )
+        .with_bindings([HostBinding::new(
+            PluginInstanceId::new("example.copy", "default"),
+            "example.store@1",
+            "store",
+        )
+        .with_requirement_id("source")
+        .selectable(None)]);
+        fs::write(
+            root.path().join(HOST_CATALOG),
+            serde_json::to_vec(&expanded).unwrap(),
+        )
+        .unwrap();
+
+        let resolved = load_resolved_app(root.path()).unwrap();
+        assert_eq!(
+            resolved.plan().capability_bindings()[0].provider_instance(),
+            "example.store.a/default"
+        );
+    }
+
+    #[test]
+    fn first_bind_repairs_the_requested_legacy_ambiguity_and_materializes_unique_choices() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".lenso")).unwrap();
+        let consumer = PluginDescriptor::new("example.copy", "1.0.0", "copy")
+            .with_authoring(2, "lenso.test-authoring@2")
+            .with_requirement(
+                CapabilityRequirementPlan::one("example.store@1", "1.0.0")
+                    .with_requirement_id("source"),
+            )
+            .with_requirement(
+                CapabilityRequirementPlan::one("example.audit@1", "1.0.0")
+                    .with_requirement_id("audit"),
+            );
+        let store = |plugin_id: &str| {
+            PluginDescriptor::new(plugin_id, "1.0.0", "store").with_capability(
+                CapabilityEndpointPlan::new("example.store@1", "1.0.0", ["get"]),
+            )
+        };
+        let audit = PluginDescriptor::new("example.audit", "1.0.0", "audit").with_capability(
+            CapabilityEndpointPlan::new("example.audit@1", "1.0.0", ["record"]),
+        );
+        let host = HostCatalog::new(
+            [
+                HostSlot::one("copy"),
+                HostSlot::many("store"),
+                HostSlot::one("audit"),
+            ],
+            [
+                HostPluginRelease::new(consumer),
+                HostPluginRelease::new(store("example.store.a")),
+                HostPluginRelease::new(store("example.store.b")),
+                HostPluginRelease::new(audit),
+            ],
+            [
+                HostDefaultPlugin::new("example.copy", "default"),
+                HostDefaultPlugin::new("example.store.a", "default"),
+                HostDefaultPlugin::new("example.store.b", "default"),
+                HostDefaultPlugin::new("example.audit", "default"),
+            ],
+        )
+        .with_bindings([HostBinding::new(
+            PluginInstanceId::new("example.copy", "default"),
+            "example.store@1",
+            "store",
+        )
+        .with_requirement_id("source")
+        .selectable(None)]);
+        fs::write(
+            root.path().join(HOST_CATALOG),
+            serde_json::to_vec(&host).unwrap(),
+        )
+        .unwrap();
+
+        let resolved = set_dependency_selection(
+            root.path(),
+            PluginInstanceId::new("example.copy", "default"),
+            "source",
+            Some(PluginInstanceId::new("example.store.b", "default")),
+        )
+        .unwrap();
+        let bindings = resolved
+            .plan()
+            .capability_bindings()
+            .iter()
+            .map(|binding| (binding.requirement_id(), binding.provider_instance()))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(bindings["source"], "example.store.b/default");
+        assert_eq!(bindings["audit"], "example.audit/default");
+        let document: DependencySelectionsDocument = serde_json::from_slice(
+            &fs::read(root.path().join("plugins/dependencies.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(document.selections.len(), 1);
+    }
+
+    #[test]
+    fn batch_bind_adopts_two_ambiguous_requirements_atomically() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".lenso")).unwrap();
+        let consumer = PluginDescriptor::new("example.copy", "1.0.0", "copy")
+            .with_authoring(2, "lenso.test-authoring@2")
+            .with_requirement(
+                CapabilityRequirementPlan::one("example.store@1", "1.0.0")
+                    .with_requirement_id("source"),
+            )
+            .with_requirement(
+                CapabilityRequirementPlan::one("example.store@1", "1.0.0")
+                    .with_requirement_id("destination"),
+            );
+        let store = |plugin_id: &str| {
+            PluginDescriptor::new(plugin_id, "1.0.0", "store").with_capability(
+                CapabilityEndpointPlan::new("example.store@1", "1.0.0", ["get"]),
+            )
+        };
+        let host = HostCatalog::new(
+            [HostSlot::one("copy"), HostSlot::many("store")],
+            [
+                HostPluginRelease::new(consumer),
+                HostPluginRelease::new(store("example.store.a")),
+                HostPluginRelease::new(store("example.store.b")),
+            ],
+            [
+                HostDefaultPlugin::new("example.copy", "default"),
+                HostDefaultPlugin::new("example.store.a", "default"),
+                HostDefaultPlugin::new("example.store.b", "default"),
+            ],
+        )
+        .with_bindings([
+            HostBinding::new(
+                PluginInstanceId::new("example.copy", "default"),
+                "example.store@1",
+                "store",
+            )
+            .with_requirement_id("source")
+            .selectable(None),
+            HostBinding::new(
+                PluginInstanceId::new("example.copy", "default"),
+                "example.store@1",
+                "store",
+            )
+            .with_requirement_id("destination")
+            .selectable(None),
+        ]);
+        fs::write(
+            root.path().join(HOST_CATALOG),
+            serde_json::to_vec(&host).unwrap(),
+        )
+        .unwrap();
+        let consumer = PluginInstanceId::new("example.copy", "default");
+
+        let resolved = set_dependency_selections(
+            root.path(),
+            [
+                DependencyChoice {
+                    consumer: consumer.clone(),
+                    requirement_id: "source".to_owned(),
+                    provider: Some(PluginInstanceId::new("example.store.a", "default")),
+                },
+                DependencyChoice {
+                    consumer,
+                    requirement_id: "destination".to_owned(),
+                    provider: Some(PluginInstanceId::new("example.store.b", "default")),
+                },
+            ],
+        )
+        .unwrap();
+        let bindings = resolved
+            .plan()
+            .capability_bindings()
+            .iter()
+            .map(|binding| (binding.requirement_id(), binding.provider_instance()))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(bindings["source"], "example.store.a/default");
+        assert_eq!(bindings["destination"], "example.store.b/default");
     }
 
     #[test]

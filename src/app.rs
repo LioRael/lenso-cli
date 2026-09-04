@@ -6,14 +6,21 @@ use lenso_app_plan::authoring::HostCatalog;
 
 use crate::plugins::{load_resolved_app, project_root};
 
+mod build;
+mod prepare;
+
 #[derive(Clone, Debug, Subcommand)]
 pub(crate) enum AppCommand {
+    /// Build Host authoring artifacts from static TypeScript and verified bundles.
+    Build(build::HostBuildArgs),
+    /// Prepare one immutable, offline Host distribution for an exact target.
+    Prepare(prepare::PrepareArgs),
     /// Create an App workspace from one exact Host executable and Host Catalog.
     Init(AppInitArgs),
     /// Validate the App derived from this Host and its `plugins/` directory.
     Check(ProjectArgs),
     /// Explain the derived Plugin Instances, provenance, and bindings.
-    Show(ProjectArgs),
+    Show(ShowArgs),
 }
 
 #[derive(Args, Clone, Debug)]
@@ -42,8 +49,26 @@ pub(crate) struct ProjectArgs {
     json: bool,
 }
 
+#[derive(Args, Clone, Debug)]
+pub(crate) struct ShowArgs {
+    /// App project root. Defaults to the current directory.
+    #[arg(long)]
+    root: Option<PathBuf>,
+    /// Emit a stable JSON report.
+    #[arg(long)]
+    json: bool,
+    /// Distribution Host authority used by the private runtime resolver.
+    #[arg(long, hide = true, requires = "runtime_json")]
+    host_build: Option<PathBuf>,
+    /// Emit the exact private runtime input rather than the management projection.
+    #[arg(long, hide = true, requires = "host_build")]
+    runtime_json: bool,
+}
+
 pub(crate) fn app(command: AppCommand) -> anyhow::Result<()> {
     match command {
+        AppCommand::Build(args) => build::build(&args),
+        AppCommand::Prepare(args) => prepare::prepare(args),
         AppCommand::Init(args) => init(args),
         AppCommand::Check(args) => check(args),
         AppCommand::Show(args) => show(args),
@@ -132,8 +157,16 @@ fn check(args: ProjectArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn show(args: ProjectArgs) -> anyhow::Result<()> {
+fn show(args: ShowArgs) -> anyhow::Result<()> {
     let root = project_root(args.root)?;
+    if args.runtime_json {
+        let host_build = args
+            .host_build
+            .context("runtime resolution needs Host authority")?;
+        let resolution = lenso_app_authoring::resolve_runtime_app(&root, &host_build)?;
+        println!("{}", serde_json::to_string(&resolution)?);
+        return Ok(());
+    }
     let resolved = load_resolved_app(&root)?;
     if args.json {
         let instances = resolved
