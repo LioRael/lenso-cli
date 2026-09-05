@@ -8,7 +8,7 @@ use super::*;
 fn bun_descriptor_lowers_named_dependencies_into_the_plugin_contract() {
     let descriptor = parse_descriptor_bytes(
         br#"{
-            "abi":"lenso.json-request@1",
+            "abi":"lenso.json-host-imports@2",
             "configuration_schema":{"type":"object","required":["prefix"]},
             "capabilities":[{
                 "capability_id":"company.notes@1",

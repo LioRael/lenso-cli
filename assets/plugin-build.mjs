@@ -345,7 +345,9 @@ const fingerprint = buildApi.fingerprintBuildInputs({
 fs.writeFileSync(report, JSON.stringify({
   fingerprint,
   descriptor: {
-    abi: "lenso.json-request@1",
+    abi: requiredCapabilities.length === 0
+      ? "lenso.json-request@1"
+      : "lenso.json-host-imports@2",
     ...(configurationSchema === undefined ? {} : { configuration_schema: configurationSchema }),
     capabilities: loweredProviders.map((provider) => ({
       capability_id: provider.capability_id,

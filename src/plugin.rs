@@ -980,9 +980,12 @@ fn resolve_dev_selection(
 fn parse_descriptor_bytes(bytes: &[u8]) -> anyhow::Result<PluginDescriptor> {
     let descriptor: PluginDescriptor =
         serde_json::from_slice(bytes).context("parse generated Plugin descriptor")?;
-    if descriptor.abi != "lenso.json-request@1" {
+    if !matches!(
+        descriptor.abi.as_str(),
+        "lenso.json-request@1" | "lenso.json-host-imports@2"
+    ) {
         bail!(
-            "unsupported Plugin descriptor ABI `{}`; expected request-only V1",
+            "unsupported Plugin descriptor ABI `{}`; expected request V1 or host-imports V2",
             descriptor.abi
         );
     }
