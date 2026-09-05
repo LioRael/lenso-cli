@@ -1,5 +1,11 @@
 ## lenso-cli@0.2.31
 
+## 0.16.1
+
+### Patch Changes
+
+- c569f1a: Package Rust Process implementations with the canonical Rust target triple so TypeScript Hosts can admit them on macOS and Windows.
+
 ## 0.16.0
 
 ### Minor Changes
