@@ -8,7 +8,7 @@ use super::*;
 fn bun_descriptor_lowers_named_dependencies_into_the_plugin_contract() {
     let descriptor = parse_descriptor_bytes(
         br#"{
-            "abi":"lenso.json-request@1",
+            "abi":"lenso.json-host-imports@2",
             "configuration_schema":{"type":"object","required":["prefix"]},
             "capabilities":[{
                 "capability_id":"company.notes@1",
@@ -205,18 +205,25 @@ fn rust_plugin_scaffold_exposes_only_portable_authoring() {
 }
 
 #[test]
-fn bun_plugin_scaffold_uses_generated_runtime_lowering() {
+fn bun_plugin_scaffold_uses_generic_and_product_owned_declarations() {
     let files = bun_plugin_scaffold("example.echo");
     let package = files.get(Path::new("package.json")).unwrap();
     let author = files.get(Path::new("src/plugin.ts")).unwrap();
-    let runtime = files.get(Path::new("src/lenso.bun.generated.ts")).unwrap();
 
     assert!(package.contains("\"runtime\": \"bun\""));
-    assert!(package.contains("\"@lenso/bun\": \"0.3.0\""));
-    assert!(author.contains("bindToolProviderProvider"));
+    assert!(package.contains("\"@lenso/bun-plugin\": \"0.2.1\""));
+    assert!(package.contains("\"@lenso/agent-tool-sdk\": \"0.1.0\""));
+    assert!(author.contains("tools(["));
+    assert!(author.contains("schema.object"));
     assert!(author.contains("definePlugin"));
     assert!(!author.contains("serve("));
-    assert!(runtime.contains("serve(plugin)"));
+    for generated in [
+        "src/lenso.bun.generated.ts",
+        "src/lenso.describe.generated.ts",
+        "src/lenso.invoke.generated.ts",
+    ] {
+        assert!(!files.contains_key(Path::new(generated)));
+    }
 }
 
 #[test]
@@ -260,6 +267,38 @@ fn multi_scaffold_keeps_one_business_source_for_two_outputs() {
         );
     }
 }
+
+#[test]
+fn cargo_project_can_declare_rust_and_typescript_implementations() {
+    let root = tempfile::tempdir().unwrap();
+    let manifest = root.path().join("Cargo.toml");
+    fs::write(
+        &manifest,
+        r#"[package]
+name = "document-sync"
+version = "0.1.0"
+[package.metadata.lenso]
+plugin-id = "example.document-sync"
+root-slot = "document-sync"
+[package.metadata.lenso-cli]
+implementations = [
+  { id = "rust-process", path = ".", runtime = "process" },
+  { id = "typescript-bun", path = "typescript", runtime = "bun" },
+]
+"#,
+    )
+    .unwrap();
+
+    let package = read_package(&manifest).unwrap();
+    assert_eq!(
+        project_runtime(&package).unwrap(),
+        ProjectRuntime::Composite
+    );
+    let implementations = &package.metadata.lenso_cli.unwrap().implementations;
+    assert_eq!(implementations[0].id, "rust-process");
+    assert_eq!(implementations[1].path, Path::new("typescript"));
+}
+
 #[test]
 fn duplicate_plugin_identity_is_rejected() {
     let root = tempfile::tempdir().unwrap();
@@ -343,6 +382,7 @@ async fn clean_room_plugin_runs_new_check_dev_and_pack() {
         operation: Some("execute".to_owned()),
         request_json: r#"{"name":"company.uppercase","arguments_json":"{\"text\":\"hello\"}"}"#
             .to_owned(),
+        config_json: "{}".to_owned(),
         json: true,
         watch: false,
         implementation: DevImplementationArg::Auto,
@@ -392,6 +432,7 @@ async fn clean_room_multi_plugin_auto_dev_runs_the_process_build() {
         request_json:
             r#"{"name":"company.multi-smoke","arguments_json":"{\"text\":\"auto-process\"}"}"#
                 .to_owned(),
+        config_json: "{}".to_owned(),
         json: true,
         watch: false,
         implementation: DevImplementationArg::Auto,
@@ -425,6 +466,7 @@ async fn clean_room_process_plugin_runs_new_check_dev_and_pack() {
         operation: Some("execute".to_owned()),
         request_json: r#"{"name":"company.uppercase","arguments_json":"{\"text\":\"hello\"}"}"#
             .to_owned(),
+        config_json: "{}".to_owned(),
         json: true,
         watch: false,
         implementation: DevImplementationArg::Auto,

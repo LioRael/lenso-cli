@@ -12,6 +12,7 @@ use lenso_app_plan::{
     CapabilityBinding, CapabilityEndpointPlan, CapabilityRequirementPlan, PluginInstancePlan,
     ResolvedAppPlan,
 };
+use lenso_bun_adapter::{BUN_AUTHORING_RUNTIME_PROFILE, BunAdapter};
 use lenso_kernel::{
     CancellationToken, ExecutionAdapter, ExecutionAdapterCatalog, Kernel, NoopPluginLifecycle,
     PreparedNativeApp, PreparedNativePlugin, RuntimeFailure, ShutdownOutcome,
@@ -30,9 +31,9 @@ use super::{
     BuildProfile, BunPackage, Command, DevImplementationArg, ExecutionClassId,
     PROCESS_EXECUTION_CLASS, PROCESS_RUNTIME_PROFILE_V1, PROCESS_RUNTIME_PROFILE_V2, Path,
     PluginCapability, PluginDescriptor, PluginDevArgs, ProjectRuntime, Value, VerifiedBundle,
-    WASM_EXECUTION_CLASS, env, fs, materialize_bun, materialize_dev, one_capability,
-    parse_descriptor, project_root, project_runtime, read_bun_package, read_bundle_manifest,
-    read_package, resolve_dev_selection, run_bun_output,
+    WASM_EXECUTION_CLASS, env, fs, implementation_root, materialize_bun, materialize_composite,
+    materialize_dev, one_capability, parse_descriptor, project_root, project_runtime,
+    read_bun_package, read_bundle_manifest, read_package, resolve_dev_selection,
 };
 
 pub(super) async fn run(args: PluginDevArgs) -> anyhow::Result<()> {
@@ -72,22 +73,35 @@ async fn dev_once(args: &PluginDevArgs) -> anyhow::Result<()> {
     if let Some(package) = read_bun_package(&root)? {
         if !matches!(
             args.implementation,
-            DevImplementationArg::Auto | DevImplementationArg::All
+            DevImplementationArg::Auto | DevImplementationArg::Bun | DevImplementationArg::All
         ) {
             bail!("Bun Plugin projects support `--implementation auto` or `all`");
         }
-        return dev_bun(&root, &package, args);
+        return dev_bun(&root, &package, args).await;
     }
     let package = read_package(&root.join("Cargo.toml"))?;
     let declared_runtime = project_runtime(&package)?;
+    if declared_runtime == ProjectRuntime::Composite {
+        return dev_composite(&root, &package, args).await;
+    }
     let selection = resolve_dev_selection(declared_runtime, args.implementation)?;
+    dev_cargo(&root, &package, declared_runtime, selection, args).await
+}
+
+async fn dev_cargo(
+    root: &Path,
+    package: &super::CargoPackage,
+    declared_runtime: ProjectRuntime,
+    selection: super::DevSelection,
+    args: &PluginDevArgs,
+) -> anyhow::Result<()> {
     let dev_runtime = selection.invoke;
     let temporary = tempfile::tempdir().context("create Plugin dev directory")?;
     let output = temporary.path().join("dev.lenso-plugin");
     let verified = materialize_dev(
-        &root,
+        root,
         &output,
-        &package,
+        package,
         declared_runtime,
         selection.build,
         BuildProfile::Development,
@@ -116,13 +130,81 @@ async fn dev_once(args: &PluginDevArgs) -> anyhow::Result<()> {
                     execution_class: ExecutionClassId::new(dev_class),
                     runtime_profile: "lenso.wasm-component@1".to_owned(),
                 }],
-                ProjectRuntime::Multi | ProjectRuntime::Bun => {
+                ProjectRuntime::Composite | ProjectRuntime::Multi | ProjectRuntime::Bun => {
                     unreachable!("development resolves to one invocation runtime")
                 }
             },
         },
     )?;
     invoke_selected_dev(&output, &verified, selected, dev_runtime, args).await
+}
+
+async fn dev_composite(
+    root: &Path,
+    package: &super::CargoPackage,
+    args: &PluginDevArgs,
+) -> anyhow::Result<()> {
+    let declarations = &package
+        .metadata
+        .lenso_cli
+        .as_ref()
+        .expect("composite projects have CLI metadata")
+        .implementations;
+    let declared = |runtime: &str| -> anyhow::Result<&super::LensoCliImplementation> {
+        let matches = declarations
+            .iter()
+            .filter(|implementation| implementation.runtime == runtime)
+            .collect::<Vec<_>>();
+        let [implementation] = matches.as_slice() else {
+            bail!("composite Plugin must declare exactly one `{runtime}` implementation");
+        };
+        Ok(*implementation)
+    };
+    match args.implementation {
+        DevImplementationArg::Wasm => {
+            bail!("composite Plugin declares Process and Bun implementations")
+        }
+        DevImplementationArg::Bun => {
+            let implementation = declared("bun")?;
+            let implementation_root = implementation_root(root, &implementation.path)?;
+            let bun_package = read_bun_package(&implementation_root)?
+                .context("declared Bun implementation has no Lenso package metadata")?;
+            dev_bun(&implementation_root, &bun_package, args).await
+        }
+        DevImplementationArg::Auto | DevImplementationArg::Process => {
+            let implementation = declared("process")?;
+            let implementation_root = implementation_root(root, &implementation.path)?;
+            let process_package = read_package(&implementation_root.join("Cargo.toml"))?;
+            dev_cargo(
+                &implementation_root,
+                &process_package,
+                ProjectRuntime::Process,
+                super::DevSelection {
+                    build: super::DevBuild::Process,
+                    invoke: ProjectRuntime::Process,
+                },
+                args,
+            )
+            .await
+        }
+        DevImplementationArg::All => {
+            let temporary = tempfile::tempdir().context("create Plugin dev directory")?;
+            let output = temporary.path().join("dev.lenso-plugin");
+            let verified =
+                materialize_composite(root, &output, package, BuildProfile::Development)?;
+            let selected = resolve_implementation(
+                &read_bundle_manifest(&output)?,
+                &ImplementationPolicy {
+                    host_target: format!("{}-unknown-{}", env::consts::ARCH, env::consts::OS),
+                    runtimes: vec![RuntimeAdmission {
+                        execution_class: ExecutionClassId::new(PROCESS_EXECUTION_CLASS),
+                        runtime_profile: PROCESS_RUNTIME_PROFILE_V2.to_owned(),
+                    }],
+                },
+            )?;
+            invoke_selected_dev(&output, &verified, selected, ProjectRuntime::Process, args).await
+        }
+    }
 }
 
 async fn invoke_selected_dev(
@@ -141,7 +223,7 @@ async fn invoke_selected_dev(
     let source_descriptor = match dev_runtime {
         ProjectRuntime::Wasm => parse_descriptor(&artifact_bytes)?,
         ProjectRuntime::Process => read_process_descriptor(&artifact_path)?.descriptor,
-        ProjectRuntime::Multi | ProjectRuntime::Bun => {
+        ProjectRuntime::Composite | ProjectRuntime::Multi | ProjectRuntime::Bun => {
             unreachable!("development resolves to one invocation runtime")
         }
     };
@@ -177,6 +259,7 @@ async fn invoke_selected_dev(
         source_capability,
         operation: &operation,
         request,
+        config_json: &args.config_json,
     };
     if dev_runtime == ProjectRuntime::Process {
         if !descriptor.required_capabilities().is_empty() {
@@ -214,6 +297,7 @@ struct DevAdapterInvocation<'a> {
     source_capability: &'a PluginCapability,
     operation: &'a str,
     request: Value,
+    config_json: &'a str,
 }
 
 async fn invoke_dev_wasm(invocation: DevAdapterInvocation<'_>) -> anyhow::Result<Value> {
@@ -227,7 +311,10 @@ async fn invoke_dev_wasm(invocation: DevAdapterInvocation<'_>) -> anyhow::Result
         source_capability,
         operation,
         request,
+        config_json,
     } = invocation;
+    let configuration: Value = serde_json::from_str(config_json)
+        .context("Plugin development configuration is not valid JSON")?;
     let artifact =
         ArtifactHandle::open(artifact_path, artifact_digest, artifact_bytes.len() as u64)
             .map_err(|error| runtime_error("open Plugin artifact", &error))?;
@@ -239,6 +326,7 @@ async fn invoke_dev_wasm(invocation: DevAdapterInvocation<'_>) -> anyhow::Result
             PluginInstancePlan::new("plugin", plugin_id)
                 .with_authoring(descriptor.authoring_version(), descriptor.runtime_profile())
                 .with_entrypoint(descriptor.entrypoint())
+                .with_configuration(serde_json::to_string(&configuration)?)
                 .with_execution_class(descriptor.execution_class().clone())
                 .with_capability(capability.clone()),
             dev_client_plan(capability),
@@ -265,7 +353,10 @@ async fn invoke_dev_process(invocation: DevAdapterInvocation<'_>) -> anyhow::Res
         source_capability,
         operation,
         request,
+        config_json,
     } = invocation;
+    let configuration: Value = serde_json::from_str(config_json)
+        .context("Plugin development configuration is not valid JSON")?;
     let artifact = ArtifactHandle::open(executable, artifact_digest, artifact_bytes.len() as u64)
         .map_err(|error| runtime_error("open Plugin artifact", &error))?;
     let artifacts = ArtifactCatalog::new()
@@ -276,6 +367,7 @@ async fn invoke_dev_process(invocation: DevAdapterInvocation<'_>) -> anyhow::Res
             PluginInstancePlan::new("plugin", plugin_id)
                 .with_authoring(descriptor.authoring_version(), descriptor.runtime_profile())
                 .with_entrypoint(descriptor.entrypoint())
+                .with_configuration(serde_json::to_string(&configuration)?)
                 .with_execution_class(descriptor.execution_class().clone())
                 .with_capability(capability.clone()),
             dev_client_plan(capability),
@@ -496,14 +588,14 @@ fn print_dev_response(
     Ok(())
 }
 
-fn dev_bun(root: &Path, package: &BunPackage, args: &PluginDevArgs) -> anyhow::Result<()> {
+async fn dev_bun(root: &Path, package: &BunPackage, args: &PluginDevArgs) -> anyhow::Result<()> {
     let temporary = tempfile::tempdir().context("create Bun Plugin dev directory")?;
-    let (verified, descriptor) = materialize_bun(
-        root,
-        &temporary.path().join("dev.lenso-plugin"),
-        package,
-        BuildProfile::Development,
-    )?;
+    let output = temporary.path().join("dev.lenso-plugin");
+    let (verified, descriptor) =
+        materialize_bun(root, &output, package, BuildProfile::Development)?;
+    if !descriptor.required_capabilities.is_empty() {
+        bail!("Bun Plugin development invocation requires an App to bind declared dependencies");
+    }
     let capability = one_capability(&descriptor)?;
     let operation = args.operation.clone().unwrap_or_else(|| {
         capability
@@ -520,34 +612,56 @@ fn dev_bun(root: &Path, package: &BunPackage, args: &PluginDevArgs) -> anyhow::R
     }
     let request: Value = serde_json::from_str(&args.request_json)
         .context("Plugin development request is not valid JSON")?;
-    let request_json = serde_json::to_string(&request)?;
-    let output = run_bun_output(
-        root,
-        &[
-            "run",
-            "src/lenso.invoke.generated.ts",
-            "--",
-            &capability.capability_id,
-            &operation,
-            &request_json,
-        ],
-        "invoke Bun Plugin",
+    let configuration: Value = serde_json::from_str(&args.config_json)
+        .context("Plugin development configuration is not valid JSON")?;
+    let selected = resolve_implementation(
+        &read_bundle_manifest(&output)?,
+        &ImplementationPolicy {
+            host_target: format!("{}-unknown-{}", env::consts::ARCH, env::consts::OS),
+            runtimes: vec![RuntimeAdmission {
+                execution_class: ExecutionClassId::bun_child_process(),
+                runtime_profile: BUN_AUTHORING_RUNTIME_PROFILE.to_owned(),
+            }],
+        },
     )?;
-    let outcome: Value =
-        serde_json::from_slice(&output).context("Bun Plugin returned invalid JSON")?;
-    if let Some(response) = outcome.get("ok") {
-        return print_dev_response(
-            &verified,
-            &capability.capability_id,
-            &operation,
-            response,
-            args.json,
-        );
-    }
-    if let Some(error) = outcome.get("error") {
-        bail!("Plugin returned Domain Error: {error}");
-    }
-    bail!("Bun Plugin returned no terminal outcome")
+    let artifact_path = output.join(&selected.artifact.path);
+    let artifact_bytes = fs::read(&artifact_path)?;
+    let artifact = ArtifactHandle::open(
+        &artifact_path,
+        &selected.artifact.digest,
+        artifact_bytes.len() as u64,
+    )
+    .map_err(|error| runtime_error("open Bun Plugin artifact", &error))?;
+    let artifacts = ArtifactCatalog::new()
+        .with_artifact("plugin", artifact)
+        .map_err(|error| runtime_error("register Bun Plugin artifact", &error))?;
+    let [selected_capability] = selected.descriptor.provided_capabilities() else {
+        bail!("Bun Plugin development requires exactly one provided Capability");
+    };
+    let plan = ResolvedAppPlan::new(
+        vec![
+            PluginInstancePlan::new("plugin", &verified.plugin_id)
+                .with_authoring(2, BUN_AUTHORING_RUNTIME_PROFILE)
+                .with_entrypoint(selected.descriptor.entrypoint())
+                .with_configuration(serde_json::to_string(&configuration)?)
+                .with_execution_class(ExecutionClassId::bun_child_process())
+                .with_capability(selected_capability.clone()),
+            dev_client_plan(selected_capability),
+        ],
+        vec![dev_client_binding(selected_capability)],
+    );
+    let bun = env::var_os("BUN_BIN").unwrap_or_else(|| "bun".into());
+    let adapter = BunAdapter::production(bun)
+        .with_artifacts(artifacts)
+        .with_authoring_codec(DynamicJsonCodec::new(capability));
+    let response = invoke_dev_adapter(adapter, &plan, &operation, request).await?;
+    print_dev_response(
+        &verified,
+        &capability.capability_id,
+        &operation,
+        &response,
+        args.json,
+    )
 }
 
 fn runtime_error(action: &str, error: &RuntimeFailure) -> anyhow::Error {
