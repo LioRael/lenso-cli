@@ -9,23 +9,29 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::host_authoring::HostInput;
+use crate::host_authoring::{HOST_BUILD, HostInput};
 use anyhow::{Context, bail};
 use lenso_app_plan::authoring::{
-    PluginInstanceId, PluginRootInstance, PluginRootResolutionError, PluginRootSnapshot,
-    ResolvedApp,
+    DependencyChoice, PluginInstanceId, PluginRootInstance, PluginRootResolutionError,
+    PluginRootSnapshot, ResolvedApp,
 };
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::{
-    MAX_CONFIGURATION_BYTES, PLUGIN_ROOT, PluginRootAuthoringState, atomic_write,
-    inspect_plugin_root, load_host_catalog, lock_plugin_root, snapshot_plugin_root,
-    validate_existing_plugin_id, validate_instance_filename,
+    DEPENDENCY_SELECTIONS, DEPENDENCY_SELECTIONS_SCHEMA_VERSION, DependencySelectionsDocument,
+    HOST_CATALOG, LEGACY_DEPENDENCY_SELECTIONS, MAX_CONFIGURATION_BYTES, PLUGIN_ROOT,
+    PluginRootAuthoringState, inspect_plugin_root, load_host_catalog, lock_plugin_root,
+    root_transaction, snapshot_plugin_root, validate_existing_plugin_id,
+    validate_instance_filename, validate_requirement_id,
 };
 
 const PROPOSAL_SCHEMA: &str = "lenso.plugin-configuration-proposal.v1";
 const PUBLICATION_SCHEMA: &str = "lenso.plugin-configuration-publication.v1";
 const SOURCE_DIGEST_SCHEMA: &str = "lenso.plugin-configuration-source.v1";
+const ROOT_CHANGE_PROPOSAL_SCHEMA: &str = "lenso.plugin-root-change-proposal.v1";
+const ROOT_CHANGE_PUBLICATION_SCHEMA: &str = "lenso.plugin-root-change-publication.v1";
+const ROOT_SOURCE_DIGEST_SCHEMA: &str = "lenso.plugin-root-source.v1";
 
 /// Stable provenance for the authority that owns Plugin configuration publication.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -86,6 +92,17 @@ pub trait PluginConfigurationAuthority: fmt::Debug + Send + Sync {
         &self,
         proposal: &PluginConfigurationProposal,
     ) -> anyhow::Result<PluginConfigurationPublication>;
+
+    fn propose_changes(
+        &self,
+        expected_revision: &PluginRootRevision,
+        changes: PluginRootChangeSet,
+    ) -> anyhow::Result<PluginRootChangeProposal>;
+
+    fn publish_changes(
+        &self,
+        proposal: &PluginRootChangeProposal,
+    ) -> anyhow::Result<PluginRootChangePublication>;
 }
 
 /// Default configuration authority backed by one visible App Plugin Root.
@@ -144,6 +161,23 @@ impl PluginConfigurationAuthority for LocalPluginRootAuthority {
     ) -> anyhow::Result<PluginConfigurationPublication> {
         let _guard = self.lock()?;
         publish_instance_configuration(&self.root, proposal)
+    }
+
+    fn propose_changes(
+        &self,
+        expected_revision: &PluginRootRevision,
+        changes: PluginRootChangeSet,
+    ) -> anyhow::Result<PluginRootChangeProposal> {
+        let _guard = self.lock()?;
+        propose_plugin_root_changes(&self.root, expected_revision, changes)
+    }
+
+    fn publish_changes(
+        &self,
+        proposal: &PluginRootChangeProposal,
+    ) -> anyhow::Result<PluginRootChangePublication> {
+        let _guard = self.lock()?;
+        publish_plugin_root_changes(&self.root, proposal)
     }
 }
 
@@ -221,6 +255,227 @@ impl fmt::Display for PluginRootRevisionConflict {
 
 impl Error for PluginRootRevisionConflict {}
 
+/// One exact TOML source to include in a coordinated Plugin Root change.
+#[derive(Clone, Debug, Serialize)]
+pub struct PluginRootConfigurationChange {
+    plugin_id: String,
+    instance_key: String,
+    toml: Vec<u8>,
+}
+
+impl PluginRootConfigurationChange {
+    pub fn new(
+        plugin_id: impl Into<String>,
+        instance: impl Into<String>,
+        toml: impl Into<Vec<u8>>,
+    ) -> Self {
+        Self {
+            plugin_id: plugin_id.into(),
+            instance_key: instance.into(),
+            toml: toml.into(),
+        }
+    }
+
+    pub fn plugin_id(&self) -> &str {
+        &self.plugin_id
+    }
+
+    pub fn instance_key(&self) -> &str {
+        &self.instance_key
+    }
+
+    pub fn toml(&self) -> &[u8] {
+        &self.toml
+    }
+}
+
+/// A complete change request that can coordinate multiple configurations and choices.
+#[derive(Clone, Debug, Default)]
+pub struct PluginRootChangeSet {
+    configurations: Vec<PluginRootConfigurationChange>,
+    dependency_choices: Option<Vec<DependencyChoice>>,
+}
+
+impl PluginRootChangeSet {
+    pub const fn new() -> Self {
+        Self {
+            configurations: Vec::new(),
+            dependency_choices: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_configuration(mut self, change: PluginRootConfigurationChange) -> Self {
+        self.configurations.push(change);
+        self
+    }
+
+    /// Replaces the complete persisted choice set. An empty list adopts explicit empty intent.
+    #[must_use]
+    pub fn with_dependency_choices(
+        mut self,
+        choices: impl IntoIterator<Item = DependencyChoice>,
+    ) -> Self {
+        self.dependency_choices = Some(choices.into_iter().collect());
+        self
+    }
+
+    pub fn configurations(&self) -> &[PluginRootConfigurationChange] {
+        &self.configurations
+    }
+
+    pub fn dependency_choices(&self) -> Option<&[DependencyChoice]> {
+        self.dependency_choices.as_deref()
+    }
+}
+
+/// Digest of one exact Plugin Root source path, including absence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PluginRootSourceDigest {
+    path: String,
+    digest: String,
+}
+
+impl PluginRootSourceDigest {
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+}
+
+/// Exact old-to-new public requirement identity mapping in a reviewed migration.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PluginRequirementMigration {
+    consumer: PluginInstanceId,
+    old_requirement_id: String,
+    new_requirement_ids: Vec<String>,
+    provider: Option<PluginInstanceId>,
+}
+
+impl PluginRequirementMigration {
+    pub const fn consumer(&self) -> &PluginInstanceId {
+        &self.consumer
+    }
+
+    pub fn old_requirement_id(&self) -> &str {
+        &self.old_requirement_id
+    }
+
+    pub fn new_requirement_ids(&self) -> &[String] {
+        &self.new_requirement_ids
+    }
+
+    pub const fn provider(&self) -> Option<&PluginInstanceId> {
+        self.provider.as_ref()
+    }
+}
+
+/// Immutable review evidence for one coordinated Plugin Root publication.
+#[derive(Clone, Debug)]
+pub struct PluginRootChangeProposal {
+    schema: &'static str,
+    base_revision: PluginRootRevision,
+    host_catalog_digest: String,
+    source_digests: Vec<PluginRootSourceDigest>,
+    candidate_revision: PluginRootRevision,
+    digest: String,
+    status: PluginConfigurationProposalStatus,
+    application: PluginConfigurationApplication,
+    diagnostics: Vec<PluginConfigurationDiagnostic>,
+    requirement_migrations: Vec<PluginRequirementMigration>,
+    changes: PluginRootChangeSet,
+    materialized_choices: Option<Vec<DependencyChoice>>,
+}
+
+impl PluginRootChangeProposal {
+    pub const fn schema(&self) -> &str {
+        self.schema
+    }
+
+    pub const fn base_revision(&self) -> &PluginRootRevision {
+        &self.base_revision
+    }
+
+    pub fn host_catalog_digest(&self) -> &str {
+        &self.host_catalog_digest
+    }
+
+    pub fn source_digests(&self) -> &[PluginRootSourceDigest] {
+        &self.source_digests
+    }
+
+    pub const fn candidate_revision(&self) -> &PluginRootRevision {
+        &self.candidate_revision
+    }
+
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    pub const fn status(&self) -> PluginConfigurationProposalStatus {
+        self.status
+    }
+
+    pub const fn application(&self) -> PluginConfigurationApplication {
+        self.application
+    }
+
+    pub fn diagnostics(&self) -> &[PluginConfigurationDiagnostic] {
+        &self.diagnostics
+    }
+
+    pub fn requirement_migrations(&self) -> &[PluginRequirementMigration] {
+        &self.requirement_migrations
+    }
+
+    pub const fn changes(&self) -> &PluginRootChangeSet {
+        &self.changes
+    }
+
+    pub fn materialized_dependency_choices(&self) -> Option<&[DependencyChoice]> {
+        self.materialized_choices.as_deref()
+    }
+}
+
+/// Evidence returned after one coordinated Plugin Root transaction commits.
+#[derive(Clone, Debug)]
+pub struct PluginRootChangePublication {
+    schema: &'static str,
+    base_revision: PluginRootRevision,
+    revision: PluginRootRevision,
+    proposal_digest: String,
+    resolved: ResolvedApp,
+}
+
+impl PluginRootChangePublication {
+    pub const fn schema(&self) -> &str {
+        self.schema
+    }
+
+    pub const fn base_revision(&self) -> &PluginRootRevision {
+        &self.base_revision
+    }
+
+    pub const fn revision(&self) -> &PluginRootRevision {
+        &self.revision
+    }
+
+    pub fn proposal_digest(&self) -> &str {
+        &self.proposal_digest
+    }
+
+    pub const fn resolved(&self) -> &ResolvedApp {
+        &self.resolved
+    }
+
+    pub fn into_resolved(self) -> ResolvedApp {
+        self.resolved
+    }
+}
+
 /// Read-only review evidence for one exact Plugin Instance configuration change.
 #[derive(Clone, Debug)]
 pub struct PluginConfigurationProposal {
@@ -235,6 +490,7 @@ pub struct PluginConfigurationProposal {
     plugin_id: String,
     instance_key: String,
     toml: Vec<u8>,
+    root_proposal: PluginRootChangeProposal,
 }
 
 impl PluginConfigurationProposal {
@@ -353,6 +609,390 @@ impl PluginConfigurationPublication {
     }
 }
 
+/// Builds review evidence for a coordinated set of Plugin Root changes without publishing it.
+pub fn propose_plugin_root_changes(
+    root: &Path,
+    expected_revision: &PluginRootRevision,
+    changes: PluginRootChangeSet,
+) -> anyhow::Result<PluginRootChangeProposal> {
+    let _lock = lock_plugin_root(root)?;
+    let host = load_host_catalog(root)?;
+    let current = snapshot_plugin_root(root, &host)?;
+    let current_revision = revision_for_snapshot(&current)?;
+    ensure_revision(expected_revision, &current_revision)?;
+    build_root_change_proposal(root, &host, &current, current_revision, changes)
+}
+
+/// Publishes one reviewed multi-file change with revision, source, and Host fencing.
+pub fn publish_plugin_root_changes(
+    root: &Path,
+    proposal: &PluginRootChangeProposal,
+) -> anyhow::Result<PluginRootChangePublication> {
+    let _lock = lock_plugin_root(root)?;
+    let host = load_host_catalog(root)?;
+    let current = snapshot_plugin_root(root, &host)?;
+    let current_revision = revision_for_snapshot(&current)?;
+    ensure_revision(&proposal.base_revision, &current_revision)?;
+    let current_host_digest = host_catalog_digest(root)?;
+    if current_host_digest != proposal.host_catalog_digest {
+        bail!("Host Catalog changed after the Plugin Root proposal was reviewed");
+    }
+    let current_sources = source_digests_for_changes(root, &proposal.changes)?;
+    if current_sources != proposal.source_digests {
+        bail!("Plugin Root source bytes changed after the proposal was reviewed");
+    }
+    let verified = build_root_change_proposal(
+        root,
+        &host,
+        &current,
+        current_revision,
+        proposal.changes.clone(),
+    )?;
+    if proposal.candidate_revision != verified.candidate_revision
+        || proposal.digest != verified.digest
+        || proposal.materialized_choices != verified.materialized_choices
+    {
+        bail!("Plugin Root proposal no longer matches its reviewed candidate");
+    }
+    ensure_ready(
+        verified.status,
+        verified.application,
+        &verified.diagnostics,
+        "Plugin Root proposal",
+    )?;
+
+    let mut files = verified
+        .changes
+        .configurations
+        .iter()
+        .map(|change| {
+            root_transaction::RootFileChange::write(
+                PathBuf::from(&change.plugin_id).join(format!("{}.toml", change.instance_key)),
+                change.toml.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    if let Some(choices) = &verified.materialized_choices {
+        let document = DependencySelectionsDocument {
+            schema_version: DEPENDENCY_SELECTIONS_SCHEMA_VERSION,
+            choices: choices.clone(),
+        };
+        files.push(root_transaction::RootFileChange::write(
+            DEPENDENCY_SELECTIONS,
+            serde_json::to_vec_pretty(&document).context("encode dependency selections")?,
+        ));
+        files.push(root_transaction::RootFileChange::remove(
+            LEGACY_DEPENDENCY_SELECTIONS,
+        ));
+    }
+    root_transaction::publish_root_files(root, files)?;
+
+    let published = snapshot_plugin_root(root, &host)?;
+    let revision = revision_for_snapshot(&published)?;
+    if revision != proposal.candidate_revision {
+        bail!("published Plugin Root does not match the reviewed candidate revision");
+    }
+    let resolved = host.resolve(&published).map_err(anyhow::Error::msg)?;
+    Ok(PluginRootChangePublication {
+        schema: ROOT_CHANGE_PUBLICATION_SCHEMA,
+        base_revision: proposal.base_revision.clone(),
+        revision,
+        proposal_digest: proposal.digest.clone(),
+        resolved,
+    })
+}
+
+fn build_root_change_proposal(
+    root: &Path,
+    host: &HostInput,
+    current: &PluginRootSnapshot,
+    base_revision: PluginRootRevision,
+    changes: PluginRootChangeSet,
+) -> anyhow::Result<PluginRootChangeProposal> {
+    let changes = normalize_change_set(changes)?;
+    let mut instances = current.instances().to_vec();
+    for change in &changes.configurations {
+        let id = PluginInstanceId::new(&change.plugin_id, &change.instance_key);
+        instances.retain(|instance| instance.id() != &id);
+        instances.push(
+            PluginRootInstance::new(&change.plugin_id, &change.instance_key)
+                .with_configuration(parse_configuration(&change.toml)?),
+        );
+    }
+    let mut candidate = PluginRootSnapshot::new(
+        current.releases().iter().cloned(),
+        instances,
+        current.disabled().iter().cloned(),
+    );
+    candidate = match &changes.dependency_choices {
+        Some(choices) => candidate.with_dependency_choices(choices.clone()),
+        None => crate::preserve_dependency_selections(candidate, current),
+    };
+
+    let mut materialized_choices = None;
+    let resolution = if changes.dependency_choices.is_some() {
+        match host.propose(&candidate) {
+            Ok(proposed) => {
+                let choices = proposed.dependency_choices().to_vec();
+                candidate = PluginRootSnapshot::new(
+                    candidate.releases().iter().cloned(),
+                    candidate.instances().iter().cloned(),
+                    candidate.disabled().iter().cloned(),
+                )
+                .with_dependency_choices(choices.clone());
+                materialized_choices = Some(choices);
+                host.resolve(&candidate)
+            }
+            Err(error) => Err(error),
+        }
+    } else {
+        host.resolve(&candidate)
+    };
+    if let Some(choices) = &materialized_choices {
+        validate_dependency_choices(choices)?;
+        let document = DependencySelectionsDocument {
+            schema_version: DEPENDENCY_SELECTIONS_SCHEMA_VERSION,
+            choices: choices.clone(),
+        };
+        let bytes = serde_json::to_vec(&document).context("encode dependency selections")?;
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > super::MAX_DEPENDENCY_SELECTION_BYTES {
+            bail!("Plugin dependency selections exceed 1 MiB");
+        }
+    }
+    let candidate_revision = revision_for_snapshot(&candidate)?;
+    let (mut status, mut application, mut diagnostics) =
+        classify_resolution(resolution, &candidate_revision, &base_revision);
+    let requirement_migrations = materialized_choices
+        .as_ref()
+        .map_or_else(Vec::new, |choices| {
+            requirement_migrations(current.dependency_choices(), choices)
+        });
+    if changes
+        .dependency_choices
+        .as_ref()
+        .is_some_and(|requested| has_unreviewed_split(&requirement_migrations, requested))
+    {
+        status = PluginConfigurationProposalStatus::NeedsDecision;
+        application = PluginConfigurationApplication::Blocked;
+        diagnostics.push(PluginConfigurationDiagnostic {
+            code: "migration_mapping_required",
+            detail: "a split requirement migration needs every new requirement mapped explicitly"
+                .to_owned(),
+        });
+    }
+    let host_catalog_digest = host_catalog_digest(root)?;
+    let source_digests = source_digests_for_changes(root, &changes)?;
+    let authority = serde_json::to_vec(&(
+        ROOT_CHANGE_PROPOSAL_SCHEMA,
+        base_revision.as_str(),
+        &host_catalog_digest,
+        source_digests
+            .iter()
+            .map(|source| (&source.path, &source.digest))
+            .collect::<Vec<_>>(),
+        candidate_revision.as_str(),
+        &changes.configurations,
+        &materialized_choices,
+        &requirement_migrations,
+    ))
+    .context("encode Plugin Root proposal authority")?;
+    Ok(PluginRootChangeProposal {
+        schema: ROOT_CHANGE_PROPOSAL_SCHEMA,
+        base_revision,
+        host_catalog_digest,
+        source_digests,
+        candidate_revision,
+        digest: sha256_digest(&authority),
+        status,
+        application,
+        diagnostics,
+        requirement_migrations,
+        changes,
+        materialized_choices,
+    })
+}
+
+fn has_unreviewed_split(
+    migrations: &[PluginRequirementMigration],
+    requested: &[DependencyChoice],
+) -> bool {
+    let requested_keys = requested
+        .iter()
+        .map(|choice| (&choice.consumer, choice.requirement_id.as_str()))
+        .collect::<std::collections::BTreeSet<_>>();
+    migrations.iter().any(|migration| {
+        migration.new_requirement_ids.len() > 1
+            && migration.new_requirement_ids.iter().any(|requirement_id| {
+                !requested_keys.contains(&(&migration.consumer, requirement_id.as_str()))
+            })
+    })
+}
+
+fn normalize_change_set(mut changes: PluginRootChangeSet) -> anyhow::Result<PluginRootChangeSet> {
+    if changes.configurations.is_empty() && changes.dependency_choices.is_none() {
+        bail!("Plugin Root proposal must contain at least one change");
+    }
+    let mut identities = std::collections::BTreeSet::new();
+    for change in &changes.configurations {
+        validate_existing_plugin_id(&change.plugin_id)?;
+        validate_instance_filename(&change.instance_key)?;
+        parse_configuration(&change.toml)?;
+        if !identities.insert((change.plugin_id.clone(), change.instance_key.clone())) {
+            bail!(
+                "duplicate Plugin configuration change for `{}/{}`",
+                change.plugin_id,
+                change.instance_key
+            );
+        }
+    }
+    changes.configurations.sort_by(|left, right| {
+        left.plugin_id
+            .cmp(&right.plugin_id)
+            .then_with(|| left.instance_key.cmp(&right.instance_key))
+    });
+    if let Some(choices) = &mut changes.dependency_choices {
+        validate_dependency_choices(choices)?;
+        choices.sort_by(|left, right| {
+            left.consumer
+                .cmp(&right.consumer)
+                .then_with(|| left.requirement_id.cmp(&right.requirement_id))
+        });
+    }
+    Ok(changes)
+}
+
+fn requirement_migrations(
+    current: &[DependencyChoice],
+    candidate: &[DependencyChoice],
+) -> Vec<PluginRequirementMigration> {
+    let current_keys = current
+        .iter()
+        .map(|choice| (&choice.consumer, choice.requirement_id.as_str()))
+        .collect::<std::collections::BTreeSet<_>>();
+    let candidate_keys = candidate
+        .iter()
+        .map(|choice| (&choice.consumer, choice.requirement_id.as_str()))
+        .collect::<std::collections::BTreeSet<_>>();
+    current
+        .iter()
+        .filter(|choice| {
+            !candidate_keys.contains(&(&choice.consumer, choice.requirement_id.as_str()))
+        })
+        .map(|old| {
+            let mut new_requirement_ids = candidate
+                .iter()
+                .filter(|new| {
+                    !current_keys.contains(&(&new.consumer, new.requirement_id.as_str()))
+                        && new.consumer == old.consumer
+                        && new.provider == old.provider
+                })
+                .map(|choice| choice.requirement_id.clone())
+                .collect::<Vec<_>>();
+            new_requirement_ids.sort();
+            PluginRequirementMigration {
+                consumer: old.consumer.clone(),
+                old_requirement_id: old.requirement_id.clone(),
+                new_requirement_ids,
+                provider: old.provider.clone(),
+            }
+        })
+        .collect()
+}
+
+fn validate_dependency_choices(choices: &[DependencyChoice]) -> anyhow::Result<()> {
+    if choices.len() > super::MAX_DEPENDENCY_SELECTIONS {
+        bail!(
+            "Plugin dependency selections exceed {} entries",
+            super::MAX_DEPENDENCY_SELECTIONS
+        );
+    }
+    let mut keys = std::collections::BTreeSet::new();
+    for choice in choices {
+        validate_existing_plugin_id(choice.consumer.plugin_id())?;
+        validate_instance_filename(choice.consumer.instance_key())?;
+        validate_requirement_id(&choice.requirement_id)?;
+        if let Some(provider) = &choice.provider {
+            validate_existing_plugin_id(provider.plugin_id())?;
+            validate_instance_filename(provider.instance_key())?;
+        }
+        if !keys.insert((choice.consumer.clone(), choice.requirement_id.clone())) {
+            bail!("duplicate dependency choice for `{}`", choice.consumer);
+        }
+    }
+    Ok(())
+}
+
+fn host_catalog_digest(root: &Path) -> anyhow::Result<String> {
+    let generated = root.join(HOST_BUILD);
+    let path = match fs::symlink_metadata(&generated) {
+        Ok(_) => generated,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => root.join(HOST_CATALOG),
+        Err(error) => return Err(error).context("inspect generated Host authority source"),
+    };
+    let metadata = fs::symlink_metadata(&path).context("inspect Host Catalog source")?;
+    if !metadata.file_type().is_file() {
+        bail!(
+            "Host Catalog source must be a regular file: {}",
+            path.display()
+        );
+    }
+    Ok(sha256_digest(
+        &fs::read(path).context("read Host Catalog source")?,
+    ))
+}
+
+fn source_digests_for_changes(
+    root: &Path,
+    changes: &PluginRootChangeSet,
+) -> anyhow::Result<Vec<PluginRootSourceDigest>> {
+    let mut paths = changes
+        .configurations
+        .iter()
+        .map(|change| format!("{}/{}.toml", change.plugin_id, change.instance_key))
+        .collect::<Vec<_>>();
+    if changes.dependency_choices.is_some() {
+        paths.extend([
+            DEPENDENCY_SELECTIONS.to_owned(),
+            LEGACY_DEPENDENCY_SELECTIONS.to_owned(),
+        ]);
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+        .into_iter()
+        .map(|path| root_source_digest(root, path))
+        .collect()
+}
+
+fn root_source_digest(root: &Path, path: String) -> anyhow::Result<PluginRootSourceDigest> {
+    let source = root.join(PLUGIN_ROOT).join(&path);
+    let bytes = match fs::symlink_metadata(&source) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            Some(fs::read(&source).with_context(|| format!("read {}", source.display()))?)
+        }
+        Ok(_) => bail!(
+            "Plugin Root source must be a regular file: {}",
+            source.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).with_context(|| format!("inspect {}", source.display())),
+    };
+    let mut digest = Sha256::new();
+    update_digest_component(&mut digest, ROOT_SOURCE_DIGEST_SCHEMA.as_bytes());
+    update_digest_component(&mut digest, path.as_bytes());
+    match bytes {
+        Some(bytes) => {
+            digest.update([1]);
+            update_digest_component(&mut digest, &bytes);
+        }
+        None => digest.update([0]),
+    }
+    Ok(PluginRootSourceDigest {
+        path,
+        digest: encode_sha256(digest.finalize()),
+    })
+}
+
 /// Builds review evidence without changing the Plugin Root.
 pub fn propose_instance_configuration(
     root: &Path,
@@ -369,15 +1009,31 @@ pub fn propose_instance_configuration(
     let current_revision = revision_for_snapshot(&current)?;
     ensure_revision(expected_revision, &current_revision)?;
     let base_source_digest = source_digest_for_instance(root, plugin_id, instance)?;
-    build_proposal(
+    let root_proposal = build_root_change_proposal(
+        root,
         &host,
         &current,
-        current_revision,
+        current_revision.clone(),
+        PluginRootChangeSet::new().with_configuration(PluginRootConfigurationChange::new(
+            plugin_id,
+            instance,
+            bytes.to_vec(),
+        )),
+    )?;
+    Ok(PluginConfigurationProposal {
+        schema: PROPOSAL_SCHEMA,
+        base_revision: current_revision,
         base_source_digest,
-        plugin_id,
-        instance,
-        bytes,
-    )
+        candidate_revision: root_proposal.candidate_revision.clone(),
+        digest: root_proposal.digest.clone(),
+        status: root_proposal.status,
+        application: root_proposal.application,
+        diagnostics: root_proposal.diagnostics.clone(),
+        plugin_id: plugin_id.to_owned(),
+        instance_key: instance.to_owned(),
+        toml: bytes.to_vec(),
+        root_proposal,
+    })
 }
 
 /// Publishes an exact reviewed proposal when its base revision is still current.
@@ -385,101 +1041,39 @@ pub fn publish_instance_configuration(
     root: &Path,
     proposal: &PluginConfigurationProposal,
 ) -> anyhow::Result<PluginConfigurationPublication> {
-    let _lock = lock_plugin_root(root)?;
-    let host = load_host_catalog(root)?;
-    let current = snapshot_plugin_root(root, &host)?;
-    let current_revision = revision_for_snapshot(&current)?;
+    if proposal.plugin_id != proposal.root_proposal.changes.configurations[0].plugin_id
+        || proposal.instance_key != proposal.root_proposal.changes.configurations[0].instance_key
+        || proposal.toml != proposal.root_proposal.changes.configurations[0].toml
+        || proposal.digest != proposal.root_proposal.digest
+    {
+        bail!("Plugin configuration proposal no longer matches its reviewed candidate");
+    }
+    let current_revision = inspect_plugin_root(root)?.revision().clone();
     ensure_revision(&proposal.base_revision, &current_revision)?;
     let current_source_digest =
         source_digest_for_instance(root, &proposal.plugin_id, &proposal.instance_key)?;
     ensure_source_digest(&proposal.base_source_digest, &current_source_digest)?;
-
-    let verified = build_proposal(
-        &host,
-        &current,
-        current_revision,
-        current_source_digest,
-        &proposal.plugin_id,
-        &proposal.instance_key,
-        &proposal.toml,
-    )?;
-    if proposal.candidate_revision != verified.candidate_revision
-        || proposal.digest != verified.digest
-    {
-        bail!("Plugin configuration proposal no longer matches its reviewed candidate");
-    }
-    if verified.status != PluginConfigurationProposalStatus::Ready
-        || verified.application == PluginConfigurationApplication::Blocked
-    {
-        let detail = verified
-            .diagnostics
-            .as_slice()
-            .first()
-            .map_or("candidate did not pass the Ready Gate", |diagnostic| {
-                diagnostic.detail()
-            });
-        bail!("Plugin configuration proposal cannot be published: {detail}");
-    }
-
-    let path = root
-        .join(PLUGIN_ROOT)
-        .join(&proposal.plugin_id)
-        .join(format!("{}.toml", proposal.instance_key));
-    atomic_write(&path, &proposal.toml)?;
-    let published = snapshot_plugin_root(root, &host)?;
-    let revision = revision_for_snapshot(&published)?;
-    if revision != proposal.candidate_revision {
-        bail!("published Plugin Root does not match the reviewed candidate revision");
-    }
-    let resolved = super::inspect_plugin_root(root)?.resolved().clone();
+    let publication = publish_plugin_root_changes(root, &proposal.root_proposal)?;
     Ok(PluginConfigurationPublication {
         schema: PUBLICATION_SCHEMA,
         base_revision: proposal.base_revision.clone(),
         base_source_digest: proposal.base_source_digest.clone(),
-        revision,
+        revision: publication.revision,
         proposal_digest: proposal.digest.clone(),
-        resolved,
+        resolved: publication.resolved,
     })
 }
 
-fn build_proposal(
-    host: &HostInput,
-    current: &PluginRootSnapshot,
-    base_revision: PluginRootRevision,
-    base_source_digest: PluginConfigurationSourceDigest,
-    plugin_id: &str,
-    instance: &str,
-    bytes: &[u8],
-) -> anyhow::Result<PluginConfigurationProposal> {
-    let configuration = parse_configuration(bytes)?;
-    let id = PluginInstanceId::new(plugin_id, instance);
-    let mut instances = current
-        .instances()
-        .iter()
-        .filter(|item| item.id() != &id)
-        .cloned()
-        .collect::<Vec<_>>();
-    instances.push(PluginRootInstance::new(plugin_id, instance).with_configuration(configuration));
-    let candidate = crate::preserve_dependency_selections(
-        PluginRootSnapshot::new(
-            current.releases().iter().cloned(),
-            instances,
-            current.disabled().iter().cloned(),
-        ),
-        current,
-    );
-    let candidate_revision = revision_for_snapshot(&candidate)?;
-    let authority = serde_json::to_vec(&(
-        PROPOSAL_SCHEMA,
-        host,
-        current,
-        base_source_digest.as_str(),
-        &candidate,
-        bytes,
-    ))
-    .context("encode Plugin configuration proposal authority")?;
-    let digest = sha256_digest(&authority);
-    let (status, application, diagnostics) = match host.resolve(&candidate) {
+fn classify_resolution(
+    resolution: Result<ResolvedApp, PluginRootResolutionError>,
+    candidate_revision: &PluginRootRevision,
+    base_revision: &PluginRootRevision,
+) -> (
+    PluginConfigurationProposalStatus,
+    PluginConfigurationApplication,
+    Vec<PluginConfigurationDiagnostic>,
+) {
+    match resolution {
         Ok(_) => (
             PluginConfigurationProposalStatus::Ready,
             if candidate_revision == base_revision {
@@ -508,20 +1102,26 @@ fn build_proposal(
                 }],
             )
         }
-    };
-    Ok(PluginConfigurationProposal {
-        schema: PROPOSAL_SCHEMA,
-        base_revision,
-        base_source_digest,
-        candidate_revision,
-        digest,
-        status,
-        application,
-        diagnostics,
-        plugin_id: plugin_id.to_owned(),
-        instance_key: instance.to_owned(),
-        toml: bytes.to_vec(),
-    })
+    }
+}
+
+fn ensure_ready(
+    status: PluginConfigurationProposalStatus,
+    application: PluginConfigurationApplication,
+    diagnostics: &[PluginConfigurationDiagnostic],
+    subject: &str,
+) -> anyhow::Result<()> {
+    if status == PluginConfigurationProposalStatus::Ready
+        && application != PluginConfigurationApplication::Blocked
+    {
+        return Ok(());
+    }
+    let detail = diagnostics
+        .first()
+        .map_or("candidate did not pass the Ready Gate", |diagnostic| {
+            diagnostic.detail()
+        });
+    bail!("{subject} cannot be published: {detail}")
 }
 
 fn resolution_error_code(error: &PluginRootResolutionError) -> &'static str {
@@ -746,6 +1346,39 @@ mod tests {
         root
     }
 
+    fn coordinated_root() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".lenso")).unwrap();
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "value": { "type": "string" } },
+            "additionalProperties": false
+        });
+        let host = lenso_app_plan::authoring::HostCatalog::new(
+            [HostSlot::one("source"), HostSlot::one("target")],
+            [
+                HostPluginRelease::new(
+                    PluginDescriptor::new("example.source", "1.0.0", "source")
+                        .with_configuration_schema(schema.clone()),
+                ),
+                HostPluginRelease::new(
+                    PluginDescriptor::new("example.target", "1.0.0", "target")
+                        .with_configuration_schema(schema),
+                ),
+            ],
+            [
+                HostDefaultPlugin::new("example.source", "default"),
+                HostDefaultPlugin::new("example.target", "default"),
+            ],
+        );
+        fs::write(
+            root.path().join(HOST_CATALOG),
+            serde_json::to_vec(&host).unwrap(),
+        )
+        .unwrap();
+        root
+    }
+
     #[test]
     fn proposal_is_read_only_and_publication_advances_the_revision() {
         let root = fixture_root();
@@ -787,6 +1420,106 @@ mod tests {
             fs::read_to_string(configuration_path(root.path())).unwrap(),
             "greeting = \"hello\"\n"
         );
+    }
+
+    #[test]
+    fn coordinated_proposal_publishes_two_configurations_and_choices_together() {
+        let root = coordinated_root();
+        let base = inspect_plugin_root(root.path()).unwrap().revision().clone();
+        let changes = PluginRootChangeSet::new()
+            .with_configuration(PluginRootConfigurationChange::new(
+                "example.source",
+                "default",
+                b"value = \"source\"\n".to_vec(),
+            ))
+            .with_configuration(PluginRootConfigurationChange::new(
+                "example.target",
+                "default",
+                b"value = \"target\"\n".to_vec(),
+            ))
+            .with_dependency_choices([]);
+        let proposal = propose_plugin_root_changes(root.path(), &base, changes).unwrap();
+
+        assert_eq!(proposal.status(), PluginConfigurationProposalStatus::Ready);
+        assert_eq!(proposal.source_digests().len(), 4);
+        assert!(proposal.host_catalog_digest().starts_with("sha256:"));
+        assert!(
+            !root
+                .path()
+                .join("plugins/example.source/default.toml")
+                .exists()
+        );
+        assert!(!root.path().join("plugins/.dependencies.json").exists());
+
+        let publication = publish_plugin_root_changes(root.path(), &proposal).unwrap();
+
+        assert_eq!(publication.revision(), proposal.candidate_revision());
+        assert_eq!(
+            fs::read_to_string(root.path().join("plugins/example.source/default.toml")).unwrap(),
+            "value = \"source\"\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("plugins/example.target/default.toml")).unwrap(),
+            "value = \"target\"\n"
+        );
+        let choices: DependencySelectionsDocument = serde_json::from_slice(
+            &fs::read(root.path().join("plugins/.dependencies.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(choices.schema_version, DEPENDENCY_SELECTIONS_SCHEMA_VERSION);
+        assert!(choices.choices.is_empty());
+    }
+
+    #[test]
+    fn coordinated_publication_rejects_a_byte_changed_host_catalog() {
+        let root = fixture_root();
+        let base = inspect_plugin_root(root.path()).unwrap().revision().clone();
+        let changes =
+            PluginRootChangeSet::new().with_configuration(PluginRootConfigurationChange::new(
+                "example.agent",
+                "default",
+                b"greeting = \"hello\"\n".to_vec(),
+            ));
+        let proposal = propose_plugin_root_changes(root.path(), &base, changes).unwrap();
+        let catalog: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.path().join(HOST_CATALOG)).unwrap()).unwrap();
+        fs::write(
+            root.path().join(HOST_CATALOG),
+            serde_json::to_vec_pretty(&catalog).unwrap(),
+        )
+        .unwrap();
+
+        let error = publish_plugin_root_changes(root.path(), &proposal).unwrap_err();
+
+        assert!(error.to_string().contains("Host Catalog changed"));
+        assert!(!configuration_path(root.path()).exists());
+    }
+
+    #[test]
+    fn requirement_migration_preserves_exact_provider_and_exposes_splits() {
+        let consumer = PluginInstanceId::new("example.copy", "default");
+        let provider = PluginInstanceId::new("example.store", "account-a");
+        let current = [DependencyChoice {
+            consumer: consumer.clone(),
+            requirement_id: "~example.store@1".to_owned(),
+            provider: Some(provider.clone()),
+        }];
+        let candidate = ["source", "archive"].map(|requirement_id| DependencyChoice {
+            consumer: consumer.clone(),
+            requirement_id: requirement_id.to_owned(),
+            provider: Some(provider.clone()),
+        });
+
+        let migrations = requirement_migrations(&current, &candidate);
+
+        assert_eq!(migrations.len(), 1);
+        assert_eq!(migrations[0].provider(), Some(&provider));
+        assert_eq!(
+            migrations[0].new_requirement_ids(),
+            &["archive".to_owned(), "source".to_owned()]
+        );
+        assert!(has_unreviewed_split(&migrations, &[]));
+        assert!(!has_unreviewed_split(&migrations, &candidate));
     }
 
     #[test]

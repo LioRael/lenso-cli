@@ -34,15 +34,18 @@ use crate::identity::{
 };
 
 mod configuration_authority;
+mod root_transaction;
 mod selection_authority;
 
 pub use configuration_authority::{
     LocalPluginRootAuthority, PluginConfigurationApplication, PluginConfigurationAuthority,
     PluginConfigurationAuthoritySource, PluginConfigurationDiagnostic, PluginConfigurationProposal,
     PluginConfigurationProposalStatus, PluginConfigurationPublication,
-    PluginConfigurationSourceConflict, PluginConfigurationSourceDigest, PluginRootRevision,
-    PluginRootRevisionConflict, PluginRootRevisionParseError, propose_instance_configuration,
-    publish_instance_configuration,
+    PluginConfigurationSourceConflict, PluginConfigurationSourceDigest, PluginRequirementMigration,
+    PluginRootChangeProposal, PluginRootChangePublication, PluginRootChangeSet,
+    PluginRootConfigurationChange, PluginRootRevision, PluginRootRevisionConflict,
+    PluginRootRevisionParseError, PluginRootSourceDigest, propose_instance_configuration,
+    propose_plugin_root_changes, publish_instance_configuration, publish_plugin_root_changes,
 };
 pub use selection_authority::{
     PluginSelectionAuthority, PluginSelectionPublication, set_instance_enabled_fenced,
@@ -51,9 +54,14 @@ pub use selection_authority::{
 const PLUGIN_ROOT: &str = "plugins";
 const HOST_CATALOG: &str = ".lenso/host-catalog.json";
 const BUNDLE_NAME: &str = "plugin.lenso-plugin";
-const DEPENDENCY_SELECTIONS: &str = "dependencies.json";
+const DEPENDENCY_SELECTIONS: &str = ".dependencies.json";
+const LEGACY_DEPENDENCY_SELECTIONS: &str = "dependencies.json";
+pub const DEPENDENCY_SELECTIONS_SCHEMA_VERSION: u32 = 1;
 pub const DEPENDENCY_SELECTIONS_SCHEMA: &str = "lenso.plugin-dependencies.v1";
 const AUTHORING_LOCK: &str = ".lenso/plugin-root-authoring.lock";
+const TRANSACTION_GUARD: &str = ".transaction";
+const MAX_DEPENDENCY_SELECTION_BYTES: u64 = 1024 * 1024;
+const MAX_DEPENDENCY_SELECTIONS: usize = 4_096;
 const MAX_CONFIGURATION_BYTES: u64 = 256 * 1024;
 const MAX_RESOURCE_FILES: usize = 4_096;
 const MAX_RESOURCE_FILE_BYTES: u64 = 1024 * 1024;
@@ -62,6 +70,7 @@ const MAX_RESOURCE_DEPTH: usize = 32;
 
 /// Resolves the App selected by one project root's Host Catalog and Plugin Root.
 pub fn load_resolved_app(root: &Path) -> anyhow::Result<ResolvedApp> {
+    let _lock = lock_plugin_root_shared(root)?;
     let host = load_host_catalog(root)?;
     let snapshot = snapshot_plugin_root(root, &host)?;
     host.resolve(&snapshot).map_err(anyhow::Error::msg)
@@ -106,6 +115,7 @@ pub fn resolve_runtime_app(root: &Path, host_build: &Path) -> anyhow::Result<Run
     let host: GeneratedHostBuild =
         serde_json::from_slice(&host_bytes).context("invalid distribution Host build")?;
     host.validate()?;
+    let _lock = lock_plugin_root_shared(&root)?;
     let snapshot = snapshot_plugin_root(&root, &HostInput::Generated(host.clone()))?;
     let plugin_root_revision = configuration_authority::revision_for_snapshot(&snapshot)?;
     let resolved = host.resolve(&snapshot).map_err(anyhow::Error::msg)?;
@@ -265,6 +275,7 @@ impl PluginRootAuthoringState {
     reason = "keeps one atomic read-only Root projection"
 )]
 pub fn inspect_plugin_root(root: &Path) -> anyhow::Result<PluginRootAuthoringState> {
+    let _lock = lock_plugin_root_shared(root)?;
     let host = load_host_catalog(root)?;
     let snapshot = snapshot_plugin_root(root, &host)?;
     let revision = configuration_authority::revision_for_snapshot(&snapshot)?;
@@ -466,6 +477,7 @@ fn snapshot_plugin_root(root: &Path, host: &HostInput) -> anyhow::Result<PluginR
     let mut instances = Vec::new();
     let mut disabled = Vec::new();
     let mut dependency_selections = None;
+    let mut legacy_dependency_selections = None;
     let mut plugin_names = BTreeMap::<String, String>::new();
     let mut directories = read_entries(&plugin_root)?;
     directories.sort_by_key(fs::DirEntry::file_name);
@@ -475,24 +487,19 @@ fn snapshot_plugin_root(root: &Path, host: &HostInput) -> anyhow::Result<PluginR
             continue;
         }
         let file_type = entry.file_type()?;
-        if name == DEPENDENCY_SELECTIONS {
-            if !file_type.is_file() {
-                bail!(
-                    "Plugin dependency selections must be a regular file: {}",
-                    entry.path().display()
-                );
+        if name == TRANSACTION_GUARD {
+            bail!(
+                "Plugin Root has an unresolved authoring transaction; run a configuration command to recover it: {}",
+                entry.path().display()
+            );
+        }
+        if name == DEPENDENCY_SELECTIONS || name == LEGACY_DEPENDENCY_SELECTIONS {
+            let selections = read_dependency_selections(&entry.path(), &name, file_type)?;
+            if name == DEPENDENCY_SELECTIONS {
+                dependency_selections = Some(selections);
+            } else {
+                legacy_dependency_selections = Some(selections);
             }
-            let document: DependencySelectionsDocument = serde_json::from_slice(
-                &fs::read(entry.path()).context("read Plugin dependency selections")?,
-            )
-            .context("invalid Plugin dependency selections")?;
-            if document.schema != DEPENDENCY_SELECTIONS_SCHEMA {
-                bail!(
-                    "unsupported Plugin dependency selection schema `{}`",
-                    document.schema
-                );
-            }
-            dependency_selections = Some(document.selections);
             continue;
         }
         if !file_type.is_dir() {
@@ -510,18 +517,86 @@ fn snapshot_plugin_root(root: &Path, host: &HostInput) -> anyhow::Result<PluginR
             host,
         )?;
     }
+    if dependency_selections.is_some() && legacy_dependency_selections.is_some() {
+        bail!("Plugin Root contains both canonical and legacy dependency selection files");
+    }
     let snapshot = PluginRootSnapshot::new(releases, instances, disabled);
-    Ok(match dependency_selections {
-        Some(selections) => snapshot.with_dependency_choices(selections),
-        None => snapshot,
-    })
+    Ok(
+        match dependency_selections.or(legacy_dependency_selections) {
+            Some(selections) => snapshot.with_dependency_choices(selections),
+            None => snapshot,
+        },
+    )
+}
+
+fn read_dependency_selections(
+    path: &Path,
+    name: &str,
+    file_type: fs::FileType,
+) -> anyhow::Result<Vec<DependencyChoice>> {
+    if !file_type.is_file() {
+        bail!(
+            "Plugin dependency selections must be a regular file: {}",
+            path.display()
+        );
+    }
+    if fs::symlink_metadata(path)?.len() > MAX_DEPENDENCY_SELECTION_BYTES {
+        bail!("Plugin dependency selections exceed 1 MiB");
+    }
+    let bytes = fs::read(path).context("read Plugin dependency selections")?;
+    let selections = if name == DEPENDENCY_SELECTIONS {
+        let document: DependencySelectionsDocument =
+            serde_json::from_slice(&bytes).context("invalid Plugin dependency selections")?;
+        if document.schema_version != DEPENDENCY_SELECTIONS_SCHEMA_VERSION {
+            bail!(
+                "unsupported Plugin dependency selection schema version `{}`",
+                document.schema_version
+            );
+        }
+        let mut sorted = document.choices.clone();
+        sorted.sort_by(|left, right| {
+            left.consumer
+                .cmp(&right.consumer)
+                .then_with(|| left.requirement_id.cmp(&right.requirement_id))
+        });
+        if document.choices != sorted {
+            bail!("Plugin dependency selections must be sorted by consumer and requirement");
+        }
+        if document.choices.windows(2).any(|pair| {
+            pair[0].consumer == pair[1].consumer && pair[0].requirement_id == pair[1].requirement_id
+        }) {
+            bail!("Plugin dependency selections contain a duplicate requirement key");
+        }
+        document.choices
+    } else {
+        let document: LegacyDependencySelectionsDocument = serde_json::from_slice(&bytes)
+            .context("invalid legacy Plugin dependency selections")?;
+        if document.schema != DEPENDENCY_SELECTIONS_SCHEMA {
+            bail!(
+                "unsupported legacy Plugin dependency selection schema `{}`",
+                document.schema
+            );
+        }
+        document.selections
+    };
+    if selections.len() > MAX_DEPENDENCY_SELECTIONS {
+        bail!("Plugin dependency selections exceed {MAX_DEPENDENCY_SELECTIONS} entries");
+    }
+    Ok(selections)
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DependencySelectionsDocument {
-    pub schema: String,
-    pub selections: Vec<DependencyChoice>,
+    pub schema_version: u32,
+    pub choices: Vec<DependencyChoice>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyDependencySelectionsDocument {
+    schema: String,
+    selections: Vec<DependencyChoice>,
 }
 
 fn preserve_dependency_selections(
@@ -1130,22 +1205,38 @@ pub fn set_dependency_selections(
     root: &Path,
     replacements: impl IntoIterator<Item = DependencyChoice>,
 ) -> anyhow::Result<ResolvedApp> {
-    let replacements = replacements.into_iter().collect::<Vec<_>>();
-    if replacements.is_empty() {
+    apply_dependency_selections(root, replacements.into_iter().collect(), false)
+}
+
+/// Replaces the complete saved choice set after validating one complete candidate App.
+///
+/// This is the explicit migration boundary for renamed or removed requirement identities.
+pub fn replace_dependency_selections(
+    root: &Path,
+    selections: impl IntoIterator<Item = DependencyChoice>,
+) -> anyhow::Result<ResolvedApp> {
+    apply_dependency_selections(root, selections.into_iter().collect(), true)
+}
+
+fn apply_dependency_selections(
+    root: &Path,
+    replacements: Vec<DependencyChoice>,
+    replace_all: bool,
+) -> anyhow::Result<ResolvedApp> {
+    if replacements.is_empty() && !replace_all {
         bail!("at least one dependency selection is required");
     }
     let mut replacement_keys = BTreeSet::new();
     for selection in &replacements {
         validate_existing_plugin_id(selection.consumer.plugin_id())?;
         validate_instance_filename(selection.consumer.instance_key())?;
-        if selection.requirement_id.trim().is_empty() {
-            bail!("dependency requirement identity must not be empty");
-        }
+        validate_requirement_id(&selection.requirement_id)?;
         if let Some(provider) = &selection.provider {
             validate_existing_plugin_id(provider.plugin_id())?;
             validate_instance_filename(provider.instance_key())?;
         }
-        if !replacement_keys.insert((&selection.consumer, selection.requirement_id.as_str())) {
+        if !replacement_keys.insert((selection.consumer.clone(), selection.requirement_id.clone()))
+        {
             bail!(
                 "duplicate dependency selection for `{}` requirement `{}`",
                 selection.consumer,
@@ -1156,12 +1247,17 @@ pub fn set_dependency_selections(
     let _lock = lock_plugin_root(root)?;
     let host = load_host_catalog(root)?;
     let current = snapshot_plugin_root(root, &host)?;
-    let mut selections = current.dependency_choices().to_vec();
-    selections.retain(|selection| {
-        !replacement_keys.contains(&(&selection.consumer, selection.requirement_id.as_str()))
-    });
-    drop(replacement_keys);
-    selections.extend(replacements);
+    let mut selections = if replace_all {
+        replacements
+    } else {
+        let mut selections = current.dependency_choices().to_vec();
+        selections.retain(|selection| {
+            !replacement_keys
+                .contains(&(selection.consumer.clone(), selection.requirement_id.clone()))
+        });
+        selections.extend(replacements);
+        selections
+    };
     selections.sort_by(|left, right| {
         left.consumer
             .cmp(&right.consumer)
@@ -1169,12 +1265,49 @@ pub fn set_dependency_selections(
     });
     let (resolved, selections) = resolve_adopted_dependencies(&host, &current, selections)?;
     let document = DependencySelectionsDocument {
-        schema: DEPENDENCY_SELECTIONS_SCHEMA.to_owned(),
-        selections,
+        schema_version: DEPENDENCY_SELECTIONS_SCHEMA_VERSION,
+        choices: selections,
     };
     let bytes = serde_json::to_vec_pretty(&document).context("encode dependency selections")?;
-    atomic_write(&root.join(PLUGIN_ROOT).join(DEPENDENCY_SELECTIONS), &bytes)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_DEPENDENCY_SELECTION_BYTES {
+        bail!("Plugin dependency selections exceed 1 MiB");
+    }
+    let legacy = root.join(PLUGIN_ROOT).join(LEGACY_DEPENDENCY_SELECTIONS);
+    let legacy_exists = match fs::symlink_metadata(&legacy) {
+        Ok(metadata) if metadata.file_type().is_file() => true,
+        Ok(_) => bail!(
+            "legacy Plugin dependency selections must be a regular file: {}",
+            legacy.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error).context("inspect legacy Plugin dependency selections"),
+    };
+    if legacy_exists {
+        root_transaction::publish_root_files(
+            root,
+            vec![
+                root_transaction::RootFileChange::write(DEPENDENCY_SELECTIONS, bytes),
+                root_transaction::RootFileChange::remove(LEGACY_DEPENDENCY_SELECTIONS),
+            ],
+        )?;
+    } else {
+        atomic_write(&root.join(PLUGIN_ROOT).join(DEPENDENCY_SELECTIONS), &bytes)?;
+    }
     Ok(resolved)
+}
+
+fn validate_requirement_id(value: &str) -> anyhow::Result<()> {
+    let bytes = value.as_bytes();
+    if bytes.is_empty()
+        || bytes.len() > 64
+        || !bytes[0].is_ascii_lowercase()
+        || !bytes[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_')
+    {
+        bail!("dependency requirement identity `{value}` is invalid");
+    }
+    Ok(())
 }
 
 fn resolve_adopted_dependencies(
@@ -1330,10 +1463,13 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     fs::create_dir_all(parent)?;
     let temporary = tempfile::NamedTempFile::new_in(parent)?;
     fs::write(temporary.path(), bytes)?;
+    temporary.as_file().sync_all()?;
     temporary
         .persist(path)
         .map_err(|error| error.error)
         .with_context(|| format!("commit Plugin file {}", path.display()))?;
+    #[cfg(unix)]
+    fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
 
@@ -1350,7 +1486,31 @@ fn lock_plugin_root(root: &Path) -> anyhow::Result<fs::File> {
         .with_context(|| format!("open Plugin Root authoring lock {}", path.display()))?;
     file.lock()
         .with_context(|| format!("lock Plugin Root authoring authority {}", path.display()))?;
+    root_transaction::recover_plugin_root_transaction(root)?;
     Ok(file)
+}
+
+fn lock_plugin_root_shared(root: &Path) -> anyhow::Result<Option<fs::File>> {
+    let path = root.join(AUTHORING_LOCK);
+    let file = match fs::OpenOptions::new().read(true).open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if root.join(PLUGIN_ROOT).join(DEPENDENCY_SELECTIONS).exists() {
+                bail!(
+                    "adopted Plugin Root is missing its authoring lock: {}",
+                    path.display()
+                );
+            }
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("open Plugin Root authoring lock {}", path.display()));
+        }
+    };
+    file.lock_shared()
+        .with_context(|| format!("lock Plugin Root for reading {}", path.display()))?;
+    Ok(Some(file))
 }
 fn copy_directory(source: &Path, destination: &Path) -> anyhow::Result<()> {
     for entry in read_entries(source)? {
@@ -1466,7 +1626,31 @@ mod tests {
             Some(PluginInstanceId::new("example.store.a", "default")),
         )
         .unwrap();
-        assert!(root.path().join("plugins/dependencies.json").is_file());
+        assert!(root.path().join("plugins/.dependencies.json").is_file());
+
+        let canonical: DependencySelectionsDocument = serde_json::from_slice(
+            &fs::read(root.path().join("plugins/.dependencies.json")).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("plugins/dependencies.json"),
+            serde_json::to_vec_pretty(&LegacyDependencySelectionsDocument {
+                schema: DEPENDENCY_SELECTIONS_SCHEMA.to_owned(),
+                selections: canonical.choices,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        fs::remove_file(root.path().join("plugins/.dependencies.json")).unwrap();
+        set_dependency_selection(
+            root.path(),
+            PluginInstanceId::new("example.copy", "default"),
+            "source",
+            Some(PluginInstanceId::new("example.store.a", "default")),
+        )
+        .unwrap();
+        assert!(root.path().join("plugins/.dependencies.json").is_file());
+        assert!(!root.path().join("plugins/dependencies.json").exists());
 
         let expanded = HostCatalog::new(
             [HostSlot::one("copy"), HostSlot::many("store")],
@@ -1571,11 +1755,40 @@ mod tests {
 
         assert_eq!(bindings["source"], "example.store.b/default");
         assert_eq!(bindings["audit"], "example.audit/default");
-        let document: DependencySelectionsDocument = serde_json::from_slice(
-            &fs::read(root.path().join("plugins/dependencies.json")).unwrap(),
+        let mut document: DependencySelectionsDocument = serde_json::from_slice(
+            &fs::read(root.path().join("plugins/.dependencies.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(document.selections.len(), 1);
+        assert_eq!(document.choices.len(), 1);
+        document.choices.insert(
+            0,
+            DependencyChoice {
+                consumer: PluginInstanceId::new("example.copy", "default"),
+                requirement_id: "retired".to_owned(),
+                provider: Some(PluginInstanceId::new("example.store.a", "default")),
+            },
+        );
+        fs::write(
+            root.path().join("plugins/.dependencies.json"),
+            serde_json::to_vec_pretty(&document).unwrap(),
+        )
+        .unwrap();
+
+        replace_dependency_selections(
+            root.path(),
+            [DependencyChoice {
+                consumer: PluginInstanceId::new("example.copy", "default"),
+                requirement_id: "source".to_owned(),
+                provider: Some(PluginInstanceId::new("example.store.b", "default")),
+            }],
+        )
+        .unwrap();
+        let repaired: DependencySelectionsDocument = serde_json::from_slice(
+            &fs::read(root.path().join("plugins/.dependencies.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(repaired.choices.len(), 1);
+        assert_eq!(repaired.choices[0].requirement_id, "source");
     }
 
     #[test]
@@ -1807,6 +2020,21 @@ mod tests {
         let resolved = load_resolved_app(root.path()).unwrap();
 
         assert_eq!(resolved.instances().len(), 1);
+    }
+
+    #[test]
+    fn readers_reject_an_unresolved_transaction_guard() {
+        let root = fixture_root();
+        fs::create_dir_all(root.path().join("plugins")).unwrap();
+        fs::write(root.path().join("plugins/.transaction"), "broken").unwrap();
+
+        let error = load_resolved_app(root.path()).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("unresolved authoring transaction")
+        );
     }
 
     #[test]
