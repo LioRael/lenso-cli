@@ -332,7 +332,7 @@ fn bun_package_manifest(plugin_id: &str, package_name: &str) -> String {
   }},
   "dependencies": {{
     "@lenso/agent-tool-sdk": "0.1.0",
-    "@lenso/bun-plugin": "0.2.1"
+    "@lenso/bun-plugin": "0.2.2"
   }},
   "devDependencies": {{
     "@types/bun": "1.4.0",

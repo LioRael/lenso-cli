@@ -211,7 +211,7 @@ fn bun_plugin_scaffold_uses_generic_and_product_owned_declarations() {
     let author = files.get(Path::new("src/plugin.ts")).unwrap();
 
     assert!(package.contains("\"runtime\": \"bun\""));
-    assert!(package.contains("\"@lenso/bun-plugin\": \"0.2.1\""));
+    assert!(package.contains("\"@lenso/bun-plugin\": \"0.2.2\""));
     assert!(package.contains("\"@lenso/agent-tool-sdk\": \"0.1.0\""));
     assert!(author.contains("tools(["));
     assert!(author.contains("schema.object"));
