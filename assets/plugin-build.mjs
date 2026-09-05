@@ -195,13 +195,13 @@ for (const provider of definition.providers) {
     if (provider.arguments.length !== 2 || descriptorArgument?.kind !== "value" || !isRecord(descriptorArgument.value) || binderArgument?.kind !== "handler") {
       throw new Error(`${provider.span.file}: provider requires one static descriptor and one binder function`);
     }
-    const descriptor = descriptorArgument.value;
-    const capabilityId = staticValue(descriptor.capability_id);
-    const descriptorVersion = staticValue(descriptor.descriptor_version);
-    const descriptorDigest = staticValue(descriptor.descriptor_digest);
-    const requestOperations = staticValue(descriptor.operations);
-    const streamOperations = staticValue(descriptor.stream_operations);
-    const eventOperations = staticValue(descriptor.event_operations);
+    const descriptor = plainStatic(descriptorArgument, "provider descriptor");
+    const capabilityId = descriptor.capability_id;
+    const descriptorVersion = descriptor.descriptor_version;
+    const descriptorDigest = descriptor.descriptor_digest;
+    const requestOperations = descriptor.operations;
+    const streamOperations = descriptor.stream_operations;
+    const eventOperations = descriptor.event_operations;
     if (
       typeof capabilityId !== "string" ||
       typeof descriptorVersion !== "string" ||

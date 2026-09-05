@@ -472,7 +472,9 @@ fn contract_from_bun_descriptor(
     package: &BunPackage,
     descriptor: &PluginDescriptor,
 ) -> anyhow::Result<PluginContract> {
-    let mut contract = descriptor.capabilities.iter().fold(
+    let mut capabilities = descriptor.capabilities.iter().collect::<Vec<_>>();
+    capabilities.sort_by_key(|capability| &capability.capability_id);
+    let mut contract = capabilities.into_iter().fold(
         PluginContract::new(
             &package.metadata.plugin_id,
             &package.version,
@@ -483,14 +485,20 @@ fn contract_from_bun_descriptor(
             contract.with_capability(CapabilityEndpointPlan::new(
                 &capability.capability_id,
                 &capability.descriptor_version,
-                capability.request_operations.clone(),
+                {
+                    let mut operations = capability.request_operations.clone();
+                    operations.sort();
+                    operations
+                },
             ))
         },
     );
     if let Some(schema) = &descriptor.configuration_schema {
         contract = contract.with_configuration_schema(schema.clone());
     }
-    for requirement in &descriptor.required_capabilities {
+    let mut requirements = descriptor.required_capabilities.iter().collect::<Vec<_>>();
+    requirements.sort_by_key(|requirement| &requirement.requirement_id);
+    for requirement in requirements {
         if requirement.cardinality != "one" {
             bail!(
                 "Bun Plugin requirement `{}` uses unsupported cardinality `{}`",
