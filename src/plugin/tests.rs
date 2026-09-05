@@ -300,6 +300,14 @@ implementations = [
 }
 
 #[test]
+fn process_artifacts_use_the_canonical_rust_host_target() {
+    assert_eq!(
+        rust_host_target(Path::new(".")).unwrap(),
+        native_host_target()
+    );
+}
+
+#[test]
 fn duplicate_plugin_identity_is_rejected() {
     let root = tempfile::tempdir().unwrap();
     let manifest = root.path().join("Cargo.toml");

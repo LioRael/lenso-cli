@@ -11,6 +11,7 @@ categories = ["command-line-utilities", "development-tools"]
 keywords = ["cli", "authoring", "plugins", "app-plan"]
 include = [
     "/assets/plugin-build.mjs",
+    "/build.rs",
     "/src/**/*.rs",
     "/contracts/*.json",
     "/docs/migration-plugin-authoring.md",
