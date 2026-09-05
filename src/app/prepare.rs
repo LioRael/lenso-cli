@@ -8,7 +8,8 @@ use anyhow::{Context, bail};
 use clap::Args;
 use lenso_app_plan::ExecutionClassId;
 use lenso_plugin_bundle::{
-    ImplementationPolicy, read_bundle_manifest, resolve_implementation, verify_bundle_directory,
+    ImplementationPolicy, RuntimeAdmission, read_bundle_manifest, resolve_implementation,
+    verify_bundle_directory,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -55,6 +56,7 @@ struct BundleInventory {
     release_version: String,
     manifest_digest: String,
     execution_class: String,
+    runtime_profile: String,
     target: String,
     implementation_id: String,
     artifact_path: String,
@@ -360,7 +362,10 @@ fn validate_bundle(
             &manifest,
             &ImplementationPolicy {
                 host_target: args.target.clone(),
-                execution_classes: vec![ExecutionClassId::new(&bundle.execution_class)],
+                runtimes: vec![RuntimeAdmission {
+                    execution_class: ExecutionClassId::new(&bundle.execution_class),
+                    runtime_profile: bundle.runtime_profile.clone(),
+                }],
             },
         )?;
         if selected.implementation_id != bundle.implementation_id

@@ -10,7 +10,8 @@ use lenso_app_plan::{
     authoring::{HostSlot, PluginInstanceId},
 };
 use lenso_plugin_bundle::{
-    ImplementationPolicy, read_bundle_manifest, resolve_implementation, verify_bundle_directory,
+    ImplementationPolicy, RuntimeAdmission, read_bundle_manifest, resolve_implementation,
+    verify_bundle_directory,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -82,6 +83,22 @@ impl Execution {
             Self::Bun => "lenso.bun-process@1",
             Self::Process => "lenso.process@1",
         })
+    }
+
+    fn admissions(self) -> Vec<RuntimeAdmission> {
+        match self {
+            Self::Bun => vec![
+                lenso_app_plan::PLUGIN_AUTHORING_V2_RUNTIME_PROFILE,
+                "lenso.bun-process@1",
+            ],
+            Self::Process => vec!["lenso.process-stdio@2", "lenso.process@1"],
+        }
+        .into_iter()
+        .map(|runtime_profile| RuntimeAdmission {
+            execution_class: self.class(),
+            runtime_profile: runtime_profile.to_owned(),
+        })
+        .collect()
     }
 }
 
@@ -261,7 +278,7 @@ fn materialize(declaration: Declaration, args: &HostBuildArgs) -> anyhow::Result
                     &manifest,
                     &ImplementationPolicy {
                         host_target: args.target.clone(),
-                        execution_classes: vec![reference.execution.class()],
+                        runtimes: reference.execution.admissions(),
                     },
                 )?;
                 if selected
@@ -288,6 +305,7 @@ fn materialize(declaration: Declaration, args: &HostBuildArgs) -> anyhow::Result
             "path": archive_path, "plugin_id": verified.plugin_id,
             "release_version": verified.release_version, "manifest_digest": verified.manifest_digest,
             "execution_class": reference.execution.class(), "target": args.target,
+            "runtime_profile": selected.descriptor.runtime_profile(),
             "implementation_id": selected.implementation_id,
             "artifact_path": selected.artifact.path,
             "artifact_digest": selected.artifact.digest,
