@@ -1,5 +1,16 @@
 ## lenso-cli@0.2.31
 
+## 0.15.0
+
+### Minor Changes
+
+- a11b527: Streamline Plugin authoring with implementation-aware dev builds, event-driven
+  watching, canonical identity validation, exact catalog installs, and clearer
+  runtime diagnostics.
+- b992dda: Build and run complete Lenso applications from TypeScript with closed Host
+  policy, named dependency choices, immutable prepared distributions, and native
+  process ownership.
+
 ## 0.14.0
 
 ### Minor Changes
