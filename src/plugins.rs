@@ -8,9 +8,10 @@ use anyhow::{Context, bail};
 use clap::{Args, Subcommand};
 pub(crate) use lenso_app_authoring::load_resolved_app;
 use lenso_app_authoring::{
-    BundleMutation, DEPENDENCY_SELECTIONS_SCHEMA, DependencySelectionsDocument, add_bundle,
-    configure_instance, prepare_bundle_mutation, remove_instance_difference, remove_plugin,
-    set_dependency_selection, set_dependency_selections, set_instance_disabled,
+    BundleMutation, DEPENDENCY_SELECTIONS_SCHEMA_VERSION, DependencySelectionsDocument,
+    PluginRootChangeSet, add_bundle, configure_instance, inspect_plugin_root,
+    prepare_bundle_mutation, propose_plugin_root_changes, publish_plugin_root_changes,
+    remove_instance_difference, remove_plugin, set_dependency_selection, set_instance_disabled,
 };
 use lenso_app_plan::authoring::PluginInstanceId;
 use lenso_plugin_bundle::verify_bundle_directory;
@@ -119,6 +120,9 @@ pub(crate) struct BindArgs {
     /// JSON selection document to apply atomically when several requirements are ambiguous.
     #[arg(long)]
     file: Option<PathBuf>,
+    /// Validate and display the complete choice migration without publishing it.
+    #[arg(long, requires = "file")]
+    preview: bool,
     /// App project root. Defaults to the current directory.
     #[arg(long)]
     root: Option<PathBuf>,
@@ -284,15 +288,48 @@ fn bind(args: BindArgs) -> anyhow::Result<()> {
             &fs::read(&file).with_context(|| format!("read {}", file.display()))?,
         )
         .with_context(|| format!("invalid dependency selections: {}", file.display()))?;
-        if document.schema != DEPENDENCY_SELECTIONS_SCHEMA {
+        if document.schema_version != DEPENDENCY_SELECTIONS_SCHEMA_VERSION {
             bail!(
-                "unsupported dependency selection schema `{}`",
-                document.schema
+                "unsupported dependency selection schema version `{}`",
+                document.schema_version
             );
         }
-        let count = document.selections.len();
         let root = project_root(args.root)?;
-        set_dependency_selections(&root, document.selections)?;
+        let current = inspect_plugin_root(&root)?;
+        let base = current.revision().clone();
+        let changes = PluginRootChangeSet::new().with_dependency_choices(document.choices);
+        let proposal = propose_plugin_root_changes(&root, &base, changes)?;
+        for migration in proposal.requirement_migrations() {
+            let targets = if migration.new_requirement_ids().is_empty() {
+                "removed".to_owned()
+            } else {
+                migration.new_requirement_ids().join(", ")
+            };
+            let provider = migration
+                .provider()
+                .map_or("absent".to_owned(), ToString::to_string);
+            println!(
+                "{}/{} -> {targets}; provider {provider}",
+                migration.consumer(),
+                migration.old_requirement_id()
+            );
+        }
+        let reviewed_choices = proposal
+            .materialized_dependency_choices()
+            .or_else(|| proposal.changes().dependency_choices())
+            .unwrap_or_default();
+        print_choice_migration(current.resolved().dependency_choices(), reviewed_choices);
+        if args.preview {
+            println!("Migration status: {:?}.", proposal.status());
+            for diagnostic in proposal.diagnostics() {
+                println!("{}: {}", diagnostic.code(), diagnostic.detail());
+            }
+            return Ok(());
+        }
+        let count = proposal
+            .materialized_dependency_choices()
+            .map_or(0, <[lenso_app_plan::authoring::DependencyChoice]>::len);
+        publish_plugin_root_changes(&root, &proposal)?;
         println!("Applied {count} dependency selections.");
         return Ok(());
     }
@@ -321,6 +358,46 @@ fn bind(args: BindArgs) -> anyhow::Result<()> {
         None => println!("Left `{consumer}` optional requirement `{requirement}` absent."),
     }
     Ok(())
+}
+
+fn print_choice_migration(
+    current: &[lenso_app_plan::authoring::DependencyChoice],
+    candidate: &[lenso_app_plan::authoring::DependencyChoice],
+) {
+    let key = |choice: &lenso_app_plan::authoring::DependencyChoice| {
+        (choice.consumer.to_string(), choice.requirement_id.clone())
+    };
+    let current = current
+        .iter()
+        .map(|choice| (key(choice), choice))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let candidate = candidate
+        .iter()
+        .map(|choice| (key(choice), choice))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for identity in current
+        .keys()
+        .chain(candidate.keys())
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        let describe = |choice: Option<&&lenso_app_plan::authoring::DependencyChoice>,
+                        missing: &str| {
+            choice.map_or_else(
+                || missing.to_owned(),
+                |choice| {
+                    choice
+                        .provider
+                        .as_ref()
+                        .map_or("absent".to_owned(), ToString::to_string)
+                },
+            )
+        };
+        let before = describe(current.get(identity), "unset");
+        let after = describe(candidate.get(identity), "removed");
+        if before != after {
+            println!("{}/{}: {before} -> {after}", identity.0, identity.1);
+        }
+    }
 }
 
 fn disable(args: InstanceArgs) -> anyhow::Result<()> {

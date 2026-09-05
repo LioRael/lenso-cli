@@ -108,6 +108,7 @@ lenso plugins rollback company.uppercase --version 1.2.3
 lenso plugins configure company.uppercase default --file uppercase.toml
 lenso plugins bind company.copy source company.store --provider-instance source
 lenso plugins bind company.copy cache --absent
+lenso plugins bind --file dependency-choices.json --preview
 lenso plugins disable company.uppercase default
 lenso plugins enable company.uppercase default
 lenso plugins remove company.uppercase default
@@ -122,9 +123,11 @@ enables package defaults. `<instance>.disabled` is the explicit absence marker.
 Optional structured files live beside it under
 `plugins/<plugin-id>/<instance>/`; `app check` validates the bounded regular-file
 tree before the Host snapshots it into a Generation.
-Named single-dependency choices live in `plugins/dependencies.json` and are
+Named single-dependency choices live in `plugins/.dependencies.json` and are
 changed through `plugins bind`. They preserve exact provider intent, including
 explicit absence for optional requirements, across unrelated installations.
+Use `plugins bind --file ... --preview` to validate and display a complete
+migration before publishing it atomically.
 Installed non-embedded behavior carries one exact `plugin.lenso-plugin` Bundle
 inside its Plugin directory.
 

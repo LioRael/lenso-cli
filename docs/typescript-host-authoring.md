@@ -188,8 +188,8 @@ If several requirements are already ambiguous, apply them as one candidate:
 
 ```json
 {
-  "schema": "lenso.plugin-dependencies.v1",
-  "selections": [
+  "schema_version": 1,
+  "choices": [
     {
       "consumer": { "plugin_id": "company.copy", "instance_key": "default" },
       "requirement_id": "source",
@@ -205,11 +205,28 @@ If several requirements are already ambiguous, apply them as one candidate:
 ```
 
 ```sh
+lenso plugins bind --file dependency-choices.json --preview
 lenso plugins bind --file dependency-choices.json
 ```
 
+The file is the complete reviewed choice set. Applying it replaces stale saved
+requirement IDs as one candidate, which is the explicit migration path for a
+renamed or removed public requirement. Positional `bind` changes only one key.
+`--preview` prints exact provider transitions and validation diagnostics without
+publishing the candidate. Unique migrations retain the old provider Instance;
+a split, renamed public identity, or newly ambiguous target stays in
+`NeedsDecision` until the file supplies the explicit mapping.
+
+Configuration authorities can submit several Instance TOML files and the
+complete choice set through one `PluginRootChangeSet`. The proposal fences the
+semantic Root revision, exact bytes or absence of every changed source, and the
+Host Catalog digest. Publication validates the complete candidate, then commits
+all files through one bounded recoverable transaction. Startup and inspection
+only take the reader lock and report an unresolved transaction; the next normal
+configuration operation performs recovery.
+
 The Host build writes its initial selectable choices to
-`plugins/dependencies.json` with schema `lenso.plugin-dependencies.v1`. The first
+`plugins/.dependencies.json` with `schema_version: 1`. The first
 bind on an older Root adopts the same choice contract and materializes every
 currently unique required or optional single dependency before changing the
 requested selection. Subsequent installs and configuration edits preserve that

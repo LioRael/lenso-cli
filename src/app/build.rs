@@ -360,12 +360,13 @@ fn materialize(declaration: Declaration, args: &HostBuildArgs) -> anyhow::Result
     let proposed = build.propose(&lenso_app_plan::authoring::PluginRootSnapshot::default())?;
     if !proposed.dependency_choices().is_empty() {
         fs::create_dir(stage.path().join("plugins"))?;
+        fs::write(stage.path().join(".lenso/plugin-root-authoring.lock"), [])?;
         let document = lenso_app_authoring::DependencySelectionsDocument {
-            schema: lenso_app_authoring::DEPENDENCY_SELECTIONS_SCHEMA.to_owned(),
-            selections: proposed.dependency_choices().to_vec(),
+            schema_version: lenso_app_authoring::DEPENDENCY_SELECTIONS_SCHEMA_VERSION,
+            choices: proposed.dependency_choices().to_vec(),
         };
         fs::write(
-            stage.path().join("plugins/dependencies.json"),
+            stage.path().join("plugins/.dependencies.json"),
             serde_json::to_vec_pretty(&document)?,
         )?;
     }

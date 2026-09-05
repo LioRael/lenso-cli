@@ -249,16 +249,12 @@ fn host_build_materializes_only_a_host_authorized_dependency_choice() {
     materialize(declaration, &args).unwrap();
 
     let choices: lenso_app_authoring::DependencySelectionsDocument =
-        serde_json::from_slice(&fs::read(args.out.join("plugins/dependencies.json")).unwrap())
+        serde_json::from_slice(&fs::read(args.out.join("plugins/.dependencies.json")).unwrap())
             .unwrap();
-    assert_eq!(choices.selections.len(), 1);
-    assert_eq!(choices.selections[0].requirement_id, "source");
+    assert_eq!(choices.choices.len(), 1);
+    assert_eq!(choices.choices[0].requirement_id, "source");
     assert_eq!(
-        choices.selections[0]
-            .provider
-            .as_ref()
-            .unwrap()
-            .instance_key(),
+        choices.choices[0].provider.as_ref().unwrap().instance_key(),
         "source"
     );
     assert_eq!(
