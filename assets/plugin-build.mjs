@@ -95,7 +95,7 @@ function exportSubpath(info, origin) {
   return subpath;
 }
 
-function generatedContract(origin) {
+function generatedContract(origin, local) {
   if (!origin.name.endsWith("_CONTRACT")) return undefined;
   const runtimeFile = origin.file.endsWith(".d.ts")
     ? origin.file.slice(0, -".d.ts".length) + ".js"
@@ -112,11 +112,17 @@ function generatedContract(origin) {
     if (!match) throw new Error(`${runtimeFile}: generated contract is missing ${name}`);
     return match[1];
   };
-  const info = packageForFile(origin.file);
-  exportSubpath(info, origin);
-  const relative = path.relative(info.directory, fs.realpathSync(runtimeFile)).replaceAll(path.sep, "/");
-  lockedPackages.set(identityKey(info.identity), info.identity);
-  contractArtifacts.set(`${info.identity.name}@${info.identity.version}/${relative}`, digest(source));
+  let artifactPath;
+  if (local) {
+    artifactPath = path.relative(root, fs.realpathSync(runtimeFile)).replaceAll(path.sep, "/");
+  } else {
+    const info = packageForFile(origin.file);
+    exportSubpath(info, origin);
+    const relative = path.relative(info.directory, fs.realpathSync(runtimeFile)).replaceAll(path.sep, "/");
+    lockedPackages.set(identityKey(info.identity), info.identity);
+    artifactPath = `${info.identity.name}@${info.identity.version}/${relative}`;
+  }
+  contractArtifacts.set(artifactPath, digest(source));
   return {
     kind: "contract",
     capability_id: read("CAPABILITY_ID"),
@@ -129,25 +135,25 @@ function generatedContract(origin) {
 
 function classifySymbol(origin) {
   const originFile = fs.realpathSync(origin.file);
-  if (
+  const local =
     originFile.startsWith(`${root}${path.sep}`) &&
-    !originFile.includes(`${path.sep}node_modules${path.sep}`)
-  ) {
-    return undefined;
-  }
-  const contract = generatedContract(origin);
+    !originFile.includes(`${path.sep}node_modules${path.sep}`);
+  const contract = generatedContract(origin, local);
   if (contract) return contract;
+  if (local) return undefined;
   const info = packageForFile(origin.file);
   const subpath = exportSubpath(info, origin);
   if (info.manifest.name === "@lenso/bun-plugin" && subpath === ".") {
     if (origin.name === "definePlugin") return { kind: "plugin_definition" };
-    if (origin.name === "dependency" || origin.name === "configuration") {
+    if (origin.name === "dependency" || origin.name === "configuration" || origin.name === "provider") {
       lockedPackages.set(identityKey(info.identity), info.identity);
       return {
         kind: "declaration",
         package: info.identity,
         export_name: origin.name,
-        ...(origin.name === "configuration" ? { handler_parameters: [1] } : {}),
+        ...(origin.name === "configuration" || origin.name === "provider"
+          ? { handler_parameters: [1] }
+          : {}),
       };
     }
   }
@@ -182,6 +188,45 @@ for (const provider of definition.providers) {
     throw new Error(`${provider.span.file}: providers must come from a package declaration lowering`);
   }
   const info = packagesByIdentity.get(identityKey(provider.package));
+  if (provider.package.name === "@lenso/bun-plugin" && provider.export_name === "provider") {
+    collectHandlers(provider.arguments, handlerArguments);
+    const descriptorArgument = provider.arguments[0];
+    const binderArgument = provider.arguments[1];
+    if (provider.arguments.length !== 2 || descriptorArgument?.kind !== "value" || !isRecord(descriptorArgument.value) || binderArgument?.kind !== "handler") {
+      throw new Error(`${provider.span.file}: provider requires one static descriptor and one binder function`);
+    }
+    const descriptor = descriptorArgument.value;
+    const capabilityId = staticValue(descriptor.capability_id);
+    const descriptorVersion = staticValue(descriptor.descriptor_version);
+    const descriptorDigest = staticValue(descriptor.descriptor_digest);
+    const requestOperations = staticValue(descriptor.operations);
+    const streamOperations = staticValue(descriptor.stream_operations);
+    const eventOperations = staticValue(descriptor.event_operations);
+    if (
+      typeof capabilityId !== "string" ||
+      typeof descriptorVersion !== "string" ||
+      typeof descriptorDigest !== "string" ||
+      !Array.isArray(requestOperations) || requestOperations.some((value) => typeof value !== "string") ||
+      !Array.isArray(streamOperations) || streamOperations.length !== 0 ||
+      !Array.isArray(eventOperations) || eventOperations.length !== 0
+    ) {
+      throw new Error(`${provider.span.file}: provider descriptor must declare one request-only Capability with an exact digest`);
+    }
+    const binderPath = `generic/provider-${loweredProviders.length}.ts`;
+    generatedFiles.set(binderPath, [
+      `import { resolveHandler } from "lenso:build-handlers";`,
+      `const bind = resolveHandler(${JSON.stringify(binderArgument.reference)});`,
+      `export function bindProvider(instance) { return bind(instance); }`,
+    ].join("\n"));
+    loweredProviders.push({
+      capability_id: capabilityId,
+      descriptor_version: descriptorVersion,
+      descriptor_digest: descriptorDigest,
+      request_operations: requestOperations,
+      binder: { module: binderPath, export_name: "bindProvider" },
+    });
+    continue;
+  }
   const metadata = info?.buildMetadata ??
     (info?.manifest.lenso?.build
       ? buildApi.validateBuildPackageMetadata(info.manifest.lenso.build)
