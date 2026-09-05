@@ -33,6 +33,7 @@ const WASM_TARGET: &str = "wasm32-unknown-unknown";
 const PROCESS_EXECUTION_CLASS: &str = "lenso.process@1";
 const PROCESS_RUNTIME_PROFILE_V1: &str = "lenso.process@1";
 const PROCESS_RUNTIME_PROFILE_V2: &str = "lenso.process-stdio@2";
+const BUN_PLUGIN_BUILDER: &str = include_str!("../assets/plugin-build.mjs");
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum PluginCommand {
@@ -56,8 +57,8 @@ pub struct PluginNewArgs {
     /// New Plugin project directory. Defaults to the Plugin id.
     #[arg(long)]
     dir: Option<PathBuf>,
-    /// Implementation outputs. Multi builds Wasm and a native Process from the same source.
-    #[arg(long, value_enum, default_value_t = PluginRuntimeArg::Multi)]
+    /// Implementation runtime. The default builds an official Rust Process Plugin.
+    #[arg(long, value_enum, default_value_t = PluginRuntimeArg::Process)]
     runtime: PluginRuntimeArg,
     /// Create a linked native Rust HTTP Endpoint Plugin instead of an Agent Tool Plugin.
     #[arg(long, conflicts_with = "runtime")]
@@ -101,6 +102,9 @@ pub struct PluginDevArgs {
     /// JSON request passed to the Plugin.
     #[arg(long, default_value = "{}")]
     request_json: String,
+    /// JSON configuration passed when the Plugin starts.
+    #[arg(long, default_value = "{}")]
+    config_json: String,
     /// Emit a stable JSON result.
     #[arg(long)]
     json: bool,
@@ -117,6 +121,7 @@ enum DevImplementationArg {
     Auto,
     Wasm,
     Process,
+    Bun,
     /// Build every declared implementation, then invoke the fastest local one.
     All,
 }
@@ -172,10 +177,20 @@ struct LensoCliMetadata {
     runtime: Option<String>,
     #[serde(default)]
     outputs: Vec<String>,
+    #[serde(default)]
+    implementations: Vec<LensoCliImplementation>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct LensoCliImplementation {
+    id: String,
+    path: PathBuf,
+    runtime: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProjectRuntime {
+    Composite,
     Multi,
     Wasm,
     Process,
@@ -216,6 +231,12 @@ struct BunPackageMetadata {
 struct BunPackage {
     version: String,
     metadata: BunPackageMetadata,
+}
+
+#[derive(Debug, Deserialize)]
+struct BunBuildReport {
+    fingerprint: String,
+    descriptor: PluginDescriptor,
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -378,20 +399,56 @@ fn materialize_bun(
     run_bun(root, &["run", "check"], "typecheck Bun Plugin")?;
     let staging = tempfile::tempdir().context("stage Bun Plugin implementation")?;
     let artifact = staging.path().join("plugin.js");
+    let report_path = staging.path().join("build-report.json");
+    let builder = staging.path().join("lenso-plugin-build.mjs");
+    fs::write(&builder, BUN_PLUGIN_BUILDER).context("stage Bun Plugin build frontend")?;
+    let builder_text = builder.to_string_lossy().into_owned();
     let artifact_text = artifact.to_string_lossy().into_owned();
-    let mut arguments = vec![
-        "build",
-        "src/lenso.bun.generated.ts",
-        "--target=bun",
-        "--format=esm",
-        "--outfile",
-        artifact_text.as_str(),
-    ];
-    if profile == BuildProfile::Release {
-        arguments.push("--minify");
+    let report_text = report_path.to_string_lossy().into_owned();
+    let profile_text = match profile {
+        BuildProfile::Development => "development",
+        BuildProfile::Release => "release",
+    };
+    run_bun(
+        root,
+        &[
+            "run",
+            builder_text.as_str(),
+            "src/plugin.ts",
+            artifact_text.as_str(),
+            report_text.as_str(),
+            profile_text,
+        ],
+        "compile Bun Plugin declarations",
+    )?;
+    let report_metadata =
+        fs::symlink_metadata(&report_path).context("inspect Bun Plugin build report")?;
+    if !report_metadata.file_type().is_file() {
+        bail!("Bun Plugin build report must be a regular file");
     }
-    run_bun(root, &arguments, "build Bun Plugin implementation")?;
-    let descriptor = describe_bun_plugin(root)?;
+    if report_metadata.len() > 8 * 1024 * 1024 {
+        bail!("Bun Plugin build report exceeds 8 MiB");
+    }
+    let build_report = fs::read(&report_path).context("read Bun Plugin build report")?;
+    let report: BunBuildReport =
+        serde_json::from_slice(&build_report).context("parse Bun Plugin build report")?;
+    if !is_sha256_digest(&report.fingerprint) {
+        bail!("Bun Plugin build returned an invalid source fingerprint");
+    }
+    let descriptor = report.descriptor;
+    validate_capabilities(&descriptor)?;
+    for capability in &descriptor.capabilities {
+        if !capability
+            .descriptor_digest
+            .as_deref()
+            .is_some_and(is_sha256_digest)
+        {
+            bail!(
+                "Bun Plugin Capability `{}` has an invalid Descriptor digest",
+                capability.capability_id
+            );
+        }
+    }
     let contract = contract_from_bun_descriptor(package, &descriptor)?;
     let verified = build_source_plugin_release_bundle(&SourcePluginReleaseBuild {
         contract,
@@ -404,7 +461,7 @@ fn materialize_bun(
             target: "javascript-bun".to_owned(),
             entrypoint: "plugin.js".to_owned(),
             execution_class: ExecutionClassId::bun_child_process(),
-            runtime_profile: lenso_app_plan::PLUGIN_AUTHORING_V2_RUNTIME_PROFILE.to_owned(),
+            runtime_profile: "lenso.bun-authoring@2".to_owned(),
         }],
         output: output.to_path_buf(),
     })?;
@@ -452,16 +509,6 @@ fn contract_from_bun_descriptor(
     Ok(contract)
 }
 
-fn describe_bun_plugin(root: &Path) -> anyhow::Result<PluginDescriptor> {
-    let output = run_bun_output(
-        root,
-        &["run", "src/lenso.describe.generated.ts"],
-        "describe Bun Plugin",
-    )?;
-    let descriptor = parse_descriptor_bytes(&output)?;
-    Ok(descriptor)
-}
-
 fn materialize(
     root: &Path,
     output: &Path,
@@ -474,6 +521,7 @@ fn materialize(
     synchronize_plugin_lock(root, &package)?;
     let target_directory = cargo_target_directory(root)?;
     match project_runtime(&package)? {
+        ProjectRuntime::Composite => materialize_composite(root, output, &package, profile),
         ProjectRuntime::Multi => {
             materialize_multi(root, output, &package, &target_directory, profile)
         }
@@ -655,6 +703,135 @@ fn materialize_multi(
     )?)
 }
 
+fn materialize_composite(
+    root: &Path,
+    output: &Path,
+    package: &CargoPackage,
+    profile: BuildProfile,
+) -> anyhow::Result<VerifiedBundle> {
+    let declarations = &package
+        .metadata
+        .lenso_cli
+        .as_ref()
+        .expect("composite projects have CLI metadata")
+        .implementations;
+    if declarations.len() < 2 {
+        bail!("composite Plugin projects require at least two implementations");
+    }
+    let staging = tempfile::tempdir().context("stage declared Plugin implementations")?;
+    let mut contract = None::<PluginContract>;
+    let mut implementations = Vec::with_capacity(declarations.len());
+    let mut ids = BTreeSet::new();
+    for declaration in declarations {
+        if declaration.id.is_empty()
+            || !declaration
+                .id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            || !ids.insert(declaration.id.as_str())
+        {
+            bail!(
+                "invalid or duplicate Plugin implementation id `{}`",
+                declaration.id
+            );
+        }
+        let (candidate_contract, source) =
+            materialize_declared_implementation(root, staging.path(), declaration, profile)?;
+        if let Some(expected) = &contract {
+            if expected != &candidate_contract {
+                bail!("declared Plugin implementations do not expose the same Contract");
+            }
+        } else {
+            contract = Some(candidate_contract);
+        }
+        implementations.push(source);
+    }
+    build_source_plugin_release_bundle(&SourcePluginReleaseBuild {
+        contract: contract.expect("composite Plugin has implementations"),
+        implementations,
+        output: output.to_path_buf(),
+    })
+    .map_err(Into::into)
+}
+
+fn materialize_declared_implementation(
+    root: &Path,
+    staging: &Path,
+    declaration: &LensoCliImplementation,
+    profile: BuildProfile,
+) -> anyhow::Result<(PluginContract, SourcePluginImplementation)> {
+    let implementation_root = implementation_root(root, &declaration.path)?;
+    let implementation_bundle = staging.join(&declaration.id);
+    match declaration.runtime.as_str() {
+        "process" => {
+            let implementation_package = read_package(&implementation_root.join("Cargo.toml"))?;
+            let target_directory = cargo_target_directory(&implementation_root)?;
+            materialize_process(
+                &implementation_root,
+                &implementation_bundle,
+                &implementation_package,
+                &target_directory,
+                profile,
+            )?;
+            let descriptor = v2_descriptor(&implementation_bundle)?;
+            let filename = if cfg!(windows) {
+                "plugin.exe"
+            } else {
+                "plugin"
+            };
+            let source = SourcePluginImplementation {
+                id: declaration.id.clone(),
+                host_targets: vec![format!("{}-unknown-{}", env::consts::ARCH, env::consts::OS)],
+                artifact: implementation_bundle.join(filename),
+                bundle_path: format!("implementations/{}/{filename}", declaration.id),
+                media_type: "application/vnd.lenso.process".to_owned(),
+                target: format!("{}-unknown-{}", env::consts::ARCH, env::consts::OS),
+                entrypoint: descriptor.implementation().entrypoint().to_owned(),
+                execution_class: descriptor.implementation().execution_class().clone(),
+                runtime_profile: descriptor.runtime_profile().to_owned(),
+            };
+            Ok((descriptor.contract(), source))
+        }
+        "bun" => {
+            let implementation_package =
+                read_bun_package(&implementation_root)?.ok_or_else(|| {
+                    anyhow::anyhow!("Bun implementation has no Lenso package metadata")
+                })?;
+            materialize_bun(
+                &implementation_root,
+                &implementation_bundle,
+                &implementation_package,
+                profile,
+            )?;
+            let PluginManifest::V4(manifest) = read_bundle_manifest(&implementation_bundle)? else {
+                bail!("Bun implementation did not produce Bundle 4");
+            };
+            let [implementation] = manifest.implementations.as_slice() else {
+                bail!("Bun implementation must produce exactly one artifact");
+            };
+            let filename = Path::new(&implementation.artifact.path)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("implementation artifact has no portable filename")
+                })?;
+            let source = SourcePluginImplementation {
+                id: declaration.id.clone(),
+                host_targets: implementation.host_targets.clone(),
+                artifact: implementation_bundle.join(&implementation.artifact.path),
+                bundle_path: format!("implementations/{}/{filename}", declaration.id),
+                media_type: implementation.artifact.media_type.clone(),
+                target: implementation.artifact.target.clone(),
+                entrypoint: implementation.runtime.entrypoint().to_owned(),
+                execution_class: implementation.runtime.execution_class().clone(),
+                runtime_profile: implementation.runtime.runtime_profile().to_owned(),
+            };
+            Ok((manifest.contract, source))
+        }
+        runtime => bail!("unsupported declared Plugin implementation runtime `{runtime}`"),
+    }
+}
+
 fn v2_descriptor(root: &Path) -> anyhow::Result<lenso_app_plan::authoring::PluginDescriptor> {
     let PluginManifest::V2(manifest) = read_bundle_manifest(root)? else {
         bail!("implementation staging Bundle did not use V2")
@@ -711,6 +888,12 @@ fn project_runtime(package: &CargoPackage) -> anyhow::Result<ProjectRuntime> {
     let Some(metadata) = package.metadata.lenso_cli.as_ref() else {
         return Ok(ProjectRuntime::Wasm);
     };
+    if !metadata.implementations.is_empty() {
+        if metadata.runtime.is_some() || !metadata.outputs.is_empty() {
+            bail!("Plugin implementations cannot be combined with runtime or outputs");
+        }
+        return Ok(ProjectRuntime::Composite);
+    }
     if !metadata.outputs.is_empty() {
         return match metadata.outputs.as_slice() {
             [output] if output == "wasm" => Ok(ProjectRuntime::Wasm),
@@ -727,11 +910,35 @@ fn project_runtime(package: &CargoPackage) -> anyhow::Result<ProjectRuntime> {
     }
 }
 
+fn implementation_root(root: &Path, declared: &Path) -> anyhow::Result<PathBuf> {
+    if declared.is_absolute()
+        || declared
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        bail!("Plugin implementation path must stay inside the project root");
+    }
+    let canonical_root = fs::canonicalize(root).context("resolve Plugin project root")?;
+    let candidate = fs::canonicalize(root.join(declared)).with_context(|| {
+        format!(
+            "resolve Plugin implementation path `{}`",
+            declared.display()
+        )
+    })?;
+    if !candidate.starts_with(&canonical_root) {
+        bail!("Plugin implementation path must stay inside the project root");
+    }
+    Ok(candidate)
+}
+
 fn resolve_dev_selection(
     declared: ProjectRuntime,
     implementation: DevImplementationArg,
 ) -> anyhow::Result<DevSelection> {
     match (declared, implementation) {
+        (ProjectRuntime::Composite, _) => {
+            bail!("composite Plugin development is dispatched from its declarations")
+        }
         (ProjectRuntime::Multi, DevImplementationArg::Auto | DevImplementationArg::Process) => {
             Ok(DevSelection {
                 build: DevBuild::Process,
@@ -757,11 +964,14 @@ fn resolve_dev_selection(
             build: DevBuild::Process,
             invoke: ProjectRuntime::Process,
         }),
-        (ProjectRuntime::Wasm, DevImplementationArg::Process) => {
+        (ProjectRuntime::Wasm, DevImplementationArg::Process | DevImplementationArg::Bun) => {
             bail!("Plugin project declares only a Wasm implementation")
         }
-        (ProjectRuntime::Process, DevImplementationArg::Wasm) => {
+        (ProjectRuntime::Process, DevImplementationArg::Wasm | DevImplementationArg::Bun) => {
             bail!("Plugin project declares only a Process implementation")
+        }
+        (ProjectRuntime::Multi, DevImplementationArg::Bun) => {
+            bail!("Plugin project declares only Rust implementations")
         }
         (ProjectRuntime::Bun, _) => bail!("Bun development is dispatched separately"),
     }
@@ -805,6 +1015,14 @@ fn validate_capabilities(descriptor: &PluginDescriptor) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn is_sha256_digest(value: &str) -> bool {
+    value.starts_with("sha256:")
+        && value.len() == 71
+        && value[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 fn one_capability(descriptor: &PluginDescriptor) -> anyhow::Result<&PluginCapability> {
@@ -854,23 +1072,6 @@ fn run_bun(root: &Path, args: &[&str], action: &str) -> anyhow::Result<()> {
         bail!("{action} failed with {status}");
     }
     Ok(())
-}
-
-fn run_bun_output(root: &Path, args: &[&str], action: &str) -> anyhow::Result<Vec<u8>> {
-    let bun = env::var_os("BUN_BIN").unwrap_or_else(|| "bun".into());
-    let output = Command::new(bun)
-        .args(args)
-        .current_dir(root)
-        .output()
-        .with_context(|| action.to_owned())?;
-    if !output.status.success() {
-        bail!(
-            "{action} failed with {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(output.stdout)
 }
 
 fn print_verified(

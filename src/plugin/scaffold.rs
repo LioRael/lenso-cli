@@ -310,29 +310,11 @@ pub(super) fn bun_plugin_scaffold(plugin_id: &str) -> BTreeMap<PathBuf, String> 
 "#
             .to_owned(),
         ),
-        (
-            PathBuf::from("src/plugin.ts"),
-            bun_author_source(plugin_id),
-        ),
-        (
-            PathBuf::from("src/lenso.bun.generated.ts"),
-            "import { serve } from \"@lenso/bun\";\nimport plugin from \"./plugin.ts\";\n\nserve(plugin);\n"
-                .to_owned(),
-        ),
-        (
-            PathBuf::from("src/lenso.describe.generated.ts"),
-            "import { describePortablePlugin } from \"@lenso/bun\";\nimport plugin from \"./plugin.ts\";\n\nconsole.log(JSON.stringify(describePortablePlugin(plugin)));\n"
-                .to_owned(),
-        ),
-        (
-            PathBuf::from("src/lenso.invoke.generated.ts"),
-            "import plugin from \"./plugin.ts\";\n\nconst [, , capability, operation, request = \"{}\"] = Bun.argv;\nconst provider = plugin.providers.find(({ descriptor }) => descriptor.capability_id === capability);\nif (!provider) throw new Error(`unknown capability ${capability}`);\nconst outcome = await provider.invokeRequest(operation, {\n  requestId: \"0\" as never,\n  cancelled: false,\n  extensions: Object.freeze({}),\n}, JSON.parse(request));\nswitch (outcome.kind) {\n  case \"success\": console.log(JSON.stringify({ ok: outcome.value })); break;\n  case \"domain\": console.log(JSON.stringify({ error: outcome.value })); break;\n  case \"runtime\": throw new Error(`Plugin runtime failure: ${outcome.failure.kind}`);\n}\n"
-                .to_owned(),
-        ),
+        (PathBuf::from("src/plugin.ts"), bun_author_source(plugin_id)),
         (
             PathBuf::from("README.md"),
             format!(
-                "# {plugin_id}\n\nTyped Bun Plugin using the official `@lenso/bun` Capability projection. The generated files own runtime lowering; edit `src/plugin.ts`.\n\n```sh\nlenso plugin check\nlenso plugin dev --operation execute --request-json '{{\"name\":\"{plugin_id}\",\"arguments_json\":\"{{\\\"text\\\":\\\"hello\\\"}}\"}}'\nlenso plugin dev --watch\nlenso plugin pack\n```\n"
+                "# {plugin_id}\n\nTyped Bun Plugin using the generic Lenso Plugin SDK and Agent-owned Tool declarations. Edit `src/plugin.ts`; the CLI compiles declarations and runtime bindings.\n\n```sh\nlenso plugin check\nlenso plugin dev --operation execute --request-json '{{\"name\":\"{plugin_id}\",\"arguments_json\":\"{{\\\"text\\\":\\\"hello\\\"}}\"}}'\nlenso plugin dev --watch\nlenso plugin pack\n```\n"
             ),
         ),
     ])
@@ -349,7 +331,8 @@ fn bun_package_manifest(plugin_id: &str, package_name: &str) -> String {
     "check": "tsc --noEmit"
   }},
   "dependencies": {{
-    "@lenso/bun": "0.3.0"
+    "@lenso/agent-tool-sdk": "0.1.0",
+    "@lenso/bun-plugin": "0.2.1"
   }},
   "devDependencies": {{
     "@types/bun": "1.4.0",
@@ -367,58 +350,26 @@ fn bun_package_manifest(plugin_id: &str, package_name: &str) -> String {
 
 fn bun_author_source(plugin_id: &str) -> String {
     format!(
-        r#"import {{ definePlugin }} from "@lenso/bun";
-import {{
-  bindToolProviderProvider,
-  type ToolProviderProvider,
-}} from "@lenso/bun/capabilities/agent-tool-provider";
+        r#"import {{ definePlugin }} from "@lenso/bun-plugin";
+import {{ tool, tools }} from "@lenso/agent-tool-sdk";
+import * as schema from "@lenso/agent-tool-sdk/schema";
 
-const tool: ToolProviderProvider = {{
-  async catalog() {{
-    return {{
-      ok: true,
-      value: {{
-        tools: [{{
-          description: "Process one UTF-8 string.",
-          input_schema_json: JSON.stringify({{
-            type: "object",
-            additionalProperties: false,
-            properties: {{ text: {{ type: "string", maxLength: 4096 }} }},
-            required: ["text"],
-          }}),
+export default definePlugin({{
+  providers: [
+    tools([
+      tool(
+        {{
           name: "{plugin_id}",
-        }}],
-      }},
-    }};
-  }},
-  async execute(_context, request) {{
-    if (request.name !== "{plugin_id}") {{
-      return {{ ok: false, error: {{ kind: "domain", error: "not_found" }} }};
-    }}
-    let arguments_: unknown;
-    try {{
-      arguments_ = JSON.parse(request.arguments_json);
-    }} catch {{
-      return {{ ok: false, error: {{ kind: "domain", error: "invalid_arguments" }} }};
-    }}
-    if (
-      typeof arguments_ !== "object" ||
-      arguments_ === null ||
-      !("text" in arguments_) ||
-      typeof arguments_.text !== "string" ||
-      arguments_.text.length === 0 ||
-      arguments_.text.length > 4096
-    ) {{
-      return {{ ok: false, error: {{ kind: "domain", error: "invalid_arguments" }} }};
-    }}
-    return {{
-      ok: true,
-      value: {{ content: arguments_.text, content_type: "text", metadata_json: "{{}}" }},
-    }};
-  }},
-}};
-
-export default definePlugin({{ providers: [bindToolProviderProvider(tool)] }});
+          description: "Uppercase one UTF-8 string.",
+          input: schema.object({{ text: schema.string() }}),
+          output: schema.string(),
+          execution: "parallel_safe",
+        }},
+        ({{ text }}) => ({{ ok: true, value: text.toUpperCase() }}),
+      ),
+    ]),
+  ],
+}});
 "#
     )
 }

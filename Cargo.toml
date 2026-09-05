@@ -10,6 +10,7 @@ rust-version = "1.94"
 categories = ["command-line-utilities", "development-tools"]
 keywords = ["cli", "authoring", "plugins", "app-plan"]
 include = [
+    "/assets/plugin-build.mjs",
     "/src/**/*.rs",
     "/contracts/*.json",
     "/docs/migration-plugin-authoring.md",
@@ -33,6 +34,7 @@ cli = [
     "dep:clap",
     "dep:lenso-contract-authoring-next",
     "dep:lenso-contract-codegen-next",
+    "dep:lenso-bun-adapter",
     "dep:lenso-kernel",
     "dep:lenso-process-adapter",
     "dep:lenso-runner",
@@ -78,6 +80,7 @@ must_use_candidate = "allow"
 anyhow = "1.0"
 clap = { version = "4", features = ["derive"], optional = true }
 lenso-app-plan = { version = "0.4.1" }
+lenso-bun-adapter = { version = "0.1.7", optional = true }
 lenso-contract-authoring-next = { package = "lenso-contract-authoring", version = "0.1.1", optional = true }
 lenso-contract-codegen-next = { package = "lenso-contract-codegen", version = "0.7.3", optional = true }
 lenso-kernel = { version = "0.3.3", optional = true }
