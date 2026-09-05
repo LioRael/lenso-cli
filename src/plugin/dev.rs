@@ -32,8 +32,8 @@ use super::{
     PROCESS_EXECUTION_CLASS, PROCESS_RUNTIME_PROFILE_V1, PROCESS_RUNTIME_PROFILE_V2, Path,
     PluginCapability, PluginDescriptor, PluginDevArgs, ProjectRuntime, Value, VerifiedBundle,
     WASM_EXECUTION_CLASS, env, fs, implementation_root, materialize_bun, materialize_composite,
-    materialize_dev, one_capability, parse_descriptor, project_root, project_runtime,
-    read_bun_package, read_bundle_manifest, read_package, resolve_dev_selection,
+    materialize_dev, native_host_target, one_capability, parse_descriptor, project_root,
+    project_runtime, read_bun_package, read_bundle_manifest, read_package, resolve_dev_selection,
 };
 
 pub(super) async fn run(args: PluginDevArgs) -> anyhow::Result<()> {
@@ -114,7 +114,7 @@ async fn dev_cargo(
     let selected = resolve_implementation(
         &read_bundle_manifest(&output)?,
         &ImplementationPolicy {
-            host_target: format!("{}-unknown-{}", env::consts::ARCH, env::consts::OS),
+            host_target: super::rust_host_target(root)?,
             runtimes: match dev_runtime {
                 ProjectRuntime::Process => vec![
                     RuntimeAdmission {
@@ -195,7 +195,7 @@ async fn dev_composite(
             let selected = resolve_implementation(
                 &read_bundle_manifest(&output)?,
                 &ImplementationPolicy {
-                    host_target: format!("{}-unknown-{}", env::consts::ARCH, env::consts::OS),
+                    host_target: super::rust_host_target(root)?,
                     runtimes: vec![RuntimeAdmission {
                         execution_class: ExecutionClassId::new(PROCESS_EXECUTION_CLASS),
                         runtime_profile: PROCESS_RUNTIME_PROFILE_V2.to_owned(),
@@ -617,7 +617,7 @@ async fn dev_bun(root: &Path, package: &BunPackage, args: &PluginDevArgs) -> any
     let selected = resolve_implementation(
         &read_bundle_manifest(&output)?,
         &ImplementationPolicy {
-            host_target: format!("{}-unknown-{}", env::consts::ARCH, env::consts::OS),
+            host_target: native_host_target().to_owned(),
             runtimes: vec![RuntimeAdmission {
                 execution_class: ExecutionClassId::bun_child_process(),
                 runtime_profile: BUN_AUTHORING_RUNTIME_PROFILE.to_owned(),

@@ -24,6 +24,7 @@ use crate::archive::{archive_bundle, with_bundle_directory};
 use lenso_app_authoring::identity::{
     PluginIdVersion, classify_existing_plugin_id, validate_release_version,
 };
+use lenso_app_authoring::native_host_target;
 
 mod dev;
 mod scaffold;
@@ -34,6 +35,24 @@ const PROCESS_EXECUTION_CLASS: &str = "lenso.process@1";
 const PROCESS_RUNTIME_PROFILE_V1: &str = "lenso.process@1";
 const PROCESS_RUNTIME_PROFILE_V2: &str = "lenso.process-stdio@2";
 const BUN_PLUGIN_BUILDER: &str = include_str!("../assets/plugin-build.mjs");
+
+fn rust_host_target(root: &Path) -> anyhow::Result<String> {
+    let rustc = env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let output = Command::new(rustc)
+        .arg("-vV")
+        .current_dir(root)
+        .output()
+        .context("read Rust host target")?;
+    if !output.status.success() {
+        bail!("read Rust host target: `rustc -vV` failed");
+    }
+    let version = String::from_utf8(output.stdout).context("Rust version output is not UTF-8")?;
+    version
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .map(str::to_owned)
+        .context("Rust version output has no host target")
+}
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum PluginCommand {
@@ -621,7 +640,7 @@ fn materialize_process(
             runtime_descriptor: descriptor.path().to_path_buf(),
             authoring_version: source.authoring_version,
             runtime_profile: source.runtime_profile,
-            target: format!("{}-unknown-{}", env::consts::ARCH, env::consts::OS),
+            target: rust_host_target(root)?,
             output: output.to_path_buf(),
         },
     )?)
@@ -653,7 +672,7 @@ fn materialize_multi(
         output: wasm_bundle.clone(),
     })?;
     let process_bundle = staging.path().join("process");
-    let host_target = format!("{}-unknown-{}", env::consts::ARCH, env::consts::OS);
+    let host_target = rust_host_target(root)?;
     let executable = target_directory
         .join(profile.directory())
         .join(&package.name);
@@ -787,13 +806,14 @@ fn materialize_declared_implementation(
             } else {
                 "plugin"
             };
+            let host_target = rust_host_target(&implementation_root)?;
             let source = SourcePluginImplementation {
                 id: declaration.id.clone(),
-                host_targets: vec![format!("{}-unknown-{}", env::consts::ARCH, env::consts::OS)],
+                host_targets: vec![host_target.clone()],
                 artifact: implementation_bundle.join(filename),
                 bundle_path: format!("implementations/{}/{filename}", declaration.id),
                 media_type: "application/vnd.lenso.process".to_owned(),
-                target: format!("{}-unknown-{}", env::consts::ARCH, env::consts::OS),
+                target: host_target,
                 entrypoint: descriptor.implementation().entrypoint().to_owned(),
                 execution_class: descriptor.implementation().execution_class().clone(),
                 runtime_profile: descriptor.runtime_profile().to_owned(),

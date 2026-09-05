@@ -11,7 +11,7 @@ use host_authoring::{GeneratedHostBuild, HOST_BUILD, HostInput};
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    env, fs,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -32,6 +32,16 @@ use sha2::{Digest as _, Sha256};
 use crate::identity::{
     classify_existing_plugin_id, validate_plugin_id_v1, validate_release_version,
 };
+
+/// Rust target triple of this CLI build.
+///
+/// Plugin admission uses the same canonical vocabulary as `rustc` and
+/// `lenso app build --target`.
+#[doc(hidden)]
+#[must_use]
+pub const fn native_host_target() -> &'static str {
+    env!("LENSO_CLI_BUILD_TARGET")
+}
 
 mod configuration_authority;
 mod root_transaction;
@@ -779,7 +789,7 @@ fn read_verified_bundle_descriptor(
     let descriptor = resolve_implementation(
         &manifest,
         &ImplementationPolicy {
-            host_target: format!("{}-unknown-{}", env::consts::ARCH, env::consts::OS),
+            host_target: native_host_target().to_owned(),
             runtimes: [
                 ("lenso.quickjs@1", "lenso.quickjs@1"),
                 ("lenso.process@1", "lenso.process-stdio@2"),
