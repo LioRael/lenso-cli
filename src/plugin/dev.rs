@@ -1,26 +1,38 @@
 use std::{
     any::Any,
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     io::{BufRead, BufReader, Write},
     process::Stdio,
     sync::{Mutex, OnceLock},
+    time::Duration,
 };
 
 use anyhow::{Context, anyhow, bail};
-use lenso_app_plan::{PluginInstancePlan, ResolvedAppPlan};
-use lenso_kernel::{CancellationToken, ExecutionAdapter, InvocationContext, RuntimeFailure};
-use lenso_plugin_bundle::{ImplementationPolicy, RuntimeAdmission, resolve_implementation};
+use lenso_app_plan::{
+    CapabilityBinding, CapabilityEndpointPlan, CapabilityRequirementPlan, PluginInstancePlan,
+    ResolvedAppPlan,
+};
+use lenso_kernel::{
+    CancellationToken, ExecutionAdapter, ExecutionAdapterCatalog, Kernel, NoopPluginLifecycle,
+    PreparedNativeApp, PreparedNativePlugin, RuntimeFailure, ShutdownOutcome,
+};
+use lenso_plugin_bundle::{
+    ImplementationPolicy, ResolvedPluginImplementation, RuntimeAdmission, resolve_implementation,
+};
+use lenso_process_adapter::ProcessAdapter;
+use lenso_runner::TokioDriver;
 use lenso_runtime_codec::{ArtifactCatalog, ArtifactHandle, JsonCapabilityCodec};
 use lenso_wasm_component_adapter::{WasmComponentAdapter, WasmComponentLimits};
 
 use crate::watch::SourceWatcher;
 
 use super::{
-    BuildProfile, BunPackage, CapabilityEndpointPlan, Command, DevImplementationArg,
-    ExecutionClassId, Path, PluginCapability, PluginDescriptor, PluginDevArgs, ProjectRuntime,
-    Value, VerifiedBundle, WASM_EXECUTION_CLASS, env, fs, materialize_bun, materialize_dev,
-    one_capability, parse_descriptor, project_root, project_runtime, read_bun_package,
-    read_bundle_manifest, read_package, resolve_dev_selection, run_bun_output,
+    BuildProfile, BunPackage, Command, DevImplementationArg, ExecutionClassId,
+    PROCESS_EXECUTION_CLASS, PROCESS_RUNTIME_PROFILE_V1, PROCESS_RUNTIME_PROFILE_V2, Path,
+    PluginCapability, PluginDescriptor, PluginDevArgs, ProjectRuntime, Value, VerifiedBundle,
+    WASM_EXECUTION_CLASS, env, fs, materialize_bun, materialize_dev, one_capability,
+    parse_descriptor, project_root, project_runtime, read_bun_package, read_bundle_manifest,
+    read_package, resolve_dev_selection, run_bun_output,
 };
 
 pub(super) async fn run(args: PluginDevArgs) -> anyhow::Result<()> {
@@ -81,7 +93,7 @@ async fn dev_once(args: &PluginDevArgs) -> anyhow::Result<()> {
         BuildProfile::Development,
     )?;
     let dev_class = if dev_runtime == ProjectRuntime::Process {
-        "lenso.process@1"
+        PROCESS_EXECUTION_CLASS
     } else {
         WASM_EXECUTION_CLASS
     };
@@ -89,76 +101,133 @@ async fn dev_once(args: &PluginDevArgs) -> anyhow::Result<()> {
         &read_bundle_manifest(&output)?,
         &ImplementationPolicy {
             host_target: format!("{}-unknown-{}", env::consts::ARCH, env::consts::OS),
-            runtimes: vec![RuntimeAdmission {
-                execution_class: ExecutionClassId::new(dev_class),
-                runtime_profile: match dev_runtime {
-                    ProjectRuntime::Process => "lenso.process@1",
-                    ProjectRuntime::Wasm => "lenso.wasm-component@1",
-                    ProjectRuntime::Multi | ProjectRuntime::Bun => {
-                        unreachable!("development resolves to one invocation runtime")
-                    }
+            runtimes: match dev_runtime {
+                ProjectRuntime::Process => vec![
+                    RuntimeAdmission {
+                        execution_class: ExecutionClassId::new(dev_class),
+                        runtime_profile: PROCESS_RUNTIME_PROFILE_V2.to_owned(),
+                    },
+                    RuntimeAdmission {
+                        execution_class: ExecutionClassId::new(dev_class),
+                        runtime_profile: PROCESS_RUNTIME_PROFILE_V1.to_owned(),
+                    },
+                ],
+                ProjectRuntime::Wasm => vec![RuntimeAdmission {
+                    execution_class: ExecutionClassId::new(dev_class),
+                    runtime_profile: "lenso.wasm-component@1".to_owned(),
+                }],
+                ProjectRuntime::Multi | ProjectRuntime::Bun => {
+                    unreachable!("development resolves to one invocation runtime")
                 }
-                .to_owned(),
-            }],
+            },
         },
     )?;
+    invoke_selected_dev(&output, &verified, selected, dev_runtime, args).await
+}
+
+async fn invoke_selected_dev(
+    output: &Path,
+    verified: &VerifiedBundle,
+    selected: ResolvedPluginImplementation,
+    dev_runtime: ProjectRuntime,
+    args: &PluginDevArgs,
+) -> anyhow::Result<()> {
     let artifact_path = output.join(&selected.artifact.path);
     let artifact_bytes = fs::read(&artifact_path)?;
-    let descriptor = match dev_runtime {
+    let descriptor = &selected.descriptor;
+    let [capability] = descriptor.provided_capabilities() else {
+        bail!("Plugin development requires exactly one provided Capability");
+    };
+    let source_descriptor = match dev_runtime {
         ProjectRuntime::Wasm => parse_descriptor(&artifact_bytes)?,
-        ProjectRuntime::Process => read_process_descriptor(&artifact_path)?,
+        ProjectRuntime::Process => read_process_descriptor(&artifact_path)?.descriptor,
         ProjectRuntime::Multi | ProjectRuntime::Bun => {
             unreachable!("development resolves to one invocation runtime")
         }
     };
-    let capability = one_capability(&descriptor)?;
+    let source_capability = one_capability(&source_descriptor)?;
+    if source_capability.capability_id != capability.capability_id()
+        || source_capability.descriptor_version != capability.descriptor_version()
+        || source_capability.request_operations != capability.request_operations()
+    {
+        bail!("packaged Capability differs from source descriptor evidence");
+    }
     let operation = args.operation.clone().unwrap_or_else(|| {
-        capability
+        source_capability
             .request_operations
             .first()
             .expect("validated operation")
             .clone()
     });
-    if !capability.request_operations.contains(&operation) {
+    if !source_capability.request_operations.contains(&operation) {
         bail!(
             "Plugin Capability `{}` does not declare operation `{operation}`",
-            capability.capability_id
+            source_capability.capability_id
         );
     }
     let request: Value = serde_json::from_str(&args.request_json)
         .context("Plugin development request is not valid JSON")?;
-    if dev_runtime == ProjectRuntime::Process {
-        let response = invoke_dev_process(
-            &artifact_path,
-            &descriptor,
-            capability,
-            &operation,
-            &request,
-        )?;
-        return print_dev_response(&verified, capability, &operation, &response, args.json);
-    }
-    let response = invoke_dev_wasm(
-        &artifact_path,
-        &selected.artifact.digest,
-        &artifact_bytes,
-        &verified.plugin_id,
+    let invocation = DevAdapterInvocation {
+        artifact_path: &artifact_path,
+        artifact_digest: &selected.artifact.digest,
+        artifact_bytes: &artifact_bytes,
+        plugin_id: &verified.plugin_id,
+        descriptor,
         capability,
-        &operation,
+        source_capability,
+        operation: &operation,
         request,
+    };
+    if dev_runtime == ProjectRuntime::Process {
+        if !descriptor.required_capabilities().is_empty() {
+            bail!("Plugin development requires an App Root to resolve declared dependencies");
+        }
+        if descriptor.authoring_version() == 2 && source_capability.descriptor_digest.is_none() {
+            bail!("Process V2 source descriptor omitted its Capability digest proof");
+        }
+        let response = invoke_dev_process(invocation).await?;
+        return print_dev_response(
+            verified,
+            capability.capability_id(),
+            &operation,
+            &response,
+            args.json,
+        );
+    }
+    let response = invoke_dev_wasm(invocation).await?;
+    print_dev_response(
+        verified,
+        capability.capability_id(),
+        &operation,
+        &response,
+        args.json,
     )
-    .await?;
-    print_dev_response(&verified, capability, &operation, &response, args.json)
 }
 
-async fn invoke_dev_wasm(
-    artifact_path: &Path,
-    artifact_digest: &str,
-    artifact_bytes: &[u8],
-    plugin_id: &str,
-    capability: &PluginCapability,
-    operation: &str,
+struct DevAdapterInvocation<'a> {
+    artifact_path: &'a Path,
+    artifact_digest: &'a str,
+    artifact_bytes: &'a [u8],
+    plugin_id: &'a str,
+    descriptor: &'a lenso_app_plan::authoring::PluginDescriptor,
+    capability: &'a CapabilityEndpointPlan,
+    source_capability: &'a PluginCapability,
+    operation: &'a str,
     request: Value,
-) -> anyhow::Result<Value> {
+}
+
+async fn invoke_dev_wasm(invocation: DevAdapterInvocation<'_>) -> anyhow::Result<Value> {
+    let DevAdapterInvocation {
+        artifact_path,
+        artifact_digest,
+        artifact_bytes,
+        plugin_id,
+        descriptor,
+        capability,
+        source_capability,
+        operation,
+        request,
+    } = invocation;
     let artifact =
         ArtifactHandle::open(artifact_path, artifact_digest, artifact_bytes.len() as u64)
             .map_err(|error| runtime_error("open Plugin artifact", &error))?;
@@ -168,101 +237,116 @@ async fn invoke_dev_wasm(
     let plan = ResolvedAppPlan::new(
         vec![
             PluginInstancePlan::new("plugin", plugin_id)
-                .with_entrypoint("plugin")
-                .with_execution_class(ExecutionClassId::new(WASM_EXECUTION_CLASS))
-                .with_capability(CapabilityEndpointPlan::new(
-                    &capability.capability_id,
-                    &capability.descriptor_version,
-                    capability.request_operations.clone(),
-                )),
+                .with_authoring(descriptor.authoring_version(), descriptor.runtime_profile())
+                .with_entrypoint(descriptor.entrypoint())
+                .with_execution_class(descriptor.execution_class().clone())
+                .with_capability(capability.clone()),
+            dev_client_plan(capability),
         ],
-        Vec::new(),
+        vec![dev_client_binding(capability)],
     );
     let adapter = WasmComponentAdapter::new(artifacts)
         .with_limits(WasmComponentLimits {
             max_component_bytes: artifact_bytes.len(),
             ..WasmComponentLimits::default()
         })
-        .with_codec(DynamicJsonCodec::new(capability));
-    invoke_dev_adapter(&adapter, &plan, operation, request).await
+        .with_codec(DynamicJsonCodec::new(source_capability));
+    invoke_dev_adapter(adapter, &plan, operation, request).await
 }
 
-fn invoke_dev_process(
-    executable: &Path,
-    expected_descriptor: &PluginDescriptor,
-    capability: &PluginCapability,
-    operation: &str,
-    request: &Value,
-) -> anyhow::Result<Value> {
-    const MAX_FRAME_BYTES: usize = 1024 * 1024;
-    let mut child = Command::new(executable)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .with_context(|| format!("start Process Plugin `{}`", executable.display()))?;
-    let mut input = child.stdin.take().context("open Process Plugin stdin")?;
-    let output = child.stdout.take().context("open Process Plugin stdout")?;
-    let mut output = BufReader::new(output);
+async fn invoke_dev_process(invocation: DevAdapterInvocation<'_>) -> anyhow::Result<Value> {
+    let DevAdapterInvocation {
+        artifact_path: executable,
+        artifact_digest,
+        artifact_bytes,
+        plugin_id,
+        descriptor,
+        capability,
+        source_capability,
+        operation,
+        request,
+    } = invocation;
+    let artifact = ArtifactHandle::open(executable, artifact_digest, artifact_bytes.len() as u64)
+        .map_err(|error| runtime_error("open Plugin artifact", &error))?;
+    let artifacts = ArtifactCatalog::new()
+        .with_artifact("plugin", artifact)
+        .map_err(|error| runtime_error("register Plugin artifact", &error))?;
+    let plan = ResolvedAppPlan::new(
+        vec![
+            PluginInstancePlan::new("plugin", plugin_id)
+                .with_authoring(descriptor.authoring_version(), descriptor.runtime_profile())
+                .with_entrypoint(descriptor.entrypoint())
+                .with_execution_class(descriptor.execution_class().clone())
+                .with_capability(capability.clone()),
+            dev_client_plan(capability),
+        ],
+        vec![dev_client_binding(capability)],
+    );
+    let adapter =
+        ProcessAdapter::new(artifacts).with_codec(DynamicJsonCodec::new(source_capability));
+    invoke_dev_adapter(adapter, &plan, operation, request).await
+}
 
-    let result = (|| {
-        let ready = read_process_frame(&mut output, MAX_FRAME_BYTES)?;
-        if ready.get("type").and_then(Value::as_str) != Some("ready")
-            || ready.get("protocol").and_then(Value::as_str) != Some("lenso.process-stdio@1")
-        {
-            bail!("Process Plugin did not complete the expected readiness handshake");
-        }
-        let actual_descriptor = serde_json::from_value::<PluginDescriptor>(
-            ready
-                .get("descriptor")
-                .cloned()
-                .context("Process Plugin readiness omitted its descriptor")?,
-        )
-        .context("Process Plugin readiness descriptor is invalid")?;
-        if &actual_descriptor != expected_descriptor {
-            bail!("Process Plugin readiness descriptor differs from packaged source evidence");
-        }
+const DEV_CLIENT_INSTANCE: &str = "lenso-dev-client";
+const DEV_CLIENT_PACKAGE: &str = "lenso.dev-client";
+const DEV_CLIENT_EXECUTION_CLASS: &str = "lenso.dev-client@1";
 
-        write_process_frame(
-            &mut input,
-            &serde_json::json!({
-                "type": "invoke",
-                "id": 1,
-                "capability": capability.capability_id,
-                "operation": operation,
-                "request": request,
-            }),
-        )?;
-        let response = read_process_frame(&mut output, MAX_FRAME_BYTES)?;
-        if response.get("type").and_then(Value::as_str) != Some("result")
-            || response.get("id").and_then(Value::as_u64) != Some(1)
-        {
-            bail!("Process Plugin returned an unexpected result frame");
-        }
-        if let Some(value) = response.get("ok") {
-            return Ok(value.clone());
-        }
-        if let Some(error) = response.get("error") {
-            bail!("Plugin returned Domain Error: {error}");
-        }
-        if let Some(failure) = response.get("failure").and_then(Value::as_str) {
-            bail!("Process Plugin failed: {failure}");
-        }
-        bail!("Process Plugin result contains no terminal outcome")
-    })();
+fn dev_client_plan(capability: &CapabilityEndpointPlan) -> PluginInstancePlan {
+    PluginInstancePlan::new(DEV_CLIENT_INSTANCE, DEV_CLIENT_PACKAGE)
+        .with_authoring(1, DEV_CLIENT_EXECUTION_CLASS)
+        .with_entrypoint("dev")
+        .with_execution_class(ExecutionClassId::new(DEV_CLIENT_EXECUTION_CLASS))
+        .with_requirement(CapabilityRequirementPlan::one(
+            capability.capability_id(),
+            capability.descriptor_version(),
+        ))
+}
 
-    let _ = write_process_frame(&mut input, &serde_json::json!({ "type": "shutdown" }));
-    drop(input);
-    if result.is_err() {
-        let _ = child.kill();
+fn dev_client_binding(capability: &CapabilityEndpointPlan) -> CapabilityBinding {
+    CapabilityBinding::new(
+        DEV_CLIENT_INSTANCE,
+        capability.capability_id(),
+        capability.descriptor_version(),
+        "plugin",
+    )
+}
+
+#[derive(Debug)]
+struct DevClientAdapter;
+
+impl ExecutionAdapter for DevClientAdapter {
+    fn execution_class(&self) -> ExecutionClassId {
+        ExecutionClassId::new(DEV_CLIENT_EXECUTION_CLASS)
     }
-    let _ = child.wait();
-    result
+
+    fn prepare(&self, plan: &ResolvedAppPlan) -> Result<PreparedNativeApp, RuntimeFailure> {
+        let generations = plan
+            .plugin_instances()
+            .iter()
+            .filter(|instance| instance.execution_class() == &self.execution_class())
+            .map(|instance| {
+                (
+                    instance.instance_key().to_owned(),
+                    PreparedNativePlugin::new(Vec::new(), NoopPluginLifecycle),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        Ok(PreparedNativeApp::new(Vec::new(), generations))
+    }
 }
 
-pub(super) fn read_process_descriptor(executable: &Path) -> anyhow::Result<PluginDescriptor> {
+pub(super) struct ProcessSourceDescriptor {
+    pub(super) descriptor: PluginDescriptor,
+    pub(super) authoring_version: u32,
+    pub(super) runtime_profile: String,
+}
+
+pub(super) fn read_process_descriptor(
+    executable: &Path,
+) -> anyhow::Result<ProcessSourceDescriptor> {
     const MAX_FRAME_BYTES: usize = 1024 * 1024;
     let mut child = Command::new(executable)
+        .arg("--lenso-describe")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -274,6 +358,16 @@ pub(super) fn read_process_descriptor(executable: &Path) -> anyhow::Result<Plugi
 
     let result = (|| {
         let ready = read_process_frame(&mut output, MAX_FRAME_BYTES)?;
+        if ready.get("abi").and_then(Value::as_str).is_some() {
+            let descriptor = super::parse_descriptor_bytes(
+                &serde_json::to_vec(&ready).context("encode generated Process descriptor")?,
+            )?;
+            return Ok(ProcessSourceDescriptor {
+                descriptor,
+                authoring_version: 2,
+                runtime_profile: PROCESS_RUNTIME_PROFILE_V2.to_owned(),
+            });
+        }
         if ready.get("type").and_then(Value::as_str) != Some("ready")
             || ready.get("protocol").and_then(Value::as_str) != Some("lenso.process-stdio@1")
         {
@@ -286,7 +380,11 @@ pub(super) fn read_process_descriptor(executable: &Path) -> anyhow::Result<Plugi
                 .context("Process Plugin readiness omitted its descriptor")?,
         )
         .context("Process Plugin readiness descriptor is invalid")?;
-        Ok(descriptor)
+        Ok(ProcessSourceDescriptor {
+            descriptor,
+            authoring_version: 1,
+            runtime_profile: PROCESS_RUNTIME_PROFILE_V1.to_owned(),
+        })
     })();
 
     let _ = write_process_frame(&mut input, &serde_json::json!({ "type": "shutdown" }));
@@ -318,41 +416,64 @@ fn write_process_frame(writer: &mut impl Write, frame: &Value) -> anyhow::Result
 }
 
 async fn invoke_dev_adapter(
-    adapter: &impl ExecutionAdapter,
+    adapter: impl ExecutionAdapter,
     plan: &ResolvedAppPlan,
     operation: &str,
     request: Value,
 ) -> anyhow::Result<Value> {
-    let generation = adapter
-        .recreate(plan, "plugin")
-        .map_err(|error| runtime_error("prepare Plugin generation", &error))?;
-    let endpoint = generation
-        .endpoints()
-        .first()
-        .ok_or_else(|| anyhow!("Plugin produced no request endpoint"))?;
-    let outcome = endpoint
-        .invoke(
-            operation,
-            Box::new(request),
-            InvocationContext::new(1, None, CancellationToken::new()),
-        )
+    let plan = plan.clone();
+    let operation = operation.to_owned();
+    tokio::task::LocalSet::new()
+        .run_until(async move {
+            let adapters = ExecutionAdapterCatalog::new()
+                .with_adapter(adapter)
+                .map_err(|error| anyhow!("register Plugin Adapter: {error}"))?
+                .with_adapter(DevClientAdapter)
+                .map_err(|error| anyhow!("register development client Adapter: {error}"))?;
+            let app = Kernel::start(plan, TokioDriver::new(), adapters)
+                .await
+                .map_err(|error| runtime_error("start Plugin development App", &error))?;
+            let invocation = async {
+                let dependencies = app
+                    .dependencies(DEV_CLIENT_INSTANCE)
+                    .map_err(|error| runtime_error("resolve Plugin development binding", &error))?;
+                let [dependency] = dependencies.bindings() else {
+                    bail!("Plugin development requires exactly one resolved provider");
+                };
+                let handle = dependency.handle().ok_or_else(|| {
+                    anyhow!("Plugin development provider has no request endpoint")
+                })?;
+                let context = dependencies
+                    .invocation_context(None, CancellationToken::new())
+                    .map_err(|error| runtime_error("create Plugin invocation context", &error))?;
+                handle
+                    .invoke_erased(&operation, Box::new(request), context)
+                    .await
+                    .map_err(|error| runtime_error("invoke Plugin", &error))
+            }
+            .await;
+            let shutdown = app.shutdown(Duration::from_secs(3)).await;
+            if shutdown != ShutdownOutcome::Clean {
+                bail!("Plugin development App shutdown was {shutdown:?}");
+            }
+            let outcome = invocation?;
+            let response = outcome
+                .map_err(|error| {
+                    error.downcast::<Value>().map_or_else(
+                        |_| anyhow!("Plugin returned an unknown Domain Error"),
+                        |value| anyhow!("Plugin returned Domain Error: {value}"),
+                    )
+                })?
+                .downcast::<Value>()
+                .map_err(|_| anyhow!("Plugin returned a response with an unexpected type"))?;
+            Ok(*response)
+        })
         .await
-        .map_err(|error| runtime_error("invoke Plugin", &error))?;
-    let response = outcome
-        .map_err(|error| {
-            error.downcast::<Value>().map_or_else(
-                |_| anyhow!("Plugin returned an unknown Domain Error"),
-                |value| anyhow!("Plugin returned Domain Error: {value}"),
-            )
-        })?
-        .downcast::<Value>()
-        .map_err(|_| anyhow!("Plugin returned a response with an unexpected type"))?;
-    Ok(*response)
 }
 
 fn print_dev_response(
     verified: &VerifiedBundle,
-    capability: &PluginCapability,
+    capability_id: &str,
     operation: &str,
     response: &Value,
     json: bool,
@@ -364,7 +485,7 @@ fn print_dev_response(
                 "schema_version": 1,
                 "kind": "lenso.plugin-dev",
                 "plugin_id": verified.plugin_id,
-                "capability_id": capability.capability_id,
+                "capability_id": capability_id,
                 "operation": operation,
                 "response": response,
             }))?
@@ -415,7 +536,13 @@ fn dev_bun(root: &Path, package: &BunPackage, args: &PluginDevArgs) -> anyhow::R
     let outcome: Value =
         serde_json::from_slice(&output).context("Bun Plugin returned invalid JSON")?;
     if let Some(response) = outcome.get("ok") {
-        return print_dev_response(&verified, capability, &operation, response, args.json);
+        return print_dev_response(
+            &verified,
+            &capability.capability_id,
+            &operation,
+            response,
+            args.json,
+        );
     }
     if let Some(error) = outcome.get("error") {
         bail!("Plugin returned Domain Error: {error}");
@@ -431,6 +558,7 @@ fn runtime_error(action: &str, error: &RuntimeFailure) -> anyhow::Error {
 struct DynamicJsonCodec {
     capability_id: &'static str,
     descriptor_version: &'static str,
+    descriptor_digest: &'static str,
     request_operations: &'static [&'static str],
 }
 
@@ -439,6 +567,9 @@ impl DynamicJsonCodec {
         Self {
             capability_id: intern_string(&capability.capability_id),
             descriptor_version: intern_string(&capability.descriptor_version),
+            descriptor_digest: intern_string(
+                capability.descriptor_digest.as_deref().unwrap_or_default(),
+            ),
             request_operations: intern_operations(&capability.request_operations),
         }
     }
@@ -451,6 +582,10 @@ impl JsonCapabilityCodec for DynamicJsonCodec {
 
     fn descriptor_version(&self) -> &'static str {
         self.descriptor_version
+    }
+
+    fn descriptor_digest(&self) -> &'static str {
+        self.descriptor_digest
     }
 
     fn request_operations(&self) -> &'static [&'static str] {
@@ -514,11 +649,34 @@ fn intern_operations(operations: &[String]) -> &'static [&'static str] {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn descriptor_fixture(frame: &str) -> tempfile::TempPath {
+        use std::os::unix::fs::PermissionsExt;
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        fs::write(
+            file.path(),
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+                frame.replace('\'', "'\\''")
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(file.path()).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(file.path(), permissions).unwrap();
+        file.into_temp_path()
+    }
+
     #[test]
     fn repeated_wasm_rebuilds_reuse_interned_contract_storage() {
         let capability = PluginCapability {
             capability_id: "example.echo@1".to_owned(),
             descriptor_version: "1".to_owned(),
+            descriptor_digest: Some(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_owned(),
+            ),
             request_operations: vec!["execute".to_owned()],
         };
         let first = DynamicJsonCodec::new(&capability);
@@ -530,8 +688,52 @@ mod tests {
             second.descriptor_version()
         ));
         assert!(std::ptr::eq(
+            first.descriptor_digest(),
+            second.descriptor_digest()
+        ));
+        assert!(std::ptr::eq(
             first.request_operations(),
             second.request_operations()
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_descriptor_prefers_portable_authoring_v2() {
+        let executable = descriptor_fixture(
+            r#"{"abi":"lenso.json-request@1","capabilities":[{"capability_id":"example.echo@1","descriptor_version":"1","descriptor_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","request_operations":["execute"]}],"required_capabilities":[]}"#,
+        );
+
+        let source = read_process_descriptor(&executable).unwrap();
+
+        assert_eq!(source.authoring_version, 2);
+        assert_eq!(source.runtime_profile, PROCESS_RUNTIME_PROFILE_V2);
+        assert_eq!(
+            source.descriptor.capabilities[0]
+                .descriptor_digest
+                .as_deref(),
+            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+        assert_eq!(
+            source.descriptor.capabilities[0].capability_id,
+            "example.echo@1"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_descriptor_keeps_v1_readiness_compatibility() {
+        let executable = descriptor_fixture(
+            r#"{"type":"ready","protocol":"lenso.process-stdio@1","descriptor":{"abi":"lenso.json-request@1","capabilities":[{"capability_id":"example.echo@1","descriptor_version":"1","request_operations":["execute"]}],"required_capabilities":[]}}"#,
+        );
+
+        let source = read_process_descriptor(&executable).unwrap();
+
+        assert_eq!(source.authoring_version, 1);
+        assert_eq!(source.runtime_profile, PROCESS_RUNTIME_PROFILE_V1);
+        assert_eq!(
+            source.descriptor.capabilities[0].capability_id,
+            "example.echo@1"
+        );
     }
 }

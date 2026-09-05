@@ -9,8 +9,6 @@ use lenso_app_authoring::identity::validate_plugin_id_v1;
 
 use super::{PluginNewArgs, PluginRuntimeArg, WASM_TARGET, run_bun, run_cargo};
 
-const PLUGIN_SDK_REVISION: &str = "7c54f4065012d41769fefbb41098a4657f1f4825";
-const AGENT_TOOL_SDK_REVISION: &str = "fd944a4ee56026be708b50c710635d1b17a59758";
 pub(super) const LENSO_APP_PLAN_REVISION: &str = "8599db7e4a214ed92f32089f81d14c833d4becf6";
 pub(super) const LENSO_NATIVE_REVISION: &str = "89815107385475c8b5be378bdcf5e21aa74e02f0";
 pub(super) const LENSO_WEB_REVISION: &str = "42efe4fe9aa249bdb19ed366b25b8358e30b68ab";
@@ -468,8 +466,8 @@ runtime = "wasm"
 crate-type = ["cdylib"]
 
 [dependencies]
-lenso = {{ package = "lenso-plugin-sdk", version = "0.2.0", git = "https://github.com/LioRael/lenso-runtime-rust", rev = "{PLUGIN_SDK_REVISION}" }}
-lenso-agent-tool-sdk = {{ version = "0.2.0", git = "https://github.com/LioRael/lenso-agent", rev = "{AGENT_TOOL_SDK_REVISION}" }}
+lenso = {{ package = "lenso-plugin-sdk", version = "0.4.1" }}
+lenso-agent-tool-sdk = "0.3.0"
 schemars = "1"
 serde = {{ version = "1", features = ["derive"] }}
 
@@ -507,6 +505,7 @@ impl Plugin {{
         }}
         Ok(ExecuteResponse {{
             content: arguments.text,
+            content_blocks: None,
             content_type: ContentType::Text,
             metadata_json: "{{}}"
                 .try_into()

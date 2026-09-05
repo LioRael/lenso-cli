@@ -1142,6 +1142,7 @@ dependencies = [
  "lenso-contract-codegen",
  "lenso-kernel",
  "lenso-plugin-bundle",
+ "lenso-process-adapter",
  "lenso-runner",
  "lenso-runtime-codec",
  "lenso-wasm-component-adapter",
@@ -1209,9 +1210,9 @@ dependencies = [
 
 [[package]]
 name = "lenso-plugin-bundle"
-version = "0.3.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69e804e8b2c5aff7b36142460320b061b047d2f67d136347679de649f87f722f"
+checksum = "019b52e7b1bb825570513e55fe6edcec80e67641319ac35e6a27c3f20ed93a29"
 dependencies = [
  "hex",
  "lenso-app-plan",
@@ -1226,10 +1227,52 @@ dependencies = [
 ]
 
 [[package]]
-name = "lenso-runner"
-version = "0.2.4"
+name = "lenso-process-adapter"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "764cf6b2d45daf8c7c6430baa4a6feb63ec95f77a47bed0521371e96be1eb14b"
+checksum = "39af5262da1d0630fc9b53e09c44c400f9c721a18c01d75799c1e4c62fa9a125"
+dependencies = [
+ "base64",
+ "futures",
+ "hex",
+ "lenso-app-plan",
+ "lenso-kernel",
+ "lenso-process-protocol",
+ "lenso-process-sdk",
+ "lenso-runtime-codec",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "lenso-process-protocol"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52e07ac3591bf26ed625889a4ce1af768679abcb86dc197667ee7cdc12846599"
+dependencies = [
+ "base64",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "lenso-process-sdk"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ccc827f3483326f2829429e8c811e7bb97f3190ce50b0dbfa84cea67411b62f8"
+dependencies = [
+ "lenso-process-protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "lenso-runner"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9153b8f442eebb576b89d21454ae6c670388dc7872202259dff28238b309cc21"
 dependencies = [
  "cpu-time",
  "futures",
@@ -1240,9 +1283,9 @@ dependencies = [
 
 [[package]]
 name = "lenso-runtime-codec"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a669f87db29eaf8afe0d787fe21c475af696a6fcaebecc283a1f62cef81079d9"
+checksum = "4a8d54e0a5ed49c4c746165a7a90f61502fee7e1a11193067e89fa904f402f4a"
 dependencies = [
  "futures",
  "hex",
@@ -1256,9 +1299,9 @@ dependencies = [
 
 [[package]]
 name = "lenso-wasm-component-adapter"
-version = "0.2.4"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6f4cf264af0d4b53ecfba5473351e7d91d8a79122ea099dc1c1553e6425bae7"
+checksum = "81fb1d8d396f0eb665dedba7a0960a62fc750927a1dd1e42582ab02e274bfaea"
 dependencies = [
  "futures",
  "lenso-app-plan",
