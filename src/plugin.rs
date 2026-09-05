@@ -30,6 +30,9 @@ mod scaffold;
 mod web_dev;
 
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
+const PROCESS_EXECUTION_CLASS: &str = "lenso.process@1";
+const PROCESS_RUNTIME_PROFILE_V1: &str = "lenso.process@1";
+const PROCESS_RUNTIME_PROFILE_V2: &str = "lenso.process-stdio@2";
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum PluginCommand {
@@ -229,6 +232,8 @@ struct PluginDescriptor {
 struct PluginCapability {
     capability_id: String,
     descriptor_version: String,
+    #[serde(default)]
+    descriptor_digest: Option<String>,
     request_operations: Vec<String>,
 }
 
@@ -550,16 +555,16 @@ fn materialize_process(
     let executable = target_directory
         .join(profile.directory())
         .join(&package.name);
+    let source = dev::read_process_descriptor(&executable)?;
     let descriptor = tempfile::NamedTempFile::new().context("stage Process descriptor")?;
-    serde_json::to_writer(
-        descriptor.as_file(),
-        &dev::read_process_descriptor(&executable)?,
-    )?;
+    serde_json::to_writer(descriptor.as_file(), &source.descriptor)?;
     Ok(build_source_process_plugin_bundle(
         &SourceProcessPluginBuild {
             package_manifest: root.join("Cargo.toml"),
             executable,
             runtime_descriptor: descriptor.path().to_path_buf(),
+            authoring_version: source.authoring_version,
+            runtime_profile: source.runtime_profile,
             target: format!("{}-unknown-{}", env::consts::ARCH, env::consts::OS),
             output: output.to_path_buf(),
         },
@@ -597,14 +602,14 @@ fn materialize_multi(
         .join(profile.directory())
         .join(&package.name);
     let runtime_descriptor = staging.path().join("process-descriptor.json");
-    fs::write(
-        &runtime_descriptor,
-        serde_json::to_vec(&dev::read_process_descriptor(&executable)?)?,
-    )?;
+    let source = dev::read_process_descriptor(&executable)?;
+    fs::write(&runtime_descriptor, serde_json::to_vec(&source.descriptor)?)?;
     build_source_process_plugin_bundle(&SourceProcessPluginBuild {
         package_manifest: root.join("Cargo.toml"),
         executable,
         runtime_descriptor,
+        authoring_version: source.authoring_version,
+        runtime_profile: source.runtime_profile,
         target: host_target.clone(),
         output: process_bundle.clone(),
     })?;
@@ -641,7 +646,7 @@ fn materialize_multi(
                     media_type: "application/vnd.lenso.process".to_owned(),
                     target: host_target,
                     entrypoint: "plugin".to_owned(),
-                    execution_class: ExecutionClassId::new("lenso.process@1"),
+                    execution_class: ExecutionClassId::new(PROCESS_EXECUTION_CLASS),
                     runtime_profile: process_descriptor.runtime_profile().to_owned(),
                 },
             ],
@@ -762,11 +767,6 @@ fn resolve_dev_selection(
     }
 }
 
-fn parse_descriptor(component: &[u8]) -> anyhow::Result<PluginDescriptor> {
-    let bytes = extract_plugin_descriptor(component)?;
-    parse_descriptor_bytes(&bytes)
-}
-
 fn parse_descriptor_bytes(bytes: &[u8]) -> anyhow::Result<PluginDescriptor> {
     let descriptor: PluginDescriptor =
         serde_json::from_slice(bytes).context("parse generated Plugin descriptor")?;
@@ -778,6 +778,11 @@ fn parse_descriptor_bytes(bytes: &[u8]) -> anyhow::Result<PluginDescriptor> {
     }
     validate_capabilities(&descriptor)?;
     Ok(descriptor)
+}
+
+fn parse_descriptor(component: &[u8]) -> anyhow::Result<PluginDescriptor> {
+    let bytes = extract_plugin_descriptor(component)?;
+    parse_descriptor_bytes(&bytes)
 }
 
 fn validate_capabilities(descriptor: &PluginDescriptor) -> anyhow::Result<()> {
