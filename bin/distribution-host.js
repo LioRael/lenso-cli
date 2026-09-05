@@ -25,6 +25,7 @@ function relativeFile(directory, relative) {
 }
 /** Verifies the complete immutable distribution before any process is started. */
 function verifyDistribution(directory = __dirname) {
+    const verifiesExecutableMode = process.platform !== "win32";
     const lockPath = node_path_1.default.join(directory, ".lenso", "distribution.lock.json");
     const metadata = (0, node_fs_1.lstatSync)(lockPath);
     if (!metadata.isFile() || metadata.isSymbolicLink())
@@ -56,7 +57,7 @@ function verifyDistribution(directory = __dirname) {
         if (artifact.length !== file.size || digest(artifact) !== file.sha256) {
             throw new Error(`distribution artifact failed integrity: ${file.path}`);
         }
-        if (file.executable && (fileMetadata.mode & 0o111) === 0) {
+        if (verifiesExecutableMode && file.executable && (fileMetadata.mode & 0o111) === 0) {
             throw new Error(`distribution artifact is not executable: ${file.path}`);
         }
     }

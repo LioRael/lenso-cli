@@ -1209,9 +1209,9 @@ dependencies = [
 
 [[package]]
 name = "lenso-plugin-bundle"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a32231913de447cdab50df0d77f3404178507e60623de2046240a1c5d620836"
+checksum = "58d099ef632712db340f0d54998cdf3335350f117e9719d6cbadc433e05ed551"
 dependencies = [
  "hex",
  "lenso-app-plan",

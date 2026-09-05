@@ -9,6 +9,7 @@ fn bun_descriptor_lowers_named_dependencies_into_the_plugin_contract() {
     let descriptor = parse_descriptor_bytes(
         br#"{
             "abi":"lenso.json-request@1",
+            "configuration_schema":{"type":"object","required":["prefix"]},
             "capabilities":[{
                 "capability_id":"company.notes@1",
                 "descriptor_version":"1.0.0",
@@ -35,8 +36,48 @@ fn bun_descriptor_lowers_named_dependencies_into_the_plugin_contract() {
     let contract = contract_from_bun_descriptor(&package, &descriptor).unwrap();
     let requirement = &contract.required_capabilities()[0];
 
+    assert_eq!(
+        contract.configuration_schema(),
+        Some(&serde_json::json!({"type":"object","required":["prefix"]}))
+    );
     assert_eq!(requirement.requirement_id(), "store");
     assert_eq!(requirement.capability_id(), "company.notes-store@1");
+}
+
+#[test]
+fn bun_descriptor_accepts_a_providerless_lifecycle_plugin() {
+    let descriptor = parse_descriptor_bytes(
+        br#"{
+            "abi":"lenso.json-request@1",
+            "capabilities":[],
+            "required_capabilities":[{
+                "requirement_id":"store",
+                "capability_id":"company.notes-store@1",
+                "descriptor_version":"1.0.0",
+                "cardinality":"one"
+            }]
+        }"#,
+    )
+    .unwrap();
+
+    assert!(descriptor.capabilities.is_empty());
+    assert_eq!(descriptor.required_capabilities[0].requirement_id, "store");
+}
+
+#[test]
+fn bun_descriptor_rejects_duplicate_providers() {
+    let error = parse_descriptor_bytes(
+        br#"{
+            "abi":"lenso.json-request@1",
+            "capabilities":[
+                {"capability_id":"company.notes@1","descriptor_version":"1.0.0","request_operations":["read"]},
+                {"capability_id":"company.notes@1","descriptor_version":"1.0.0","request_operations":["write"]}
+            ]
+        }"#,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("repeats provided Capability"));
 }
 
 #[test]
