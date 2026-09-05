@@ -1,5 +1,15 @@
 ## lenso-cli@0.2.31
 
+## 0.16.0
+
+### Minor Changes
+
+- a31a95c: Persist exportable named dependency choices, preview requirement migrations, and publish coordinated configuration changes through a recoverable Plugin Root transaction.
+
+### Patch Changes
+
+- c15e364: Ship the current native CLI in the npm distribution so TypeScript Hosts can admit, install, and configure Plugin Bundle schema v4 releases.
+
 ## 0.15.0
 
 ### Minor Changes
