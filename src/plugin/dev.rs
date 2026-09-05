@@ -9,7 +9,7 @@ use std::{
 use anyhow::{Context, anyhow, bail};
 use lenso_app_plan::{PluginInstancePlan, ResolvedAppPlan};
 use lenso_kernel::{CancellationToken, ExecutionAdapter, InvocationContext, RuntimeFailure};
-use lenso_plugin_bundle::{ImplementationPolicy, resolve_implementation};
+use lenso_plugin_bundle::{ImplementationPolicy, RuntimeAdmission, resolve_implementation};
 use lenso_runtime_codec::{ArtifactCatalog, ArtifactHandle, JsonCapabilityCodec};
 use lenso_wasm_component_adapter::{WasmComponentAdapter, WasmComponentLimits};
 
@@ -89,7 +89,17 @@ async fn dev_once(args: &PluginDevArgs) -> anyhow::Result<()> {
         &read_bundle_manifest(&output)?,
         &ImplementationPolicy {
             host_target: format!("{}-unknown-{}", env::consts::ARCH, env::consts::OS),
-            execution_classes: vec![ExecutionClassId::new(dev_class)],
+            runtimes: vec![RuntimeAdmission {
+                execution_class: ExecutionClassId::new(dev_class),
+                runtime_profile: match dev_runtime {
+                    ProjectRuntime::Process => "lenso.process@1",
+                    ProjectRuntime::Wasm => "lenso.wasm-component@1",
+                    ProjectRuntime::Multi | ProjectRuntime::Bun => {
+                        unreachable!("development resolves to one invocation runtime")
+                    }
+                }
+                .to_owned(),
+            }],
         },
     )?;
     let artifact_path = output.join(&selected.artifact.path);

@@ -16,14 +16,14 @@ use std::{
 };
 
 use anyhow::{Context, bail};
-use lenso_app_plan::ExecutionClassId;
 use lenso_app_plan::authoring::{
     DependencyChoice, PluginDescriptor, PluginInstanceId, PluginRootInstance, PluginRootSnapshot,
     ResolvedApp,
 };
+use lenso_app_plan::{ExecutionClassId, PLUGIN_AUTHORING_V2_RUNTIME_PROFILE};
 use lenso_plugin_bundle::{
-    ImplementationPolicy, VerifiedBundle, read_bundle_manifest, resolve_implementation,
-    verify_bundle_directory,
+    ImplementationPolicy, RuntimeAdmission, VerifiedBundle, read_bundle_manifest,
+    resolve_implementation, verify_bundle_directory,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -705,12 +705,20 @@ fn read_verified_bundle_descriptor(
         &manifest,
         &ImplementationPolicy {
             host_target: format!("{}-unknown-{}", env::consts::ARCH, env::consts::OS),
-            execution_classes: vec![
-                ExecutionClassId::new("lenso.quickjs@1"),
-                ExecutionClassId::new("lenso.process@1"),
-                ExecutionClassId::new("lenso.wasm-component@1"),
-                ExecutionClassId::new("lenso.bun-process@1"),
-            ],
+            runtimes: [
+                ("lenso.quickjs@1", "lenso.quickjs@1"),
+                ("lenso.process@1", "lenso.process-stdio@2"),
+                ("lenso.process@1", "lenso.process@1"),
+                ("lenso.wasm-component@1", "lenso.wasm-component@1"),
+                ("lenso.bun-process@1", PLUGIN_AUTHORING_V2_RUNTIME_PROFILE),
+                ("lenso.bun-process@1", "lenso.bun-process@1"),
+            ]
+            .into_iter()
+            .map(|(execution_class, runtime_profile)| RuntimeAdmission {
+                execution_class: ExecutionClassId::new(execution_class),
+                runtime_profile: runtime_profile.to_owned(),
+            })
+            .collect(),
         },
     )?
     .descriptor;

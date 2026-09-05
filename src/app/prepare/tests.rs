@@ -3,7 +3,7 @@ use crate::archive::archive_bundle;
 use lenso_app_authoring::host_authoring::{GeneratedHostBuild, HostPluginInput};
 use lenso_app_plan::{CapabilityEndpointPlan, ExecutionClassId, authoring::PluginContract};
 use lenso_plugin_bundle::{
-    ImplementationPolicy, SourcePluginImplementation, SourcePluginReleaseBuild,
+    ImplementationPolicy, RuntimeAdmission, SourcePluginImplementation, SourcePluginReleaseBuild,
     build_source_plugin_release_bundle, read_bundle_manifest, resolve_implementation,
     verify_bundle_directory,
 };
@@ -23,6 +23,7 @@ fn authoring(root: &Path) -> PathBuf {
     let bundle = root.join("bundle");
     build_source_plugin_release_bundle(&SourcePluginReleaseBuild {
         contract: PluginContract::new("company.store", "1.0.0", "store")
+            .with_authoring_version(2)
             .with_capability(CapabilityEndpointPlan::new("company.notes", "1", ["get"])),
         implementations: vec![SourcePluginImplementation {
             id: "bun".into(),
@@ -33,6 +34,7 @@ fn authoring(root: &Path) -> PathBuf {
             target: "javascript-bun".into(),
             entrypoint: "plugin.js".into(),
             execution_class: ExecutionClassId::bun_child_process(),
+            runtime_profile: lenso_app_plan::PLUGIN_AUTHORING_V2_RUNTIME_PROFILE.into(),
         }],
         output: bundle.clone(),
     })
@@ -43,7 +45,10 @@ fn authoring(root: &Path) -> PathBuf {
         &manifest,
         &ImplementationPolicy {
             host_target: "aarch64-apple-darwin".into(),
-            execution_classes: vec![ExecutionClassId::bun_child_process()],
+            runtimes: vec![RuntimeAdmission {
+                execution_class: ExecutionClassId::bun_child_process(),
+                runtime_profile: lenso_app_plan::PLUGIN_AUTHORING_V2_RUNTIME_PROFILE.into(),
+            }],
         },
     )
     .unwrap()
@@ -76,6 +81,7 @@ fn authoring(root: &Path) -> PathBuf {
             "release_version": verified.release_version,
             "manifest_digest": verified.manifest_digest,
             "execution_class": "lenso.bun-process@1",
+            "runtime_profile": "lenso.plugin-authoring@2",
             "target": "aarch64-apple-darwin",
             "implementation_id": "bun",
             "artifact_path": "implementations/bun/plugin.js",

@@ -399,6 +399,7 @@ fn materialize_bun(
             target: "javascript-bun".to_owned(),
             entrypoint: "plugin.js".to_owned(),
             execution_class: ExecutionClassId::bun_child_process(),
+            runtime_profile: lenso_app_plan::PLUGIN_AUTHORING_V2_RUNTIME_PROFILE.to_owned(),
         }],
         output: output.to_path_buf(),
     })?;
@@ -630,6 +631,7 @@ fn materialize_multi(
                     target: WASM_TARGET.to_owned(),
                     entrypoint: "plugin".to_owned(),
                     execution_class: ExecutionClassId::new(WASM_EXECUTION_CLASS),
+                    runtime_profile: wasm_descriptor.runtime_profile().to_owned(),
                 },
                 SourcePluginImplementation {
                     id: "process".to_owned(),
@@ -640,6 +642,7 @@ fn materialize_multi(
                     target: host_target,
                     entrypoint: "plugin".to_owned(),
                     execution_class: ExecutionClassId::new("lenso.process@1"),
+                    runtime_profile: process_descriptor.runtime_profile().to_owned(),
                 },
             ],
             output: output.to_path_buf(),

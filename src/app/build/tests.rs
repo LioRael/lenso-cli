@@ -23,7 +23,9 @@ fn bundle_with_endpoint(
     .unwrap();
     let bundle = root.join("bundle");
     build_source_plugin_release_bundle(&SourcePluginReleaseBuild {
-        contract: PluginContract::new("company.store", "1.0.0", "store").with_capability(endpoint),
+        contract: PluginContract::new("company.store", "1.0.0", "store")
+            .with_authoring_version(2)
+            .with_capability(endpoint),
         implementations: vec![SourcePluginImplementation {
             id: "bun".into(),
             host_targets: vec!["*".into()],
@@ -33,6 +35,7 @@ fn bundle_with_endpoint(
             target: "javascript-bun".into(),
             entrypoint: "plugin.js".into(),
             execution_class: ExecutionClassId::bun_child_process(),
+            runtime_profile: lenso_app_plan::PLUGIN_AUTHORING_V2_RUNTIME_PROFILE.into(),
         }],
         output: bundle.clone(),
     })
@@ -64,6 +67,7 @@ fn named_dependency_bundle(root: &std::path::Path) -> (PathBuf, PathBuf) {
             target: "javascript-bun".into(),
             entrypoint: "plugin.js".into(),
             execution_class: ExecutionClassId::bun_child_process(),
+            runtime_profile: lenso_app_plan::PLUGIN_AUTHORING_V2_RUNTIME_PROFILE.into(),
         }],
         output: store.clone(),
     })
@@ -89,6 +93,7 @@ fn named_dependency_bundle(root: &std::path::Path) -> (PathBuf, PathBuf) {
             target: "javascript-bun".into(),
             entrypoint: "plugin.js".into(),
             execution_class: ExecutionClassId::bun_child_process(),
+            runtime_profile: lenso_app_plan::PLUGIN_AUTHORING_V2_RUNTIME_PROFILE.into(),
         }],
         output: copy.clone(),
     })

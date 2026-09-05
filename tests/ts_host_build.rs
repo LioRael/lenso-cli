@@ -22,14 +22,17 @@ fn fixture_bundle_bytes(root: &Path, id: &str, consumes_store: bool, bytes: &str
     let artifact = root.join(format!("{id}.js"));
     fs::write(&artifact, bytes).unwrap();
     let mut contract = PluginContract::new(format!("company.{id}"), "1.0.0", id)
+        .with_authoring_version(2)
         .with_configuration_schema(serde_json::json!({"type":"object"}))
         .with_capability(CapabilityEndpointPlan::new(
-            format!("company.{id}"),
+            format!("company.{id}@1"),
             "1",
             ["get"],
         ));
     if consumes_store {
-        contract = contract.with_requirement(CapabilityRequirementPlan::one("company.store", "1"));
+        contract = contract.with_requirement(
+            CapabilityRequirementPlan::one("company.store@1", "1").with_requirement_id("store"),
+        );
     }
     build_source_plugin_release_bundle(&SourcePluginReleaseBuild {
         contract,
@@ -42,6 +45,7 @@ fn fixture_bundle_bytes(root: &Path, id: &str, consumes_store: bool, bytes: &str
             target: "javascript-bun".into(),
             entrypoint: "plugin.js".into(),
             execution_class: ExecutionClassId::bun_child_process(),
+            runtime_profile: lenso_app_plan::PLUGIN_AUTHORING_V2_RUNTIME_PROFILE.into(),
         }],
         output: root.join(format!("{id}-bundle")),
     })
