@@ -1,6 +1,6 @@
 {
   "name": "@lenso/cli",
-  "version": "0.16.1",
+  "version": "0.16.2",
   "description": "Authoring CLI for Lenso Plugins and Apps.",
   "license": "MIT",
   "homepage": "https://github.com/LioRael/lenso-cli",

@@ -1,5 +1,11 @@
 ## lenso-cli@0.2.31
 
+## 0.16.2
+
+### Patch Changes
+
+- f94daf1: Complete portable Plugin packaging and configuration publication, preserving Instance resources and supporting explicit release versions during upgrade and rollback.
+
 ## 0.16.1
 
 ### Patch Changes
