@@ -767,19 +767,21 @@ mod tests {
     fn descriptor_fixture(frame: &str) -> tempfile::TempPath {
         use std::os::unix::fs::PermissionsExt;
 
-        let file = tempfile::NamedTempFile::new().unwrap();
+        // Close the writable handle before another test can fork a child that
+        // inherits it; Linux rejects execution while such a handle survives.
+        let file = tempfile::NamedTempFile::new().unwrap().into_temp_path();
         fs::write(
-            file.path(),
+            &file,
             format!(
                 "#!/bin/sh\nprintf '%s\\n' '{}'\n",
                 frame.replace('\'', "'\\''")
             ),
         )
         .unwrap();
-        let mut permissions = fs::metadata(file.path()).unwrap().permissions();
+        let mut permissions = fs::metadata(&file).unwrap().permissions();
         permissions.set_mode(0o755);
-        fs::set_permissions(file.path(), permissions).unwrap();
-        file.into_temp_path()
+        fs::set_permissions(&file, permissions).unwrap();
+        file
     }
 
     #[test]

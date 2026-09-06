@@ -646,6 +646,27 @@ fn materialize_process(
     )?)
 }
 
+fn shared_portable_contract(
+    mut left: PluginContract,
+    mut right: PluginContract,
+) -> anyhow::Result<PluginContract> {
+    // Authoring v2 changes requirement identity. With no requirements, promotion
+    // preserves semantics; all remaining product Contract fields must still match.
+    if left.authoring_version() != right.authoring_version()
+        && matches!(left.authoring_version(), 1 | 2)
+        && matches!(right.authoring_version(), 1 | 2)
+        && left.required_capabilities().is_empty()
+        && right.required_capabilities().is_empty()
+    {
+        left = left.with_authoring_version(2);
+        right = right.with_authoring_version(2);
+    }
+    if left != right {
+        bail!("Plugin implementations do not expose the same Contract");
+    }
+    Ok(left)
+}
+
 fn materialize_multi(
     root: &Path,
     output: &Path,
@@ -690,9 +711,8 @@ fn materialize_multi(
     })?;
     let wasm_descriptor = v2_descriptor(&wasm_bundle)?;
     let process_descriptor = v2_descriptor(&process_bundle)?;
-    if wasm_descriptor.contract() != process_descriptor.contract() {
-        bail!("Plugin implementations do not expose the same Contract");
-    }
+    let contract =
+        shared_portable_contract(wasm_descriptor.contract(), process_descriptor.contract())?;
     let process_name = if cfg!(windows) {
         "plugin.exe"
     } else {
@@ -700,7 +720,7 @@ fn materialize_multi(
     };
     Ok(build_source_plugin_release_bundle(
         &SourcePluginReleaseBuild {
-            contract: wasm_descriptor.contract(),
+            contract,
             implementations: vec![
                 SourcePluginImplementation {
                     id: "wasm".to_owned(),

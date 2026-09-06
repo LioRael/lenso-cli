@@ -702,6 +702,25 @@ pub fn publish_plugin_root_changes(
     })
 }
 
+fn candidate_configuration_instances(
+    current: &PluginRootSnapshot,
+    changes: &PluginRootChangeSet,
+) -> anyhow::Result<Vec<PluginRootInstance>> {
+    let mut instances = current.instances().to_vec();
+    for change in &changes.configurations {
+        let id = PluginInstanceId::new(&change.plugin_id, &change.instance_key);
+        let instance = instances
+            .iter()
+            .find(|instance| instance.id() == &id)
+            .cloned()
+            .unwrap_or_else(|| PluginRootInstance::new(&change.plugin_id, &change.instance_key));
+        instances.retain(|instance| instance.id() != &id);
+        instances.push(instance.with_configuration(parse_configuration(&change.toml)?));
+    }
+    instances.sort_by(|left, right| left.id().cmp(right.id()));
+    Ok(instances)
+}
+
 fn build_root_change_proposal(
     root: &Path,
     host: &HostInput,
@@ -710,15 +729,7 @@ fn build_root_change_proposal(
     changes: PluginRootChangeSet,
 ) -> anyhow::Result<PluginRootChangeProposal> {
     let changes = normalize_change_set(changes)?;
-    let mut instances = current.instances().to_vec();
-    for change in &changes.configurations {
-        let id = PluginInstanceId::new(&change.plugin_id, &change.instance_key);
-        instances.retain(|instance| instance.id() != &id);
-        instances.push(
-            PluginRootInstance::new(&change.plugin_id, &change.instance_key)
-                .with_configuration(parse_configuration(&change.toml)?),
-        );
-    }
+    let instances = candidate_configuration_instances(current, &changes)?;
     let mut candidate = PluginRootSnapshot::new(
         current.releases().iter().cloned(),
         instances,
@@ -1377,6 +1388,34 @@ mod tests {
         )
         .unwrap();
         root
+    }
+
+    #[test]
+    fn single_configuration_keeps_the_materialized_instance_order() {
+        let root = coordinated_root();
+        for (plugin, value) in [("example.source", "old"), ("example.target", "unchanged")] {
+            let directory = root.path().join("plugins").join(plugin);
+            fs::create_dir_all(&directory).unwrap();
+            fs::write(
+                directory.join("default.toml"),
+                format!("value = \"{value}\"\n"),
+            )
+            .unwrap();
+        }
+        let resources = root.path().join("plugins/example.source/default");
+        fs::create_dir_all(&resources).unwrap();
+        fs::write(resources.join("note.txt"), "keep this resource").unwrap();
+        let base = inspect_plugin_root(root.path()).unwrap().revision().clone();
+        let proposal = propose_instance_configuration(
+            root.path(),
+            &base,
+            "example.source",
+            "default",
+            b"value = \"new\"\n",
+        )
+        .unwrap();
+        let publication = publish_instance_configuration(root.path(), &proposal).unwrap();
+        assert_eq!(publication.revision(), proposal.candidate_revision());
     }
 
     #[test]
