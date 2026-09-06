@@ -495,3 +495,31 @@ async fn clean_room_process_plugin_runs_new_check_dev_and_pack() {
     })
     .unwrap();
 }
+
+#[test]
+fn dependency_free_implementations_share_the_same_authoring_contract() {
+    let legacy =
+        lenso_app_plan::authoring::PluginContract::new("dev.fixture.echo", "1.0.0", "tools");
+    let modern = legacy.clone().with_authoring_version(2);
+    assert_eq!(
+        super::shared_portable_contract(legacy.clone(), modern.clone()).unwrap(),
+        modern
+    );
+    assert_eq!(
+        super::shared_portable_contract(legacy.clone(), legacy.clone()).unwrap(),
+        legacy
+    );
+    let different = modern
+        .clone()
+        .with_capability(lenso_app_plan::CapabilityEndpointPlan::new(
+            "dev.fixture.other@1",
+            "1.0.0",
+            ["echo"],
+        ));
+    assert!(super::shared_portable_contract(legacy.clone(), different).is_err());
+    let legacy_dependency = legacy.with_requirement(
+        lenso_app_plan::CapabilityRequirementPlan::one("dev.fixture.store@1", "1.0.0"),
+    );
+    let modern_dependency = legacy_dependency.clone().with_authoring_version(2);
+    assert!(super::shared_portable_contract(legacy_dependency, modern_dependency).is_err());
+}

@@ -152,6 +152,7 @@ pub(crate) struct SearchArgs {
 }
 
 #[derive(Clone, Debug, Args)]
+#[command(disable_version_flag = true)]
 pub(crate) struct CatalogMutationArgs {
     /// Exact Plugin ID.
     plugin_id: String,
@@ -179,6 +180,7 @@ pub(crate) struct HistoryArgs {
 }
 
 #[derive(Clone, Debug, Args)]
+#[command(disable_version_flag = true)]
 pub(crate) struct RollbackArgs {
     /// Exact Plugin ID.
     plugin_id: String,

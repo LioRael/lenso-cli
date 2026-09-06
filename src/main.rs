@@ -153,6 +153,25 @@ fn run_current_host_at(root: Option<PathBuf>, arguments: Vec<String>) -> anyhow:
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn plugin_release_versions_do_not_collide_with_cli_version_flags() {
+        use clap::{CommandFactory, Parser};
+        super::Cli::command().debug_assert();
+        for command in ["install", "update", "rollback"] {
+            assert!(
+                super::Cli::try_parse_from([
+                    "lenso",
+                    "plugins",
+                    command,
+                    "dev.fixture.echo",
+                    "--version",
+                    "1.0.1"
+                ])
+                .is_ok()
+            );
+        }
+    }
+
     use super::*;
     use clap::{CommandFactory, Parser};
 
