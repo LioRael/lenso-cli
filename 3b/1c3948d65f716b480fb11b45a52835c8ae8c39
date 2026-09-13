@@ -1,0 +1,40 @@
+src/main.rs
+  s_3724267b9ee00e::t_896c691118cb82 2
+docs/verified-plugin-archives.md
+  s_3724267b9ee00e::t_43b9340630820c 1-40
+  s_3724267b9ee00e::t_c4c5a50cb05608 41-125
+Cargo.toml
+  s_3724267b9ee00e::t_43b9340630820c 19
+  s_3724267b9ee00e::t_df471d7889022b 81-83,107,118-119
+src/lib.rs
+  s_3724267b9ee00e::t_896c691118cb82 13
+  s_3724267b9ee00e::t_a2fe73fadeddf1 7-10
+src/archive.rs
+  s_3724267b9ee00e::t_896c691118cb82 15-16,62,116-119,131-276
+  s_3724267b9ee00e::t_a4ead5f86369b0 397-415
+  s_3724267b9ee00e::t_2c47431411b2d9 334-337,355-368,378-379,389-390
+  s_3724267b9ee00e::t_ed7d4eba2f116f 333,338-354,369-377,380-388,391-394
+  s_3724267b9ee00e::t_e77217dc6674da 1-2,395-396,416-541
+.cargo/config.toml
+  s_3724267b9ee00e::t_88fb56011d0c5c 1-4
+src/archive_download.rs
+  s_3724267b9ee00e::t_0794856cc2b979 1-479
+src/signed_plugin_catalog.rs
+  s_3724267b9ee00e::t_d59c26a3c9f699 1-465
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3b1c3948d65f716b480fb11b45a52835c8ae8c39",
+  "prompts": {},
+  "sessions": {
+    "s_3724267b9ee00e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09863-bdc5-7501-9f17-8276e89fcd6d",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
