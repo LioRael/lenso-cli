@@ -16,6 +16,7 @@ include = [
     "/contracts/*.json",
     "/docs/migration-plugin-authoring.md",
     "/docs/typescript-host-authoring.md",
+    "/docs/verified-plugin-archives.md",
     "/README.md",
     "/Cargo.toml",
 ]
@@ -44,7 +45,6 @@ cli = [
     "dep:nix",
     "dep:notify",
     "dep:tokio",
-    "dep:url",
 ]
 
 [workspace]
@@ -78,6 +78,9 @@ missing_panics_doc = "allow"
 must_use_candidate = "allow"
 
 [dependencies]
+base64 = "0.22"
+ed25519-dalek = "2.2"
+hex = "0.4"
 anyhow = "1.0"
 clap = { version = "4", features = ["derive"], optional = true }
 lenso-app-plan = { version = "0.4.1" }
@@ -101,7 +104,7 @@ tokio = { version = "1.52", features = ["fs", "io-util", "macros", "net", "proce
 toml.workspace = true
 uuid = { version = "1", features = ["v7"] }
 ureq = { version = "2.12", default-features = false, features = ["tls"] }
-url = { version = "2.5", optional = true }
+url = "2.5"
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
 jsonschema = { version = "0.47.0", default-features = false }
 
@@ -112,6 +115,8 @@ nix = { version = "0.30", features = ["signal"], optional = true }
 winsafe = { version = "0.0.19", features = ["kernel"] }
 
 [dev-dependencies]
+rcgen = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tempfile.workspace = true
 
 [lints.rust]

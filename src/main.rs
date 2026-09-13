@@ -1,5 +1,5 @@
 mod app;
-mod archive;
+use lenso_app_authoring::bundle_archive as archive;
 mod catalog;
 mod doctor;
 mod plugin;

@@ -1,3 +1,5 @@
+pub use crate::archive_download::PluginArchiveDownloadPolicy;
+
 use std::{
     fs::{self, File},
     io::{self, Read, Write},
@@ -10,7 +12,8 @@ use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
 const MAX_ARCHIVE_FILES: usize = 4_096;
 const MAX_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
 
-pub(crate) fn archive_bundle(source: &Path, output: &Path) -> anyhow::Result<()> {
+/// Writes one immutable archive from regular files. Does not grant execution authority.
+pub fn archive_bundle(source: &Path, output: &Path) -> anyhow::Result<()> {
     if output.exists() {
         bail!("Plugin Bundle output already exists: {}", output.display());
     }
@@ -56,7 +59,7 @@ pub(crate) fn archive_bundle(source: &Path, output: &Path) -> anyhow::Result<()>
     Ok(())
 }
 
-pub(crate) fn extract_bundle(archive: &Path, destination: &Path) -> anyhow::Result<()> {
+fn extract_bundle(archive: &Path, destination: &Path) -> anyhow::Result<()> {
     fs::create_dir_all(destination)?;
     let mut zip = ZipArchive::new(File::open(archive)?)
         .with_context(|| format!("open Plugin Bundle archive {}", archive.display()))?;
@@ -110,7 +113,10 @@ pub(crate) fn extract_bundle(archive: &Path, destination: &Path) -> anyhow::Resu
     Ok(())
 }
 
-pub(crate) fn with_bundle_directory<T>(
+/// Uses a local directory or privately extracts a bounded local archive.
+/// This authoring helper does not check a remote digest or verify Bundle contents.
+/// Use [`VerifiedPluginArchive`] for an untrusted downloaded release.
+pub fn with_bundle_directory<T>(
     bundle: &Path,
     use_directory: impl FnOnce(&Path) -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
@@ -120,6 +126,152 @@ pub(crate) fn with_bundle_directory<T>(
     let temporary = tempfile::tempdir().context("extract Plugin Bundle archive")?;
     extract_bundle(bundle, temporary.path())?;
     use_directory(temporary.path())
+}
+
+/// Expected immutable transport identity supplied by an independent trusted source.
+#[derive(Clone, Debug)]
+pub struct PluginArchiveIdentity {
+    pub size: u64,
+    pub sha256: String,
+}
+
+/// Exact release identity admitted by the caller, independently of transport bytes.
+#[derive(Clone, Debug)]
+pub struct PluginReleaseIdentity {
+    pub plugin_id: String,
+    pub release_version: String,
+    pub manifest_digest: String,
+}
+
+impl PluginReleaseIdentity {
+    fn verify(&self, bundle: &lenso_plugin_bundle::VerifiedBundle) -> anyhow::Result<()> {
+        if self.plugin_id != bundle.plugin_id
+            || self.release_version != bundle.release_version
+            || self.manifest_digest != bundle.manifest_digest
+        {
+            bail!("Plugin archive does not match the admitted release identity");
+        }
+        Ok(())
+    }
+}
+
+/// Owns a private copy of the exact verified archive and its verified extraction.
+/// No candidate App is resolved or changed. Drop removes temporary files.
+#[derive(Debug)]
+pub struct VerifiedPluginArchive {
+    temporary: tempfile::TempDir,
+    bundle: lenso_plugin_bundle::VerifiedBundle,
+}
+
+impl VerifiedPluginArchive {
+    /// Reads at most the expected byte count plus one, verifies the transport
+    /// identity, then extracts and verifies the complete Bundle. Source changes
+    /// after this call cannot alter the retained bytes used by installation.
+    pub fn read(reader: impl Read, expected: &PluginArchiveIdentity) -> anyhow::Result<Self> {
+        use sha2::{Digest as _, Sha256};
+        if expected.size == 0 || expected.size > MAX_ARCHIVE_BYTES {
+            bail!("Plugin archive expected size is outside supported bounds");
+        }
+        let digest = expected
+            .sha256
+            .strip_prefix("sha256:")
+            .context("Plugin archive requires a SHA-256 digest")?;
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            bail!("Plugin archive SHA-256 digest is invalid");
+        }
+        let temporary = tempfile::tempdir().context("stage verified Plugin archive")?;
+        let archive_path = temporary.path().join("plugin.lenso-plugin");
+        let mut archive = File::create(&archive_path)?;
+        let mut reader = reader.take(expected.size + 1);
+        let mut hasher = Sha256::new();
+        let mut total = 0_u64;
+        let mut buffer = [0_u8; 8 * 1024];
+        loop {
+            let count = reader.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            total += u64::try_from(count)?;
+            if total > expected.size {
+                bail!("Plugin archive exceeds expected size");
+            }
+            hasher.update(&buffer[..count]);
+            archive.write_all(&buffer[..count])?;
+        }
+        let mut actual = String::with_capacity(64);
+        for byte in hasher.finalize() {
+            use std::fmt::Write as _;
+            write!(actual, "{byte:02x}")?;
+        }
+        if total != expected.size || actual != digest {
+            bail!("Plugin archive size or digest mismatch");
+        }
+        archive.sync_all()?;
+        drop(archive);
+        let directory = temporary.path().join("bundle");
+        extract_bundle(&archive_path, &directory)?;
+        let bundle = lenso_plugin_bundle::verify_bundle_directory(&directory)?;
+        Ok(Self { temporary, bundle })
+    }
+
+    /// Verifies both the transport bytes and exact release before handing a
+    /// downloaded archive to a target. The caller authenticates the expected
+    /// identities (for example, by verifying and selecting a signed catalog).
+    pub fn read_release(
+        reader: impl Read,
+        transport: &PluginArchiveIdentity,
+        release: &PluginReleaseIdentity,
+    ) -> anyhow::Result<Self> {
+        let verified = Self::read(reader, transport)?;
+        release.verify(verified.bundle())?;
+        Ok(verified)
+    }
+
+    /// Prepares an add/update in an explicitly chosen authoring root, using
+    /// the existing Host admission, complete-App resolution and atomic commit.
+    /// Rechecks the copied candidate against the originally verified identity,
+    /// so even modification of the exposed temporary directory cannot substitute
+    /// another valid Bundle. Dropping the proposal leaves the Plugin Root intact.
+    ///
+    /// This is an authoring primitive, not online installation authority: a live
+    /// Host must use its private candidate root and own revision checks, user
+    /// approval, readiness, durable receipts and publication to the active App.
+    pub fn prepare_mutation(
+        &self,
+        root: &Path,
+        mutation: crate::BundleMutation,
+    ) -> anyhow::Result<crate::PreparedBundleMutation> {
+        let proposal = crate::prepare_bundle_mutation(root, &self.directory(), mutation)?;
+        PluginReleaseIdentity {
+            plugin_id: self.bundle.plugin_id.clone(),
+            release_version: self.bundle.release_version.clone(),
+            manifest_digest: self.bundle.manifest_digest.clone(),
+        }
+        .verify(proposal.verified())?;
+        Ok(proposal)
+    }
+
+    /// Source-derived release facts, after full Bundle verification.
+    pub fn bundle(&self) -> &lenso_plugin_bundle::VerifiedBundle {
+        &self.bundle
+    }
+
+    /// Private verified extraction, for immediate downstream installation.
+    /// The owning process must not modify it between verification and use.
+    pub fn directory(&self) -> PathBuf {
+        self.temporary.path().join("bundle")
+    }
+
+    /// Opens the retained archive, rather than a mutable caller-supplied path.
+    pub fn open_archive(&self) -> anyhow::Result<File> {
+        Ok(File::open(
+            self.temporary.path().join("plugin.lenso-plugin"),
+        )?)
+    }
 }
 
 fn collect_files(root: &Path, directory: &Path, output: &mut Vec<PathBuf>) -> anyhow::Result<()> {
@@ -177,6 +329,215 @@ fn validate_relative_path(path: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn identity(bytes: &[u8]) -> PluginArchiveIdentity {
+        PluginArchiveIdentity {
+            size: bytes.len() as u64,
+            sha256: crate::runtime_sha256(bytes),
+        }
+    }
+
+    #[test]
+    fn rejects_transport_changes_before_parsing_an_archive() {
+        let expected = identity(b"not a zip");
+        let mut reader = io::Cursor::new(vec![42; 1000]);
+        let error = VerifiedPluginArchive::read(&mut reader, &expected).unwrap_err();
+        assert!(error.to_string().contains("expected size"));
+        assert_eq!(reader.position(), expected.size + 1);
+        let error = VerifiedPluginArchive::read(&b"different"[..], &expected).unwrap_err();
+        assert!(error.to_string().contains("digest mismatch"));
+        let error = VerifiedPluginArchive::read(&b"short"[..], &expected).unwrap_err();
+        assert!(error.to_string().contains("digest mismatch"));
+    }
+
+    #[test]
+    fn rejects_invalid_expectations_without_reading_source() {
+        for expected in [
+            PluginArchiveIdentity {
+                size: 0,
+                sha256: crate::runtime_sha256(b""),
+            },
+            PluginArchiveIdentity {
+                size: MAX_ARCHIVE_BYTES + 1,
+                sha256: crate::runtime_sha256(b""),
+            },
+            PluginArchiveIdentity {
+                size: 1,
+                sha256: "sha256:INVALID".into(),
+            },
+        ] {
+            let mut reader = io::Cursor::new(b"x");
+            assert!(VerifiedPluginArchive::read(&mut reader, &expected).is_err());
+            assert_eq!(reader.position(), 0);
+        }
+    }
+
+    #[test]
+    fn rejects_unsafe_archive_paths_even_when_transport_identity_matches() {
+        let mut zip = ZipWriter::new(io::Cursor::new(Vec::new()));
+        zip.start_file("../escape", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"unexpected").unwrap();
+        let bytes = zip.finish().unwrap().into_inner();
+        let error = VerifiedPluginArchive::read(bytes.as_slice(), &identity(&bytes)).unwrap_err();
+        assert!(error.to_string().contains("unsafe path"));
+    }
+
+    #[test]
+    fn valid_zip_with_invalid_bundle_cannot_produce_verified_evidence() {
+        let mut zip = ZipWriter::new(io::Cursor::new(Vec::new()));
+        zip.start_file("lenso-plugin.json", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"{}").unwrap();
+        let bytes = zip.finish().unwrap().into_inner();
+        assert!(VerifiedPluginArchive::read(bytes.as_slice(), &identity(&bytes)).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires LENSO_TEST_PLUGIN_ARCHIVE from a real CLI pack"]
+    fn verified_archive_retains_validated_bytes_after_source_changes() {
+        let bytes = fs::read(
+            std::env::var("LENSO_TEST_PLUGIN_ARCHIVE").expect("provide CLI-built archive"),
+        )
+        .unwrap();
+        let source_root = tempfile::tempdir().unwrap();
+        let source = source_root.path().join("source.lenso-plugin");
+        fs::write(&source, &bytes).unwrap();
+        let verified =
+            VerifiedPluginArchive::read(File::open(&source).unwrap(), &identity(&bytes)).unwrap();
+        assert_eq!(verified.bundle().plugin_id, "lenso.marketplace.echo");
+        fs::write(&source, b"replaced after acquisition").unwrap();
+        let mut retained = Vec::new();
+        verified
+            .open_archive()
+            .unwrap()
+            .read_to_end(&mut retained)
+            .unwrap();
+        assert_eq!(retained, bytes);
+        let directory = verified.directory();
+        assert!(directory.join("lenso-plugin.json").exists());
+        drop(verified);
+        assert!(!directory.exists());
+    }
+
+    #[test]
+    #[ignore = "requires LENSO_TEST_PLUGIN_ARCHIVE from a real CLI pack"]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one exact-release add, substitution rejection and replacement journey"
+    )]
+    fn verified_release_prepares_add_and_rejects_substitution_without_changing_root() {
+        use lenso_app_plan::authoring::{HostCatalog, HostSlot};
+        let bytes = fs::read(std::env::var("LENSO_TEST_PLUGIN_ARCHIVE").unwrap()).unwrap();
+        let archive = VerifiedPluginArchive::read(bytes.as_slice(), &identity(&bytes)).unwrap();
+        let expected = PluginReleaseIdentity {
+            plugin_id: archive.bundle().plugin_id.clone(),
+            release_version: archive.bundle().release_version.clone(),
+            manifest_digest: archive.bundle().manifest_digest.clone(),
+        };
+        for wrong in [
+            PluginReleaseIdentity {
+                plugin_id: "example.other".into(),
+                ..expected.clone()
+            },
+            PluginReleaseIdentity {
+                release_version: "999.0.0".into(),
+                ..expected.clone()
+            },
+            PluginReleaseIdentity {
+                manifest_digest: format!("sha256:{}", "0".repeat(64)),
+                ..expected.clone()
+            },
+        ] {
+            assert!(
+                VerifiedPluginArchive::read_release(bytes.as_slice(), &identity(&bytes), &wrong)
+                    .is_err()
+            );
+        }
+        let archive =
+            VerifiedPluginArchive::read_release(bytes.as_slice(), &identity(&bytes), &expected)
+                .unwrap();
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join(".lenso")).unwrap();
+        let host = HostCatalog::new([HostSlot::many("tool-providers")], [], []);
+        fs::write(
+            root.path().join(".lenso/host-catalog.json"),
+            serde_json::to_vec(&host).unwrap(),
+        )
+        .unwrap();
+        let destination = root
+            .path()
+            .join("plugins/lenso.marketplace.echo/plugin.lenso-plugin");
+        let preview = archive
+            .prepare_mutation(root.path(), crate::BundleMutation::Add)
+            .unwrap();
+        assert!(!destination.exists());
+        assert_eq!(preview.verified().manifest_digest, expected.manifest_digest);
+        drop(preview);
+        assert!(!destination.exists());
+        archive
+            .prepare_mutation(root.path(), crate::BundleMutation::Add)
+            .unwrap()
+            .commit()
+            .unwrap();
+        assert!(destination.exists());
+        assert!(
+            archive
+                .prepare_mutation(root.path(), crate::BundleMutation::Add)
+                .is_err()
+        );
+        let original = fs::read(destination.join("lenso-plugin.json")).unwrap();
+        // A valid but different release in the public temporary directory must
+        // not inherit the original archive handle's admission.
+        let manifest_path = archive.directory().join("lenso-plugin.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["release_version"] = "0.2.0".into();
+        manifest["entry"]["descriptor"]["release_version"] = "0.2.0".into();
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        lenso_plugin_bundle::verify_bundle_directory(&archive.directory()).unwrap();
+        let error = archive
+            .prepare_mutation(root.path(), crate::BundleMutation::Replace)
+            .unwrap_err();
+        assert!(error.to_string().contains("admitted release identity"));
+        assert_eq!(
+            fs::read(destination.join("lenso-plugin.json")).unwrap(),
+            original
+        );
+        // Independently admit the actual second release, then use the same
+        // candidate/commit path to update the authoring root.
+        let updated_path = root.path().join("updated.lenso-plugin");
+        archive_bundle(&archive.directory(), &updated_path).unwrap();
+        let updated_bytes = fs::read(updated_path).unwrap();
+        let updated_bundle =
+            lenso_plugin_bundle::verify_bundle_directory(&archive.directory()).unwrap();
+        let updated_identity = PluginReleaseIdentity {
+            plugin_id: updated_bundle.plugin_id,
+            release_version: updated_bundle.release_version,
+            manifest_digest: updated_bundle.manifest_digest,
+        };
+        let updated = VerifiedPluginArchive::read_release(
+            updated_bytes.as_slice(),
+            &identity(&updated_bytes),
+            &updated_identity,
+        )
+        .unwrap();
+        let proposal = updated
+            .prepare_mutation(root.path(), crate::BundleMutation::Replace)
+            .unwrap();
+        assert_eq!(
+            fs::read(destination.join("lenso-plugin.json")).unwrap(),
+            original
+        );
+        assert_eq!(proposal.verified().release_version, "0.2.0");
+        proposal.commit().unwrap();
+        assert_eq!(
+            lenso_plugin_bundle::verify_bundle_directory(&destination)
+                .unwrap()
+                .release_version,
+            "0.2.0"
+        );
+    }
 
     #[test]
     fn archives_and_extracts_regular_bundle_files() {

@@ -1,0 +1,4 @@
+# Reviewed source-cohort prerequisite. Replace with a published minimum version
+# before registry publication; never substitute an unpinned branch here.
+[patch.crates-io]
+lenso-plugin-bundle = { git = "https://github.com/LioRael/lenso-runtime-rust.git", rev = "a78f1f399825f152708ad091cf6196e5670383f5" }

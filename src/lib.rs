@@ -4,8 +4,13 @@
 //! before changing visible App-owned files. Runtime Generation staging and
 //! switching remain the responsibility of the running Host.
 
+mod archive_download;
+
+#[path = "archive.rs"]
+pub mod bundle_archive;
 pub mod host_authoring;
 pub mod identity;
+pub mod signed_plugin_catalog;
 
 use host_authoring::{GeneratedHostBuild, HOST_BUILD, HostInput};
 
