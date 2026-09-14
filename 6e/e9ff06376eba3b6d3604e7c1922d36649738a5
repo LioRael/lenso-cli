@@ -1,0 +1,21 @@
+Cargo.toml
+  s_f20b1a187f6c7e::t_0034d57306d194 108-109
+Cargo.lock
+  s_f20b1a187f6c7e::t_263ddd964d7f77 836,838,869,906,908,911,1560,1562,1574,1582,1589,1591,1596-1609,2406,2408,2904-2924,3259-3264,4188,4190,4196,4200-4201,4203,4206-4207,4209
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6ee9ff06376eba3b6d3604e7c1922d36649738a5",
+  "prompts": {},
+  "sessions": {
+    "s_f20b1a187f6c7e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0a028-3805-7c23-9c30-83f6f3a6ec47",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
