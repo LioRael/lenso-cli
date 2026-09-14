@@ -40,6 +40,10 @@ jobs:
       - run: npm run check:npm-shim
       - run: cargo fmt --all -- --check
       - run: cargo test --locked --workspace
+      - name: Verify portable signed catalog closure
+        run: cargo check --locked -p lenso-plugin-catalog --target wasm32-unknown-unknown
+      - name: Verify catalog package
+        run: cargo publish --dry-run --locked -p lenso-plugin-catalog --allow-dirty
       - name: Verify release dependency convergence
         shell: bash
         run: |
@@ -65,7 +69,7 @@ jobs:
           fi
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
           if git diff --quiet "$BASE_SHA" HEAD -- \
-            Cargo.toml Cargo.lock README.md contracts docs/migration-plugin-authoring.md src; then
+            Cargo.toml Cargo.lock README.md contracts docs/migration-plugin-authoring.md src crates; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
@@ -74,7 +78,7 @@ jobs:
       # Ordinary CLI payload changes retain a package-content gate here.
       - name: Package CLI payload
         if: ${{ steps.cli-crate.outputs.changed == 'true' && !startsWith(github.head_ref, 'release-plz-') }}
-        run: cargo package --locked -p lenso-cli --allow-dirty --no-verify
+        run: cargo package --locked --workspace --allow-dirty --no-verify
 
   windows-authoring:
     name: Windows authoring filesystem semantics

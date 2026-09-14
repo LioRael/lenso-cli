@@ -1690,10 +1690,7 @@ name = "lenso-cli"
 version = "0.5.3"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
  "clap",
- "ed25519-dalek",
- "hex",
  "jsonschema",
  "lenso-app-plan",
  "lenso-bun-adapter",
@@ -1701,6 +1698,7 @@ dependencies = [
  "lenso-contract-codegen",
  "lenso-kernel",
  "lenso-plugin-bundle",
+ "lenso-plugin-catalog",
  "lenso-process-adapter",
  "lenso-runner",
  "lenso-runtime-codec",
@@ -1710,7 +1708,6 @@ dependencies = [
  "rcgen",
  "rustix",
  "rustls",
- "semver",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -1785,6 +1782,22 @@ dependencies = [
  "toml",
  "wasmparser",
  "wit-component",
+]
+
+[[package]]
+name = "lenso-plugin-catalog"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "ed25519-dalek",
+ "hex",
+ "lenso-plugin-bundle",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "url",
 ]
 
 [[package]]
