@@ -1,0 +1,43 @@
+.github/workflows/quality.yml
+  s_3724267b9ee00e::t_77ecb710026aab 43-46,72,81
+Cargo.lock
+  s_3724267b9ee00e::t_8a893623199a94 1701,1787-1802
+Cargo.toml
+  s_3724267b9ee00e::t_97b4a2d4920bc1 52,89
+crates/lenso-plugin-catalog/Cargo.toml
+  s_3724267b9ee00e::t_22b73b98b151ac 1-30
+crates/lenso-plugin-catalog/README.md
+  s_3724267b9ee00e::t_eb682c7d2984e1 1-25
+crates/lenso-plugin-catalog/src/identity.rs
+  s_3724267b9ee00e::t_4aafca744bac79 1-70
+crates/lenso-plugin-catalog/src/lib.rs
+  s_3724267b9ee00e::t_c88ef884d6ea62 1-450
+crates/lenso-plugin-catalog/src/native.rs
+  s_3724267b9ee00e::t_fabf58b267d3d1 1-25
+crates/lenso-plugin-catalog/tests/conformance.json
+  s_3724267b9ee00e::t_095edeab5d94ce 1-16
+crates/lenso-plugin-catalog/tests/conformance.rs
+  s_3724267b9ee00e::t_29a53b3e7e5734 1-33
+docs/release-process.md
+  s_3724267b9ee00e::t_06fb88af98e922 11,13,25-26,54-55,57-60,63-69
+src/identity.rs
+  s_3724267b9ee00e::t_aa27febc04dbdd 3
+src/signed_plugin_catalog.rs
+  s_3724267b9ee00e::t_9e369fb86d03a8 1,3-4,6
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "798d58b9aae2f90ed29e17285b0693d10cb8eabd",
+  "prompts": {},
+  "sessions": {
+    "s_3724267b9ee00e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09863-bdc5-7501-9f17-8276e89fcd6d",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
