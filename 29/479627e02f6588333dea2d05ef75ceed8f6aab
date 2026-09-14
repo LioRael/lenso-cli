@@ -1,0 +1,23 @@
+Cargo.lock
+  s_3724267b9ee00e::t_5629e8f3a75e86 1774-1776
+Cargo.toml
+  s_3724267b9ee00e::t_699b27ad42ef67 91
+docs/verified-plugin-archives.md
+  s_3724267b9ee00e::t_c89ff3531a412c 119,121-123
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "29479627e02f6588333dea2d05ef75ceed8f6aab",
+  "prompts": {},
+  "sessions": {
+    "s_3724267b9ee00e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09863-bdc5-7501-9f17-8276e89fcd6d",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
