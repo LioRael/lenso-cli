@@ -116,10 +116,8 @@ Validation: 62 library tests pass with the real archive tests enabled, including
 the local HTTPS transfer. Library/test Clippy passes with warnings denied.
 No Agent production configuration, public registry or running App was changed.
 
-## Development cohort
+## Runtime dependency
 
-The checked-in Cargo configuration pins the Runtime prerequisite by immutable
-Git revision so a clean checkout can reproduce verification without sibling
-worktrees. It is a development source cohort, not proof of registry publication.
-Before publishing, release the Runtime fix and replace this patch with the
-published minimum dependency version and a registry lockfile.
+Registry builds require `lenso-plugin-bundle >=0.4.2`, which preserves canonical
+manifest identity when other dependencies enable `serde_json/preserve_order`.
+The CLI no longer requires a Git source override or a sibling checkout.
