@@ -80,13 +80,31 @@ Cross-repository compatibility is proven by SemVer requirements, contracts,
 and focused integration checks. Do not restore the retired `lenso-release`
 runtime or a shared release channel to coordinate the two package streams.
 
-## Event recovery
+## Generated release PR checks
 
-GitHub suppresses new workflow runs when a repository `GITHUB_TOKEN` creates or
-updates a release branch. If merging one of those generated branches does not
-produce the expected `main` push run, dispatch the same reviewed Trusted
-Publisher workflow against `main` instead of creating an empty commit or using
-a local registry token:
+Release PRs use the repository `GITHUB_TOKEN`; no dedicated Release App or
+central coordinator is required. Keep Actions pull-request creation enabled and
+retain the workflow's scoped `contents: write` and `pull-requests: write` permissions.
+Registry publication continues to use the repository's own OIDC workflow.
+
+GitHub places workflows for `github-actions[bot]` pull requests behind an
+[approval gate](https://github.blog/changelog/2026-06-11-bot-created-pull-requests-can-run-workflows-if-approved/).
+During delivery:
+
+1. Review the generated version/lockfile changes and record the PR's current head SHA.
+2. Open the pending CI run for that same head and use **Approve and run**.
+3. Wait for all required checks on the reviewed head before merging. If the bot
+   updates the PR, review the new head and approve its pending runs again.
+
+`action_required` and an expired approval are delivery blockers, not executed
+test failures. Approving CI does not approve a merge or publication. Do not bypass
+required checks or dispatch a publisher to compensate for a pending PR approval.
+
+## Publication event recovery
+
+If an authorized release merge does not produce the expected `main` publisher
+run, dispatch the same reviewed Trusted Publisher workflow against `main`
+instead of creating an empty commit or using a local registry token:
 
 ```sh
 gh workflow run release-plz.yml --ref main
