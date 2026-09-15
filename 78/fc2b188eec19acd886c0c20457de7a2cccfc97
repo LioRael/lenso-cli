@@ -1,0 +1,23 @@
+crates/lenso-plugin-catalog/README.md
+  s_3724267b9ee00e::t_235e2453b7201b 14-19
+crates/lenso-plugin-catalog/src/lib.rs
+  s_3724267b9ee00e::t_b36196351a15b4 123-141,389-404,425,449
+crates/lenso-plugin-catalog/tests/conformance.rs
+  s_3724267b9ee00e::t_7bedb8a2fec5dd 34-76
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "78fc2b188eec19acd886c0c20457de7a2cccfc97",
+  "prompts": {},
+  "sessions": {
+    "s_3724267b9ee00e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09863-bdc5-7501-9f17-8276e89fcd6d",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
