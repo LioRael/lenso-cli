@@ -11,6 +11,12 @@ Callers supply trusted keys, current time, and the last durable checkpoint.
 Verification preserves freshness, rollback, equivocation, and immutable release
 identity checks; it never grants installation or execution authority.
 
+For display-only callers, `verify_for_browse` returns a `BrowseSnapshot` that
+permits expired metadata while retaining signature, schema, identity, future-issue,
+rollback, and equivocation checks. It exposes expiry for a visible stale notice
+and has no installation selection API. `verify` and `VerifiedSnapshot::select`
+continue to reject expired catalogs; browsing must never substitute for them.
+
 The optional `bundle-verification` feature adds the native
 `Release::verify_bundle_directory` compatibility method using the framework's
 Bundle verifier. It is enabled by `lenso-cli`; Workers consumers must leave it

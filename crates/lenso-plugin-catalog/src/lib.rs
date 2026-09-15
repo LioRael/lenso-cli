@@ -120,6 +120,25 @@ pub struct VerifiedSnapshot {
     checkpoint: Checkpoint,
 }
 
+/// Integrity-verified metadata for browsing. This type cannot select an installation.
+#[derive(Clone, Debug)]
+pub struct BrowseSnapshot {
+    snapshot: Snapshot,
+    checkpoint: Checkpoint,
+}
+
+impl BrowseSnapshot {
+    pub fn snapshot(&self) -> &Snapshot {
+        &self.snapshot
+    }
+    pub fn checkpoint(&self) -> &Checkpoint {
+        &self.checkpoint
+    }
+    pub fn is_stale(&self, now: u64) -> bool {
+        now >= self.snapshot.expires_at
+    }
+}
+
 impl VerifiedSnapshot {
     pub fn snapshot(&self) -> &Snapshot {
         &self.snapshot
@@ -367,6 +386,22 @@ pub fn verify(
     previous: Option<&Checkpoint>,
     now: u64,
 ) -> Result<VerifiedSnapshot> {
+    let browse = verify_for_browse(bytes, trust, previous, now)?;
+    ensure!(!browse.is_stale(now), "catalog is expired or not yet valid");
+    Ok(VerifiedSnapshot {
+        snapshot: browse.snapshot,
+        checkpoint: browse.checkpoint,
+    })
+}
+
+/// Verify provenance and history for display, permitting expired metadata only.
+/// Future issuance, invalid signatures, rollback and equivocation remain errors.
+pub fn verify_for_browse(
+    bytes: &[u8],
+    trust: &Trust,
+    previous: Option<&Checkpoint>,
+    now: u64,
+) -> Result<BrowseSnapshot> {
     ensure!(
         bytes.len() <= MAX_ENVELOPE_BYTES,
         "catalog exceeds size limit"
@@ -387,7 +422,7 @@ pub fn verify(
         "unexpected catalog identity"
     );
     ensure!(
-        snapshot.issued_at <= now && now < snapshot.expires_at,
+        snapshot.issued_at <= now,
         "catalog is expired or not yet valid"
     );
     let checkpoint = Checkpoint {
@@ -411,7 +446,7 @@ pub fn verify(
             "catalog revision equivocation rejected"
         );
     }
-    Ok(VerifiedSnapshot {
+    Ok(BrowseSnapshot {
         snapshot,
         checkpoint,
     })
