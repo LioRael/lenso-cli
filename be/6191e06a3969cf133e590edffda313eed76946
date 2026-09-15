@@ -1,0 +1,19 @@
+docs/release-process.md
+  s_b4ef4420977247::t_6703357d6f3f0f 83,85-107
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "be6191e06a3969cf133e590edffda313eed76946",
+  "prompts": {},
+  "sessions": {
+    "s_b4ef4420977247": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0a46d-f66f-7aa2-a04d-613964d63efb",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
