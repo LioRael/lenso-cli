@@ -22,6 +22,9 @@ const buildApi = await importFromPlugin("@lenso/bun-plugin/build");
 const lockPath = path.join(root, "bun.lock");
 const lockText = fs.readFileSync(lockPath, "utf8");
 let lock;
+if (typeof Bun.JSONC?.parse !== "function") {
+  throw new Error("Plugin builds require Bun with JSONC support; use Bun 1.4.0 or newer");
+}
 try {
   lock = Bun.JSONC.parse(lockText);
 } catch {
