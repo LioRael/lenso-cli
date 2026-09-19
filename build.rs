@@ -26,6 +26,12 @@ fn main() {
     }
     let root = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
         .join("assets/terminal");
+    for required in ["rust-sdk/Cargo.toml.template", "rust-sdk/src/lib.rs"] {
+        assert!(
+            root.join(required).is_file(),
+            "missing bundled terminal asset: {required}"
+        );
+    }
     println!("cargo:rerun-if-changed={}", root.display());
     let mut source = "const TERMINAL_ASSETS: &[(&str, &[u8])] = &[\n".to_owned();
     assets(&root, &root, &mut source);

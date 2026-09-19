@@ -99,7 +99,11 @@ pub(crate) fn add(args: AddArgs) -> anyhow::Result<()> {
             .prefix(".lenso-support-")
             .tempdir_in(root.join("app"))?;
         for (name, bytes) in TERMINAL_ASSETS {
-            write(stage.path(), name, bytes)?;
+            write(
+                stage.path(),
+                name.strip_suffix(".template").unwrap_or(name),
+                bytes,
+            )?;
         }
         let mut metadata = package("lenso.terminal.cli", "consumer.ts");
         metadata["name"] = "@lenso/cli".into();
