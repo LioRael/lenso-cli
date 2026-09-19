@@ -8,6 +8,7 @@ use crate::plugins::{load_resolved_app, project_root};
 
 mod assemble;
 mod build;
+mod contracts;
 mod local_dev;
 mod local_host;
 mod local_workflow;
@@ -19,6 +20,11 @@ mod prepare;
 
 #[derive(Clone, Debug, Subcommand)]
 pub(crate) enum AppCommand {
+    /// Author local Capability contracts using existing generated SDK projections.
+    Contract {
+        #[command(subcommand)]
+        command: contracts::scaffold::ContractCommand,
+    },
     /// Build a runnable local App, or explicit static TypeScript Host authoring artifacts.
     Build(local_workflow::BuildArgs),
     /// Create a convention-based local App without a handwritten Host configuration.
@@ -90,6 +96,7 @@ pub(crate) struct ShowArgs {
 
 pub(crate) async fn app(command: AppCommand) -> anyhow::Result<()> {
     match command {
+        AppCommand::Contract { command } => contracts::scaffold::run(command),
         AppCommand::Build(args) => local_workflow::build(args),
         AppCommand::Create(args) => local_workflow::create(args),
         AppCommand::Start(args) => local_workflow::start(args),

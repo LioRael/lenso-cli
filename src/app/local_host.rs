@@ -391,7 +391,7 @@ pub(super) fn is_native(candidate: &Candidate) -> bool {
         .any(|i| i.runtime == "native-linked")
 }
 
-fn dependency(package: &Value) -> anyhow::Result<Value> {
+pub(super) fn dependency(package: &Value) -> anyhow::Result<Value> {
     let name = package["name"].as_str().context("Cargo name")?;
     let version = package["version"].as_str().context("Cargo version")?;
     match package["source"].as_str() {
@@ -650,4 +650,11 @@ pub(super) fn host_arguments(root: &Path) -> anyhow::Result<Vec<&'static str>> {
         "portable" => Ok(vec!["app", "__run-local"]),
         _ => bail!("unsupported local Host entrypoint"),
     }
+}
+
+pub(super) fn digest_text(value: &str) -> String {
+    Sha256::digest(value.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }

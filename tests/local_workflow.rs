@@ -164,3 +164,129 @@ fn clean_room_local_host_invokes_native_to_bun_and_runs_without_source_or_toolch
     assert!(String::from_utf8_lossy(&tampered.stderr).contains("runtime file changed"));
     assert!(!String::from_utf8_lossy(&tampered.stderr).contains("NATIVE_TO_BUN_OK"));
 }
+
+#[test]
+fn schema_contract_scaffold_builds_without_a_rust_authoring_package() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("app");
+    let cli = env!("CARGO_BIN_EXE_lenso");
+    for args in [
+        vec![
+            "app",
+            "create",
+            root.to_str().unwrap(),
+            "--runtime",
+            "empty",
+        ],
+        vec![
+            "app",
+            "contract",
+            "new",
+            "example.text",
+            "--root",
+            root.to_str().unwrap(),
+        ],
+    ] {
+        let output = Command::new(cli).args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let output = Command::new(cli)
+        .args(["app", "build", "--root"])
+        .arg(&root)
+        .env_clear()
+        .env("PATH", temporary.path().join("no-tools"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        root.join("contracts/example.text/generated/contract.ts")
+            .is_file()
+    );
+    assert!(!root.join("contracts/example.text/Cargo.toml").exists());
+    assert!(!root.join("lenso.toml").exists());
+}
+
+#[test]
+#[ignore = "requires Bun and registry access; builds generated Capability providers and dependencies"]
+fn clean_room_bun_generated_capabilities_build_and_start_without_cargo() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("app");
+    let cli = env!("CARGO_BIN_EXE_lenso");
+    let run = |command: &mut Command| {
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    };
+    run(Command::new(cli)
+        .args(["app", "create"])
+        .arg(&root)
+        .args(["--runtime", "empty"]));
+    run(Command::new(cli)
+        .args(["app", "contract", "new", "example.text", "--root"])
+        .arg(&root));
+    for (name, source) in [
+        (
+            "provider",
+            "import { definePlugin } from '@lenso/bun-plugin'; import { Text, type TextProvider } from './generated.ts'; export default definePlugin({ provides: [Text], create(): TextProvider { return { async execute(_context, request) { return { ok: true, value: request }; } }; } });",
+        ),
+        (
+            "consumer",
+            "import { definePlugin } from '@lenso/bun-plugin'; import { Text } from './generated.ts'; export default definePlugin({ provides: [], dependencies: { text: Text.required() }, create({ dependencies }) { return { text: dependencies.text }; } });",
+        ),
+    ] {
+        let package = root.join("app").join(name);
+        fs::create_dir_all(&package).unwrap();
+        fs::write(package.join("package.json"), serde_json::to_vec_pretty(&serde_json::json!({
+            "name":format!("example-{name}"),"version":"1.0.0","private":true,"type":"module",
+            "scripts":{"check":"tsc --noEmit"},
+            "dependencies":{"@lenso/bun-plugin":"0.4.1","@lenso/contract-runtime":"0.3.0"},
+            "devDependencies":{"typescript":"7.0.2","@types/bun":"1.4.0"},
+            "lenso":{"pluginId":format!("example.{name}"),"runtime":"bun","rootSlot":"tools","entry":"plugin.ts",
+                "contract":{"descriptor":"../../contracts/example.text/capability.json","projection":"typescript","output":"generated.ts"}}
+        })).unwrap()).unwrap();
+        fs::create_dir_all(package.join("src")).unwrap();
+        fs::write(
+            package.join("src/plugin.ts"),
+            source.replace("'./generated.ts'", "'../generated.ts'"),
+        )
+        .unwrap();
+        fs::write(package.join("tsconfig.json"), r#"{"compilerOptions":{"strict":true,"noEmit":true,"module":"Preserve","moduleResolution":"bundler","allowImportingTsExtensions":true,"types":["bun"]},"include":["src/**/*.ts"]}"#).unwrap();
+        run(Command::new("bun").arg("install").current_dir(&package));
+    }
+    let tools = temporary.path().join("tools");
+    fs::create_dir(&tools).unwrap();
+    #[cfg(unix)]
+    for name in ["cargo", "rustc"] {
+        use std::os::unix::fs::PermissionsExt;
+        let path = tools.join(name);
+        fs::write(&path, "#!/bin/sh\nexit 99\n").unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = std::env::join_paths(
+        std::iter::once(tools).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    run(Command::new(cli)
+        .args(["app", "build", "--root"])
+        .arg(&root)
+        .env("PATH", path));
+    run(Command::new(cli)
+        .args(["app", "start", "--from"])
+        .arg(root.join("dist"))
+        .arg("--check")
+        .env_clear()
+        .env("PATH", temporary.path().join("no-tools")));
+}

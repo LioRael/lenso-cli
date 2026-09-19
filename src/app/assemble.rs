@@ -72,6 +72,7 @@ pub(crate) fn assemble(args: AssembleArgs) -> anyhow::Result<()> {
                     .exists()
         })
         .collect::<Vec<_>>();
+    super::contracts::synchronize(&root, &candidates)?;
     let source_digests = candidates
         .iter()
         .map(|candidate| {

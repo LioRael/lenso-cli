@@ -109,7 +109,9 @@ pub(super) fn read(root: &Path, role: SourceRole) -> anyhow::Result<Option<Candi
             continue;
         };
         // SDK packages may expose lenso.build without declaring a business Plugin.
-        if format == "bun" && metadata.get("pluginId").is_none() && metadata.get("build").is_some()
+        if format == "bun"
+            && metadata.get("pluginId").is_none()
+            && (metadata.get("build").is_some() || metadata.get("contract").is_some())
         {
             continue;
         }

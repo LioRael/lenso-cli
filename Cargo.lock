@@ -1742,9 +1742,9 @@ dependencies = [
 
 [[package]]
 name = "lenso-contract-codegen"
-version = "0.7.3"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7138fd807c56e207e9dbb45a608d66cc193417e2d8c069ff877d414307dc60d7"
+checksum = "7722d17cb261dfd8f75b6e417973c9a8580e2310e7a7bf0c3126b09d7b7e5035"
 dependencies = [
  "lenso-contract-authoring",
  "regex",

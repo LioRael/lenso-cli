@@ -18,6 +18,7 @@ include = [
     "/docs/typescript-host-authoring.md",
     "/docs/verified-plugin-archives.md",
     "/docs/local-plugin-discovery.md",
+    "/docs/capability-authoring.md",
     "/README.md",
     "/Cargo.toml",
 ]
@@ -86,7 +87,7 @@ clap = { version = "4", features = ["derive"], optional = true }
 lenso-app-plan = { version = "0.4.1" }
 lenso-bun-adapter = { version = "0.1.7", optional = true }
 lenso-contract-authoring-next = { package = "lenso-contract-authoring", version = "0.1.1", optional = true }
-lenso-contract-codegen-next = { package = "lenso-contract-codegen", version = "0.7.3", optional = true }
+lenso-contract-codegen-next = { package = "lenso-contract-codegen", version = "0.9.0", optional = true }
 lenso-kernel = { version = "0.3.3", optional = true }
 lenso-plugin-bundle = { version = "0.4.2" }
 lenso-plugin-catalog = { path = "crates/lenso-plugin-catalog", version = "0.1.0", features = ["bundle-verification"] }

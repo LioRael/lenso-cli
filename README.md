@@ -165,3 +165,9 @@ For example, a Host with a selected Session command provider may expose
 `lenso sessions list` and `lenso sessions show --help`. Removing that provider
 removes those paths without changing this CLI. Static maintenance roots remain
 reserved and cannot be shadowed by App commands.
+
+Local Capability authoring is integrated into `app dev/build`.
+`lenso app contract new example.text` creates a schema-first contract;
+`--source rust` creates a source-first Rust contract. Generated typed clients and
+providers remove manual cross-language JSON plumbing. See
+[Capability authoring](docs/capability-authoring.md).
