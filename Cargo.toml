@@ -17,6 +17,7 @@ include = [
     "/docs/migration-plugin-authoring.md",
     "/docs/typescript-host-authoring.md",
     "/docs/verified-plugin-archives.md",
+    "/docs/local-plugin-discovery.md",
     "/README.md",
     "/Cargo.toml",
 ]
@@ -104,6 +105,7 @@ ureq = { version = "2.12", default-features = false, features = ["tls"] }
 url = "2.5"
 zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 jsonschema = { version = "0.51", default-features = false }
+glob = "0.3.3"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.30", features = ["signal"], optional = true }

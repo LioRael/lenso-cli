@@ -8,6 +8,7 @@ mod archive_download;
 
 #[path = "archive.rs"]
 pub mod bundle_archive;
+pub mod discovery;
 pub mod host_authoring;
 pub mod identity;
 pub mod signed_plugin_catalog;

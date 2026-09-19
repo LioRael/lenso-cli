@@ -21,6 +21,8 @@ pub(crate) enum AppCommand {
     Check(ProjectArgs),
     /// Explain the derived Plugin Instances, provenance, and bindings.
     Show(ShowArgs),
+    /// Discover local Plugin source projects and Bundles without building or activating them.
+    Discover(ProjectArgs),
 }
 
 #[derive(Args, Clone, Debug)]
@@ -72,7 +74,31 @@ pub(crate) fn app(command: AppCommand) -> anyhow::Result<()> {
         AppCommand::Init(args) => init(args),
         AppCommand::Check(args) => check(args),
         AppCommand::Show(args) => show(args),
+        AppCommand::Discover(args) => discover(args),
     }
+}
+
+fn discover(args: ProjectArgs) -> anyhow::Result<()> {
+    let report = lenso_app_authoring::discovery::discover(&project_root(args.root)?)?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        for candidate in &report.candidates {
+            println!(
+                "{}@{}\t{:?}\t{}\t{}",
+                candidate.plugin_id,
+                candidate.release_version,
+                candidate.role,
+                candidate.format,
+                candidate.project.display()
+            );
+        }
+        println!(
+            "Discovered {} candidates; no Plugins were built or activated.",
+            report.candidates.len()
+        );
+    }
+    Ok(())
 }
 
 fn init(args: AppInitArgs) -> anyhow::Result<()> {

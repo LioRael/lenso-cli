@@ -94,6 +94,12 @@ imports; released artifact cohorts are not included yet.
 
 ## Change an App
 
+For local source projects, `lenso app discover` inspects `app/` without requiring
+a Host or configuration file. Optional `lenso.toml` `plugin_sources` adds local
+directories, workspaces, or Bundles. Discovery does not activate Plugins; see
+[local Plugin discovery](docs/local-plugin-discovery.md) for supported metadata
+and the remaining automatic Host assembly work.
+
 The current Host supplies useful defaults and a generated Host Catalog. An App
 owner writes only differences under `plugins/`:
 
