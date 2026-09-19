@@ -9,6 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub mod conventions;
 mod project;
 
 const MAX_ENTRIES: usize = 50_000;
@@ -51,6 +52,11 @@ pub struct Implementation {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Candidate {
+    /// Logical owner of a selected additive build contribution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub surface_owner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub composite: Option<PathBuf>,
     pub plugin_id: String,
     pub release_version: String,
     pub project: PathBuf,
@@ -155,6 +161,10 @@ impl Scanner {
                 "local Plugin source must be a directory or archive: {}",
                 path.display()
             );
+        }
+        if path.join("plugin.json").try_exists()? {
+            self.insert(conventions::composite(&path, role)?)?;
+            return Ok(());
         }
         if path.join(lenso_plugin_bundle::MANIFEST_FILE).try_exists()? {
             self.insert(project::bundle(&path, role)?)?;

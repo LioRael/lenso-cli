@@ -241,6 +241,8 @@ struct BunPackageDocument {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BunPackageMetadata {
+    #[serde(default)]
+    source: Option<String>,
     plugin_id: String,
     root_slot: String,
     runtime: String,
@@ -415,6 +417,26 @@ fn materialize_bun(
     package: &BunPackage,
     profile: BuildProfile,
 ) -> anyhow::Result<(VerifiedBundle, PluginDescriptor)> {
+    let source = package
+        .metadata
+        .source
+        .as_deref()
+        .unwrap_or("src/plugin.ts");
+    let relative = Path::new(source);
+    if relative.as_os_str().is_empty()
+        || relative.components().any(|part| {
+            !matches!(
+                part,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+    {
+        bail!("Bun Plugin source must be a relative path inside its package");
+    }
+    let source_path = fs::canonicalize(root.join(relative)).context("resolve Bun Plugin source")?;
+    if !source_path.starts_with(fs::canonicalize(root)?) || !source_path.is_file() {
+        bail!("Bun Plugin source must be a file inside its package");
+    }
     run_bun(root, &["run", "check"], "typecheck Bun Plugin")?;
     let staging = tempfile::tempdir().context("stage Bun Plugin implementation")?;
     let artifact = staging.path().join("plugin.js");
@@ -433,7 +455,7 @@ fn materialize_bun(
         &[
             "run",
             builder_text.as_str(),
-            "src/plugin.ts",
+            source,
             artifact_text.as_str(),
             report_text.as_str(),
             profile_text,

@@ -65,3 +65,22 @@ A product adds `surfaces` in the same metadata, or uses a composite manifest:
 These declarations initially select existing ordinary Plugin packages. Filename
 recognition alone does not yet synthesize a Plugin implementation. The compiler
 capability in step 3 is required for the shorthand authoring syntax.
+
+## Current implementation evidence
+
+Steps 1 and 2 now have an initial package-selection implementation: composite
+projects, adopted support declarations, optional/required independent surface
+packages, source provenance, read-only `app inspect`, and pre-publication selection
+freshness. Bun's optional `lenso.source` selects a package-local authoring entry.
+Multiple active owner instances are rejected in this initial profile.
+
+The real Bun smoke adopts a shared owner once, includes its selected contribution,
+leaves an invalid inactive Cargo package unread, shadows cargo/rustc with failing
+commands, removes all business/contract sources, and starts the offline output.
+The ordinary workspace regression suite also passes.
+
+Steps 3 through 5 are not complete. In particular, the existing terminal provider
+Contract uses Stream, while the local generic Bun builder and portable codec only
+support Request. Shorthand CLI entry lowering must address that existing Contract
+rather than introduce a competing request-only command protocol. Registry support
+installation and automatic per-language package scaffolding are also outstanding.

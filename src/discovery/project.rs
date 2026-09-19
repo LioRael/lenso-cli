@@ -147,6 +147,8 @@ pub(super) fn read(root: &Path, role: SourceRole) -> anyhow::Result<Option<Candi
             vec![implementation("bun", runtime, root)]
         };
         found.push(Candidate {
+            composite: None,
+            surface_owner: None,
             plugin_id,
             release_version: version,
             project: root.to_path_buf(),
@@ -166,7 +168,7 @@ pub(super) fn read(root: &Path, role: SourceRole) -> anyhow::Result<Option<Candi
     Ok(found.pop())
 }
 
-fn document(path: &Path) -> anyhow::Result<Value> {
+pub(super) fn document(path: &Path) -> anyhow::Result<Value> {
     let text = read_metadata(path)?;
     if path
         .extension()
@@ -389,6 +391,8 @@ pub(super) fn bundle(path: &Path, role: SourceRole) -> anyhow::Result<Candidate>
             .collect(),
     };
     Ok(Candidate {
+        composite: None,
+        surface_owner: None,
         plugin_id: manifest.plugin_id().to_owned(),
         release_version: manifest.release_version().to_owned(),
         project: path.to_path_buf(),

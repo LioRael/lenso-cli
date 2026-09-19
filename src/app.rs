@@ -48,6 +48,8 @@ pub(crate) enum AppCommand {
     Show(ShowArgs),
     /// Discover local Plugin source projects and Bundles without building or activating them.
     Discover(ProjectArgs),
+    /// Explain local convention support and selected surface packages without executing code.
+    Inspect(ProjectArgs),
     /// Build local Plugin sources into a validated Host authoring directory.
     Assemble(assemble::AssembleArgs),
 }
@@ -109,6 +111,7 @@ pub(crate) async fn app(command: AppCommand) -> anyhow::Result<()> {
         AppCommand::Check(args) => check(args),
         AppCommand::Show(args) => show(args),
         AppCommand::Discover(args) => discover(args),
+        AppCommand::Inspect(args) => inspect(args),
         AppCommand::Assemble(args) => assemble::assemble(args),
     }
 }
@@ -324,4 +327,24 @@ mod tests {
         assert!(root.join("plugins").is_dir());
         assert_eq!(load_resolved_app(&root).unwrap().instances().len(), 1);
     }
+}
+
+fn inspect(args: ProjectArgs) -> anyhow::Result<()> {
+    let report = lenso_app_authoring::discovery::discover(&project_root(args.root)?)?;
+    let plan = lenso_app_authoring::discovery::conventions::plan(&report)?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&plan)?);
+    } else {
+        for surface in &plan.surfaces {
+            println!(
+                "{}\t{}\t{}\t{}",
+                surface.owner,
+                surface.entry.display(),
+                surface.reason,
+                surface.support.as_deref().unwrap_or("-")
+            );
+        }
+        println!("No package managers, compilers or Plugins were executed.");
+    }
+    Ok(())
 }

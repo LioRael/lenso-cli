@@ -39,6 +39,8 @@ pub(crate) struct AssembleArgs {
 pub(crate) fn assemble(args: AssembleArgs) -> anyhow::Result<()> {
     let root = crate::plugins::project_root(args.root)?;
     let report = discover(&root)?;
+    let convention_plan = lenso_app_authoring::discovery::conventions::plan(&report)?;
+    let selection_bytes = serde_json::to_vec(&convention_plan)?;
     let destination = std::path::absolute(&args.out)?;
     if fs::symlink_metadata(&destination).is_ok() {
         bail!("Host output already exists: {}", destination.display());
@@ -53,6 +55,10 @@ pub(crate) fn assemble(args: AssembleArgs) -> anyhow::Result<()> {
     fs::create_dir(stage.path().join(".lenso"))?;
     fs::write(stage.path().join(".lenso/plugin-root-authoring.lock"), [])?;
     fs::create_dir(stage.path().join("bundles"))?;
+    fs::write(
+        stage.path().join(".lenso/conventions.json"),
+        serde_json::to_vec_pretty(&convention_plan)?,
+    )?;
     let root_intent = root.join("plugins");
     if root_intent.try_exists()? {
         copy_root(&root_intent, &stage.path().join("plugins"), 0, &mut 0)?;
@@ -60,11 +66,12 @@ pub(crate) fn assemble(args: AssembleArgs) -> anyhow::Result<()> {
     let mut inputs = Vec::new();
     let mut inventory = Vec::new();
     let mut sources = Vec::new();
-    let candidates = report
+    let candidates = convention_plan
         .candidates
         .into_iter()
         .filter(|candidate| {
             candidate.role != SourceRole::Shared
+                || candidate.surface_owner.is_some()
                 || stage
                     .path()
                     .join("plugins")
@@ -105,6 +112,7 @@ pub(crate) fn assemble(args: AssembleArgs) -> anyhow::Result<()> {
         // Shared sources are not built merely because they can be discovered.
         // A Root directory is intent to validate, not implicit enablement.
         if candidate.role == SourceRole::Shared
+            && candidate.surface_owner.is_none()
             && !stage
                 .path()
                 .join("plugins")
@@ -128,7 +136,8 @@ pub(crate) fn assemble(args: AssembleArgs) -> anyhow::Result<()> {
             inputs.push(LocalPluginInput {
                 descriptor,
                 manifest_digest: super::local_host::digest(&stage.path().join(".lenso/host"))?,
-                app_owned: candidate.role == SourceRole::AppOwned,
+                app_owned: candidate.role == SourceRole::AppOwned
+                    || candidate.surface_owner.is_some(),
                 source: candidate.project.display().to_string(),
             });
             sources.push(candidate);
@@ -205,7 +214,7 @@ pub(crate) fn assemble(args: AssembleArgs) -> anyhow::Result<()> {
         inputs.push(LocalPluginInput {
             descriptor,
             manifest_digest: verified.manifest_digest,
-            app_owned: candidate.role == SourceRole::AppOwned,
+            app_owned: candidate.role == SourceRole::AppOwned || candidate.surface_owner.is_some(),
             source: candidate.project.display().to_string(),
         });
     }
@@ -234,6 +243,10 @@ pub(crate) fn assemble(args: AssembleArgs) -> anyhow::Result<()> {
         stage.path().join("bundles.json"),
         serde_json::to_vec_pretty(&inventory)?,
     )?;
+    let fresh = lenso_app_authoring::discovery::conventions::plan(&discover(&root)?)?;
+    if serde_json::to_vec(&fresh)? != selection_bytes {
+        bail!("local convention selection changed during build; retry");
+    }
     let resolved = lenso_app_authoring::load_resolved_app(stage.path())
         .context("resolve local Host with Plugin Root intent")?;
     for source in &sources {

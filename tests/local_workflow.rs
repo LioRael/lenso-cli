@@ -247,7 +247,11 @@ fn clean_room_bun_generated_capabilities_build_and_start_without_cargo() {
             "import { definePlugin } from '@lenso/bun-plugin'; import { Text } from './generated.ts'; export default definePlugin({ provides: [], dependencies: { text: Text.required() }, create({ dependencies }) { return { text: dependencies.text }; } });",
         ),
     ] {
-        let package = root.join("app").join(name);
+        let package = if name == "consumer" {
+            root.join("app/provider/cli")
+        } else {
+            root.join("app").join(name)
+        };
         fs::create_dir_all(&package).unwrap();
         fs::write(package.join("package.json"), serde_json::to_vec_pretty(&serde_json::json!({
             "name":format!("example-{name}"),"version":"1.0.0","private":true,"type":"module",
@@ -255,7 +259,7 @@ fn clean_room_bun_generated_capabilities_build_and_start_without_cargo() {
             "dependencies":{"@lenso/bun-plugin":"0.4.1","@lenso/contract-runtime":"0.3.0"},
             "devDependencies":{"typescript":"7.0.2","@types/bun":"1.4.0"},
             "lenso":{"pluginId":format!("example.{name}"),"runtime":"bun","rootSlot":"tools","entry":"plugin.ts",
-                "contract":{"descriptor":"../../contracts/example.text/capability.json","projection":"typescript","output":"generated.ts"}}
+                "contract":{"descriptor":if name == "consumer" { "../../../contracts/example.text/capability.json" } else { "../../contracts/example.text/capability.json" },"projection":"typescript","output":"generated.ts"}}
         })).unwrap()).unwrap();
         fs::create_dir_all(package.join("src")).unwrap();
         fs::write(
@@ -266,6 +270,51 @@ fn clean_room_bun_generated_capabilities_build_and_start_without_cargo() {
         fs::write(package.join("tsconfig.json"), r#"{"compilerOptions":{"strict":true,"noEmit":true,"module":"Preserve","moduleResolution":"bundler","allowImportingTsExtensions":true,"types":["bun"]},"include":["src/**/*.ts"]}"#).unwrap();
         run(Command::new("bun").arg("install").current_dir(&package));
     }
+    let owner_manifest = root.join("app/provider/package.json");
+    let mut owner: serde_json::Value =
+        serde_json::from_slice(&fs::read(&owner_manifest).unwrap()).unwrap();
+    owner["lenso"]["conventions"] = serde_json::json!([{"id":"example.cli","entries":["cli.ts"]}]);
+    owner["lenso"]["surfaces"] = serde_json::json!([
+        {"entry":"cli/src/cli.ts","project":"cli"},
+        {"entry":"tui/tui.rs","project":"tui"}
+    ]);
+    fs::write(&owner_manifest, serde_json::to_vec_pretty(&owner).unwrap()).unwrap();
+    fs::rename(
+        root.join("app/provider/cli/src/plugin.ts"),
+        root.join("app/provider/cli/src/cli.ts"),
+    )
+    .unwrap();
+    let manifest = root.join("app/provider/cli/package.json");
+    let mut package: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    package["lenso"]["source"] = "src/cli.ts".into();
+    fs::write(manifest, serde_json::to_vec_pretty(&package).unwrap()).unwrap();
+    fs::create_dir(root.join("app/provider/tui")).unwrap();
+    fs::write(
+        root.join("app/provider/tui/tui.rs"),
+        "compile_error!(\"must not compile\");",
+    )
+    .unwrap();
+    fs::write(
+        root.join("app/provider/tui/Cargo.toml"),
+        "invalid manifest; must never resolve this package",
+    )
+    .unwrap();
+    fs::create_dir(root.join("shared")).unwrap();
+    fs::rename(root.join("app/provider"), root.join("shared/provider")).unwrap();
+    fs::write(root.join("lenso.toml"), "plugin_sources = [\"shared\"]\n").unwrap();
+    fs::create_dir_all(root.join("plugins/example.provider")).unwrap();
+    fs::write(
+        root.join("plugins/example.provider/default.toml"),
+        "# Adopt the logical Plugin once\n",
+    )
+    .unwrap();
+    let inspection = run(Command::new(cli)
+        .args(["app", "inspect", "--json", "--root"])
+        .arg(&root));
+    let plan: serde_json::Value = serde_json::from_slice(&inspection.stdout).unwrap();
+    assert_eq!(plan["surfaces"][0]["reason"], "selected");
+    assert_eq!(plan["surfaces"][1]["reason"], "support_not_adopted");
     let tools = temporary.path().join("tools");
     fs::create_dir(&tools).unwrap();
     #[cfg(unix)]
@@ -283,6 +332,9 @@ fn clean_room_bun_generated_capabilities_build_and_start_without_cargo() {
         .args(["app", "build", "--root"])
         .arg(&root)
         .env("PATH", path));
+    fs::remove_dir_all(root.join("app")).unwrap();
+    fs::remove_dir_all(root.join("shared")).unwrap();
+    fs::remove_dir_all(root.join("contracts")).unwrap();
     run(Command::new(cli)
         .args(["app", "start", "--from"])
         .arg(root.join("dist"))

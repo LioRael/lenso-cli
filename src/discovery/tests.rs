@@ -236,3 +236,162 @@ fn recursive_globs_are_rejected_in_favor_of_bounded_directory_scanning() {
             .contains("recursive **")
     );
 }
+
+fn support(root: &Path, path: &str, id: &str, entry: &str) {
+    bun(root, path, id);
+    let manifest = root.join(path).join("package.json");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&manifest).unwrap()).unwrap();
+    value["lenso"]["conventions"] = serde_json::json!([{ "id": id, "entries": [entry] }]);
+    fs::write(manifest, value.to_string()).unwrap();
+}
+
+fn surfaces(root: &Path) {
+    bun(root, "app/notes", "example.notes");
+    bun(root, "app/notes/cli", "example.notes-cli");
+    write(root, "app/notes/cli/cli.ts", "export {};");
+    // Deliberately invalid package. Inactive packages must never be parsed.
+    write(root, "app/notes/tui/Cargo.toml", "INVALID TOML !!!");
+    write(
+        root,
+        "app/notes/tui/tui.rs",
+        "compile_error!(\"inactive\");",
+    );
+    let manifest = root.join("app/notes/package.json");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&manifest).unwrap()).unwrap();
+    value["lenso"]["surfaces"] = serde_json::json!([
+        {"entry":"cli/cli.ts", "project":"cli"},
+        {"entry":"tui/tui.rs", "project":"tui"}
+    ]);
+    fs::write(manifest, value.to_string()).unwrap();
+}
+
+#[test]
+fn selected_surface_packages_are_independent_and_inactive_metadata_is_not_read() {
+    let root = tempfile::tempdir().unwrap();
+    surfaces(root.path());
+    support(root.path(), "app/support", "example.cli", "cli.ts");
+    let plan = conventions::plan(&discover(root.path()).unwrap()).unwrap();
+    assert_eq!(plan.candidates.len(), 3);
+    assert_eq!(
+        plan.surfaces[0].plugin_id.as_deref(),
+        Some("example.notes-cli")
+    );
+    assert_eq!(plan.surfaces[1].reason, "support_not_adopted");
+    assert!(!root.path().join(".lenso").exists());
+}
+
+#[test]
+fn shared_support_requires_a_live_root_instance() {
+    let root = tempfile::tempdir().unwrap();
+    surfaces(root.path());
+    support(root.path(), "shared/support", "example.cli", "cli.ts");
+    write(root.path(), "lenso.toml", "plugin_sources = [\"shared\"]");
+    let inspect = || conventions::plan(&discover(root.path()).unwrap()).unwrap();
+    assert_eq!(inspect().surfaces[0].reason, "support_not_adopted");
+    write(root.path(), "plugins/example.cli/default.toml", "# adopted");
+    assert_eq!(inspect().surfaces[0].reason, "selected");
+    write(root.path(), "plugins/example.cli/default.disabled", "");
+    assert_eq!(inspect().surfaces[0].reason, "support_not_adopted");
+}
+
+#[test]
+fn convention_conflicts_are_rejected_without_scan_order_preference() {
+    let root = tempfile::tempdir().unwrap();
+    support(root.path(), "app/a", "example.a", "cli.ts");
+    support(root.path(), "app/b", "example.b", "cli.ts");
+    let error = conventions::plan(&discover(root.path()).unwrap()).unwrap_err();
+    assert!(error.to_string().contains("conflicting convention entry"));
+}
+
+#[test]
+fn composite_identity_comes_from_core_package() {
+    let root = tempfile::tempdir().unwrap();
+    bun(root.path(), "app/notes/core", "example.notes");
+    write(
+        root.path(),
+        "app/notes/plugin.json",
+        r#"{"schema":"lenso.plugin-project.v1","core":"core"}"#,
+    );
+    let report = discover(root.path()).unwrap();
+    assert_eq!(report.candidates.len(), 1);
+    assert_eq!(report.candidates[0].plugin_id, "example.notes");
+    assert!(report.candidates[0].project.ends_with("notes/core"));
+    assert_eq!(conventions::plan(&report).unwrap().candidates.len(), 1);
+}
+
+#[test]
+fn required_surfaces_fail_before_compilation_and_disabled_owners_do_not_activate() {
+    let root = tempfile::tempdir().unwrap();
+    surfaces(root.path());
+    let manifest = root.path().join("app/notes/package.json");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&manifest).unwrap()).unwrap();
+    value["lenso"]["surfaces"][0]["required"] = true.into();
+    fs::write(manifest, value.to_string()).unwrap();
+    assert!(
+        conventions::plan(&discover(root.path()).unwrap())
+            .unwrap_err()
+            .to_string()
+            .contains("required surface")
+    );
+    write(root.path(), "plugins/example.notes/default.disabled", "");
+    let plan = conventions::plan(&discover(root.path()).unwrap()).unwrap();
+    assert!(
+        plan.surfaces
+            .iter()
+            .all(|s| s.reason == "owner_not_adopted")
+    );
+}
+
+#[test]
+fn surface_paths_cannot_escape_the_logical_project() {
+    let root = tempfile::tempdir().unwrap();
+    bun(root.path(), "app/core", "example.core");
+    write(root.path(), "outside.ts", "");
+    let manifest = root.path().join("app/core/package.json");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&manifest).unwrap()).unwrap();
+    value["lenso"]["surfaces"] = serde_json::json!([{"entry":"../../outside.ts","project":"."}]);
+    fs::write(manifest, value.to_string()).unwrap();
+    assert!(
+        conventions::plan(&discover(root.path()).unwrap())
+            .unwrap_err()
+            .to_string()
+            .contains("stay inside")
+    );
+}
+
+#[test]
+fn multiple_owner_instances_do_not_silently_share_one_surface() {
+    let root = tempfile::tempdir().unwrap();
+    surfaces(root.path());
+    write(root.path(), "plugins/example.notes/second.toml", "");
+    assert!(
+        conventions::plan(&discover(root.path()).unwrap())
+            .unwrap_err()
+            .to_string()
+            .contains("one active owner instance")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn surface_symlinks_cannot_escape_the_owner() {
+    let root = tempfile::tempdir().unwrap();
+    surfaces(root.path());
+    fs::remove_file(root.path().join("app/notes/cli/cli.ts")).unwrap();
+    write(root.path(), "external.ts", "");
+    std::os::unix::fs::symlink(
+        root.path().join("external.ts"),
+        root.path().join("app/notes/cli/cli.ts"),
+    )
+    .unwrap();
+    assert!(
+        conventions::plan(&discover(root.path()).unwrap())
+            .unwrap_err()
+            .to_string()
+            .contains("symbolic links")
+    );
+}

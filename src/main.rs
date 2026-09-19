@@ -207,7 +207,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 "contract", "build", "create", "start", "dev", "prepare", "init", "check", "show",
-                "discover", "assemble"
+                "discover", "inspect", "assemble"
             ]
         );
     }

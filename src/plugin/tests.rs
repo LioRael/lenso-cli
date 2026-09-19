@@ -27,6 +27,7 @@ fn bun_descriptor_lowers_named_dependencies_into_the_plugin_contract() {
     let package = BunPackage {
         version: "1.0.0".to_owned(),
         metadata: BunPackageMetadata {
+            source: None,
             plugin_id: "company.notes".to_owned(),
             root_slot: "notes".to_owned(),
             runtime: "bun".to_owned(),

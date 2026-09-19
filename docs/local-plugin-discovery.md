@@ -151,3 +151,69 @@ Bundle verifier and report `verified_bundle_not_admitted`. Bundle implementation
 runtime values are exact execution-class IDs; source values are authoring runtime
 names. Assembly normalizes these before explicit implementation selection.
 No new handwritten Descriptor, Schema, or plugin manifest is introduced.
+
+## Optional surface packages
+
+Local convention selection is an authoring/build feature. It selects existing
+Plugin packages; it does not yet compile standalone `cli.ts`/`cli.rs` shorthand.
+Run `lenso app inspect --json` to inspect the selection without executing code.
+
+A support Plugin declares recognized filenames in its existing Lenso metadata
+(`lenso` in package.json, or `package.metadata.lenso` in Cargo.toml):
+
+```json
+{"conventions":[{"id":"example.cli","entries":["cli.ts","cli.rs"]}]}
+```
+
+An owning Plugin declares independently buildable contributions in that same
+metadata:
+
+```json
+{"surfaces":[
+  {"entry":"cli/src/cli.ts","project":"cli"},
+  {"entry":"tui/src/tui.rs","project":"tui","required":false}
+]}
+```
+
+The support must have an active App-owned default or an explicit, non-disabled
+Plugin Root instance. An unselected shared source grants no support. Recognition
+conflicts fail regardless of filesystem ordering. Required surfaces without
+support fail before compilation; optional ones report `support_not_adopted`.
+Inactive package manifests are not parsed, and their dependencies are not passed
+to package managers by this workflow. Dependencies deliberately placed in the
+core package or its workspace remain the author's responsibility.
+
+For mixed-language products, an optional `plugin.json` owns nested packages:
+
+```json
+{
+  "schema":"lenso.plugin-project.v1",
+  "core":"core",
+  "surfaces":[{"entry":"cli/src/cli.ts","project":"cli"}]
+}
+```
+
+The core package supplies the logical identity and version. Every selected
+surface is an ordinary Plugin with a distinct runtime identity and the same
+release version. Its own package manifest controls compilation. Selected
+contributions receive disableable defaults and retain normal descriptor, binding,
+and permission validation. There is no automatic cross-language source import,
+configuration forwarding, permission inheritance, or descriptor merging.
+
+This first profile requires one active owner instance. A multi-instance owner
+fails rather than silently sharing a surface instance. Owner/support activation
+is evaluated when building; changing it requires rebuilding. Runtime editing of
+a distribution's Plugin Root does not recompute the build selection. Generated
+`.lenso/conventions.json` records selection provenance. A changed selection during
+a build aborts publication of that output.
+
+Simple single-package Plugins need no composite manifest. Existing multi-runtime
+implementations remain alternatives for one contract, separate from additive
+surface packages. Compiler extensions, shorthand entry generation, CLI-specific
+runtime integration, and registry installation commands are subsequent work
+tracked in central issue #733.
+
+Bun packages may set `lenso.source` to a package-relative entry file, for example
+`"src/cli.ts"`. The default remains `src/plugin.ts`. The source must resolve to a
+file inside its package. This changes the authoring entry location, not the
+runtime contract: the entry still exports an ordinary `definePlugin` declaration.
