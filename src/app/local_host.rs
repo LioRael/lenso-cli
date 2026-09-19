@@ -240,6 +240,10 @@ pub(super) fn generate(
         cache.join("watch-roots.json"),
         serde_json::to_vec_pretty(&watch_roots)?,
     )?;
+    let local_inputs = watch_roots
+        .iter()
+        .map(|path| Ok((path.clone(), input_digest(path)?)))
+        .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
     let ids = codecs
         .keys()
         .map(|id| format!("{id:?}"))
@@ -315,6 +319,14 @@ pub(super) fn generate(
     if !output.status.success() {
         bail!("generated local Host build failed");
     }
+    for (path, before) in &local_inputs {
+        if &input_digest(path)? != before {
+            bail!(
+                "native path dependency changed during build: {}; retry after edits settle",
+                path.display()
+            );
+        }
+    }
     let binary = String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -335,6 +347,10 @@ pub(super) fn generate(
     fs::copy(binary, stage.join(".lenso/host"))?;
     let provenance = stage.join(".lenso/generated-host");
     fs::create_dir_all(provenance.join("src"))?;
+    fs::write(
+        provenance.join("local-inputs.json"),
+        serde_json::to_vec_pretty(&local_inputs)?,
+    )?;
     for file in ["Cargo.toml", "Cargo.lock", "src/main.rs", "build.rs"] {
         fs::copy(generated.join(file), provenance.join(file))?;
     }
@@ -475,6 +491,7 @@ pub(super) fn finalize(stage: &Path, runtime_artifacts: Vec<Value>) -> anyhow::R
         ".lenso/generated-host/Cargo.toml",
         ".lenso/generated-host/src/main.rs",
         ".lenso/generated-host/build.rs",
+        ".lenso/generated-host/local-inputs.json",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -556,7 +573,12 @@ fn executable_on_path(name: &str) -> anyhow::Result<PathBuf> {
 pub(super) fn input_digest(root: &Path) -> anyhow::Result<String> {
     let mut pending = vec![root.to_path_buf()];
     let mut files = Vec::new();
+    let mut visited = 0;
     while let Some(path) = pending.pop() {
+        visited += 1;
+        if visited > 50_000 {
+            bail!("source input exceeds 50,000 entries");
+        }
         let metadata = fs::symlink_metadata(&path)?;
         if metadata.is_dir() {
             for entry in fs::read_dir(path)? {
