@@ -459,3 +459,37 @@ fn convention_outputs_cannot_change_identity_or_activate_more_conventions() {
             .contains("recursively activate")
     );
 }
+
+#[test]
+fn composite_compilers_fingerprint_the_logical_owner_not_only_its_core() {
+    let root = tempfile::tempdir().unwrap();
+    support(root.path(), "app/support", "example.cli", "cli.ts");
+    let manifest = root.path().join("app/support/package.json");
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    metadata["lenso"]["conventions"][0]["compiler"] =
+        serde_json::json!({"program":"never-run","args":[]});
+    fs::write(manifest, serde_json::to_vec(&metadata).unwrap()).unwrap();
+    bun(root.path(), "app/product/core", "example.product");
+    write(
+        root.path(),
+        "app/product/plugin.json",
+        r#"{"schema":"lenso.plugin-project.v1","core":"core","surfaces":[{"entry":"cli.ts"}]}"#,
+    );
+    write(root.path(), "app/product/cli.ts", "export {};\n");
+    write(root.path(), "app/cli.ts", "export {};\n");
+    let plan = conventions::plan(&discover(root.path()).unwrap()).unwrap();
+    assert_eq!(
+        plan.compilations
+            .iter()
+            .find(|c| c.owner == "example.product")
+            .unwrap()
+            .owner_project,
+        fs::canonicalize(root.path().join("app/product")).unwrap()
+    );
+    assert_eq!(
+        plan.compilations.len(),
+        2,
+        "bare discovery must stop at composite boundaries"
+    );
+}

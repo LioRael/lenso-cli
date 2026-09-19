@@ -312,7 +312,7 @@ pub fn plan(report: &DiscoveryReport) -> anyhow::Result<ConventionPlan> {
                     owner: owner.plugin_id.clone(),
                     version: owner.release_version.clone(),
                     role: owner.role,
-                    owner_project: owner.project.clone(),
+                    owner_project: base.clone(),
                     entry: entry.clone(),
                     plugin_id,
                     convention: support.1.clone(),
@@ -408,6 +408,7 @@ fn discover_entries(
         if kind.is_dir() {
             if child.path().join("package.json").exists()
                 || child.path().join("Cargo.toml").exists()
+                || child.path().join("plugin.json").exists()
             {
                 continue;
             }
