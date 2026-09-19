@@ -63,6 +63,10 @@ The Rust convenience API currently supports synchronous commands and string
 options; TypeScript also supports boolean flags and async functions. Advanced
 Plugins can implement the existing generated terminal provider contract directly.
 This preserves the lower-level SDKs, dependency bindings, and Stream lifecycle.
+Standalone `plugin dev` invokes Request operations; exercise terminal Stream
+commands through `app dev -- ...`. Generated Rust entries see the CLI helper SDK;
+use an explicit independent surface package when the entry needs additional Cargo
+dependencies or a shared business library.
 
 For an App-local command without a core Plugin, put `cli.ts` or `cli.rs` in a bare
 directory such as `app/status/`. No manifest is required there. The directory

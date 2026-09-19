@@ -13,6 +13,8 @@ use std::{
 };
 
 pub(super) fn compile(plan: &ConventionPlan, output: &Path) -> anyhow::Result<Vec<Candidate>> {
+    #[cfg(unix)]
+    let compiler_group = monitor_shutdown(!plan.compilations.is_empty())?;
     let mut candidates = Vec::new();
     for compilation in &plan.compilations {
         let project = output.join(&compilation.plugin_id);
@@ -49,6 +51,8 @@ pub(super) fn compile(plan: &ConventionPlan, output: &Path) -> anyhow::Result<Ve
         let mut child = command
             .spawn()
             .with_context(|| format!("start convention compiler {}", compilation.convention))?;
+        #[cfg(unix)]
+        let group = CompilerGroup::new(compiler_group.clone(), child.id());
         let deadline = Instant::now() + Duration::from_secs(60);
         let status = loop {
             if let Some(status) = child.try_wait()? {
@@ -72,6 +76,8 @@ pub(super) fn compile(plan: &ConventionPlan, output: &Path) -> anyhow::Result<Ve
             }
             std::thread::sleep(Duration::from_millis(25));
         };
+        #[cfg(unix)]
+        drop(group);
         if stdout.metadata()?.len() > 1024 * 1024 || stderr.metadata()?.len() > 1024 * 1024 {
             bail!("compiler output exceeds 1 MiB");
         }
@@ -153,4 +159,57 @@ fn validate_tree(
         }
     }
     Ok(())
+}
+
+// Compiler commands run in their own group so a timeout also stops descendants.
+// Keep a process-wide signal listener after compilation: unregistering Tokio's
+// listener would leave SIGTERM swallowed during the remaining package builds.
+#[cfg(unix)]
+fn monitor_shutdown(enabled: bool) -> anyhow::Result<std::sync::Arc<std::sync::atomic::AtomicI32>> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicI32, Ordering},
+    };
+    let active = Arc::new(AtomicI32::new(0));
+    if enabled {
+        let mut interrupt =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let group = active.clone();
+        tokio::spawn(async move {
+            let status = tokio::select! {
+                _ = interrupt.recv() => 130,
+                _ = terminate.recv() => 143,
+            };
+            stop_group(group.swap(0, Ordering::SeqCst));
+            std::process::exit(status);
+        });
+    }
+    Ok(active)
+}
+#[cfg(unix)]
+struct CompilerGroup(std::sync::Arc<std::sync::atomic::AtomicI32>);
+#[cfg(unix)]
+impl CompilerGroup {
+    fn new(active: std::sync::Arc<std::sync::atomic::AtomicI32>, pid: u32) -> Self {
+        active.store(pid as i32, std::sync::atomic::Ordering::SeqCst);
+        Self(active)
+    }
+}
+#[cfg(unix)]
+impl Drop for CompilerGroup {
+    fn drop(&mut self) {
+        stop_group(self.0.swap(0, std::sync::atomic::Ordering::SeqCst));
+    }
+}
+#[cfg(unix)]
+fn stop_group(pid: i32) {
+    if pid > 0 {
+        use nix::{
+            sys::signal::{Signal, killpg},
+            unistd::Pid,
+        };
+        let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
+    }
 }

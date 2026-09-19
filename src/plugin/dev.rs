@@ -234,16 +234,12 @@ async fn invoke_selected_dev(
     {
         bail!("packaged Capability differs from source descriptor evidence");
     }
-    let operation = args.operation.clone().unwrap_or_else(|| {
-        source_capability
-            .request_operations
-            .first()
-            .expect("validated operation")
-            .clone()
-    });
+    let operation = args.operation.clone()
+        .or_else(|| source_capability.request_operations.first().cloned())
+        .context("plugin dev invokes Request operations; use an App with typed Stream support for this Capability")?;
     if !source_capability.request_operations.contains(&operation) {
         bail!(
-            "Plugin Capability `{}` does not declare operation `{operation}`",
+            "Plugin Capability `{}` does not declare Request operation `{operation}`",
             source_capability.capability_id
         );
     }
@@ -597,16 +593,12 @@ async fn dev_bun(root: &Path, package: &BunPackage, args: &PluginDevArgs) -> any
         bail!("Bun Plugin development invocation requires an App to bind declared dependencies");
     }
     let capability = one_capability(&descriptor)?;
-    let operation = args.operation.clone().unwrap_or_else(|| {
-        capability
-            .request_operations
-            .first()
-            .expect("validated operation")
-            .clone()
-    });
+    let operation = args.operation.clone()
+        .or_else(|| capability.request_operations.first().cloned())
+        .context("plugin dev invokes Request operations; use an App with typed Stream support for this Capability")?;
     if !capability.request_operations.contains(&operation) {
         bail!(
-            "Plugin Capability `{}` does not declare operation `{operation}`",
+            "Plugin Capability `{}` does not declare Request operation `{operation}`",
             capability.capability_id
         );
     }
