@@ -177,7 +177,7 @@ fn clean_room_custom_convention_compiler_is_only_executed_by_build() {
     write(
         &support,
         "package.json",
-        r#"{"name":"example.audit-support","version":"1.0.0","type":"module","dependencies":{"@lenso/bun-plugin":"0.4.1"},"lenso":{"pluginId":"example.audit-support","runtime":"bun","rootSlot":"tools","source":"plugin.ts","conventions":[{"id":"example.audit","entries":["audit.ts"],"compiler":{"program":"bun","args":["compile.mjs"]}}]}}"#,
+        r#"{"name":"example.audit-support","version":"1.0.0","type":"module","scripts":{"check":"tsc --noEmit"},"devDependencies":{"typescript":"7.0.2","@types/bun":"1.4.0"},"dependencies":{"@lenso/bun-plugin":"0.4.1"},"lenso":{"pluginId":"example.audit-support","runtime":"bun","rootSlot":"tools","source":"plugin.ts","conventions":[{"id":"example.audit","entries":["audit.ts"],"compiler":{"program":"bun","args":["compile.mjs"]}}]}}"#,
     );
     write(
         &support,
@@ -191,10 +191,16 @@ fn clean_room_custom_convention_compiler_is_only_executed_by_build() {
 const request = JSON.parse(fs.readFileSync(0, 'utf8'));
 if (request.schema !== 'lenso.convention-compile.v1') throw new Error('protocol');
 fs.writeFileSync('compiler-ran', request.entry);
-fs.writeFileSync(request.output + '/package.json', JSON.stringify({name:request.plugin_id,version:request.release_version,type:'module',dependencies:{'@lenso/bun-plugin':'0.4.1'},lenso:{pluginId:request.plugin_id,runtime:'bun',rootSlot:'tools',source:'plugin.ts'}}));
+fs.writeFileSync(request.output + '/package.json', JSON.stringify({name:request.plugin_id,version:request.release_version,type:'module',scripts:{check:'tsc --noEmit'},devDependencies:{typescript:'7.0.2','@types/bun':'1.4.0'},dependencies:{'@lenso/bun-plugin':'0.4.1'},lenso:{pluginId:request.plugin_id,runtime:'bun',rootSlot:'tools',source:'plugin.ts'}}));
 fs.writeFileSync(request.output + '/plugin.ts', fs.readFileSync('plugin.ts'));
+fs.copyFileSync('tsconfig.json', request.output + '/tsconfig.json');
 console.log(JSON.stringify({schema:'lenso.convention-compiled.v1'}));
 "#,
+    );
+    write(
+        &support,
+        "tsconfig.json",
+        r#"{"compilerOptions":{"strict":true,"noEmit":true,"module":"Preserve","moduleResolution":"bundler","types":["bun"]},"include":["plugin.ts"]}"#,
     );
     // Marker lives in an ignored output directory, not among compiler source inputs.
     let script = fs::read_to_string(support.join("compile.mjs"))
