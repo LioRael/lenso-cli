@@ -1,5 +1,18 @@
 ## lenso-cli@0.2.31
 
+## 0.17.0
+
+### Minor Changes
+
+- 153a244: Add extensible local file conventions and bundled CLI support with Rust and TypeScript scaffolds, selected-only optional dependencies, read-only diagnostics, and source-free command distributions. TypeScript CLI Apps require Bun for authoring but no Rust toolchain.
+
+  Rust CLI entries now use `#[command]` with typed arguments, doc-comment help, async execution, and invocation-local progressive output while retaining the builder and generated Provider APIs.
+
+- 153a244: Delegate App authoring to the independent Engine and add generic file processing, local processor discovery, locks and incremental publication.
+- d77b946: Add configuration-free App creation, generated native and portable Hosts, local development restart, Plugin-owned Web assets, and verified offline builds. Preserve explicit TypeScript Host authoring and existing Plugin Root intent.
+- 83368e4: Synchronize local Capability contracts before App builds, scaffold schema/Rust
+  contract packages, and compile generated Bun provides/dependency declarations.
+
 ## 0.16.2
 
 ### Patch Changes
