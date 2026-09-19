@@ -97,7 +97,7 @@ A logical Plugin may have multiple independently buildable packages when it need
 optional dependencies. Use `surfaces` metadata, or the optional composite
 `plugin.json` described in [local discovery](local-plugin-discovery.md). An
 unselected surface package is not parsed, installed, compiled, or bundled by this
-workflow. Dependencies already imported by the core or included in its workspace
+workflow. Dependencies alreadyru imported by the core or included in its workspace
 cannot be removed by convention selection. Shared source text itself is cheap;
 independent package boundaries isolate heavyweight runtime dependencies.
 

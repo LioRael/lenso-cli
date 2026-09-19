@@ -131,6 +131,10 @@ fn clean_room_cli_conventions_need_no_rust_and_keep_inactive_packages_unresolved
 
 #[test]
 #[ignore = "requires Cargo and Bun; proves generated Rust and TS entries share the terminal contracts"]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one source-free mixed-language lifecycle scenario"
+)]
 fn clean_room_mixed_cli_conventions_share_typed_contracts_and_run_offline() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("app");
@@ -224,7 +228,7 @@ async fn typed(#[arg(default = "2")] count: u32, loud: bool, #[context] output: 
         });
         let started = rx.recv_timeout(std::time::Duration::from_secs(20));
         let _ = nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(child.id() as i32),
+            nix::unistd::Pid::from_raw(i32::try_from(child.id()).unwrap()),
             nix::sys::signal::Signal::SIGTERM,
         );
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
@@ -265,7 +269,7 @@ fn clean_room_custom_convention_compiler_is_only_executed_by_build() {
     write(
         &support,
         "compile.mjs",
-        r#"import fs from 'node:fs';
+        r"import fs from 'node:fs';
 const request = JSON.parse(fs.readFileSync(0, 'utf8'));
 if (request.schema !== 'lenso.convention-compile.v1') throw new Error('protocol');
 fs.writeFileSync('compiler-ran', request.entry);
@@ -273,7 +277,7 @@ fs.writeFileSync(request.output + '/package.json', JSON.stringify({name:request.
 fs.writeFileSync(request.output + '/plugin.ts', fs.readFileSync('plugin.ts'));
 fs.copyFileSync('tsconfig.json', request.output + '/tsconfig.json');
 console.log(JSON.stringify({schema:'lenso.convention-compiled.v1'}));
-"#,
+",
     );
     write(
         &support,

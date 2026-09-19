@@ -1,10 +1,8 @@
-mod app;
-use lenso_app_authoring::bundle_archive as archive;
-mod catalog;
-mod doctor;
-mod plugin;
-mod plugins;
-mod watch;
+use lenso_engine_app::app;
+use lenso_engine_app::doctor;
+mod engine;
+use lenso_engine_app::plugin;
+use lenso_engine_app::plugins;
 
 use std::{env, path::PathBuf, process::Command};
 
@@ -27,6 +25,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum RootCommand {
+    /// Process files through optional conventions without creating an App.
+    Engine {
+        #[command(subcommand)]
+        command: engine::EngineCommand,
+    },
     /// Create, develop, check, and package one Plugin.
     Plugin {
         #[command(subcommand)]
@@ -61,17 +64,47 @@ struct RunArgs {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
+    if arguments == ["--engine-host-info"] {
+        println!(
+            "{}",
+            serde_json::json!({"schema":"lenso.engine-host.v1","target":lenso_app_authoring::native_host_target()})
+        );
+        return Ok(());
+    }
     reject_retired_invocation(&arguments)?;
     if should_delegate_to_host(&arguments) {
         return run_host_command(arguments);
     }
-    match Cli::parse().command {
+    let command = Cli::parse().command;
+    #[cfg(unix)]
+    if matches!(
+        &command,
+        RootCommand::App {
+            command: app::AppCommand::Build(_) | app::AppCommand::Assemble(_)
+        }
+    ) {
+        observe_build_shutdown()?;
+    }
+    match command {
+        RootCommand::Engine { command } => engine::run(command).await,
         RootCommand::Plugin { command } => plugin::plugin(command).await,
         RootCommand::Plugins { command } => plugins::plugins(command),
         RootCommand::App { command } => app::app(command).await,
         RootCommand::Run(args) => run(args),
         RootCommand::Doctor(args) => doctor::doctor(args),
     }
+}
+
+#[cfg(unix)]
+fn observe_build_shutdown() -> anyhow::Result<()> {
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::spawn(async move {
+        let status = tokio::select! { _ = interrupt.recv() => 130, _ = terminate.recv() => 143 };
+        lenso_engine::process::terminate_active_processes();
+        std::process::exit(status);
+    });
+    Ok(())
 }
 
 fn reject_retired_invocation(arguments: &[String]) -> anyhow::Result<()> {
@@ -115,7 +148,11 @@ fn should_delegate_to_host(arguments: &[String]) -> bool {
     let Some(first) = arguments.first().map(String::as_str) else {
         return false;
     };
-    !first.starts_with('-') && !matches!(first, "plugin" | "plugins" | "app" | "run" | "doctor")
+    !first.starts_with('-')
+        && !matches!(
+            first,
+            "engine" | "plugin" | "plugins" | "app" | "run" | "doctor"
+        )
 }
 
 fn run_host_command(arguments: Vec<String>) -> anyhow::Result<()> {
@@ -186,7 +223,10 @@ mod tests {
             .get_subcommands()
             .map(clap::Command::get_name)
             .collect::<Vec<_>>();
-        assert_eq!(names, ["plugin", "plugins", "app", "run", "doctor"]);
+        assert_eq!(
+            names,
+            ["engine", "plugin", "plugins", "app", "run", "doctor"]
+        );
 
         let plugin = command
             .get_subcommands()
@@ -224,7 +264,7 @@ mod tests {
 
     #[test]
     fn static_maintenance_roots_stay_local_and_app_roots_delegate() {
-        for command in ["plugin", "plugins", "app", "run", "doctor"] {
+        for command in ["engine", "plugin", "plugins", "app", "run", "doctor"] {
             assert!(!should_delegate_to_host(&[command.to_owned()]));
         }
         for argument in ["--help", "-h", "--version", "-V"] {

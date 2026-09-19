@@ -40,10 +40,7 @@ jobs:
       - run: npm run check:npm-shim
       - run: cargo fmt --all -- --check
       - run: cargo test --locked --workspace
-      - name: Verify portable signed catalog closure
-        run: cargo check --locked -p lenso-plugin-catalog --target wasm32-unknown-unknown
-      - name: Verify catalog package
-        run: cargo publish --dry-run --locked -p lenso-plugin-catalog --allow-dirty
+      # Portable catalog validation and publication belong to lenso-engine.
       - name: Verify release dependency convergence
         shell: bash
         run: |

@@ -22,8 +22,7 @@ one-commit recovery PR, use the same branch prefix and name the commit
 
 The crates.io registry is the source of truth for existing versions. Public
 versions, tags, and the historical `CHANGELOG.md` are not rewritten. Configure
-a crates.io Trusted Publisher for each package (`lenso-cli` and
-`lenso-plugin-catalog`) before its first live publish
+a crates.io Trusted Publisher for each package (`lenso-cli`) before its first live publish
 after this migration; no long-lived `CARGO_REGISTRY_TOKEN` is used.
 
 ## npm distribution
@@ -52,11 +51,8 @@ pnpm changeset status --output /tmp/lenso-cli-changesets.json
 npm run check:npm-shim
 cargo fmt --all -- --check
 cargo test --locked --workspace
-cargo check --locked -p lenso-plugin-catalog --target wasm32-unknown-unknown
 cargo metadata --locked --format-version 1
-cargo package --locked -p lenso-plugin-catalog --allow-dirty
 cargo package --locked --workspace --allow-dirty --no-verify
-cargo publish --dry-run --locked -p lenso-plugin-catalog --allow-dirty
 cargo publish --dry-run --locked --workspace --allow-dirty --no-verify
 ```
 
@@ -114,3 +110,12 @@ gh workflow run release-changesets.yml --ref main
 Inspect the exact `main` commit and public registry state before dispatching.
 The manual entry points run the same jobs, permissions, package checks, and OIDC
 publish steps as the normal push path.
+
+## Engine extraction
+
+Engine owns the portable catalog and its Wasm/package verification. The CLI
+consumes an immutable Engine Git revision during bootstrap. Before Cargo
+publication, publish the Engine dependency crates through their owner workflow
+and replace Git dependencies with released versions. npm binary builds can
+consume the pinned source revision; Cargo packaging still requires registry
+availability. Do not remove the CLI package gate to bypass this prerequisite.

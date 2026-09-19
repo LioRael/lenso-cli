@@ -57,6 +57,10 @@ fn local_build_does_not_change_explicit_host_flag_contract() {
 
 #[test]
 #[ignore = "requires Cargo registry access and Bun; compiles a real generated Host"]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one offline distribution acceptance scenario"
+)]
 fn clean_room_local_host_invokes_native_to_bun_and_runs_without_source_or_toolchains() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source");
@@ -216,6 +220,10 @@ fn schema_contract_scaffold_builds_without_a_rust_authoring_package() {
 
 #[test]
 #[ignore = "requires Bun and registry access; builds generated Capability providers and dependencies"]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one offline distribution acceptance scenario"
+)]
 fn clean_room_bun_generated_capabilities_build_and_start_without_cargo() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().join("app");

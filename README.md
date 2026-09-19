@@ -13,6 +13,21 @@ cargo install lenso-cli
 
 The Cargo and npm packages use independent version lines.
 
+## Process documents without an App
+
+The workspace implementation includes an embeddable convention Engine and
+optional processors:
+
+```sh
+lenso engine inspect --source ./content --markdown
+lenso engine run --source ./content --markdown
+```
+
+Adopt a local processor with `--plugin ./tools/engine-plugin.json`. See the
+[Engine guide](docs/engine.md) for the language-neutral protocol, library API,
+App compatibility, and the remaining self-hosting work. The implementation now lives in the independent `lenso-engine` repository;
+this checkout uses local path dependencies pending an authorized coordinated release.
+
 ## Author one Plugin
 
 ```sh

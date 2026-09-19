@@ -10,9 +10,6 @@ rust-version = "1.94"
 categories = ["command-line-utilities", "development-tools"]
 keywords = ["cli", "authoring", "plugins", "app-plan"]
 include = [
-    "/assets/plugin-build.mjs",
-    "/assets/terminal/**",
-    "/build.rs",
     "/src/**/*.rs",
     "/contracts/*.json",
     "/docs/migration-plugin-authoring.md",
@@ -21,6 +18,7 @@ include = [
     "/docs/local-plugin-discovery.md",
     "/docs/capability-authoring.md",
     "/docs/convention-authoring.md",
+    "/docs/engine.md",
     "/README.md",
     "/Cargo.toml",
 ]
@@ -36,100 +34,27 @@ path = "src/lib.rs"
 
 [features]
 default = ["cli"]
-cli = [
-    "dep:clap",
-    "dep:shell-words",
-    "dep:futures",
-    "dep:lenso-contract-authoring-next",
-    "dep:lenso-contract-codegen-next",
-    "dep:lenso-bun-adapter",
-    "dep:lenso-kernel",
-    "dep:lenso-contract-runtime",
-    "dep:lenso-plugin-authoring",
-    "dep:lenso-guest-sdk",
-    "dep:lenso-process-adapter",
-    "dep:lenso-runner",
-    "dep:lenso-runtime-codec",
-    "dep:lenso-wasm-component-adapter",
-    "dep:nix",
-    "dep:notify",
-    "dep:tokio",
-]
+cli = ["dep:clap", "dep:tokio", "dep:lenso-engine", "dep:lenso-engine-app", "dep:lenso-engine-markdown", "dep:lenso-engine-runtime"]
 
 [workspace]
 resolver = "2"
-members = ["crates/lenso-plugin-catalog"]
-
-[workspace.package]
-edition = "2024"
-license = "MIT"
-repository = "https://github.com/LioRael/lenso-cli"
-rust-version = "1.94"
-
-[workspace.dependencies]
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-sha2 = "0.10"
-tokio = { version = "1.52", features = ["io-util", "macros", "net", "process", "rt", "signal", "time"] }
-tempfile = "3.23"
-toml = "0.9"
-
-[workspace.lints.rust]
-unsafe_code = "forbid"
-missing_debug_implementations = "warn"
-
-[workspace.lints.clippy]
-all = { level = "warn", priority = -1 }
-pedantic = { level = "warn", priority = -1 }
-module_name_repetitions = "allow"
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
-must_use_candidate = "allow"
+members = []
 
 [dependencies]
 anyhow = "1.0"
-futures = { version = "0.3", optional = true }
-shell-words = { version = "1.1", optional = true }
-clap = { version = "4", features = ["derive", "string"], optional = true }
-lenso-app-plan = { version = "0.4.1" }
-lenso-bun-adapter = { version = "=0.1.10", optional = true }
-lenso-contract-authoring-next = { package = "lenso-contract-authoring", version = "0.1.1", optional = true }
-lenso-contract-codegen-next = { package = "lenso-contract-codegen", version = "0.9.0", optional = true }
-lenso-contract-runtime = { version = "0.2.0", optional = true }
-lenso-plugin-authoring = { version = "0.2.0", optional = true }
-lenso-guest-sdk = { version = "0.5.0", optional = true }
-lenso-kernel = { version = "0.3.3", optional = true }
-lenso-plugin-bundle = { version = "0.4.2" }
-lenso-plugin-catalog = { path = "crates/lenso-plugin-catalog", version = "0.1.0", features = ["bundle-verification"] }
-lenso-process-adapter = { version = "=0.3.11", optional = true }
-lenso-runner = { version = "0.2.5", optional = true }
-lenso-runtime-codec = { version = "=0.4.1", optional = true }
-lenso-wasm-component-adapter = { version = "=0.2.13", optional = true }
-notify = { version = "8.2", optional = true }
-serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sha2 = "0.11"
-rustix = { version = "1.1", features = ["fs"] }
-tempfile.workspace = true
-tokio = { version = "1.52", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"], optional = true }
-toml.workspace = true
-uuid = { version = "1", features = ["v7"] }
-ureq = { version = "2.12", default-features = false, features = ["tls"] }
-url = "2.5"
-zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
-jsonschema = { version = "0.51", default-features = false }
-glob = "0.3.3"
-
-[target.'cfg(unix)'.dependencies]
-nix = { version = "0.30", features = ["signal"], optional = true }
-
-[target.'cfg(windows)'.dependencies]
-winsafe = { version = "0.0.19", features = ["kernel"] }
+clap = { version = "4", features = ["derive", "string"], optional = true }
+tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "signal"], optional = true }
+lenso-engine-authoring = { git = "https://github.com/LioRael/lenso-engine.git", rev = "81cff04f397c315eac0aeb9b9bdc107dc4aa1423", version = "0.1.0" }
+lenso-engine = { git = "https://github.com/LioRael/lenso-engine.git", rev = "81cff04f397c315eac0aeb9b9bdc107dc4aa1423", version = "0.1.0", optional = true }
+lenso-engine-app = { git = "https://github.com/LioRael/lenso-engine.git", rev = "81cff04f397c315eac0aeb9b9bdc107dc4aa1423", version = "0.1.0", optional = true }
+lenso-engine-markdown = { git = "https://github.com/LioRael/lenso-engine.git", rev = "81cff04f397c315eac0aeb9b9bdc107dc4aa1423", version = "0.1.0", optional = true }
+lenso-engine-runtime = { git = "https://github.com/LioRael/lenso-engine.git", rev = "81cff04f397c315eac0aeb9b9bdc107dc4aa1423", version = "0.1.0", optional = true }
 
 [dev-dependencies]
-rcgen = "0.14"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-tempfile.workspace = true
+lenso-app-plan = "0.4.1"
+lenso-plugin-bundle = "0.4.2"
+tempfile = "3.23"
 
 [lints.rust]
 unsafe_code = "forbid"
@@ -142,3 +67,6 @@ module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 must_use_candidate = "allow"
+
+[target.'cfg(unix)'.dev-dependencies]
+nix = { version = "0.30", features = ["signal"] }
