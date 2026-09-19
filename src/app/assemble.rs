@@ -21,16 +21,19 @@ use std::{
 pub(crate) struct AssembleArgs {
     /// Source App root. Defaults to the current directory.
     #[arg(long)]
-    root: Option<PathBuf>,
+    pub(super) root: Option<PathBuf>,
     /// Host identity recorded in the generated build.
     #[arg(long, default_value = "local.app")]
-    id: String,
+    pub(super) id: String,
     /// New output directory; existing output is never overwritten.
     #[arg(long)]
-    out: PathBuf,
+    pub(super) out: PathBuf,
     /// Emit a machine-readable receipt.
     #[arg(long)]
-    json: bool,
+    pub(super) json: bool,
+    /// Also compile an executable Host with native-linked Plugins and typed codecs.
+    #[arg(long)]
+    pub(super) executable: bool,
 }
 
 pub(crate) fn assemble(args: AssembleArgs) -> anyhow::Result<()> {
@@ -57,7 +60,47 @@ pub(crate) fn assemble(args: AssembleArgs) -> anyhow::Result<()> {
     let mut inputs = Vec::new();
     let mut inventory = Vec::new();
     let mut sources = Vec::new();
-    for candidate in report.candidates {
+    let candidates = report
+        .candidates
+        .into_iter()
+        .filter(|candidate| {
+            candidate.role != SourceRole::Shared
+                || stage
+                    .path()
+                    .join("plugins")
+                    .join(&candidate.plugin_id)
+                    .exists()
+        })
+        .collect::<Vec<_>>();
+    let source_digests = candidates
+        .iter()
+        .map(|candidate| {
+            Ok((
+                candidate.plugin_id.clone(),
+                super::local_host::input_digest(&candidate.project)?,
+            ))
+        })
+        .collect::<anyhow::Result<std::collections::BTreeMap<_, _>>>()?;
+    let executable = args.executable || candidates.iter().any(super::local_host::is_native);
+    if executable {
+        super::prepare::target_platform(lenso_app_authoring::native_host_target())?;
+    }
+    let native = if candidates.iter().any(super::local_host::is_native) {
+        super::local_host::generate(stage.path(), &root.join(".lenso/host-cache"), &candidates)?
+    } else {
+        Vec::new()
+    };
+    if let Some(ingress) = native.iter().find(|d| d.plugin_id() == "lenso.web-ingress") {
+        inputs.push(LocalPluginInput {
+            descriptor: ingress.clone(),
+            manifest_digest: super::local_host::digest(&stage.path().join(".lenso/host"))?,
+            app_owned: true,
+            source: "lenso.local-host@1 Web ingress".into(),
+        });
+    }
+    let mut runtime_artifacts = Vec::new();
+    let mut runtime_codecs = std::collections::BTreeMap::new();
+    for candidate in candidates {
         // Shared sources are not built merely because they can be discovered.
         // A Root directory is intent to validate, not implicit enablement.
         if candidate.role == SourceRole::Shared
@@ -69,15 +112,26 @@ pub(crate) fn assemble(args: AssembleArgs) -> anyhow::Result<()> {
         {
             continue;
         }
-        if candidate
-            .implementations
-            .iter()
-            .any(|item| item.runtime == "native-linked")
-        {
-            bail!(
-                "{}: native-linked Host generation is not implemented by app assemble yet; use the existing Web Plugin dev/custom Host path",
-                candidate.project.display()
-            );
+        if super::local_host::is_native(&candidate) {
+            let descriptor = native
+                .iter()
+                .find(|d| d.plugin_id() == candidate.plugin_id)
+                .context("selected native Plugin is absent from linked registry")?
+                .clone();
+            if descriptor.release_version() != candidate.release_version {
+                bail!(
+                    "native source identity changed during build: {}",
+                    candidate.project.display()
+                );
+            }
+            inputs.push(LocalPluginInput {
+                descriptor,
+                manifest_digest: super::local_host::digest(&stage.path().join(".lenso/host"))?,
+                app_owned: candidate.role == SourceRole::AppOwned,
+                source: candidate.project.display().to_string(),
+            });
+            sources.push(candidate);
+            continue;
         }
         if inputs.len() >= 256 {
             bail!("local Host accepts at most 256 selected Plugin sources");
@@ -115,6 +169,26 @@ pub(crate) fn assemble(args: AssembleArgs) -> anyhow::Result<()> {
                 "local source identity changed during build: {}",
                 candidate.project.display()
             );
+        }
+        if executable {
+            let path = format!("runtime/artifacts/{}", candidate.plugin_id);
+            fs::create_dir_all(stage.path().join("runtime/artifacts"))?;
+            with_bundle_directory(&archive, |directory| {
+                fs::copy(
+                    directory.join(&selected.artifact.path),
+                    stage.path().join(&path),
+                )?;
+                Ok(())
+            })?;
+            if let Some(evidence) = crate::plugin::local_runtime_descriptor(
+                &stage.path().join(&path),
+                selected.descriptor.execution_class().as_str(),
+            )? {
+                runtime_codecs.insert(candidate.plugin_id.clone(), evidence);
+            }
+            runtime_artifacts.push(json!({"plugin_id": candidate.plugin_id, "path":path,
+                "digest":selected.artifact.digest,"size":selected.artifact.size,
+                "execution_class":selected.descriptor.execution_class().as_str()}));
         }
         let descriptor = selected.descriptor;
         inventory.push(json!({
@@ -161,24 +235,42 @@ pub(crate) fn assemble(args: AssembleArgs) -> anyhow::Result<()> {
     )?;
     let resolved = lenso_app_authoring::load_resolved_app(stage.path())
         .context("resolve local Host with Plugin Root intent")?;
+    for source in &sources {
+        if source_digests[&source.plugin_id] != super::local_host::input_digest(&source.project)? {
+            bail!(
+                "source changed during build: {}; retry after edits settle",
+                source.project.display()
+            );
+        }
+    }
     fs::write(
         stage.path().join("local-sources.json"),
         serde_json::to_vec_pretty(&json!({
             "schema": "lenso.local-sources.v1", "template": "lenso.local-host@1",
             "cli_version": env!("CARGO_PKG_VERSION"), "target": lenso_app_authoring::native_host_target(),
-            "sources": sources,
+            "sources": sources, "source_digests":source_digests,
         }))?,
     )?;
+    if executable {
+        fs::write(
+            stage.path().join("runtime-codecs.json"),
+            serde_json::to_vec_pretty(&runtime_codecs)?,
+        )?;
+        if native.is_empty() {
+            super::portable_runtime::validate(resolved.plan(), &runtime_codecs)?;
+        }
+        super::local_host::finalize(stage.path(), runtime_artifacts)?;
+    }
     super::build::publish_new_output(stage.path(), &destination)?;
     if args.json {
         println!(
             "{}",
             json!({"schema_version":1, "kind":"lenso.app-assemble", "out":destination,
-            "plugin_instances": resolved.instances().len(), "capability_bindings": resolved.plan().capability_bindings().len()})
+            "plugin_instances": resolved.instances().len(), "capability_bindings": resolved.plan().capability_bindings().len(), "executable":executable})
         );
     } else {
         println!(
-            "Assembled {} Plugin Instances at {}. Runtime distribution/startup is a separate step.",
+            "Assembled {} Plugin Instances at {}.",
             resolved.instances().len(),
             destination.display()
         );
@@ -212,7 +304,7 @@ fn local_implementation_policy() -> ImplementationPolicy {
     }
 }
 
-fn copy_root(
+pub(super) fn copy_root(
     source: &Path,
     destination: &Path,
     depth: usize,

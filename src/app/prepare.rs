@@ -67,22 +67,22 @@ struct BundleInventory {
 }
 
 #[derive(Debug, Serialize)]
-struct DistributionLock {
-    schema: &'static str,
-    app_id: String,
-    target: String,
-    platform: &'static str,
-    arch: &'static str,
-    files: Vec<DistributionFile>,
+pub(super) struct DistributionLock {
+    pub(super) schema: &'static str,
+    pub(super) app_id: String,
+    pub(super) target: String,
+    pub(super) platform: &'static str,
+    pub(super) arch: &'static str,
+    pub(super) files: Vec<DistributionFile>,
 }
 
 #[derive(Debug, Serialize)]
-struct DistributionFile {
-    path: String,
-    role: String,
-    sha256: String,
-    size: u64,
-    executable: bool,
+pub(super) struct DistributionFile {
+    pub(super) path: String,
+    pub(super) role: String,
+    pub(super) sha256: String,
+    pub(super) size: u64,
+    pub(super) executable: bool,
 }
 
 #[derive(Debug)]
@@ -414,7 +414,7 @@ fn stage_selected_artifact(
     })
 }
 
-fn target_platform(target: &str) -> anyhow::Result<(&'static str, &'static str)> {
+pub(super) fn target_platform(target: &str) -> anyhow::Result<(&'static str, &'static str)> {
     match target {
         "aarch64-apple-darwin" => Ok(("darwin", "arm64")),
         "x86_64-unknown-linux-gnu" => Ok(("linux", "x64")),

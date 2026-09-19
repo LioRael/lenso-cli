@@ -68,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         RootCommand::Plugin { command } => plugin::plugin(command).await,
         RootCommand::Plugins { command } => plugins::plugins(command),
-        RootCommand::App { command } => app::app(command),
+        RootCommand::App { command } => app::app(command).await,
         RootCommand::Run(args) => run(args),
         RootCommand::Doctor(args) => doctor::doctor(args),
     }
@@ -202,10 +202,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             app.get_subcommands()
+                .filter(|command| !command.is_hide_set())
                 .map(clap::Command::get_name)
                 .collect::<Vec<_>>(),
             [
-                "build", "prepare", "init", "check", "show", "discover", "assemble"
+                "build", "create", "start", "dev", "prepare", "init", "check", "show", "discover",
+                "assemble"
             ]
         );
     }

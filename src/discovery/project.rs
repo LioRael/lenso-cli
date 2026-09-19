@@ -113,6 +113,12 @@ pub(super) fn read(root: &Path, role: SourceRole) -> anyhow::Result<Option<Candi
         {
             continue;
         }
+        if format == "cargo"
+            && metadata.get("plugin-id").is_none()
+            && metadata.get("contract").is_some()
+        {
+            continue;
+        }
         let identity_key = if format == "cargo" {
             "plugin-id"
         } else {
@@ -236,10 +242,22 @@ fn cargo_implementations(root: &Path, value: &Value) -> anyhow::Result<Vec<Imple
     let Some(metadata) = metadata else {
         // This is the existing native Web scaffold discriminator; do not infer
         // native linking for every Cargo package or business Capability.
-        let runtime = if value
-            .pointer("/package/metadata/lenso/root-slot")
-            .and_then(Value::as_str)
-            == Some("web")
+        let native_sdk = value
+            .pointer("/dependencies/lenso")
+            .is_some_and(|dependency| {
+                dependency
+                    .get("package")
+                    .and_then(Value::as_str)
+                    .is_none_or(|name| name == "lenso")
+            })
+            || value
+                .pointer("/dependencies/lenso-native-adapter")
+                .is_some();
+        let runtime = if native_sdk
+            || value
+                .pointer("/package/metadata/lenso/root-slot")
+                .and_then(Value::as_str)
+                == Some("web")
         {
             "native-linked"
         } else {
@@ -340,7 +358,7 @@ fn cargo_implementations(root: &Path, value: &Value) -> anyhow::Result<Vec<Imple
     names
         .into_iter()
         .map(|runtime| {
-            if !["wasm", "process", "bun"].contains(&runtime) {
+            if !["wasm", "process", "bun", "native-linked"].contains(&runtime) {
                 bail!("unsupported Cargo Plugin runtime `{runtime}`");
             }
             Ok(implementation(runtime, runtime, root))

@@ -8,12 +8,30 @@ use crate::plugins::{load_resolved_app, project_root};
 
 mod assemble;
 mod build;
+mod local_dev;
+mod local_host;
+mod local_workflow;
+mod portable_runtime {
+    include!("app/local_runtime_template.rs");
+    include!("app/local_json_template.rs");
+}
 mod prepare;
 
 #[derive(Clone, Debug, Subcommand)]
 pub(crate) enum AppCommand {
-    /// Build Host authoring artifacts from static TypeScript and verified bundles.
-    Build(build::HostBuildArgs),
+    /// Build a runnable local App, or explicit static TypeScript Host authoring artifacts.
+    Build(local_workflow::BuildArgs),
+    /// Create a convention-based local App without a handwritten Host configuration.
+    Create(local_workflow::CreateArgs),
+    /// Start an already built local App without package managers or network resolution.
+    Start(local_workflow::StartArgs),
+    /// Build and restart the local App when sources or Plugin Root intent change.
+    Dev(local_dev::DevArgs),
+    #[command(name = "__run-local", hide = true)]
+    Runtime {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Prepare one immutable, offline Host distribution for an exact target.
     Prepare(prepare::PrepareArgs),
     /// Create an App workspace from one exact Host executable and Host Catalog.
@@ -70,9 +88,15 @@ pub(crate) struct ShowArgs {
     runtime_json: bool,
 }
 
-pub(crate) fn app(command: AppCommand) -> anyhow::Result<()> {
+pub(crate) async fn app(command: AppCommand) -> anyhow::Result<()> {
     match command {
-        AppCommand::Build(args) => build::build(&args),
+        AppCommand::Build(args) => local_workflow::build(args),
+        AppCommand::Create(args) => local_workflow::create(args),
+        AppCommand::Start(args) => local_workflow::start(args),
+        AppCommand::Dev(args) => local_dev::dev(args).await,
+        AppCommand::Runtime { args } => std::thread::spawn(move || portable_runtime::run(args))
+            .join()
+            .map_err(|_| anyhow::anyhow!("local runtime worker panicked"))?,
         AppCommand::Prepare(args) => prepare::prepare(args),
         AppCommand::Init(args) => init(args),
         AppCommand::Check(args) => check(args),

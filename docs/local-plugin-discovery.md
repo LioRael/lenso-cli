@@ -1,60 +1,104 @@
-# Local Plugin discovery
+# Local App development
 
-Status: first implementation slice of [plan #727](https://github.com/LioRael/lenso/issues/727).
-Discovery is read-only. `app assemble` builds portable local sources into a
-validated Host authoring output. Native linked assembly and zero-configuration
-App creation/development remain subsequent work.
+The local Host template implements [plan #727](https://github.com/LioRael/lenso/issues/727)
+and [ADR 0075](https://github.com/LioRael/lenso/pull/730). These commands require a
+CLI build containing the local App workflow; older published CLI versions do not
+provide it.
 
 ```sh
-lenso app discover
-lenso app discover --root /path/to/my-app --json
+lenso app create my-app --runtime bun
+cd my-app
+lenso app dev
+# In another terminal, or after stopping development:
+lenso app build
+lenso app start --from dist
 ```
 
-No Host, Host Catalog, or App configuration is required. The command discovers
-Plugin projects under `app/`. Add optional local sources in `lenso.toml` only
-when needed:
+No App configuration file, Host declaration, preset, or activation flag is required.
+`app/` contains App-owned Plugins. `plugins/` retains instance configuration,
+disabled markers, and named dependency choices. `app create --web` creates a native
+Rust Web Plugin with a Plugin-owned HTML page. `--runtime process` is the default;
+`bun`, `wasm`, `multi`, and `empty` are also available. `--no-install` leaves normal
+language dependency installation to the developer.
+
+Add **local discovery sources** only when needed:
 
 ```toml
+# Optional lenso.toml, relative to this App root.
 plugin_sources = ["../shared-plugins", "../packages/*", "../artifacts/example.lenso-plugin"]
 ```
 
-This is tooling configuration, not an App manifest. It accepts no enabled
-list, binding map, preset, or activation flag. Existing `plugins/` files remain
-the only instance/configuration difference authority. No marketplace source is
-configured here.
+Shared candidates are discoverable but are not built/admitted until an existing
+Root file such as `plugins/example.audit/default.toml` explicitly selects them.
+An empty/comment-only TOML file uses the Plugin's defaults. App-owned Plugins get
+a disableable `default` Instance. Duplicate identities, ambiguous providers,
+invalid configuration, and disabled required providers fail before publication.
 
-## Assemble a local Host
+## Build, inspect, and run
 
 ```sh
-lenso app assemble --out ./dist/host
-lenso app check --root ./dist/host
-lenso app show --root ./dist/host --json
+lenso app discover --json
+lenso app build --out ./dist-release
+lenso app check --root ./dist-release
+lenso app show --root ./dist-release --json
+lenso app start --from ./dist-release --check
+lenso app start --from ./dist-release
 ```
 
-The versioned local Host policy generates a disableable `default` Instance for
-each App-owned Plugin. Additional sources remain inactive until selected with
-an ordinary `plugins/<plugin-id>/<instance>.toml` file. Source projects need their
-normal installed/locked language dependencies; assembly runs existing release
-builders and verifies the copied Bundle bytes. The current target is the CLI's
-native target. Process, Wasm, and Bun implementations use explicit ordered Host
-policy; this does not establish runtime support for every resulting artifact.
+Build creates a new output directory; it never overwrites an existing one. Source
+builds use the existing Plugin builders and normal installed language dependencies.
+Native Plugins need Cargo and expose the SDK-generated `link_plugin` anchor.
+Their normal Cargo contract dependencies supply typed runtime codecs; no parallel
+handwritten Capability schema is required. Incompatible codec cohorts fail with
+an error. Bun-only Apps use the precompiled CLI runtime and need no Rust toolchain.
 
-Assembly writes a new directory and never overwrites the source App or an
-existing output. It copies Plugin Root intent, generates exact Host authority and
-Bundle inventory, materializes inferred named dependency choices in the existing
-format, and validates through the ordinary App loader before publication. Invalid
-configuration, ambiguous providers, missing shared adoption, or disabled required
-providers fail without publishing partial output. Multiple root Slot offers are
-allowed by this local template; single Capability requirements still reject
-ambiguity. Closed TypeScript/custom Host policies remain unchanged.
+The output includes the executable Host, resolver, selected artifacts, Bun when
+needed, exact Host authority, Root intent, and integrity metadata. Startup verifies
+immutable runtime files and uses the ordinary resolver/Kernel path. The distribution
+runs without the source tree, Cargo, Bun on PATH, or runtime downloads. It is a
+runtime closure, not a portable source-reproduction archive. `intent/plugins/`
+remains the editable Root snapshot; `--root PATH` can select another already
+initialized Plugin Root. `--check` performs real activation and clean shutdown.
 
-The output contains verified artifacts plus source provenance and template/CLI
-identity. It is **Host authoring output**, not yet a standalone runtime distribution
-or a source-reproduction archive. Native linked source is rejected explicitly
-until generated native Host and typed cross-runtime codec assembly is delivered.
-QuickJS/dylib source building, Web asset integration, managed development restart,
-and automatic cohort preparation remain tracked by #727. Existing `app prepare`
-still requires its supported runtime profile and exact precompiled inputs.
+`app assemble --out PATH` retains the authoring-only path for portable Plugins;
+`--executable` requests the runnable closure. Native assembly necessarily generates
+a Host. Existing `app build --source host.ts --target TARGET --out PATH`, custom
+Hosts, and `app prepare` retain their own contracts. Dynamic terminal Plugin command
+names remain available because convenience commands live under `app`.
+
+## Development loop
+
+`app dev` watches App source, Root intent, optional local sources, and native Cargo
+path dependencies. Changes are debounced, rebuilt into a separate directory, then
+restart the Host with graceful shutdown. Failed builds keep the last running App.
+A successful build followed by a startup failure is reported; automatic rollback
+or zero-downtime switching is not claimed. Ctrl-C stops the active build/Host.
+Generated output and dependency/cache trees are excluded from watching.
+
+Web routes and assets belong to the Web Plugin. The starter embeds its own HTML;
+editing it triggers the ordinary rebuild/restart. Native instance resources are
+loaded from the Root snapshot. There is no separate frontend framework or implicit
+business route registry in the Host.
+
+## Supported local runtime profile
+
+| Source | Build/runtime path | Boundary |
+| --- | --- | --- |
+| Rust native linked | Generated Host + normal SDK factories | Cargo required at build time |
+| TypeScript/Bun | Existing Bun builder + shipped Bun Adapter | Bun required at build time; bundled for deployment |
+| Rust Process | Existing release builder + Process Adapter | Native build target |
+| Rust Wasm | Existing Wasm builder + Wasm Component Adapter | Existing SDK target/toolchain required |
+| Composite Rust/Bun | Existing composite builder and Contract equivalence | One deterministic implementation selected |
+| Web | Native HTTP Endpoint Plugin + generated ingress | Assets remain Plugin-owned |
+| QuickJS / dylib | Discovery can inspect verified Bundles | Local source/runtime integration deferred |
+| Python / other languages | No SDK path established here | Not claimed by this workflow |
+
+The current executable profile supports macOS ARM64 and Linux x86_64. Other
+platforms fail explicitly instead of choosing a different runtime. Pure portable
+Capabilities support Request interactions through verified generated Descriptor
+evidence. Stream/Event boundaries require typed codecs from native contract
+projections. Old Bun archives without embedded generated Descriptor evidence need
+repacking for the generic portable Host; custom typed Hosts remain available.
 
 ## Discovery contract
 
@@ -88,10 +132,10 @@ still requires its supported runtime profile and exact precompiled inputs.
 
 Cargo projects use existing `[package.metadata.lenso]` (`plugin-id`, `root-slot`)
 and optional `[package.metadata.lenso-cli]` implementation declarations. Versions
-may inherit `workspace.package.version`. Native Web scaffolds use the existing
-`root-slot = "web"` discriminator; other projects retain existing CLI runtime
-defaults. This is compatibility with current scaffolds, not a universal rule
-that Web Capabilities imply native execution.
+may inherit `workspace.package.version`. Native projects are recognized from their normal `lenso`/`lenso-native-adapter`
+SDK dependency or explicit `runtime = "native-linked"`. Contract-only crates are
+not Plugins. Existing Web scaffold metadata remains supported; language,
+execution class, and business Capability remain independent.
 
 Bun projects use existing `package.json` `lenso.pluginId`, `lenso.runtime`, and
 package version. SDK packages exposing only `lenso.build` are not business
@@ -105,47 +149,5 @@ declared runtime choices, not extracted Capabilities, executable availability,
 or successful admission. Local Bundle directories/archives use the existing
 Bundle verifier and report `verified_bundle_not_admitted`. Bundle implementation
 runtime values are exact execution-class IDs; source values are authoring runtime
-names. A future build adapter must normalize these before implementation selection.
+names. Assembly normalizes these before explicit implementation selection.
 No new handwritten Descriptor, Schema, or plugin manifest is introduced.
-
-## Support baseline and remaining integration
-
-Inspected CLI base: `7fb23fbfa943dcb1e7fa0a97cd684f7059e0d47b`.
-Runtime source inspected: `d7eb465baa2e668ed2378fa832aab1769965a3d9`;
-Bun: `92fd7e09ddeff87cce6f7b51dc6ec05eee4ced73`;
-protocols: `c1c9c0a3d1c8dfc906c70f0e2e5e929122fde1ee`.
-Runtime/protocol remote main have advanced; the next assembly slice must inspect
-their fresh bases and release cohorts before using new interfaces. This table
-is source evidence, not proof of a released mixed-App distribution.
-
-| Source / implementation | Existing evidence | Discovery slice | Assembly follow-up |
-| --- | --- | --- | --- |
-| Rust native linked | `src/plugin/web_dev.rs`, Web scaffold | Existing Web metadata recognized | Generate a general Host, beyond single Web Plugin dev |
-| Rust Process | `src/plugin.rs`, `src/plugin/dev.rs` | Runtime and multi-output metadata | Reuse real Process Adapter for selected target |
-| Rust Wasm | Same CLI paths, Wasm Component Adapter | Runtime and multi-output metadata | Preserve declared artifact target and Host admission |
-| TypeScript/Bun | `assets/plugin-build.mjs`, Bun dev path | Existing package metadata | Mixed Host dependency/runtime integration |
-| Composite Rust + Bun | Existing `implementations` authoring | Parent plus bounded child locators | Build each implementation and validate one Contract |
-| QuickJS / dylib | Runtime-owned Adapter crates | Verified Bundle metadata only | Source extractor/build integration and exact target proof required |
-| Web resources | Selected Plugin-owned resources | Remain inside owning project | Connect build/dev server lifecycle in later slice |
-| Older native projects without identity metadata | Native linked registration | Not guessed from crate names | Source-derived locator/extractor integration required |
-| Python / other SDKs | No supported path established here | Not claimed | Separate SDK/Adapter work, outside this slice |
-
-## ADR relationship and subsequent Host contract
-
-ADR 0070 remains unchanged by this read-only command. Enabling automatic App
-assembly requires an explicit architectural adoption: discovery is Host-authoring
-input, generating explainable defaults; Plugin Root retains configuration,
-disabled markers, and Host-permitted named dependency choices. A discovered
-shared candidate is not enabled until explicitly adopted through Plugin Root.
-
-The subsequent architecture slice must freeze default Instance identity,
-shared-source adoption commands, template policy locking, and custom Host
-selection before activation is implemented. It must also settle the proposed
-`create/dev/build` convenience roots: `dev` is currently retired and other roots
-can belong to dynamic terminal Plugins. This slice uses `app discover` and does
-not silently change existing root command routing.
-
-Validation covers mixed source discovery, workspace membership/version
-inheritance, composite identity, duplicate/overlapping sources, ignored output
-trees, local path configuration, corrupt archives, and symlink cycles. This
-does not substitute for real mixed-App invocation and offline build proof.

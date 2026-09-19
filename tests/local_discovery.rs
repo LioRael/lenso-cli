@@ -73,3 +73,30 @@ fn discovers_sources_and_verified_archives_without_executing_or_installing() {
         assert!(!root.join("plugins").exists());
     }
 }
+
+#[test]
+fn native_sdk_identity_is_independent_of_slot_and_contract_libraries_are_not_plugins() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    fs::create_dir_all(root.join("app/native")).unwrap();
+    fs::write(root.join("app/native/Cargo.toml"), "[package]\nname='native'\nversion='1.0.0'\n[package.metadata.lenso]\nplugin-id='example.native'\nroot-slot='business'\n[dependencies]\nlenso='0.5.23'\n").unwrap();
+    fs::create_dir_all(root.join("app/contract")).unwrap();
+    fs::write(root.join("app/contract/Cargo.toml"), "[package]\nname='contract'\nversion='1.0.0'\n[package.metadata.lenso.contract]\ndescriptor='capability.json'\nprojection='rust-runtime'\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_lenso"))
+        .args(["app", "discover", "--root"])
+        .arg(root)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["candidates"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        report["candidates"][0]["implementations"][0]["runtime"],
+        "native-linked"
+    );
+}

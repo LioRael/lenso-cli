@@ -22,13 +22,13 @@ use crate::archive::{archive_bundle, with_bundle_directory};
 pub(crate) struct HostBuildArgs {
     /// Static TypeScript Host entrypoint. Does not execute application code.
     #[arg(long)]
-    source: PathBuf,
+    pub(super) source: PathBuf,
     /// Exact implementation target, as used by the Plugin bundles.
     #[arg(long)]
-    target: String,
+    pub(super) target: String,
     /// New authoring output directory. Existing output is never overwritten.
     #[arg(long)]
-    out: PathBuf,
+    pub(super) out: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]

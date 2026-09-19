@@ -55,15 +55,20 @@ impl GeneratedHostBuild {
                     .cloned()
                     .collect::<Vec<_>>();
                 if !providers.is_empty() {
-                    bindings.push(
-                        HostBinding::to_instances(
-                            consumer.clone(),
-                            requirement.capability_id(),
-                            providers,
-                        )
-                        .with_requirement_id(requirement.requirement_id())
-                        .selectable(None),
+                    let binding = HostBinding::to_instances(
+                        consumer.clone(),
+                        requirement.capability_id(),
+                        providers,
                     );
+                    // Legacy Capability-only requirements have a synthetic `~`
+                    // key. Only named roles may persist a selectable Root choice.
+                    bindings.push(if requirement.requirement_id().starts_with('~') {
+                        binding
+                    } else {
+                        binding
+                            .with_requirement_id(requirement.requirement_id())
+                            .selectable(None)
+                    });
                 }
             }
         }
@@ -190,6 +195,26 @@ mod tests {
             [],
         );
         assert!(build.resolve(&adopted).is_ok());
+    }
+
+    #[test]
+    fn capability_only_native_requirements_keep_legacy_fixed_binding_semantics() {
+        let root = tempfile::tempdir().unwrap();
+        let mut consumer = input("example.consumer", true);
+        consumer.descriptor = consumer
+            .descriptor
+            .with_requirement(CapabilityRequirementPlan::one("example.store@1", "1"));
+        let mut provider = input("example.provider", true);
+        provider.descriptor = provider
+            .descriptor
+            .with_capability(CapabilityEndpointPlan::new("example.store@1", "1", ["get"]));
+        let (_, resolved) =
+            GeneratedHostBuild::lower_local("example.app", vec![consumer, provider])
+                .unwrap()
+                .with_local_root(root.path())
+                .unwrap();
+        assert_eq!(resolved.plan().capability_bindings().len(), 1);
+        assert!(resolved.dependency_choices().is_empty());
     }
 
     #[test]

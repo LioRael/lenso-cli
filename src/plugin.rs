@@ -468,6 +468,16 @@ fn materialize_bun(
             );
         }
     }
+    // Preserve the generated runtime declaration inside the digest-addressed
+    // artifact so a precompiled Host can build exact JSON codecs without Cargo.
+    let declaration = serde_json::to_string(&descriptor)?;
+    if declaration.len() > 1024 * 1024 {
+        bail!("Bun runtime declaration exceeds 1 MiB");
+    }
+    let body = fs::read(&artifact)?;
+    let mut encoded = format!("// lenso-runtime-descriptor.v1:{declaration}\n").into_bytes();
+    encoded.extend(body);
+    fs::write(&artifact, encoded)?;
     let contract = contract_from_bun_descriptor(package, &descriptor)?;
     let verified = build_source_plugin_release_bundle(&SourcePluginReleaseBuild {
         contract,
@@ -1155,3 +1165,33 @@ fn print_verified(
 
 #[cfg(test)]
 mod tests;
+
+pub(crate) fn local_runtime_descriptor(
+    path: &Path,
+    execution_class: &str,
+) -> anyhow::Result<Option<Value>> {
+    match execution_class {
+        "lenso.bun-process@1" => {
+            use std::io::{BufRead, Read};
+            let mut line = Vec::new();
+            std::io::BufReader::new(fs::File::open(path)?)
+                .take(1024 * 1024 + 1)
+                .read_until(b'\n', &mut line)?;
+            let prefix = b"// lenso-runtime-descriptor.v1:";
+            if !line.starts_with(prefix) {
+                return Ok(None);
+            }
+            if line.len() > 1024 * 1024 {
+                bail!("Bun runtime declaration exceeds 1 MiB");
+            }
+            Ok(Some(serde_json::from_slice(&line[prefix.len()..])?))
+        }
+        "lenso.process@1" => Ok(Some(serde_json::to_value(
+            dev::read_process_descriptor(path)?.descriptor,
+        )?)),
+        "lenso.wasm-component@1" => Ok(Some(serde_json::from_slice(
+            &lenso_plugin_bundle::extract_plugin_descriptor(&fs::read(path)?)?,
+        )?)),
+        _ => Ok(None),
+    }
+}
