@@ -5,7 +5,7 @@ if (request.schema !== "lenso.convention-compile.v1") throw new Error("unsupport
 const output = request.output;
 if (request.entry.endsWith(".rs")) {
   const sdk = path.join(import.meta.dir, "rust-sdk");
-  const cargo = `[package]\nname = ${JSON.stringify(request.plugin_id.replaceAll(".", "-"))}\nversion = ${JSON.stringify(request.release_version)}\nedition = "2024"\n[workspace]\n[package.metadata.lenso]\nplugin-id = ${JSON.stringify(request.plugin_id)}\nroot-slot = "terminal-providers"\n[dependencies]\nlenso = "=0.5.23"\nlenso-cli-support = { path = ${JSON.stringify(sdk)} }\n`;
+  const cargo = `[package]\nname = ${JSON.stringify(request.plugin_id.replaceAll(".", "-"))}\nversion = ${JSON.stringify(request.release_version)}\nedition = "2024"\n[workspace]\n[package.metadata.lenso]\nplugin-id = ${JSON.stringify(request.plugin_id)}\nroot-slot = "terminal-providers"\n[dependencies]\nlenso = "=0.5.23"\nanyhow = "1"\nlenso-cli-support = { path = ${JSON.stringify(sdk)} }\n`;
   fs.writeFileSync(path.join(output,"Cargo.toml"),cargo);
   fs.mkdirSync(path.join(output,"src"));
   fs.writeFileSync(path.join(output,"src/lib.rs"), `

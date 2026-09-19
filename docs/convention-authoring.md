@@ -48,20 +48,37 @@ entry beside the ordinary core Plugin source. Rust `cli.rs` uses the helper SDK
 available to its selected generated contribution:
 
 ```rust
-use lenso_cli_support::Command;
-pub fn command() -> Command {
-    Command::new("hello-rust", "Say hello from Rust")
-        .string_arg("name", "world")
-        .run(|args, output| {
-            output.text(format!("Hello, {}!", args["name"]));
-            Ok(())
-        })
+use lenso_cli_support::command;
+
+/// Say hello from Rust
+#[command(name = "hello-rust")]
+async fn hello(
+    #[arg(long, default = "world")] name: String,
+) -> anyhow::Result<String> {
+    Ok(format!("Hello, {name}!"))
 }
 ```
 
-The Rust convenience API currently supports synchronous commands and string
-options; TypeScript also supports boolean flags and async functions. Advanced
-Plugins can implement the existing generated terminal provider contract directly.
+One `#[command]` function per entry generates the `command()` factory used by the
+compiler. Keep the function's own name; do not also declare a `command()` factory
+in that file. Without `name`, the function name becomes the command name with
+underscores converted to hyphens. Doc comments supply help text. The macro
+supports synchronous and asynchronous functions. Arguments use `FromStr` for
+typed conversion; `Option<T>` is optional, `bool` is a flag, and other arguments
+are required unless `#[arg(default = "...")]` supplies a fallback. `#[arg(long)]`
+is optional, and `#[arg(long = "display-name")]` renames an option. Returns may
+be text, `()`, or a `Result` of either. Invalid values and business errors retain
+the existing terminal domain errors.
+
+For progressive output, inject `#[context] output: CommandContext` and call
+`output.text(...)` or `output.error(...)`. Output is bounded to 256 queued messages
+and 16 MiB per invocation. Async functions are polled by the Stream; cancellation
+drops their future. Synchronous work must return cooperatively. The macro crate
+lives in the selected Rust contribution's dependency closure; unused Rust entries
+do not add a Rust toolchain requirement to TypeScript Apps.
+
+`Command::new(...).string_arg(...).run(...)` remains available for programmatic
+commands. Advanced Plugins can implement the generated terminal Provider directly.
 This preserves the lower-level SDKs, dependency bindings, and Stream lifecycle.
 Standalone `plugin dev` invokes Request operations; exercise terminal Stream
 commands through `app dev -- ...`. Generated Rust entries see the CLI helper SDK;
@@ -70,7 +87,8 @@ dependencies or a shared business library.
 
 For an App-local command without a core Plugin, put `cli.ts` or `cli.rs` in a bare
 directory such as `app/status/`. No manifest is required there. The directory
-supplies the default command name; an explicit name overrides it. Synthetic owner
+supplies the default TypeScript command name; Rust macros default to the function
+name. An explicit command name overrides either default. Synthetic owner
 and contribution identities are stable hashes of relative paths. Renaming paths
 changes these identities. Explicit package identities remain preferable for
 reusable products. A plain shared directory must be packaged to carry an identity.

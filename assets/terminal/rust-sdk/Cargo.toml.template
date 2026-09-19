@@ -8,6 +8,7 @@ descriptor = "capability.json"
 projection = "rust-runtime"
 output = "src/generated.rs"
 [dependencies]
+lenso-cli-macros = { path = "../rust-macros" }
 futures = "0.3"
 lenso-kernel = "0.3.5"
 lenso-contract-runtime = "0.2.0"

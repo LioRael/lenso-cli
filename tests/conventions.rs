@@ -138,6 +138,31 @@ fn clean_room_mixed_cli_conventions_share_typed_contracts_and_run_offline() {
         .args(["app", "create"])
         .arg(&root)
         .arg("--cli"));
+    for package in ["rust-macros", "rust-sdk"] {
+        run(Command::new("cargo")
+            .arg("test")
+            .arg("--manifest-path")
+            .arg(
+                root.join("app/lenso-terminal-cli")
+                    .join(package)
+                    .join("Cargo.toml"),
+            ));
+    }
+    write(
+        &root,
+        "app/typed/cli.rs",
+        r#"
+use lenso_cli_support::{command, CommandContext};
+/// Typed Rust progress
+#[command(name = "typed")]
+async fn typed(#[arg(default = "2")] count: u32, loud: bool, #[context] output: CommandContext) -> anyhow::Result<String> {
+    anyhow::ensure!(count > 0, "count must be positive");
+    output.text("started");
+    if count == 99 { std::future::pending::<()>().await; }
+    Ok(if loud { format!("COUNT={count}") } else { format!("count={count}") })
+}
+"#,
+    );
     run(Command::new(CLI)
         .args([
             "app",
@@ -161,6 +186,59 @@ fn clean_room_mixed_cli_conventions_share_typed_contracts_and_run_offline() {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(String::from_utf8_lossy(&output.stdout).contains("Hello, mixed!"));
+    }
+    let output = invoke(&root, &["typed", "--count", "3", "--loud"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("COUNT=3"));
+    for count in ["invalid", "0"] {
+        let output = invoke(&root, &["typed", "--count", count]);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("stopped cleanly"));
+    }
+    #[cfg(unix)]
+    {
+        use std::{
+            io::{BufRead, BufReader},
+            process::Stdio,
+        };
+        let mut child = Command::new(CLI)
+            .args(["app", "start", "--from"])
+            .arg(root.join("dist"))
+            .args(["--", "typed", "--count", "99"])
+            .env_clear()
+            .env("PATH", root.join("no-tools"))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            let _ = BufReader::new(stdout).read_line(&mut line);
+            let _ = tx.send(line);
+        });
+        let started = rx.recv_timeout(std::time::Duration::from_secs(20));
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(child.id() as i32),
+            nix::sys::signal::Signal::SIGTERM,
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while child.try_wait().unwrap().is_none() {
+            if std::time::Instant::now() > deadline {
+                child.kill().unwrap();
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(started.unwrap().trim(), "started");
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("stopped cleanly"));
     }
 }
 

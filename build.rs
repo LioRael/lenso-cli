@@ -26,7 +26,12 @@ fn main() {
     }
     let root = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
         .join("assets/terminal");
-    for required in ["rust-sdk/Cargo.toml.template", "rust-sdk/src/lib.rs"] {
+    for required in [
+        "rust-sdk/Cargo.toml.template",
+        "rust-sdk/src/lib.rs",
+        "rust-macros/Cargo.toml.template",
+        "rust-macros/src/lib.rs",
+    ] {
         assert!(
             root.join(required).is_file(),
             "missing bundled terminal asset: {required}"

@@ -24,6 +24,8 @@ Here `@lenso/cli` denotes bundled support, not a registry download. `compiler.mj
 is an ordinary compiler extension using the same protocol available to users.
 The router aggregates installed provider contracts; the Host supplies only the
 Plan-bound typed ingress and generated codecs. Business execution stays in
-provider Plugins. The Rust convenience helper is synchronous and buffers bounded
-text output; the TypeScript helper supports asynchronous command functions.
+provider Plugins. Rust `#[command]` macros and the TypeScript helper support asynchronous command
+functions with bounded output. The Rust builder remains available. Macro and SDK
+tests run from the materialized support packages in the mixed-language lifecycle
+test, covering typed values, errors, progressive output, and cancellation.
 Both implement the existing Stream contract and retain its terminal errors.

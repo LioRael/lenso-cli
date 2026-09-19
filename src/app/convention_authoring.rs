@@ -263,7 +263,7 @@ pub(crate) fn new(command: PluginCommand) -> anyhow::Result<()> {
             write(
                 stage.path(),
                 "cli.rs",
-                "use lenso_cli_support::Command;\npub fn command() -> Command {\n    Command::new(\"hello-rust\", \"Say hello from Rust\")\n        .string_arg(\"name\", \"world\")\n        .run(|args, output| { output.text(format!(\"Hello, {}!\", args[\"name\"])); Ok(()) })\n}\n",
+                "use lenso_cli_support::command;\n\n/// Say hello from Rust\n#[command(name = \"hello-rust\")]\nasync fn hello(#[arg(long, default = \"world\")] name: String) -> anyhow::Result<String> {\n    Ok(format!(\"Hello, {name}!\"))\n}\n",
             )?;
         }
     }
