@@ -75,7 +75,11 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn reject_retired_invocation(arguments: &[String]) -> anyhow::Result<()> {
-    if arguments.iter().any(|argument| argument == "--definition") {
+    let options = &arguments[..arguments
+        .iter()
+        .position(|argument| argument == "--")
+        .unwrap_or(arguments.len())];
+    if options.iter().any(|argument| argument == "--definition") {
         anyhow::bail!(
             "`--definition` is retired: the current Host plus `plugins/` derive the App; use `lenso app check` or `lenso app show`"
         );
@@ -88,7 +92,7 @@ fn reject_retired_invocation(arguments: &[String]) -> anyhow::Result<()> {
                 "`lenso {command}` is retired: use `lenso plugin new|dev|check|pack`; Module is not an application behavior concept"
             );
         }
-        [app, command, ..] if app == "app" && ["add", "remove"].contains(&command.as_str()) => {
+        [app, command, ..] if app == "app" && command == "remove" => {
             anyhow::bail!(
                 "`lenso app {command}` is retired: change one Plugin with `lenso plugins add|configure|disable|enable|remove`"
             );
@@ -206,8 +210,8 @@ mod tests {
                 .map(clap::Command::get_name)
                 .collect::<Vec<_>>(),
             [
-                "contract", "build", "create", "start", "dev", "prepare", "init", "check", "show",
-                "discover", "inspect", "assemble"
+                "add", "plugin", "contract", "build", "create", "start", "dev", "prepare", "init",
+                "check", "show", "discover", "inspect", "assemble"
             ]
         );
     }

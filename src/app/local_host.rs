@@ -249,12 +249,67 @@ pub(super) fn generate(
         .map(|id| format!("{id:?}"))
         .collect::<Vec<_>>()
         .join(", ");
+    let terminal_enabled = candidates
+        .iter()
+        .any(|c| c.plugin_id == "lenso.terminal.cli");
+    if terminal_enabled && cohort != "0.4" {
+        bail!("bundled terminal support requires runtime-codec 0.4 contracts");
+    }
+    let mut terminal_aliases = BTreeMap::new();
     let mut register = format!("let typed = std::collections::BTreeSet::<&str>::from([{ids}]);\n");
     for (index, (capability, (_, dependency))) in codecs.into_iter().enumerate() {
         let alias = format!("local_contract_{index}");
         dependencies.insert(alias.clone(), dependency);
+        if capability == "lenso.terminal.command@1"
+            || capability == "lenso.terminal.command-provider@1"
+        {
+            terminal_aliases.insert(capability.clone(), alias.clone());
+        }
         let name = codec_name(&capability)?;
         register.push_str(&format!("let bun = bun.with_codec(LegacyBunCodec({alias}::{name})).with_authoring_codec({alias}::{name});\nlet process = process.with_codec({alias}::{name});\nlet wasm = wasm.with_codec({alias}::{name});\n"));
+    }
+    if terminal_enabled {
+        for (name, version) in [
+            ("lenso-contract-runtime", "0.2.0"),
+            ("lenso-plugin-authoring", "0.2.0"),
+            ("lenso-guest-sdk", "0.5.0"),
+            ("shell-words", "1.1"),
+        ] {
+            dependencies.insert(name.into(), json!(version));
+        }
+        dependencies.insert("clap".into(), json!({"version":"4", "features":["string"]}));
+        fs::create_dir_all(generated.join("src/terminal"))?;
+        let mut module = include_str!("terminal/mod.rs").to_owned();
+        for (id, name, codec, body) in [
+            (
+                "lenso.terminal.command@1",
+                "command",
+                "CommandJsonCodec",
+                include_str!("terminal/command.rs"),
+            ),
+            (
+                "lenso.terminal.command-provider@1",
+                "provider",
+                "CommandProviderJsonCodec",
+                include_str!("terminal/provider.rs"),
+            ),
+        ] {
+            if let Some(alias) = terminal_aliases.get(id) {
+                module = module.replace(
+                    &format!("pub mod {name};"),
+                    &format!("pub use {alias} as {name};"),
+                );
+            } else {
+                fs::write(generated.join(format!("src/terminal/{name}.rs")), body)?;
+                register.push_str(&format!("let bun = bun.with_authoring_codec(terminal::{name}::{codec});\nlet process = process.with_codec(terminal::{name}::{codec});\nlet wasm = wasm.with_codec(terminal::{name}::{codec});\n"));
+            }
+        }
+        register.push_str("let mut typed = typed; typed.insert(terminal::command::CAPABILITY_ID); typed.insert(terminal::provider::CAPABILITY_ID);\n");
+        fs::write(generated.join("src/terminal/mod.rs"), module)?;
+        fs::write(
+            generated.join("src/terminal/parser.rs"),
+            include_str!("terminal/parser.rs"),
+        )?;
     }
     let web = web_contract.is_some();
     if let Some(contract) = web_contract {
@@ -265,6 +320,10 @@ pub(super) fn generate(
         + include_str!("local_json_template.rs"))
     .replace("// LENSO_REGISTER_CODECS", &register)
     .replace("// LENSO_LINK_PLUGINS", &linked);
+    source = source.replace("// LENSO_TERMINAL_RUN", if terminal_enabled { "if let Some(args) = &command_args { command_result = terminal::run(&app, args).await; }" } else { "if command_args.is_some() { command_result = Err(anyhow::anyhow!(\"CLI support is not adopted\")); }" });
+    if terminal_enabled {
+        source.push_str("\n#[allow(dead_code)] mod terminal;\n");
+    }
     source = source.replace(
         "// LENSO_NATIVE_RESOURCES",
         if cohort == "0.3" {
@@ -647,7 +706,7 @@ pub(super) fn input_digest(root: &Path) -> anyhow::Result<String> {
 pub(super) fn host_arguments(root: &Path) -> anyhow::Result<Vec<&'static str>> {
     match fs::read_to_string(root.join(".lenso/host-mode"))?.as_str() {
         "native" => Ok(Vec::new()),
-        "portable" => Ok(vec!["app", "__run-local"]),
+        "portable" => Ok(vec!["app", "__run-local", "--"]),
         _ => bail!("unsupported local Host entrypoint"),
     }
 }

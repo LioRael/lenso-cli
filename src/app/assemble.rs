@@ -66,9 +66,13 @@ pub(crate) fn assemble(args: AssembleArgs) -> anyhow::Result<()> {
     let mut inputs = Vec::new();
     let mut inventory = Vec::new();
     let mut sources = Vec::new();
+    let generated_sources = tempfile::tempdir().context("stage convention sources")?;
+    let generated_candidates =
+        super::convention_build::compile(&convention_plan, generated_sources.path())?;
     let candidates = convention_plan
         .candidates
         .into_iter()
+        .chain(generated_candidates)
         .filter(|candidate| {
             candidate.role != SourceRole::Shared
                 || candidate.surface_owner.is_some()
@@ -80,6 +84,12 @@ pub(crate) fn assemble(args: AssembleArgs) -> anyhow::Result<()> {
         })
         .collect::<Vec<_>>();
     super::contracts::synchronize(&root, &candidates)?;
+    let convention_inputs = convention_plan
+        .compilations
+        .iter()
+        .flat_map(|compilation| [&compilation.owner_project, &compilation.compiler_project])
+        .map(|path| Ok((path.clone(), super::local_host::input_digest(path)?)))
+        .collect::<anyhow::Result<std::collections::BTreeMap<_, _>>>()?;
     let source_digests = candidates
         .iter()
         .map(|candidate| {
@@ -249,6 +259,11 @@ pub(crate) fn assemble(args: AssembleArgs) -> anyhow::Result<()> {
     }
     let resolved = lenso_app_authoring::load_resolved_app(stage.path())
         .context("resolve local Host with Plugin Root intent")?;
+    for (path, digest) in &convention_inputs {
+        if *digest != super::local_host::input_digest(path)? {
+            bail!("convention source changed during build; retry");
+        }
+    }
     for source in &sources {
         if source_digests[&source.plugin_id] != super::local_host::input_digest(&source.project)? {
             bail!(

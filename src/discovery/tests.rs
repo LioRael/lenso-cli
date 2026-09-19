@@ -395,3 +395,67 @@ fn surface_symlinks_cannot_escape_the_owner() {
             .contains("symbolic links")
     );
 }
+
+#[test]
+fn bare_entries_are_planned_without_running_the_selected_compiler() {
+    let root = tempfile::tempdir().unwrap();
+    support(root.path(), "app/support", "example.cli", "cli.ts");
+    let manifest = root.path().join("app/support/package.json");
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    metadata["lenso"]["conventions"][0]["compiler"] =
+        serde_json::json!({"program":"must-not-run","args":[]});
+    fs::write(manifest, serde_json::to_vec(&metadata).unwrap()).unwrap();
+    write(
+        root.path(),
+        "app/hello/cli.ts",
+        "throw new Error('must not execute during discovery');",
+    );
+    let plan = conventions::plan(&discover(root.path()).unwrap()).unwrap();
+    assert_eq!(plan.compilations.len(), 1);
+    assert_eq!(plan.compilations[0].compiler.program, "must-not-run");
+    assert!(!root.path().join(".lenso").exists());
+    write(root.path(), "plugins/example.cli/default.disabled", "");
+    let plan = conventions::plan(&discover(root.path()).unwrap()).unwrap();
+    assert!(plan.compilations.is_empty());
+    assert_eq!(plan.surfaces[0].reason, "support_not_adopted");
+}
+
+#[test]
+fn convention_outputs_cannot_change_identity_or_activate_more_conventions() {
+    let root = tempfile::tempdir().unwrap();
+    bun(root.path(), "output", "example.other");
+    let compilation = conventions::Compilation {
+        owner: "example.owner".into(),
+        version: "1.0.0".into(),
+        role: SourceRole::AppOwned,
+        owner_project: root.path().into(),
+        entry: root.path().join("cli.ts"),
+        plugin_id: "example.generated".into(),
+        convention: "example.cli".into(),
+        compiler_project: root.path().into(),
+        compiler: conventions::Compiler {
+            program: "never-run".into(),
+            args: vec![],
+        },
+    };
+    assert!(
+        conventions::generated_candidate(&root.path().join("output"), &compilation)
+            .unwrap_err()
+            .to_string()
+            .contains("identity or version")
+    );
+    let manifest = root.path().join("output/package.json");
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    metadata["lenso"]["pluginId"] = "example.generated".into();
+    metadata["version"] = "1.0.0".into();
+    metadata["lenso"]["conventions"] = serde_json::json!([]);
+    fs::write(manifest, serde_json::to_vec(&metadata).unwrap()).unwrap();
+    assert!(
+        conventions::generated_candidate(&root.path().join("output"), &compilation)
+            .unwrap_err()
+            .to_string()
+            .contains("recursively activate")
+    );
+}

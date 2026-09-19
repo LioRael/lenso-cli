@@ -18,6 +18,9 @@ pub(crate) struct DevArgs {
     /// App source root. Defaults to the current directory.
     #[arg(long)]
     root: Option<PathBuf>,
+    /// Arguments for installed terminal support, rerun after each successful rebuild.
+    #[arg(last = true)]
+    args: Vec<String>,
 }
 
 pub(crate) async fn dev(args: DevArgs) -> anyhow::Result<()> {
@@ -57,6 +60,13 @@ pub(crate) async fn dev(args: DevArgs) -> anyhow::Result<()> {
             host = Some(
                 command(output.join(".lenso/host"))
                     .args(super::local_host::host_arguments(&output)?)
+                    .args(if args.args.is_empty() {
+                        vec![]
+                    } else {
+                        std::iter::once("--".to_owned())
+                            .chain(args.args.clone())
+                            .collect()
+                    })
                     .spawn()
                     .context("start generated local Host")?,
             );

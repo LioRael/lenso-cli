@@ -54,6 +54,9 @@ pub(crate) struct CreateArgs {
     /// Create a native Rust Web Plugin with Plugin-owned HTML assets.
     #[arg(long, conflicts_with = "runtime")]
     web: bool,
+    /// Create a TypeScript CLI App with bundled convention support.
+    #[arg(long, conflicts_with_all = ["runtime", "web"])]
+    cli: bool,
     /// Skip the starter's package installation and initial compile check.
     #[arg(long)]
     no_install: bool,
@@ -72,7 +75,7 @@ pub(crate) fn create(args: CreateArgs) -> anyhow::Result<()> {
         .tempdir_in(parent)?;
     fs::create_dir(staging.path().join("app"))?;
     fs::create_dir(staging.path().join("plugins"))?;
-    if args.web || !matches!(args.runtime, Starter::Empty) {
+    if !args.cli && (args.web || !matches!(args.runtime, Starter::Empty)) {
         let runtime = match args.runtime {
             Starter::Process => "process",
             Starter::Bun => "bun",
@@ -109,6 +112,21 @@ pub(crate) fn create(args: CreateArgs) -> anyhow::Result<()> {
         "# Local Lenso App\n\nRun `lenso app dev` to build and watch this App. Run `lenso app build` to produce an offline executable, then `lenso app start --from dist`.\n\nAdd Plugin source projects under `app/`. Keep instance configuration and explicit dependency choices in `plugins/`. No App configuration file is required. Optional `plugin_sources` in `lenso.toml` adds shared local candidates; an explicit Plugin Root instance is required to select them.\n\nThe generated Host supports native Rust, Bun, Process and Wasm implementations. Existing custom Host authoring remains available through `lenso app build --source ... --target ...`.\n",
     )?;
     super::build::publish_new_output(staging.path(), &destination)?;
+    if args.cli {
+        for invocation in [
+            vec!["app", "add", "@lenso/cli"],
+            vec!["app", "plugin", "new", "local.hello"],
+        ] {
+            let mut command = Command::new(std::env::current_exe()?);
+            command.args(invocation).arg("--root").arg(&destination);
+            if args.no_install {
+                command.arg("--no-install");
+            }
+            if !command.status()?.success() {
+                bail!("CLI App scaffold is created; support setup failed");
+            }
+        }
+    }
     println!(
         "Created App at {}. Run `lenso app dev --root {}`.",
         destination.display(),
@@ -128,6 +146,9 @@ pub(crate) struct StartArgs {
     /// Start, validate readiness and shut down immediately.
     #[arg(long)]
     check: bool,
+    /// Arguments passed to installed terminal support.
+    #[arg(last = true, conflicts_with = "check")]
+    args: Vec<String>,
 }
 pub(crate) fn start(args: StartArgs) -> anyhow::Result<()> {
     let executable = fs::canonicalize(args.from.join(".lenso/host"))
@@ -139,6 +160,9 @@ pub(crate) fn start(args: StartArgs) -> anyhow::Result<()> {
     }
     if args.check {
         command.arg("--check");
+    }
+    if !args.args.is_empty() {
+        command.arg("--").args(&args.args);
     }
     #[cfg(unix)]
     {

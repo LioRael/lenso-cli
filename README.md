@@ -102,6 +102,13 @@ Native Rust, Bun, Process, and Wasm reuse the existing Plugin builders and runti
 adapters. See [local App development](docs/local-plugin-discovery.md) for the
 supported platform/interaction profile and offline distribution contract.
 
+For CLI Apps, `lenso app create my-app --cli` installs bundled local convention
+support. Write `cli.ts` or `cli.rs`, then run `lenso app dev -- hello --name Ada`.
+TypeScript authoring needs Bun but no Rust environment. Support Plugins can add
+other filenames through compiler extensions, and unselected surface packages
+stay outside the build. See [extensible file conventions](docs/convention-authoring.md)
+for scaffolds, local support adoption, and dependency isolation.
+
 The current Host supplies useful defaults and a generated Host Catalog. An App
 owner writes only differences under `plugins/`:
 

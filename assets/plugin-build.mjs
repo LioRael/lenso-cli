@@ -138,7 +138,7 @@ function generatedContract(origin, local) {
       return values;
     };
     generatedProviderDescriptors.set(`${pathToFileURL(runtimeFile).href}#${origin.name}`, {
-      request_operations: operations("operations"), stream_operations: operations("stream_operations"), event_operations: operations("event_operations"),
+      request_operations: operations("operations").filter(name => !operations("stream_operations").includes(name) && !operations("event_operations").includes(name)), stream_operations: operations("stream_operations"), event_operations: operations("event_operations"),
     });
   }
   return {
@@ -204,8 +204,8 @@ const handlerArguments = new Map();
 for (const provider of definition.providers) {
   if (provider.kind === "contract") {
     const descriptor = generatedProviderDescriptors.get(`${provider.generated_module}#${provider.generated_export}`);
-    if (!descriptor || descriptor.stream_operations.length || descriptor.event_operations.length) {
-      throw new Error(`${provider.span.file}: provides requires a generated Request Capability supported by this build profile`);
+    if (!descriptor || descriptor.event_operations.length) {
+      throw new Error(`${provider.span.file}: provides requires a generated Request/Stream Capability supported by this build profile`);
     }
     const binderPath = `generic/provider-${loweredProviders.length}.ts`;
     generatedFiles.set(binderPath, [
@@ -215,6 +215,7 @@ for (const provider of definition.providers) {
     loweredProviders.push({
       capability_id: provider.capability_id, descriptor_version: provider.descriptor_version,
       descriptor_digest: provider.descriptor_digest, request_operations: descriptor.request_operations,
+      stream_operations: descriptor.stream_operations,
       binder: { module: binderPath, export_name: "bindProvider" },
     });
     continue;
@@ -242,10 +243,10 @@ for (const provider of definition.providers) {
       typeof descriptorVersion !== "string" ||
       typeof descriptorDigest !== "string" ||
       !Array.isArray(requestOperations) || requestOperations.some((value) => typeof value !== "string") ||
-      !Array.isArray(streamOperations) || streamOperations.length !== 0 ||
+      !Array.isArray(streamOperations) || streamOperations.some(value => typeof value !== "string") ||
       !Array.isArray(eventOperations) || eventOperations.length !== 0
     ) {
-      throw new Error(`${provider.span.file}: provider descriptor must declare one request-only Capability with an exact digest`);
+      throw new Error(`${provider.span.file}: provider descriptor must declare one Request/Stream Capability with an exact digest`);
     }
     const binderPath = `generic/provider-${loweredProviders.length}.ts`;
     generatedFiles.set(binderPath, [
@@ -257,7 +258,8 @@ for (const provider of definition.providers) {
       capability_id: capabilityId,
       descriptor_version: descriptorVersion,
       descriptor_digest: descriptorDigest,
-      request_operations: requestOperations,
+      request_operations: requestOperations.filter(operation => !streamOperations.includes(operation)),
+      stream_operations: streamOperations,
       binder: { module: binderPath, export_name: "bindProvider" },
     });
     continue;
@@ -355,8 +357,8 @@ for (const [index, provider] of loweredProviders.entries()) {
     capability_id: provider.capability_id,
     descriptor_version: provider.descriptor_version,
     descriptor_digest: provider.descriptor_digest,
-    operations: provider.request_operations,
-    stream_operations: [],
+    operations: [...provider.request_operations, ...(provider.stream_operations ?? [])],
+    stream_operations: provider.stream_operations ?? [],
     event_operations: [],
   })}, bind: binder${index} }`);
 }
@@ -427,7 +429,7 @@ fs.writeFileSync(report, JSON.stringify({
   fingerprint,
   descriptor: {
     abi: requiredCapabilities.length === 0
-      ? "lenso.json-request@1"
+      ? (loweredProviders.some(p => p.stream_operations?.length) ? "lenso.json-interactions@1" : "lenso.json-request@1")
       : "lenso.json-host-imports@2",
     ...(configurationSchema === undefined ? {} : { configuration_schema: configurationSchema }),
     capabilities: loweredProviders.map((provider) => ({
@@ -435,6 +437,7 @@ fs.writeFileSync(report, JSON.stringify({
       descriptor_version: provider.descriptor_version,
       descriptor_digest: provider.descriptor_digest,
       request_operations: provider.request_operations,
+      stream_operations: provider.stream_operations ?? [],
     })),
     required_capabilities: requiredCapabilities,
   },

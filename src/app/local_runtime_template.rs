@@ -59,6 +59,7 @@ pub(crate) fn run(args: Vec<String>) -> anyhow::Result<()> {
         .context("Host location")?;
     let mut intent = root.join("intent");
     let mut check = false;
+    let mut command_args = None;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -67,6 +68,7 @@ pub(crate) fn run(args: Vec<String>) -> anyhow::Result<()> {
                 intent = PathBuf::from(args.get(index).context("--root needs a directory")?);
             }
             "--check" => check = true,
+            "--" => { command_args = Some(args[index + 1..].to_vec()); break; },
             other => bail!("unknown Host argument: {other}"),
         }
         index += 1;
@@ -188,7 +190,13 @@ pub(crate) fn run(args: Vec<String>) -> anyhow::Result<()> {
     let process = lenso_process_adapter::ProcessAdapter::new(artifacts.clone());
     let wasm = lenso_wasm_component_adapter::WasmComponentAdapter::new(artifacts);
     #[cfg(not(generated_native_host))]
-    let typed = std::collections::BTreeSet::new();
+    let typed = std::collections::BTreeSet::from([super::terminal::command::CAPABILITY_ID, super::terminal::provider::CAPABILITY_ID]);
+    #[cfg(not(generated_native_host))]
+    let bun = bun.with_authoring_codec(super::terminal::command::CommandJsonCodec).with_authoring_codec(super::terminal::provider::CommandProviderJsonCodec);
+    #[cfg(not(generated_native_host))]
+    let process = process.with_codec(super::terminal::command::CommandJsonCodec).with_codec(super::terminal::provider::CommandProviderJsonCodec);
+    #[cfg(not(generated_native_host))]
+    let wasm = wasm.with_codec(super::terminal::command::CommandJsonCodec).with_codec(super::terminal::provider::CommandProviderJsonCodec);
     // LENSO_REGISTER_CODECS
     let evidence = serde_json::from_slice(&fs::read(root.join("runtime-codecs.json"))?)?;
     let mut bun = bun;
@@ -224,7 +232,11 @@ pub(crate) fn run(args: Vec<String>) -> anyhow::Result<()> {
                 .await.map_err(|e| anyhow::anyhow!("Host startup failed: {e:?}"))?;
             eprintln!("Local App ready");
             // LENSO_WEB_READY
-            if !check {
+            let mut command_result: anyhow::Result<()> = Ok(());
+            #[cfg(not(generated_native_host))]
+            if let Some(args) = &command_args { command_result = super::terminal::run(&app, args).await; }
+            // LENSO_TERMINAL_RUN
+            if !check && command_args.is_none() {
                 #[cfg(unix)]
                 let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
                 loop {
@@ -241,7 +253,7 @@ pub(crate) fn run(args: Vec<String>) -> anyhow::Result<()> {
             if let Some(error) = failure { bail!("App failed: {error:?}; shutdown: {outcome:?}"); }
             if outcome != ShutdownOutcome::Clean { bail!("App shutdown failed: {outcome:?}"); }
             eprintln!("Local App stopped cleanly");
-            Ok(())
+            command_result
         })
     )
 }
@@ -291,5 +303,5 @@ pub(crate) fn validate(
     plan: &ResolvedAppPlan,
     evidence: &std::collections::BTreeMap<String, serde_json::Value>,
 ) -> anyhow::Result<()> {
-    portable_codecs(plan, &std::collections::BTreeSet::new(), evidence).map(|_| ())
+    portable_codecs(plan, &std::collections::BTreeSet::from([super::terminal::command::CAPABILITY_ID, super::terminal::provider::CAPABILITY_ID]), evidence).map(|_| ())
 }

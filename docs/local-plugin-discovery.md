@@ -155,7 +155,8 @@ No new handwritten Descriptor, Schema, or plugin manifest is introduced.
 ## Optional surface packages
 
 Local convention selection is an authoring/build feature. It selects existing
-Plugin packages; it does not yet compile standalone `cli.ts`/`cli.rs` shorthand.
+Plugin packages or invokes an adopted compiler for standalone entry files.
+See [convention authoring](convention-authoring.md) for the complete CLI example.
 Run `lenso app inspect --json` to inspect the selection without executing code.
 
 A support Plugin declares recognized filenames in its existing Lenso metadata
@@ -209,9 +210,10 @@ a build aborts publication of that output.
 
 Simple single-package Plugins need no composite manifest. Existing multi-runtime
 implementations remain alternatives for one contract, separate from additive
-surface packages. Compiler extensions, shorthand entry generation, CLI-specific
-runtime integration, and registry installation commands are subsequent work
-tracked in central issue #733.
+surface packages. Compiler extensions lower standalone entries to ordinary source packages or
+verified Bundles. Bundled CLI support recognizes `cli.ts` and `cli.rs`; bare
+App-owned directories also work without a package manifest. Registry installation
+is outside this local-source workflow.
 
 Bun packages may set `lenso.source` to a package-relative entry file, for example
 `"src/cli.ts"`. The default remains `src/plugin.ts`. The source must resolve to a

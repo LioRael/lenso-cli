@@ -277,6 +277,8 @@ struct PluginCapability {
     #[serde(default)]
     descriptor_digest: Option<String>,
     request_operations: Vec<String>,
+    #[serde(default)]
+    stream_operations: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -533,15 +535,23 @@ fn contract_from_bun_descriptor(
         )
         .with_authoring_version(2),
         |contract, capability| {
-            contract.with_capability(CapabilityEndpointPlan::new(
+            let endpoint = CapabilityEndpointPlan::new(
                 &capability.capability_id,
                 &capability.descriptor_version,
                 {
                     let mut operations = capability.request_operations.clone();
+                    operations.extend(capability.stream_operations.clone());
                     operations.sort();
                     operations
                 },
-            ))
+            );
+            let endpoint = capability
+                .stream_operations
+                .iter()
+                .fold(endpoint, |endpoint, operation| {
+                    endpoint.with_stream_operation(operation)
+                });
+            contract.with_capability(endpoint)
         },
     );
     if let Some(schema) = &descriptor.configuration_schema {
@@ -550,19 +560,15 @@ fn contract_from_bun_descriptor(
     let mut requirements = descriptor.required_capabilities.iter().collect::<Vec<_>>();
     requirements.sort_by_key(|requirement| &requirement.requirement_id);
     for requirement in requirements {
-        if requirement.cardinality != "one" {
-            bail!(
-                "Bun Plugin requirement `{}` uses unsupported cardinality `{}`",
-                requirement.requirement_id,
-                requirement.cardinality
-            );
-        }
+        let constructor = match requirement.cardinality.as_str() {
+            "one" => CapabilityRequirementPlan::one,
+            "optional" => CapabilityRequirementPlan::optional,
+            "many" => CapabilityRequirementPlan::many,
+            other => bail!("unsupported Bun dependency cardinality {other}"),
+        };
         contract = contract.with_requirement(
-            CapabilityRequirementPlan::one(
-                &requirement.capability_id,
-                &requirement.descriptor_version,
-            )
-            .with_requirement_id(&requirement.requirement_id),
+            constructor(&requirement.capability_id, &requirement.descriptor_version)
+                .with_requirement_id(&requirement.requirement_id),
         );
     }
     Ok(contract)
@@ -1062,7 +1068,7 @@ fn parse_descriptor_bytes(bytes: &[u8]) -> anyhow::Result<PluginDescriptor> {
         serde_json::from_slice(bytes).context("parse generated Plugin descriptor")?;
     if !matches!(
         descriptor.abi.as_str(),
-        "lenso.json-request@1" | "lenso.json-host-imports@2"
+        "lenso.json-request@1" | "lenso.json-interactions@1" | "lenso.json-host-imports@2"
     ) {
         bail!(
             "unsupported Plugin descriptor ABI `{}`; expected request V1 or host-imports V2",
@@ -1090,9 +1096,9 @@ fn validate_capabilities(descriptor: &PluginDescriptor) -> anyhow::Result<()> {
                 capability.capability_id
             );
         }
-        if capability.request_operations.is_empty() {
+        if capability.request_operations.is_empty() && capability.stream_operations.is_empty() {
             bail!(
-                "Plugin Capability `{}` must declare at least one request operation",
+                "Plugin Capability `{}` must declare at least one Request or Stream operation",
                 capability.capability_id
             );
         }

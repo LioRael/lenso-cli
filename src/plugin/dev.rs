@@ -794,6 +794,7 @@ mod tests {
                     .to_owned(),
             ),
             request_operations: vec!["execute".to_owned()],
+            stream_operations: vec![],
         };
         let first = DynamicJsonCodec::new(&capability);
         let second = DynamicJsonCodec::new(&capability);

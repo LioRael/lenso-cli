@@ -9,6 +9,8 @@ use crate::plugins::{load_resolved_app, project_root};
 mod assemble;
 mod build;
 mod contracts;
+mod convention_authoring;
+mod convention_build;
 mod local_dev;
 mod local_host;
 mod local_workflow;
@@ -17,9 +19,18 @@ mod portable_runtime {
     include!("app/local_json_template.rs");
 }
 mod prepare;
+#[allow(dead_code)]
+mod terminal;
 
 #[derive(Clone, Debug, Subcommand)]
 pub(crate) enum AppCommand {
+    /// Adopt a local source or bundled convention support.
+    Add(convention_authoring::AddArgs),
+    /// Create an App-owned Plugin with optional language-specific entries.
+    Plugin {
+        #[command(subcommand)]
+        command: convention_authoring::PluginCommand,
+    },
     /// Author local Capability contracts using existing generated SDK projections.
     Contract {
         #[command(subcommand)]
@@ -98,6 +109,8 @@ pub(crate) struct ShowArgs {
 
 pub(crate) async fn app(command: AppCommand) -> anyhow::Result<()> {
     match command {
+        AppCommand::Add(args) => convention_authoring::add(args),
+        AppCommand::Plugin { command } => convention_authoring::new(command),
         AppCommand::Contract { command } => contracts::scaffold::run(command),
         AppCommand::Build(args) => local_workflow::build(args),
         AppCommand::Create(args) => local_workflow::create(args),
