@@ -45,11 +45,11 @@ anyhow = "1.0"
 serde_json = "1.0"
 clap = { version = "4", features = ["derive", "string"], optional = true }
 tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "signal"], optional = true }
-lenso-engine-authoring = { git = "https://github.com/LioRael/lenso-engine.git", rev = "81cff04f397c315eac0aeb9b9bdc107dc4aa1423", version = "0.1.0" }
-lenso-engine = { git = "https://github.com/LioRael/lenso-engine.git", rev = "81cff04f397c315eac0aeb9b9bdc107dc4aa1423", version = "0.1.0", optional = true }
-lenso-engine-app = { git = "https://github.com/LioRael/lenso-engine.git", rev = "81cff04f397c315eac0aeb9b9bdc107dc4aa1423", version = "0.1.0", optional = true }
-lenso-engine-markdown = { git = "https://github.com/LioRael/lenso-engine.git", rev = "81cff04f397c315eac0aeb9b9bdc107dc4aa1423", version = "0.1.0", optional = true }
-lenso-engine-runtime = { git = "https://github.com/LioRael/lenso-engine.git", rev = "81cff04f397c315eac0aeb9b9bdc107dc4aa1423", version = "0.1.0", optional = true }
+lenso-engine-authoring = { git = "https://github.com/LioRael/lenso-engine.git", rev = "2b3878e09dc7c38e6c8598fb418f86e265341032", version = "0.1.0" }
+lenso-engine = { git = "https://github.com/LioRael/lenso-engine.git", rev = "2b3878e09dc7c38e6c8598fb418f86e265341032", version = "0.1.1", optional = true }
+lenso-engine-app = { git = "https://github.com/LioRael/lenso-engine.git", rev = "2b3878e09dc7c38e6c8598fb418f86e265341032", version = "0.1.0", optional = true }
+lenso-engine-markdown = { git = "https://github.com/LioRael/lenso-engine.git", rev = "2b3878e09dc7c38e6c8598fb418f86e265341032", version = "0.1.0", optional = true }
+lenso-engine-runtime = { git = "https://github.com/LioRael/lenso-engine.git", rev = "2b3878e09dc7c38e6c8598fb418f86e265341032", version = "0.1.0", optional = true }
 
 [dev-dependencies]
 lenso-app-plan = "0.4.1"

@@ -88,5 +88,6 @@ jobs:
         with:
           toolchain: 1.94.0
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - name: Verify portable Bundle publication behavior
-        run: cargo test --locked -p lenso-cli --lib portable_bundle_
+      # Engine now owns portable Bundle publication regression tests.
+      - name: Verify CLI authoring integration on Windows
+        run: cargo test --locked -p lenso-cli --lib
