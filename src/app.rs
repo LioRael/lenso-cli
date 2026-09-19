@@ -6,6 +6,7 @@ use lenso_app_plan::authoring::HostCatalog;
 
 use crate::plugins::{load_resolved_app, project_root};
 
+mod assemble;
 mod build;
 mod prepare;
 
@@ -23,6 +24,8 @@ pub(crate) enum AppCommand {
     Show(ShowArgs),
     /// Discover local Plugin source projects and Bundles without building or activating them.
     Discover(ProjectArgs),
+    /// Build local Plugin sources into a validated Host authoring directory.
+    Assemble(assemble::AssembleArgs),
 }
 
 #[derive(Args, Clone, Debug)]
@@ -75,6 +78,7 @@ pub(crate) fn app(command: AppCommand) -> anyhow::Result<()> {
         AppCommand::Check(args) => check(args),
         AppCommand::Show(args) => show(args),
         AppCommand::Discover(args) => discover(args),
+        AppCommand::Assemble(args) => assemble::assemble(args),
     }
 }
 

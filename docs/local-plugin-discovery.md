@@ -1,8 +1,9 @@
 # Local Plugin discovery
 
 Status: first implementation slice of [plan #727](https://github.com/LioRael/lenso/issues/727).
-Discovery is read-only. Automatic Host assembly and zero-configuration App
-creation/development remain subsequent work.
+Discovery is read-only. `app assemble` builds portable local sources into a
+validated Host authoring output. Native linked assembly and zero-configuration
+App creation/development remain subsequent work.
 
 ```sh
 lenso app discover
@@ -21,6 +22,39 @@ This is tooling configuration, not an App manifest. It accepts no enabled
 list, binding map, preset, or activation flag. Existing `plugins/` files remain
 the only instance/configuration difference authority. No marketplace source is
 configured here.
+
+## Assemble a local Host
+
+```sh
+lenso app assemble --out ./dist/host
+lenso app check --root ./dist/host
+lenso app show --root ./dist/host --json
+```
+
+The versioned local Host policy generates a disableable `default` Instance for
+each App-owned Plugin. Additional sources remain inactive until selected with
+an ordinary `plugins/<plugin-id>/<instance>.toml` file. Source projects need their
+normal installed/locked language dependencies; assembly runs existing release
+builders and verifies the copied Bundle bytes. The current target is the CLI's
+native target. Process, Wasm, and Bun implementations use explicit ordered Host
+policy; this does not establish runtime support for every resulting artifact.
+
+Assembly writes a new directory and never overwrites the source App or an
+existing output. It copies Plugin Root intent, generates exact Host authority and
+Bundle inventory, materializes inferred named dependency choices in the existing
+format, and validates through the ordinary App loader before publication. Invalid
+configuration, ambiguous providers, missing shared adoption, or disabled required
+providers fail without publishing partial output. Multiple root Slot offers are
+allowed by this local template; single Capability requirements still reject
+ambiguity. Closed TypeScript/custom Host policies remain unchanged.
+
+The output contains verified artifacts plus source provenance and template/CLI
+identity. It is **Host authoring output**, not yet a standalone runtime distribution
+or a source-reproduction archive. Native linked source is rejected explicitly
+until generated native Host and typed cross-runtime codec assembly is delivered.
+QuickJS/dylib source building, Web asset integration, managed development restart,
+and automatic cohort preparation remain tracked by #727. Existing `app prepare`
+still requires its supported runtime profile and exact precompiled inputs.
 
 ## Discovery contract
 

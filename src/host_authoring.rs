@@ -15,11 +15,14 @@ use lenso_app_plan::authoring::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod local;
 mod policy;
+pub use local::LocalPluginInput;
 pub use policy::{AdmittedRelease, SlotAdmission};
 
 pub(crate) const HOST_BUILD: &str = ".lenso/host-build.json";
 const SCHEMA: &str = "lenso.host-build.v1";
+const LOCAL_SCHEMA: &str = "lenso.local-host-build.v1";
 
 /// Generated Host authority. This is a build artifact, never App-owner input.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -204,6 +207,12 @@ impl GeneratedHostBuild {
 
     /// Rejects malformed/unsupported authority instead of treating it as a legacy Catalog.
     pub fn validate(&self) -> anyhow::Result<()> {
+        if self.schema == LOCAL_SCHEMA {
+            // Local Hosts may require explicitly adopted shared Instances. The
+            // complete Root is validated by resolve/propose after it is loaded.
+            self.validate_policy()?;
+            return Ok(());
+        }
         // The shared resolver remains the sole validator for complete bindings/configuration.
         self.propose(&PluginRootSnapshot::default())
             .context("resolve Host defaults")?;
@@ -224,15 +233,16 @@ impl GeneratedHostBuild {
         {
             bail!("Host policy exceeds the 256 Instance/Slot/release profile limit");
         }
-        if self.schema != SCHEMA {
+        if self.schema != SCHEMA && self.schema != LOCAL_SCHEMA {
             bail!("unsupported Host build schema `{}`", self.schema);
         }
         crate::identity::validate_plugin_id_v1(&self.host_id)?;
-        if self
-            .catalog
-            .defaults()
-            .iter()
-            .any(HostDefaultPlugin::is_disableable)
+        if self.schema == SCHEMA
+            && self
+                .catalog
+                .defaults()
+                .iter()
+                .any(HostDefaultPlugin::is_disableable)
         {
             bail!("Host build cannot contain disableable defaults in this profile");
         }

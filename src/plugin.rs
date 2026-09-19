@@ -358,7 +358,7 @@ fn pack_to(root: &Path, output: &Path, json: bool) -> anyhow::Result<()> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum BuildProfile {
+pub(crate) enum BuildProfile {
     Development,
     Release,
 }
@@ -536,7 +536,7 @@ fn contract_from_bun_descriptor(
     Ok(contract)
 }
 
-fn materialize(
+pub(crate) fn materialize(
     root: &Path,
     output: &Path,
     profile: BuildProfile,
