@@ -56,13 +56,10 @@ cargo package --locked --workspace --allow-dirty --no-verify
 cargo publish --dry-run --locked --workspace --allow-dirty --no-verify
 ```
 
-The portable catalog package is verified independently. Workspace packaging stages
-local packages in dependency order, so the CLI payload can be inspected before a
-new catalog version exists on crates.io. The workspace test verifies the CLI's
-native Bundle integration; the separate Wasm check verifies the catalog's default
-feature set without that integration. Release-plz publishes changed workspace
-crates in dependency order. The catalog package is new and remains unpublished
-until explicit publication approval and its Trusted Publisher are in place.
+The independent Engine repository owns the portable catalog and its Wasm/package
+verification. CLI packaging requires the Engine dependency versions to exist in
+crates.io. Keep the registry package gate enabled; publishing the CLI does not
+publish its independently owned Engine dependencies.
 
 To inspect an npm archive locally, build the current platform payload first:
 
@@ -114,8 +111,7 @@ publish steps as the normal push path.
 ## Engine extraction
 
 Engine owns the portable catalog and its Wasm/package verification. The CLI
-consumes an immutable Engine Git revision during bootstrap. Before Cargo
-publication, publish the Engine dependency crates through their owner workflow
-and replace Git dependencies with released versions. npm binary builds can
-consume the pinned source revision; Cargo packaging still requires registry
-availability. Do not remove the CLI package gate to bypass this prerequisite.
+consumes released Engine crates from crates.io. Publish changed Engine dependencies
+before updating the CLI lockfile or releasing the CLI. The CLI's normal Cargo
+package gate validates that this registry dependency closure is available; npm
+binary publication uses the same reviewed source and lockfile.

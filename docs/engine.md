@@ -1,7 +1,7 @@
 # Engine integration
 
 The implementation is owned by the independent `lenso-engine` repository.
-The following guide describes the local migration and public interfaces.
+The following guide describes its integration and public interfaces.
 
 # Lenso Engine
 
@@ -44,7 +44,7 @@ Unrelated files such as `plugin.rs` have no meaning unless support is selected.
 
 Existing App commands continue to work. `app build` and `app dev` select the
 optional `AppProject` processor. Its App-specific discovery and assembly live in
-this repository, not in the CLI. Lower-level App APIs remain public:
+Engine, not in the CLI. Lower-level App APIs remain public:
 
 ```rust,ignore
 lenso_engine_app::app::create_empty(project.clone())?;

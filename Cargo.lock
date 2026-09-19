@@ -1678,7 +1678,8 @@ dependencies = [
 [[package]]
 name = "lenso-engine"
 version = "0.1.1"
-source = "git+https://github.com/LioRael/lenso-engine.git?rev=2b3878e09dc7c38e6c8598fb418f86e265341032#2b3878e09dc7c38e6c8598fb418f86e265341032"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d74b24b85be3c1bc77f0e79be44d0abe0d56194b3fcbe8e8d60b3f4b3c9f20e"
 dependencies = [
  "anyhow",
  "glob",
@@ -1692,7 +1693,8 @@ dependencies = [
 [[package]]
 name = "lenso-engine-app"
 version = "0.1.0"
-source = "git+https://github.com/LioRael/lenso-engine.git?rev=2b3878e09dc7c38e6c8598fb418f86e265341032#2b3878e09dc7c38e6c8598fb418f86e265341032"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b2654aa6978915f063926567beae11c71a713c59e91c8ace23d60d79e87be32"
 dependencies = [
  "anyhow",
  "clap",
@@ -1735,7 +1737,8 @@ dependencies = [
 [[package]]
 name = "lenso-engine-authoring"
 version = "0.1.0"
-source = "git+https://github.com/LioRael/lenso-engine.git?rev=2b3878e09dc7c38e6c8598fb418f86e265341032#2b3878e09dc7c38e6c8598fb418f86e265341032"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5eb1a3ca1aca69ff15344fd7f4606485ab956e7c7210a157da945526eb5e1bfd"
 dependencies = [
  "anyhow",
  "glob",
@@ -1759,7 +1762,8 @@ dependencies = [
 [[package]]
 name = "lenso-engine-markdown"
 version = "0.1.0"
-source = "git+https://github.com/LioRael/lenso-engine.git?rev=2b3878e09dc7c38e6c8598fb418f86e265341032#2b3878e09dc7c38e6c8598fb418f86e265341032"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "481231aa4bee490b8166d7f809019c7c79197df8bbb45b4bf9da7bd258818053"
 dependencies = [
  "anyhow",
  "lenso-engine",
@@ -1769,7 +1773,8 @@ dependencies = [
 [[package]]
 name = "lenso-engine-runtime"
 version = "0.1.0"
-source = "git+https://github.com/LioRael/lenso-engine.git?rev=2b3878e09dc7c38e6c8598fb418f86e265341032#2b3878e09dc7c38e6c8598fb418f86e265341032"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e88f64baf395acdfa87151960f0c857ac5b01fa00bae73b2c2a1ec364a298d74"
 dependencies = [
  "anyhow",
  "futures",
@@ -1864,7 +1869,8 @@ dependencies = [
 [[package]]
 name = "lenso-plugin-catalog"
 version = "0.1.0"
-source = "git+https://github.com/LioRael/lenso-engine.git?rev=2b3878e09dc7c38e6c8598fb418f86e265341032#2b3878e09dc7c38e6c8598fb418f86e265341032"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6a015df130d1ea908d5c446b65f0760a056df7643726c89439304f8e808afc1"
 dependencies = [
  "anyhow",
  "base64",
