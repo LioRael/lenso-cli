@@ -1,5 +1,11 @@
 ## lenso-cli@0.2.31
 
+## 0.17.1
+
+### Patch Changes
+
+- 2de131b: Bundle the Engine convention compiler budget fix so App builds can complete a first-time Console convention setup without the former sixty-second process limit.
+
 ## 0.17.0
 
 ### Minor Changes
