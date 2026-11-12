@@ -43,7 +43,7 @@ lenso --version
 
 For the latest stable CLI installer, replace `download/v0.1.0` with `latest/download`.
 Each downloaded installer is pinned to its own exact Release, even if `latest`
-changes during installation. Requirements are `sh`, `curl`, `tar`, standard file
+changes during installation. Requirements are `sh`, `curl`, `tar`, `gzip`, standard file
 utilities and `sha256sum` (Linux) or `shasum` (macOS). It does not need jq or a JSON parser.
 
 The default destination is `$HOME/.local/bin`. Override it with
@@ -123,6 +123,16 @@ from those inputs, uploads a draft, verifies GitHub asset digests, and generates
 installers containing the actual archive asset IDs and SHA-256 values. Matching
 draft assets can be reused; conflicting assets and published versions are not overwritten.
 Mutation requests are not automatically retried. Failures retain the draft for review.
+
+If builds completed but distribution/verification needs a retry, dispatch with
+`reuse_run_id` set to that native release run. The workflow checks its repository,
+workflow path and all five successful native build jobs, then reads the version and
+source commit from that run. Artifact downloads verify GitHub's artifact digests;
+release assembly rechecks every package hash. Only upload/install/publish stages rerun,
+using the original source commit and binaries. Tags remain bound to that exact commit.
+For older source commits containing workflow changes, pre-create the verified tag
+with a suitably authorized maintainer before resuming. Existing tags are checked
+through GitHub's refs/commits APIs and are never moved.
 
 Every native runner then installs from the real GitHub draft using restricted PATH
 (Unix system utilities only, or empty PATH for PowerShell). Tests reject both accidental
