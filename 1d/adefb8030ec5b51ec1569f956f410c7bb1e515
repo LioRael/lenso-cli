@@ -1,0 +1,219 @@
+.github/workflows/publish-extension.yml
+  s_c5695907fe744f::t_95971501fe96c8 1-55
+.gitignore
+  s_c5695907fe744f::t_c8b9ac0ec613a4 1-17
+Cargo.lock
+  s_c5695907fe744f::t_bf9d2d77a1abef 1-3849
+Cargo.toml
+  s_c5695907fe744f::t_f0a1c46b9726c5 1-28
+README.md
+  s_c5695907fe744f::t_167502a6097b66 1-320
+crates/cli/Cargo.toml
+  s_c5695907fe744f::t_d894ea4bf92551 1-24
+crates/cli/src/main.rs
+  s_c5695907fe744f::t_96a98b894b26b4 1-39
+crates/cli/tests/commands.rs
+  s_c5695907fe744f::t_215451d7fb09b6 1-303
+crates/framework/Cargo.toml
+  s_c5695907fe744f::t_756d2ba9f16a24 1-21
+crates/framework/src/cli.rs
+  s_c5695907fe744f::t_db917c93228bcc 1-554
+crates/framework/src/engine.rs
+  s_c5695907fe744f::t_54f7d591afa64f 1-348
+crates/framework/src/events.rs
+  s_c5695907fe744f::t_446e64d791effa 1-89
+crates/framework/src/lib.rs
+  s_c5695907fe744f::t_85b7fbbac38387 1-15
+crates/framework/src/protocol.rs
+  s_c5695907fe744f::t_6241372a24e8d3 1-220
+crates/framework/src/terminal.rs
+  s_c5695907fe744f::t_4ac16996bb141a 1-672
+crates/framework/tests/engine.rs
+  s_c5695907fe744f::t_7275ac6428146f 1-245
+crates/framework/tests/protocol.rs
+  s_c5695907fe744f::t_5edc119f4720a2 1-58
+crates/runtime/Cargo.toml
+  s_c5695907fe744f::t_4cc335f6a54ac3 1-33
+crates/runtime/src/cache.rs
+  s_c5695907fe744f::t_b47ae7f206722b 1-172
+crates/runtime/src/discovery.rs
+  s_c5695907fe744f::t_585b4aa94ec605 1-118
+crates/runtime/src/github.rs
+  s_c5695907fe744f::t_c76debd07c4b48 1-601
+crates/runtime/src/host.rs
+  s_c5695907fe744f::t_ffd051f31b0db2 1-432
+crates/runtime/src/http.rs
+  s_c5695907fe744f::t_48a02c72cca0cf 1-280
+crates/runtime/src/lib.rs
+  s_c5695907fe744f::t_3cd41bcaab467d 1-33
+crates/runtime/src/manifest.rs
+  s_c5695907fe744f::t_659df76ec5b677 1-234
+crates/runtime/src/migration.rs
+  s_c5695907fe744f::t_04628b47eacf49 1-141
+crates/runtime/src/package.rs
+  s_c5695907fe744f::t_90bbc1ad95e9b6 1-682
+crates/runtime/src/process.rs
+  s_c5695907fe744f::t_bc2881295f1a3e 1-102
+crates/runtime/src/project.rs
+  s_c5695907fe744f::t_bd79cf6b4d104f 1-968
+crates/runtime/src/publish.rs
+  s_c5695907fe744f::t_a059489204bae7 1-757
+crates/runtime/src/registry.rs
+  s_c5695907fe744f::t_20e083506ec947 1-145
+crates/runtime/src/resources.rs
+  s_c5695907fe744f::t_982dcc7afa8c2b 1-305
+crates/runtime/src/source.rs
+  s_c5695907fe744f::t_1a8280409db786 1-165
+crates/runtime/src/wasm.rs
+  s_c5695907fe744f::t_d4a5721ef34364 1-127
+crates/runtime/tests/downloads.rs
+  s_c5695907fe744f::t_65410b458b9adc 1-543
+crates/runtime/tests/project.rs
+  s_c5695907fe744f::t_0c384c5997d8e7 1-181
+crates/runtime/tests/wasm.rs
+  s_c5695907fe744f::t_2d61829aa876da 1-67
+docs/distribution-design.md
+  s_c5695907fe744f::t_3265d1064edeaa 1-270
+docs/github-distribution.md
+  s_c5695907fe744f::t_85d673b9f49eea 1-343
+docs/protocol.md
+  s_c5695907fe744f::t_47040addb0bb69 1-265
+docs/registry.md
+  s_c5695907fe744f::t_7c845583c6c945 1-105
+docs/shadcn.md
+  s_c5695907fe744f::t_c601676f88f34a 1-244
+examples/acme-cli/Cargo.toml
+  s_c5695907fe744f::t_959285ac84c247 1-19
+examples/acme-cli/src/main.rs
+  s_c5695907fe744f::t_653389f5e68c4e 1-75
+examples/m0/lenso.lock
+  s_c5695907fe744f::t_c1afb9e96ad23e 1-198
+examples/m0/lenso.toml
+  s_c5695907fe744f::t_32a2ce01727d90 1-12
+examples/m0/lenso/extensions/greeting/extension.toml
+  s_c5695907fe744f::t_7b157ffbccb72c 1-44
+examples/m0/lenso/extensions/native/extension.toml
+  s_c5695907fe744f::t_3d1a6cd5f9f747 1-20
+examples/native-dev/README.md
+  s_c5695907fe744f::t_763cd03ddc8277 1-17
+examples/native-dev/lenso.lock
+  s_c5695907fe744f::t_7d2e1fc991d84c 1-93
+examples/native-dev/lenso.toml
+  s_c5695907fe744f::t_326bd97f7ebd6e 1-10
+examples/native-dev/lenso/extensions/native/extension.toml
+  s_c5695907fe744f::t_71f341a1294918 1-37
+examples/vite-shadcn/components.json
+  s_c5695907fe744f::t_a4e4a6da4f9d09 1-8
+examples/vite-shadcn/index.html
+  s_c5695907fe744f::t_c5df471217b030 1-2
+examples/vite-shadcn/lenso.lock
+  s_c5695907fe744f::t_96e6c09764677b 1-651
+examples/vite-shadcn/lenso.toml
+  s_c5695907fe744f::t_250d565c061d95 1-15
+examples/vite-shadcn/lenso/extensions/legacy-d276630b7ec4a6c2f54b3d5db1dee7c5b6c6dfd3604466845e66e65d861fb28d/extension.json
+  s_c5695907fe744f::t_fe63c61f9a17af 1-291
+examples/vite-shadcn/lenso/extensions/shadcn/bf635d35ab6f87de0591704a14f578e6cdb2d069f9a9bcd395864e6b59e57ee8/extension.toml
+  s_c5695907fe744f::t_1a5867f3de9b98 1-179
+examples/vite-shadcn/lenso/extensions/shadcn/d72a92bfd5fb48275f62bb1375a70b04283a3a14208a3c3d275e4a95081b8009/extension.toml
+  s_c5695907fe744f::t_900c2032f6ce2f 1-179
+examples/vite-shadcn/lenso/extensions/shadcn/extension.toml
+  s_c5695907fe744f::t_5bcad539e14e84 1-88
+examples/vite-shadcn/package-lock.json
+  s_c5695907fe744f::t_5ff02dcbeab773 1-3663
+examples/vite-shadcn/package.json
+  s_c5695907fe744f::t_55a4c55db1a317 1-28
+examples/vite-shadcn/src/App.tsx
+  s_c5695907fe744f::t_6e86347bbbd5d5 1-19
+examples/vite-shadcn/src/index.css
+  s_c5695907fe744f::t_f41fc4c8b2e831 1-23
+examples/vite-shadcn/src/main.tsx
+  s_c5695907fe744f::t_dc544455f74c28 1-6
+examples/vite-shadcn/tsconfig.json
+  s_c5695907fe744f::t_261cc2102647d8 1-10
+examples/vite-shadcn/vite.config.ts
+  s_c5695907fe744f::t_97d3eab3c420c8 1-9
+examples/wasm-greeting/Cargo.lock
+  s_c5695907fe744f::t_13a8d4cf3441e4 1-390
+examples/wasm-greeting/Cargo.toml
+  s_c5695907fe744f::t_e346416f1b10a9 1-19
+examples/wasm-greeting/src/lib.rs
+  s_c5695907fe744f::t_27ef0ae11e0846 1-31
+extensions/code/Cargo.lock
+  s_c5695907fe744f::t_0956da13cf153b 1-422
+extensions/code/Cargo.toml
+  s_c5695907fe744f::t_980afbd3a627e0 1-17
+extensions/code/src/lib.rs
+  s_c5695907fe744f::t_020bd3a5bcd7f2 1-341
+extensions/project/Cargo.toml
+  s_c5695907fe744f::t_ba8461ddbb6b1d 1-20
+extensions/project/src/lib.rs
+  s_c5695907fe744f::t_65e6defa8eea2b 1-153
+extensions/project/src/plan.rs
+  s_c5695907fe744f::t_14bf25847e5a7c 1-363
+extensions/project/tests/plan.rs
+  s_c5695907fe744f::t_274570daf3815d 1-119
+extensions/shadcn/Cargo.lock
+  s_c5695907fe744f::t_13a0465a8b735b 1-1088
+extensions/shadcn/Cargo.toml
+  s_c5695907fe744f::t_2c88dd895276c2 1-27
+extensions/shadcn/src/layout.rs
+  s_c5695907fe744f::t_3357403b00333b 1-600
+extensions/shadcn/src/lib.rs
+  s_c5695907fe744f::t_61eebb7cb57293 1-362
+extensions/shadcn/src/npm.rs
+  s_c5695907fe744f::t_fe131876a189f6 1-107
+extensions/shadcn/src/registry.rs
+  s_c5695907fe744f::t_f092f5790f5d0e 1-691
+extensions/shadcn/src/search.rs
+  s_c5695907fe744f::t_7da915bae42552 1-238
+extensions/shadcn/src/workspace.rs
+  s_c5695907fe744f::t_1ebacf97594b54 1-79
+fixtures/distribution/catalog.toml
+  s_c5695907fe744f::t_8d36ce52d761da 1-7
+fixtures/distribution/hello.txt
+  s_c5695907fe744f::t_c5ca04c30c592c 1
+lenso.registry.toml
+  s_c5695907fe744f::t_6a9b0cc0c4909f 1-7
+presets/code/extension.toml
+  s_c5695907fe744f::t_e2a6de4555496a 1-129
+presets/shadcn/extension.toml
+  s_c5695907fe744f::t_82e0a07fabe7e9 1-179
+scripts/build-demo.py
+  s_c5695907fe744f::t_0f33db8d5341ec 1-21
+scripts/configure-code.py
+  s_c5695907fe744f::t_52fe5398d398e5 1-65
+scripts/configure-shadcn.py
+  s_c5695907fe744f::t_8f6e75c27796e9 1-145
+scripts/project_config.py
+  s_c5695907fe744f::t_af1e09f74afcae 1-43
+scripts/test-demo.py
+  s_c5695907fe744f::t_b1a1b13c9b6cb9 1-63
+scripts/test-dependencies.py
+  s_c5695907fe744f::t_9e70bc059e8c05 1-98
+scripts/test-github.py
+  s_c5695907fe744f::t_2692d89b893154 1-244
+scripts/test-publish.py
+  s_c5695907fe744f::t_659b753e5a7568 1-275
+scripts/test-shadcn-registry.py
+  s_c5695907fe744f::t_39822381cab00a 1-343
+scripts/test-shadcn.py
+  s_c5695907fe744f::t_ab9608a2614ade 1-128
+scripts/verify-github-release.py
+  s_c5695907fe744f::t_69d10c1b139f70 1-124
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1dadefb8030ec5b51ec1569f956f410c7bb1e515",
+  "prompts": {},
+  "sessions": {
+    "s_c5695907fe744f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d06d-149b-7062-aa67-3c0145df9d90",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
