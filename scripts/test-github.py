@@ -8,6 +8,7 @@ import hashlib
 import http.server
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -123,7 +124,7 @@ try:
     (author/'lenso.registry.toml').write_text(descriptor)
     snapshot('acme/tools',A,{'lenso.registry.toml':descriptor.encode()})
     def publish(version,number):
-        manifest=(root/'presets/code/extension.toml').read_text().replace('version = "0.1.0"',f'version = "{version}"')
+        manifest=re.sub(r'(?m)^version = "[^"]+"$', f'version = "{version}"', (root/'presets/code/extension.toml').read_text(), count=1)
         (package/'extension.toml').write_text(manifest)
         result=run(author,'package','--id','code','--out',f'dist/{version}')
         assert result['outputs']['main']['tag']=='code-v'+version

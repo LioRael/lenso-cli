@@ -128,6 +128,9 @@ needs no confirmation. A real publish fails with `--offline`.
 Uploads always start with a draft. Each uploaded asset is verified against GitHub's
 SHA-256 digest, or downloaded and hashed when the server omits the digest. Only a
 complete, verified set is made public. `--draft` keeps that set private for review.
+Extension publication does not change GitHub's `latest` entry; native CLI Releases
+use that entry for their installer channel. Extension consumers resolve by semantic
+version and do not use `latest`.
 On interruption, rerun with the same artifacts and `--target`: matching draft assets
 are reused and missing ones are uploaded. Conflicting, duplicate or unexpected assets
 fail without deletion/overwrite. A complete published release is an idempotent success,

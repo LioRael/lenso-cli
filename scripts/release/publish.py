@@ -28,11 +28,12 @@ def release_for(repo, tag):
 def check_tag(repo, tag, commit):
     # The commits API resolves lightweight and annotated tags to the final commit.
     try:
-        actual = api(repo, "commits/" + urllib.parse.quote(tag, safe=""))["sha"]
+        api(repo, "git/ref/tags/" + urllib.parse.quote(tag, safe=""))
     except RuntimeError as error:
         if "HTTP 404" in str(error):
             return
         raise
+    actual = api(repo, "commits/" + urllib.parse.quote(tag, safe=""))["sha"]
     if actual != commit:
         raise RuntimeError("Tag points to a different commit; tags are never moved")
 

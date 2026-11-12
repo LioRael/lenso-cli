@@ -8,6 +8,12 @@ Source: [LioRael/lenso-cli](https://github.com/LioRael/lenso-cli).
 The previous CLI implementation is preserved in
 [LioRael/lenso-cli-previous](https://github.com/LioRael/lenso-cli-previous).
 
+Native binaries and SHA-256-verified installers are distributed through
+[GitHub Releases](https://github.com/LioRael/lenso-cli/releases/tag/v0.1.0) for macOS
+(Intel/Apple Silicon), Linux (x64/ARM64) and Windows x64. See
+[installation and release instructions](docs/install.md), including private-repository
+downloads. Neither installation nor the native CLI requires Node.js, Git or Rust.
+
 The execution framework owns workflows, questions, hooks, and JSON/Agent output.
 The runtime owns restricted Host operations, extension distribution, integrity,
 locking, and the user cache. Business protocols live under `extensions/`; the
