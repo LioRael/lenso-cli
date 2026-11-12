@@ -1,7 +1,7 @@
 # Live GitHub Release verification
 
 Executed on 2026-11-13 (Asia/Shanghai) in the private
-[`LioRael/lenso-cli-distribution-e2e`](https://github.com/LioRael/lenso-cli-distribution-e2e)
+[`LioRael/lenso-cli`](https://github.com/LioRael/lenso-cli)
 repository. These are real GitHub Releases and a GitHub-hosted Actions run, separate
 from the local REST fixture tests. Repository access is required to open the links.
 
@@ -9,11 +9,11 @@ from the local REST fixture tests. Repository access is required to open the lin
 
 | Publisher | Release | Source commit | Result |
 | --- | --- | --- | --- |
-| Native CLI on macOS | [code-v0.1.0](https://github.com/LioRael/lenso-cli-distribution-e2e/releases/tag/code-v0.1.0), ID `443567332` | `1dadefb8030ec5b51ec1569f956f410c7bb1e515` | Three verified assets uploaded, then published; identical repeat uploaded zero assets |
-| Native CLI in Actions on Ubuntu | [code-v0.1.1](https://github.com/LioRael/lenso-cli-distribution-e2e/releases/tag/code-v0.1.1), ID `443575605` | `cc2cebc3c7438e668a2bb55924805ef566c5b923` | Built CLI and Wasm from source, uploaded and verified all assets, then published |
+| Native CLI on macOS | [code-v0.1.0](https://github.com/LioRael/lenso-cli/releases/tag/code-v0.1.0), ID `443567332` | `1dadefb8030ec5b51ec1569f956f410c7bb1e515` | Three verified assets uploaded, then published; identical repeat uploaded zero assets |
+| Native CLI in Actions on Ubuntu | [code-v0.1.1](https://github.com/LioRael/lenso-cli/releases/tag/code-v0.1.1), ID `443575605` | `cc2cebc3c7438e668a2bb55924805ef566c5b923` | Built CLI and Wasm from source, uploaded and verified all assets, then published |
 
-The [Actions run](https://github.com/LioRael/lenso-cli-distribution-e2e/actions/runs/43317107999)
-and [job](https://github.com/LioRael/lenso-cli-distribution-e2e/actions/runs/43317107999/job/131527887823)
+The [Actions run](https://github.com/LioRael/lenso-cli/actions/runs/43317107999)
+and [job](https://github.com/LioRael/lenso-cli/actions/runs/43317107999/job/131527887823)
 completed successfully. The run used `workflow_dispatch` with `draft=false`, the
 committed Cargo lockfiles and Rust 1.99.0. Publishing and verification used the
 repository-scoped `GITHUB_TOKEN` with `contents: write`.
@@ -21,8 +21,9 @@ repository-scoped `GITHUB_TOKEN` with `contents: write`.
 Each Release contains `extension.toml`, `lenso-release.json` and a versioned archive.
 The author CLI packaged prebuilt modules, created a draft, uploaded through GitHub's
 asset API, checked SHA-256 digests and made the verified Release available to consumers.
-The two publishers used distinct package versions. The verification repository's
-`0.1.1` manifest is a test version; the local workspace preset remains `0.1.0`.
+The two publishers used distinct package versions. The local workspace preset now
+tracks the verified `0.1.1` package. Increment its version for future publications
+rather than replacing existing release assets.
 
 ## Consumer verification
 
@@ -62,6 +63,28 @@ An additional tag-push run for the locally published `0.1.0` package was intenti
 cancelled while queued, avoiding a second build of that already published version.
 The completed Actions verification above used the distinct `0.1.1` version.
 
+## Repository promotion
+
+On 2026-11-13, the verified repository was renamed from
+`LioRael/lenso-cli-distribution-e2e` to `LioRael/lenso-cli`, preserving repository ID
+`1455879045`, its commits, Releases, assets and Actions history. The previous CLI
+repository is now [`LioRael/lenso-cli-previous`](https://github.com/LioRael/lenso-cli-previous),
+with its original ID `1420270580`. Both retain their private visibility. The separate
+archived `lenso-cli-legacy` repository was not changed.
+
+The local project tracks the formal repository's `main` branch at
+`https://github.com/LioRael/lenso-cli.git`. New consumers should use
+`github-release:LioRael/lenso-cli/code`. Existing declarations using the former name
+should update their `lenso.toml` source and run `lenso update`; resource profiles and
+grants should also use the canonical repository name when reading this repository.
+Do not manually rewrite locked provenance.
+
+After promotion, a fresh macOS consumer using `github-release:LioRael/lenso-cli/code`
+passed the same nine-command verification, including cold downloads, empty PATH,
+preview/consent, cache restoration and locked/offline replay. It resolved the original
+`0.1.1` Release ID `443575605`. The report and command traces are retained locally
+under `dist/repository-promotion/consumer-e2e`.
+
 ## Repeat consumption
 
 Set `GH_TOKEN` to a credential with access to the private repository, then use a new
@@ -69,7 +92,7 @@ output directory:
 
 ```sh
 python3 scripts/verify-github-release.py --binary target/debug/lenso \
-  --repo LioRael/lenso-cli-distribution-e2e --version 0.1.1 \
+  --repo LioRael/lenso-cli --version 0.1.1 \
   --ref cc2cebc3c7438e668a2bb55924805ef566c5b923 \
   --token-env GH_TOKEN --out dist/repeat-live-consumer
 ```

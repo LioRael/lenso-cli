@@ -4,6 +4,10 @@ An embeddable Rust CLI framework and a standalone `lenso` executable. Commands c
 from native handlers or explicitly declared extension manifests. Project changes
 are an optional extension; running a command does not require a file plan.
 
+Source: [LioRael/lenso-cli](https://github.com/LioRael/lenso-cli).
+The previous CLI implementation is preserved in
+[LioRael/lenso-cli-previous](https://github.com/LioRael/lenso-cli-previous).
+
 The execution framework owns workflows, questions, hooks, and JSON/Agent output.
 The runtime owns restricted Host operations, extension distribution, integrity,
 locking, and the user cache. Business protocols live under `extensions/`; the
