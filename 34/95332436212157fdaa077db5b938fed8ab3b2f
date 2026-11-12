@@ -1,0 +1,22 @@
+docs/github-release-verification.md
+  s_c5695907fe744f::t_11187fd4faa9f0 82-87
+  s_c5695907fe744f::t_df80873d953d53 4,12-13,15-16,24-26,66-81,95
+README.md
+  s_c5695907fe744f::t_af6bf952a24a53 7-10
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3495332436212157fdaa077db5b938fed8ab3b2f",
+  "prompts": {},
+  "sessions": {
+    "s_c5695907fe744f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d06d-149b-7062-aa67-3c0145df9d90",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
