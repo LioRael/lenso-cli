@@ -31,11 +31,17 @@ def check_tag(repo, tag, commit):
         api(repo, "git/ref/tags/" + urllib.parse.quote(tag, safe=""))
     except RuntimeError as error:
         if "HTTP 404" in str(error):
-            return
+            return False
         raise
     actual = api(repo, "commits/" + urllib.parse.quote(tag, safe=""))["sha"]
     if actual != commit:
         raise RuntimeError("Tag points to a different commit; tags are never moved")
+    return True
+
+def release_target(repo, tag, commit):
+    # Existing tags are authoritative; supplying an old commitish can require
+    # Workflows write permission even though GitHub would otherwise ignore it.
+    return {"tag_name": tag} if check_tag(repo, tag, commit) else {"tag_name": tag, "target_commitish": commit}
 
 def verify_asset(repo, asset, body):
     if asset["size"] != len(body) or asset["state"] != "uploaded":
@@ -122,11 +128,11 @@ def main():
                 body = api(args.repo, "releases/assets/" + str(asset["id"]), binary=True)
                 if sha256(body) != pins[asset["name"]]:
                     raise RuntimeError("Asset changed after installer verification")
-        if release["target_commitish"] != args.commit:
+        if not check_tag(args.repo, tag, args.commit) and release["target_commitish"] != args.commit:
             raise RuntimeError("Draft target changed")
         if release["draft"]:
-            release = api(args.repo, "releases/" + str(release["id"]), method="PATCH", data={"tag_name": tag, "target_commitish": args.commit, "draft": False, "make_latest": "false" if "-" in args.version else "true"})
-        if release["draft"] or release["tag_name"] != tag or release["target_commitish"] != args.commit:
+            release = api(args.repo, "releases/" + str(release["id"]), method="PATCH", data={**release_target(args.repo, tag, args.commit), "draft": False, "make_latest": "false" if "-" in args.version else "true"})
+        if release["draft"] or release["tag_name"] != tag or not check_tag(args.repo, tag, args.commit):
             raise RuntimeError("Release was not published")
         print("Published " + release["html_url"])
         return
@@ -143,8 +149,8 @@ def main():
         metadata[target] = item
         bodies[expected_name] = body
     if release is None:
-        release = api(args.repo, "releases", method="POST", data={"tag_name": tag, "target_commitish": args.commit, "name": "Lenso CLI " + tag, "draft": True, "prerelease": "-" in args.version})
-    if release["target_commitish"] != args.commit or release["prerelease"] != ("-" in args.version):
+        release = api(args.repo, "releases", method="POST", data={**release_target(args.repo, tag, args.commit), "name": "Lenso CLI " + tag, "draft": True, "prerelease": "-" in args.version})
+    if (not check_tag(args.repo, tag, args.commit) and release["target_commitish"] != args.commit) or release["prerelease"] != ("-" in args.version):
         raise RuntimeError("Existing release target/prerelease differs")
     print(f"Preparing Release {release['id']}; failures preserve drafts and assets", flush=True)
     assets = {name: put(args.repo, release, name, body) for name, body in bodies.items()}
@@ -160,9 +166,9 @@ def main():
     script_ps = f"https://api.github.com/repos/{args.repo}/releases/assets/{assets['install.ps1']['id']}"
     body = f"Native CLI for macOS (Intel/Apple Silicon), Linux (x64/ARM64, glibc 2.35+), Windows x64.\n\nNo Node.js, Git or Rust is required. Archives and installers are pinned by SHA256SUMS.\n\nPublic install:\n```sh\ncurl -fsSL https://github.com/{args.repo}/releases/download/{tag}/install.sh -o install.sh\nsh install.sh\n```\n\nPrivate repository (set GH_TOKEN):\n```sh\ncurl -fsSL -H \"Authorization: Bearer $GH_TOKEN\" -H 'Accept: application/octet-stream' '{script_sh}' -o install.sh\nsh install.sh\n```\n\nWindows: download install.ps1, then run `& ./install.ps1`. Authenticated installer API: {script_ps}\n\nInstallers install this exact version, verify SHA-256 and refuse replacement without --force / -Force. Add the printed install directory to PATH."
     if release["draft"]:
-        api(args.repo, "releases/" + str(release["id"]), method="PATCH", data={"tag_name": tag, "target_commitish": args.commit, "draft": True, "body": body})
+        api(args.repo, "releases/" + str(release["id"]), method="PATCH", data={**release_target(args.repo, tag, args.commit), "draft": True, "body": body})
     current = api(args.repo, "releases/" + str(release["id"]))
-    if current["tag_name"] != tag or current["target_commitish"] != args.commit:
+    if current["tag_name"] != tag or (not check_tag(args.repo, tag, args.commit) and current["target_commitish"] != args.commit):
         raise RuntimeError("Draft identity changed during assembly")
     outputs = {"release_id": release["id"], "install_sh_url": script_sh, "install_ps1_url": script_ps,
                "asset_seal": asset_seal(current["assets"])}
