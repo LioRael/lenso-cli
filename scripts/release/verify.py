@@ -33,7 +33,7 @@ if windows:
 else:
     tools = output / "system-tools"
     tools.mkdir()
-    for tool in ("uname", "curl", "tar", "mktemp", "rm", "chmod", "mkdir", "cat", "mv", "sha256sum", "shasum"):
+    for tool in ("uname", "curl", "tar", "gzip", "mktemp", "rm", "chmod", "mkdir", "cat", "mv", "sha256sum", "shasum"):
         path = shutil.which(tool)
         if path:
             (tools / tool).symlink_to(path)

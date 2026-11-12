@@ -9,9 +9,14 @@ on:
         description: Keep the fully verified release as a draft
         type: boolean
         default: true
+      reuse_run_id:
+        description: Optional native release run with all five successful builds; reuse its immutable artifacts
+        type: string
+        default: ""
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: release-cli-${{ github.repository }}
@@ -22,15 +27,21 @@ jobs:
     runs-on: ubuntu-22.04
     outputs:
       version: ${{ steps.version.outputs.version }}
+      source_commit: ${{ steps.version.outputs.source_commit }}
+      artifact_run_id: ${{ steps.version.outputs.artifact_run_id }}
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - id: version
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REUSE_RUN_ID: ${{ inputs.reuse_run_id }}
         run: python3 scripts/release/version.py
 
   build:
     needs: version
+    if: ${{ !inputs.reuse_run_id }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -74,9 +85,11 @@ jobs:
 
   draft:
     needs: [version, build]
+    if: ${{ !cancelled() && needs.version.result == 'success' && (needs.build.result == 'success' || (needs.build.result == 'skipped' && inputs.reuse_run_id != '')) }}
     runs-on: ubuntu-22.04
     permissions:
       contents: write
+      actions: read
     outputs:
       install_sh_url: ${{ steps.draft.outputs.install_sh_url }}
       install_ps1_url: ${{ steps.draft.outputs.install_ps1_url }}
@@ -90,15 +103,19 @@ jobs:
           pattern: cli-*
           merge-multiple: true
           path: dist/cli
+          github-token: ${{ github.token }}
+          run-id: ${{ needs.version.outputs.artifact_run_id }}
       - id: draft
         name: Upload and verify complete draft
         env:
           GITHUB_TOKEN: ${{ github.token }}
           CLI_VERSION: ${{ needs.version.outputs.version }}
-        run: python3 scripts/release/publish.py --version "$CLI_VERSION"
+          SOURCE_COMMIT: ${{ needs.version.outputs.source_commit }}
+        run: python3 scripts/release/publish.py --version "$CLI_VERSION" --commit "$SOURCE_COMMIT"
 
   install:
     needs: [version, draft]
+    if: ${{ !cancelled() && needs.version.result == 'success' && needs.draft.result == 'success' }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -119,16 +136,17 @@ jobs:
           CLI_VERSION: ${{ needs.version.outputs.version }}
           INSTALL_SH_URL: ${{ needs.draft.outputs.install_sh_url }}
           INSTALL_PS1_URL: ${{ needs.draft.outputs.install_ps1_url }}
+          SOURCE_COMMIT: ${{ needs.version.outputs.source_commit }}
         run: |
           url="$INSTALL_SH_URL"
           if [ "$RUNNER_OS" = Windows ]; then url="$INSTALL_PS1_URL"; fi
           ${{ matrix.python }} scripts/release/verify.py --installer-url "$url" \
-            --repo "$GITHUB_REPOSITORY" --commit "$GITHUB_SHA" --version "$CLI_VERSION" \
+            --repo "$GITHUB_REPOSITORY" --commit "$SOURCE_COMMIT" --version "$CLI_VERSION" \
             --out "$RUNNER_TEMP/native-install"
 
   publish:
     needs: [version, draft, install]
-    if: ${{ !inputs.draft }}
+    if: ${{ !cancelled() && !inputs.draft && needs.version.result == 'success' && needs.draft.result == 'success' && needs.install.result == 'success' }}
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -141,4 +159,5 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           CLI_VERSION: ${{ needs.version.outputs.version }}
           ASSET_SEAL: ${{ needs.draft.outputs.asset_seal }}
-        run: python3 scripts/release/publish.py --version "$CLI_VERSION" --finalize --expected-seal "$ASSET_SEAL"
+          SOURCE_COMMIT: ${{ needs.version.outputs.source_commit }}
+        run: python3 scripts/release/publish.py --version "$CLI_VERSION" --commit "$SOURCE_COMMIT" --finalize --expected-seal "$ASSET_SEAL"

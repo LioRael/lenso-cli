@@ -125,8 +125,8 @@ def main():
         if release["target_commitish"] != args.commit:
             raise RuntimeError("Draft target changed")
         if release["draft"]:
-            release = api(args.repo, "releases/" + str(release["id"]), method="PATCH", data={"draft": False, "make_latest": "false" if "-" in args.version else "true"})
-        if release["draft"]:
+            release = api(args.repo, "releases/" + str(release["id"]), method="PATCH", data={"tag_name": tag, "target_commitish": args.commit, "draft": False, "make_latest": "false" if "-" in args.version else "true"})
+        if release["draft"] or release["tag_name"] != tag or release["target_commitish"] != args.commit:
             raise RuntimeError("Release was not published")
         print("Published " + release["html_url"])
         return
@@ -160,8 +160,10 @@ def main():
     script_ps = f"https://api.github.com/repos/{args.repo}/releases/assets/{assets['install.ps1']['id']}"
     body = f"Native CLI for macOS (Intel/Apple Silicon), Linux (x64/ARM64, glibc 2.35+), Windows x64.\n\nNo Node.js, Git or Rust is required. Archives and installers are pinned by SHA256SUMS.\n\nPublic install:\n```sh\ncurl -fsSL https://github.com/{args.repo}/releases/download/{tag}/install.sh -o install.sh\nsh install.sh\n```\n\nPrivate repository (set GH_TOKEN):\n```sh\ncurl -fsSL -H \"Authorization: Bearer $GH_TOKEN\" -H 'Accept: application/octet-stream' '{script_sh}' -o install.sh\nsh install.sh\n```\n\nWindows: download install.ps1, then run `& ./install.ps1`. Authenticated installer API: {script_ps}\n\nInstallers install this exact version, verify SHA-256 and refuse replacement without --force / -Force. Add the printed install directory to PATH."
     if release["draft"]:
-        api(args.repo, "releases/" + str(release["id"]), method="PATCH", data={"body": body})
+        api(args.repo, "releases/" + str(release["id"]), method="PATCH", data={"tag_name": tag, "target_commitish": args.commit, "draft": True, "body": body})
     current = api(args.repo, "releases/" + str(release["id"]))
+    if current["tag_name"] != tag or current["target_commitish"] != args.commit:
+        raise RuntimeError("Draft identity changed during assembly")
     outputs = {"release_id": release["id"], "install_sh_url": script_sh, "install_ps1_url": script_ps,
                "asset_seal": asset_seal(current["assets"])}
     if os.environ.get("GITHUB_OUTPUT"):
