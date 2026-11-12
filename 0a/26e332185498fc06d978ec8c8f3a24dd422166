@@ -1,0 +1,44 @@
+scripts/release/verify.py
+  s_c5695907fe744f::t_3c1b900d6f1e41 1-73
+scripts/release/publish.py
+  s_c5695907fe744f::t_3c1b900d6f1e41 78,83
+  s_c5695907fe744f::t_e937a5a24bf077 1-11,16-77,79-82,84-91,93-103,106-162,166-173
+  s_c5695907fe744f::t_90616fa83ba896 12-15,92,104-105,163-165
+scripts/release/package.py
+  s_c5695907fe744f::t_572d072373e7f4 45
+  s_c5695907fe744f::t_3ed4233c465a62 1-10,12-22,67-82,84,86-116
+  s_c5695907fe744f::t_3c1b900d6f1e41 11,23-33,83
+  s_c5695907fe744f::t_e219dcb3a611f5 34-44,46-66,85
+scripts/release/install.sh.in
+  s_c5695907fe744f::t_3ed4233c465a62 1-77
+scripts/release/version.py
+  s_c5695907fe744f::t_3c1b900d6f1e41 1-14
+.github/workflows/release-cli.yml
+  s_c5695907fe744f::t_90616fa83ba896 83,130,143-144
+  s_c5695907fe744f::t_3c1b900d6f1e41 1-82,84-129,131-142
+scripts/release/github.py
+  s_c5695907fe744f::t_e937a5a24bf077 1-42
+crates/runtime/src/publish.rs
+  s_c5695907fe744f::t_3ee1aa309da1bc 604-606
+scripts/release/install.ps1.in
+  s_c5695907fe744f::t_3ed4233c465a62 1-59
+scripts/test-publish.py
+  s_c5695907fe744f::t_60214aacd1cfc9 10,166-168
+  s_c5695907fe744f::t_3c1b900d6f1e41 143
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0a26e332185498fc06d978ec8c8f3a24dd422166",
+  "prompts": {},
+  "sessions": {
+    "s_c5695907fe744f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d06d-149b-7062-aa67-3c0145df9d90",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
