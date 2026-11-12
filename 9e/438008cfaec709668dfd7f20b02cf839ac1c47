@@ -1,0 +1,19 @@
+scripts/release/publish.py
+  s_c5695907fe744f::t_b310b803740702 34,39-44,131,134-135,152-153,169,171
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9e438008cfaec709668dfd7f20b02cf839ac1c47",
+  "prompts": {},
+  "sessions": {
+    "s_c5695907fe744f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d06d-149b-7062-aa67-3c0145df9d90",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
