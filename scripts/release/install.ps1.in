@@ -1,0 +1,59 @@
+[CmdletBinding()]
+param(
+    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Lenso\bin'),
+    [string]$Archive,
+    [switch]$Force
+)
+$ErrorActionPreference = 'Stop'
+$Version = '@VERSION@'
+@ASSET@
+$Architecture = [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString()
+if ($Architecture -ne 'X64') { throw "Unsupported Windows process architecture: $Architecture" }
+$Destination = Join-Path $InstallDir 'lenso.exe'
+if (Test-Path -LiteralPath $Destination) {
+    $Existing = Get-Item -LiteralPath $Destination -Force
+    if ($Existing.PSIsContainer -or ($Existing.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Refusing to replace a link or directory: $Destination"
+    }
+    if (-not $Force) { throw "Already exists: $Destination (use -Force to replace it)" }
+}
+$Temporary = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString())
+$Staged = $null
+New-Item -ItemType Directory -Path $Temporary | Out-Null
+try {
+    if (-not $Archive) {
+        $Archive = Join-Path $Temporary 'package.zip'
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $Headers = @{ Accept = 'application/octet-stream' }
+        $Token = if ($env:GH_TOKEN) { $env:GH_TOKEN } else { $env:GITHUB_TOKEN }
+        if ($Token) { $Headers.Authorization = "Bearer $Token" }
+        # Redirects must strip credentials; HttpClient does so when auto-redirecting.
+        Add-Type -AssemblyName System.Net.Http
+        $Client = [Net.Http.HttpClient]::new()
+        try {
+            $Client.Timeout = [TimeSpan]::FromMinutes(5)
+            foreach ($Key in $Headers.Keys) { $Client.DefaultRequestHeaders.Add($Key, $Headers[$Key]) }
+            $Client.DefaultRequestHeaders.Add('User-Agent', 'lenso-installer')
+            $Bytes = $Client.GetByteArrayAsync($Url).GetAwaiter().GetResult()
+            [IO.File]::WriteAllBytes($Archive, $Bytes)
+        } finally { $Client.Dispose() }
+    }
+    $Actual = (Get-FileHash -LiteralPath $Archive -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($Actual -ne $Sha256) { throw 'Archive SHA-256 mismatch; existing installation was not changed.' }
+    Expand-Archive -LiteralPath $Archive -DestinationPath $Temporary
+    $Binary = Join-Path $Temporary 'lenso.exe'
+    $ActualVersion = & $Binary --version
+    if ($LASTEXITCODE -ne 0 -or $ActualVersion -ne "lenso $Version") { throw 'Downloaded executable version mismatch.' }
+    New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+    $Staged = Join-Path $InstallDir ('.lenso-' + [Guid]::NewGuid().ToString() + '.exe')
+    Copy-Item -LiteralPath $Binary -Destination $Staged
+    if (Test-Path -LiteralPath $Destination) {
+        [IO.File]::Replace($Staged, $Destination, $null)
+    } else { [IO.File]::Move($Staged, $Destination) }
+    $Staged = $null
+    Write-Output "Installed Lenso $Version to $Destination"
+    Write-Output "Add this directory to PATH if needed: $InstallDir"
+} finally {
+    if ($Staged -and (Test-Path -LiteralPath $Staged)) { Remove-Item -LiteralPath $Staged -Force }
+    Remove-Item -LiteralPath $Temporary -Recurse -Force
+}

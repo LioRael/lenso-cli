@@ -1,0 +1,77 @@
+#!/bin/sh
+set -eu
+
+# Generated for one Release. Checksums and asset IDs are pinned before publication.
+version='@VERSION@'
+prefix=${LENSO_INSTALL_DIR:-"$HOME/.local/bin"}
+archive=
+force=false
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --prefix) [ "$#" -ge 2 ] || exit 2; prefix=$2; shift 2 ;;
+    --archive) [ "$#" -ge 2 ] || exit 2; archive=$2; shift 2 ;;
+    --force) force=true; shift ;;
+    --help) echo "Lenso $version installer: [--prefix DIR] [--archive FILE] [--force]"; exit 0 ;;
+    *) echo "Unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+case "$(uname -s):$(uname -m)" in
+  Darwin:arm64|Darwin:aarch64) target=aarch64-apple-darwin ;;
+  Darwin:x86_64) target=x86_64-apple-darwin ;;
+  Linux:aarch64|Linux:arm64) target=aarch64-unknown-linux-gnu ;;
+  Linux:x86_64) target=x86_64-unknown-linux-gnu ;;
+  *) echo 'Unsupported platform. See the Release assets for supported targets.' >&2; exit 1 ;;
+esac
+case "$target" in
+@ASSETS@
+esac
+destination=$prefix/lenso
+if [ -L "$destination" ] || [ -d "$destination" ]; then
+  echo "Refusing to replace a link or directory: $destination" >&2; exit 1
+fi
+if [ -e "$destination" ] && [ "$force" != true ]; then
+  echo "Already exists: $destination (use --force to replace it)" >&2; exit 1
+fi
+temporary=$(mktemp -d)
+staged=
+trap 'rm -rf "$temporary"; if [ -n "$staged" ]; then rm -f "$staged"; fi' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [ -z "$archive" ]; then
+  archive=$temporary/package.tar.gz
+  token=${GH_TOKEN:-${GITHUB_TOKEN:-}}
+  if [ -n "$token" ]; then
+    curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+      --connect-timeout 20 --max-time 300 --retry 2 \
+      --header "Authorization: Bearer $token" --header 'Accept: application/octet-stream' \
+      --output "$archive" "$url"
+  else
+    curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+      --connect-timeout 20 --max-time 300 --retry 2 \
+      --header 'Accept: application/octet-stream' --output "$archive" "$url"
+  fi
+fi
+if command -v sha256sum >/dev/null 2>&1; then
+  actual=$(sha256sum "$archive"); actual=${actual%% *}
+elif command -v shasum >/dev/null 2>&1; then
+  actual=$(shasum -a 256 "$archive"); actual=${actual%% *}
+else
+  echo 'A SHA-256 tool is required: sha256sum or shasum.' >&2; exit 1
+fi
+if [ "$actual" != "$sha256" ]; then
+  echo 'Archive SHA-256 mismatch; existing installation was not changed.' >&2; exit 1
+fi
+tar -xzf "$archive" -C "$temporary"
+chmod 755 "$temporary/lenso"
+actual_version=$("$temporary/lenso" --version)
+if [ "$actual_version" != "lenso $version" ]; then
+  echo 'Downloaded executable version mismatch.' >&2; exit 1
+fi
+mkdir -p "$prefix"
+staged=$(mktemp "$prefix/.lenso.XXXXXX")
+cat "$temporary/lenso" > "$staged"
+chmod 755 "$staged"
+mv -f "$staged" "$destination"
+staged=
+printf 'Installed Lenso %s to %s\n' "$version" "$destination"
+printf 'Add this directory to PATH if needed: %s\n' "$prefix"

@@ -601,7 +601,9 @@ fn execute(ctx: &Context, plan: &Prepared) -> Result<Value, Error> {
                     &plan.options.repository,
                     &["releases", &ready.id.to_string()],
                 )?,
-                serde_json::to_vec(&json!({"draft":false,"target_commitish":plan.commit}))?,
+                serde_json::to_vec(
+                    &json!({"draft":false,"target_commitish":plan.commit,"make_latest":"false"}),
+                )?,
                 "application/json",
             )?)?;
             if ready.draft || ready.id != release.id || ready.tag_name != plan.tag {

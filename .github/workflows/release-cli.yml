@@ -1,0 +1,144 @@
+name: Release native CLI
+
+on:
+  push:
+    tags: ["v[0-9]*"]
+  workflow_dispatch:
+    inputs:
+      draft:
+        description: Keep the fully verified release as a draft
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-cli-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - id: version
+        run: python3 scripts/release/version.py
+
+  build:
+    needs: version
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: &platforms
+        include:
+          - { runner: macos-15, target: aarch64-apple-darwin, python: python3 }
+          - { runner: macos-15-intel, target: x86_64-apple-darwin, python: python3 }
+          - { runner: ubuntu-22.04, target: x86_64-unknown-linux-gnu, python: python3 }
+          - { runner: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, python: python3 }
+          - { runner: windows-2022, target: x86_64-pc-windows-msvc, python: python }
+    runs-on: ${{ matrix.runner }}
+    env:
+      CARGO_BUILD_JOBS: "2"
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: "-C target-feature=+crt-static"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build native CLI
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal --target "${{ matrix.target }}"
+          cargo +1.99.0 build --locked --release -p lenso --target "${{ matrix.target }}"
+      - name: Verify and package executable
+        env:
+          CLI_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          binary="target/${{ matrix.target }}/release/lenso"
+          if [ "$RUNNER_OS" = Windows ]; then binary="$binary.exe"; fi
+          ${{ matrix.python }} scripts/release/package.py --binary "$binary" \
+            --target "${{ matrix.target }}" --version "$CLI_VERSION" --out dist/cli
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cli-${{ matrix.target }}
+          path: dist/cli/*
+          if-no-files-found: error
+          retention-days: 7
+
+  draft:
+    needs: [version, build]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    outputs:
+      install_sh_url: ${{ steps.draft.outputs.install_sh_url }}
+      install_ps1_url: ${{ steps.draft.outputs.install_ps1_url }}
+      asset_seal: ${{ steps.draft.outputs.asset_seal }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: cli-*
+          merge-multiple: true
+          path: dist/cli
+      - id: draft
+        name: Upload and verify complete draft
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CLI_VERSION: ${{ needs.version.outputs.version }}
+        run: python3 scripts/release/publish.py --version "$CLI_VERSION"
+
+  install:
+    needs: [version, draft]
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix: *platforms
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install from GitHub and execute Wasm without development tools
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CLI_VERSION: ${{ needs.version.outputs.version }}
+          INSTALL_SH_URL: ${{ needs.draft.outputs.install_sh_url }}
+          INSTALL_PS1_URL: ${{ needs.draft.outputs.install_ps1_url }}
+        run: |
+          url="$INSTALL_SH_URL"
+          if [ "$RUNNER_OS" = Windows ]; then url="$INSTALL_PS1_URL"; fi
+          ${{ matrix.python }} scripts/release/verify.py --installer-url "$url" \
+            --repo "$GITHUB_REPOSITORY" --commit "$GITHUB_SHA" --version "$CLI_VERSION" \
+            --out "$RUNNER_TEMP/native-install"
+
+  publish:
+    needs: [version, draft, install]
+    if: ${{ !inputs.draft }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Publish after all five installers pass
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CLI_VERSION: ${{ needs.version.outputs.version }}
+          ASSET_SEAL: ${{ needs.draft.outputs.asset_seal }}
+        run: python3 scripts/release/publish.py --version "$CLI_VERSION" --finalize --expected-seal "$ASSET_SEAL"

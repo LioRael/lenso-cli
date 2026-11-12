@@ -7,6 +7,7 @@ import hashlib
 import http.server
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -139,7 +140,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         release=releases[int(path.rsplit('/',1)[1])]
         owned=[a for a in assets.values() if a['release']==release['id']]
         assert len(owned)==3,'publication reached an incomplete release'
-        assert data=={'draft':False,'target_commitish':A}
+        assert data=={'draft':False,'target_commitish':A,'make_latest':'false'}
         release['target_commitish']=data['target_commitish']
         release['draft']=False;tags[release['tag_name']]=release['target_commitish'];mutations.append(('publish',release['id']))
         self.reply(200,release_record(release))
@@ -162,7 +163,9 @@ try:
     subprocess.run(['python3',str(root/'scripts/configure-code.py'),str(seed),'--repo','acme/resources','--file','README','--item','readme','--target','docs','--github-api',api,'--token-env','PUBLISH_TEST_TOKEN'],check=True,env=env)
     policy=load(seed/'lenso.toml');module=seed/Path(policy['cli']['extensions'][0]['source']).parent/'code.wasm'
     author=scratch/'author';package=author/'extensions/code';package.mkdir(parents=True)
-    shutil.copyfile(module,package/'code.wasm');shutil.copyfile(root/'presets/code/extension.toml',package/'extension.toml');(package/'LICENSE').write_text('Acceptance fixture\n')
+    shutil.copyfile(module,package/'code.wasm')
+    (package/'extension.toml').write_text(re.sub(r'(?m)^version = "[^"]+"$', 'version = "0.1.0"', (root/'presets/code/extension.toml').read_text(), count=1))
+    (package/'LICENSE').write_text('Acceptance fixture\n')
     (author/'lenso.registry.toml').write_text(descriptor)
     base=['publish','--github','--id','code','--api',api,'--token-env','PUBLISH_TEST_TOKEN']
     common=[*base,'--repo','acme/tools','--target',A]
