@@ -1,4 +1,5 @@
 /target/
+.DS_Store
 /dist/
 /extensions/code/target/
 /examples/wasm-greeting/target/
