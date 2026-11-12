@@ -1,0 +1,7 @@
+schema_version = 1
+name = "lenso-distribution-e2e"
+
+[[items]]
+name = "hello"
+description = "A source file distributed from the same pinned repository as the extension"
+files = [{ path = "hello.txt", target = "hello.txt" }]

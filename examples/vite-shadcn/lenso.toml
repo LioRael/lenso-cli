@@ -1,0 +1,15 @@
+[cli]
+schema_version = 1
+
+[[cli.extensions]]
+id = "shadcn"
+source = "lenso/extensions/shadcn/bf635d35ab6f87de0591704a14f578e6cdb2d069f9a9bcd395864e6b59e57ee8/extension.toml"
+files = ["components.json", "package.json", "src/index.css"]
+reads = ["bun.lock", "components.json", "package-lock.json", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "src/index.css", "tsconfig.app.json", "tsconfig.json"]
+write_roots = ["app", "components", "hooks", "lib", "src"]
+read_roots = ["app", "components", "hooks", "lib", "src"]
+http = ["https://registry.npmjs.org/", "https://ui.shadcn.com/r/"]
+env = []
+discover = false
+credentials = {  }
+processes = [{ "program" = "npm", "args" = ["install", "--ignore-scripts", "--no-audit", "--no-fund"] }]

@@ -1,0 +1,10 @@
+[cli]
+schema_version = 1
+
+[[cli.extensions]]
+id = "native"
+source = "lenso/extensions/native/extension.toml"
+processes = [
+  { program = "rustc", args = ["--version"] },
+  { program = "python3", args = ["-u", "-m", "http.server", "0", "--bind", "127.0.0.1"] },
+]

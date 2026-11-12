@@ -1,0 +1,20 @@
+[package]
+name = "lenso-project"
+description = "Optional reviewed file changes for Lenso workflows"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+lenso-cli.workspace = true
+lenso-runtime.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+similar = "2"
+
+[lints]
+workspace = true

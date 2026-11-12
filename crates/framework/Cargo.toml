@@ -1,0 +1,21 @@
+[package]
+name = "lenso-cli"
+description = "An embeddable command and workflow engine for extensible CLIs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+clap = { version = "4", features = ["string"] }
+tokio.workspace = true
+inquire = { version = "0.9", default-features = false, features = ["crossterm"] }
+indicatif = "0.18"
+console = "0.16"
+crossterm = { version = "0.29", default-features = false }
+
+[lints]
+workspace = true

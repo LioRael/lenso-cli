@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "extensions": [
+    {
+      "id": "native",
+      "source": "lenso/extensions/native/extension.toml",
+      "source_sha256": "220b682a21520eec28f27219d33cd9181f8a0e589fa12b884b8f5aa21b6e2946",
+      "definition_sha256": "d49fb4a1d56edeb61dca7427017d9ff27d0f7c6c478d1d4a4c7bc30907031cd8",
+      "definition": {
+        "schema_version": 1,
+        "id": "native",
+        "version": "0.1.0",
+        "handlers": {
+          "native/rustc": {
+            "type": "process",
+            "program": "rustc",
+            "args": [
+              "--version"
+            ]
+          },
+          "native/server": {
+            "type": "process",
+            "program": "python3",
+            "args": [
+              "-u",
+              "-m",
+              "http.server",
+              "0",
+              "--bind",
+              "127.0.0.1"
+            ]
+          }
+        },
+        "workflows": [
+          {
+            "id": "native/version",
+            "steps": [
+              {
+                "id": "version",
+                "handler": "native/rustc",
+                "needs": [],
+                "hooks": {
+                  "prepare": [],
+                  "before": [],
+                  "validate": [],
+                  "after": []
+                }
+              }
+            ]
+          },
+          {
+            "id": "native/dev",
+            "steps": [
+              {
+                "id": "server",
+                "handler": "native/server",
+                "needs": [],
+                "hooks": {
+                  "prepare": [],
+                  "before": [],
+                  "validate": [],
+                  "after": []
+                }
+              }
+            ]
+          }
+        ],
+        "commands": [
+          {
+            "path": [
+              "toolchain",
+              "version"
+            ],
+            "workflow": "native/version",
+            "about": "Run the explicitly granted Rust version command",
+            "provider": "native",
+            "arguments": []
+          },
+          {
+            "path": [
+              "dev"
+            ],
+            "workflow": "native/dev",
+            "about": "Serve this example on a free localhost port until Ctrl-C",
+            "provider": "native",
+            "arguments": []
+          }
+        ]
+      },
+      "modules": {}
+    }
+  ]
+}

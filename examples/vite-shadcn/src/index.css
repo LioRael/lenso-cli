@@ -1,0 +1,23 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-accent: var(--secondary);
+  --color-accent-foreground: var(--foreground);
+  --color-destructive: #dc2626;
+  --color-input: #d4d4d8;
+  --color-border: #e4e4e7;
+  --color-ring: #71717a;
+}
+:root { --background: #fafafa; --foreground: #18181b; --primary: #18181b; --primary-foreground: #fafafa; --secondary: #e4e4e7; --secondary-foreground: #27272a; font-family: ui-sans-serif, system-ui, sans-serif; color: var(--foreground); background: var(--background); }
+body { margin: 0; }
+main { max-width: 760px; margin: 18vh auto; padding: 32px; }
+.eyebrow { color: #71717a; font-size: 13px; letter-spacing: .08em; }
+h1 { font-size: clamp(32px, 6vw, 56px); letter-spacing: -.045em; font-weight: 600; line-height: 1.08; margin: 24px 0; }
+.description { max-width: 540px; color: #71717a; line-height: 1.7; margin-bottom: 32px; }
+.demo { display: flex; gap: 12px; flex-wrap: wrap; }

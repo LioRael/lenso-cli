@@ -1,0 +1,17 @@
+/target/
+/dist/
+/extensions/code/target/
+/examples/wasm-greeting/target/
+/examples/m0/greeting.txt
+/extensions/shadcn/target/
+/examples/vite-shadcn/node_modules/
+/examples/vite-shadcn/dist/
+/examples/vite-shadcn/src/components/ui/button.tsx
+/examples/vite-shadcn/src/lib/utils.ts
+/.playwright-cli/
+/output/
+
+**/.lenso/
+**/__pycache__/
+/examples/m0/lenso/extensions/greeting/greeting.wasm
+/examples/vite-shadcn/lenso/extensions/shadcn/**/shadcn.wasm

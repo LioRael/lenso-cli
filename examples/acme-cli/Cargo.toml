@@ -1,0 +1,19 @@
+[package]
+name = "acme-example"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "acme"
+path = "src/main.rs"
+
+[dependencies]
+lenso-cli.workspace = true
+lenso-runtime.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

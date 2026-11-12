@@ -1,0 +1,20 @@
+schema_version = 1
+id = "native"
+version = "0.1.0"
+
+[handlers."native/rustc"]
+type = "process"
+program = "rustc"
+args = ["--version"]
+
+[[workflows]]
+id = "native/version"
+steps = [
+  { "id" = "version", "handler" = "native/rustc" },
+]
+
+[[commands]]
+path = ["toolchain", "version"]
+workflow = "native/version"
+about = "Run the explicitly granted Rust version command"
+provider = "native"

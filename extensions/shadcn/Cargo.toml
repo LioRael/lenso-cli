@@ -1,0 +1,27 @@
+[package]
+name = "lenso-shadcn"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+extism-pdk = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+json5 = "0.4"
+url = "2"
+sha2 = "0.10"
+regex-lite = "0.1"
+node-semver = "2"
+globset = "0.4"
+serde_yaml_ng = "0.10"
+
+[workspace]
+
+[profile.release]
+opt-level = "s"
+strip = true
+lto = true

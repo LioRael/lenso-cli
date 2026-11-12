@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "extensions/project", "examples/acme-cli"]
+exclude = ["examples/wasm-greeting", "extensions/shadcn", "extensions/code"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+lenso-cli = { path = "crates/framework" }
+lenso-runtime = { path = "crates/runtime" }
+lenso-project = { path = "extensions/project" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "signal", "io-util", "sync"] }
+sha2 = "0.10"
+tempfile = "3"
+toml = "1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[profile.dev]
+debug = 0

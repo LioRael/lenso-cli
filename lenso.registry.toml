@@ -1,0 +1,7 @@
+schema_version = 1
+
+[[extensions]]
+id = "code"
+path = "dist/author/code"
+tag = "code-v{version}"
+asset = "lenso-code-{version}.tar.gz"

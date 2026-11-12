@@ -1,0 +1,88 @@
+schema_version = 1
+id = "shadcn"
+version = "0.1.0"
+
+[handlers."shadcn/detect"]
+type = "wasm"
+module = "shadcn.wasm"
+function = "detect"
+sha256 = "auto"
+
+[handlers."shadcn/select"]
+type = "wasm"
+module = "shadcn.wasm"
+function = "select"
+sha256 = "auto"
+
+[handlers."shadcn/resolve"]
+type = "wasm"
+module = "shadcn.wasm"
+function = "resolve"
+sha256 = "auto"
+
+[handlers."shadcn/validate-plan"]
+type = "wasm"
+module = "shadcn.wasm"
+function = "validate_plan"
+sha256 = "auto"
+
+[handlers."shadcn/verify"]
+type = "wasm"
+module = "shadcn.wasm"
+function = "verify"
+sha256 = "auto"
+
+[handlers."shadcn/initialize"]
+type = "wasm"
+module = "shadcn.wasm"
+function = "initialize"
+sha256 = "auto"
+
+[[workflows]]
+id = "shadcn/preview"
+steps = [
+  { "id" = "detect", "handler" = "shadcn/detect" },
+  { "id" = "select", "handler" = "shadcn/select", "needs" = ["detect"] },
+  { "id" = "resolve", "handler" = "shadcn/resolve", "needs" = ["detect", "select"] },
+  { "id" = "plan", "handler" = "project/plan", "needs" = ["detect", "select", "resolve"], "hooks" = { "validate" = ["shadcn/validate-plan"] } },
+]
+
+[[workflows]]
+id = "shadcn/add"
+steps = [
+  { "id" = "detect", "handler" = "shadcn/detect" },
+  { "id" = "select", "handler" = "shadcn/select", "needs" = ["detect"] },
+  { "id" = "resolve", "handler" = "shadcn/resolve", "needs" = ["detect", "select"] },
+  { "id" = "plan", "handler" = "project/plan", "needs" = ["detect", "select", "resolve"], "hooks" = { "validate" = ["shadcn/validate-plan"] } },
+  { "id" = "apply", "handler" = "project/apply", "needs" = ["plan"] },
+  { "id" = "verify", "handler" = "shadcn/verify", "needs" = ["resolve", "apply"] },
+]
+
+[[workflows]]
+id = "shadcn/init"
+steps = [
+  { "id" = "detect", "handler" = "shadcn/detect" },
+  { "id" = "initialize", "handler" = "shadcn/initialize", "needs" = ["detect"] },
+  { "id" = "plan", "handler" = "project/plan", "needs" = ["detect", "initialize"] },
+  { "id" = "apply", "handler" = "project/apply", "needs" = ["plan"] },
+]
+
+[[commands]]
+path = ["add"]
+workflow = "shadcn/add"
+about = "Review and install an official shadcn component"
+provider = "shadcn"
+arguments = [{ "name" = "item", "help" = "Component name; omit to choose interactively", "positional" = true }]
+
+[[commands]]
+path = ["preview"]
+workflow = "shadcn/preview"
+about = "Preview official shadcn files and dependencies without writing"
+provider = "shadcn"
+arguments = [{ "name" = "item", "help" = "Component name; omit to choose interactively", "positional" = true }]
+
+[[commands]]
+path = ["init"]
+workflow = "shadcn/init"
+about = "Review components.json initialization for a prepared Vite/Tailwind project"
+provider = "shadcn"

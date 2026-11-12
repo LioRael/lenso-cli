@@ -1,0 +1,55 @@
+name: Publish code extension
+
+on:
+  push:
+    tags: ["code-v*"]
+  workflow_dispatch:
+    inputs:
+      draft:
+        description: Keep the verified release as a draft
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-code-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build CLI and Wasm
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal --target wasm32-unknown-unknown
+          cargo +1.99.0 build --locked --release -p lenso
+          cargo +1.99.0 build --locked --release --target wasm32-unknown-unknown --manifest-path extensions/code/Cargo.toml
+          mkdir -p dist/author/code
+          cp presets/code/extension.toml dist/author/code/extension.toml
+          cp extensions/code/target/wasm32-unknown-unknown/release/lenso_code.wasm dist/author/code/code.wasm
+      - name: Publish verified assets
+        id: publish
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          KEEP_DRAFT: ${{ inputs.draft || false }}
+        run: |
+          args=(publish --github --id code --token-env GITHUB_TOKEN --yes --json)
+          if [ "$KEEP_DRAFT" = true ]; then args+=(--draft); fi
+          target/release/lenso "${args[@]}"
+      - name: Verify published extension in a fresh consumer
+        if: steps.publish.outputs.state == 'published'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PACKAGE_VERSION: ${{ steps.publish.outputs.version }}
+        run: |
+          python3 scripts/verify-github-release.py --binary target/release/lenso \
+            --repo "$GITHUB_REPOSITORY" --version "$PACKAGE_VERSION" --ref "$GITHUB_SHA" \
+            --out "$RUNNER_TEMP/lenso-release-e2e"

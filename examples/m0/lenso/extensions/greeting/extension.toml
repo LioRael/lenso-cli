@@ -1,0 +1,44 @@
+schema_version = 1
+id = "demo"
+version = "0.1.0"
+
+[handlers."demo/greeting"]
+type = "wasm"
+module = "greeting.wasm"
+function = "greeting"
+sha256 = "auto"
+
+[handlers."demo/validate"]
+type = "wasm"
+module = "greeting.wasm"
+function = "validate_plan"
+sha256 = "auto"
+
+[[workflows]]
+id = "demo/plan"
+steps = [
+  { "id" = "greeting", "handler" = "demo/greeting" },
+  { "id" = "plan", "handler" = "project/plan", "needs" = ["greeting"], "hooks" = { "validate" = ["demo/validate"] } },
+]
+
+[[workflows]]
+id = "demo/install"
+steps = [
+  { "id" = "greeting", "handler" = "demo/greeting" },
+  { "id" = "plan", "handler" = "project/plan", "needs" = ["greeting"], "hooks" = { "validate" = ["demo/validate"] } },
+  { "id" = "apply", "handler" = "project/apply", "needs" = ["plan"] },
+]
+
+[[commands]]
+path = ["preview"]
+workflow = "demo/plan"
+about = "Preview a Wasm-generated greeting file"
+provider = "demo"
+arguments = [{ "name" = "name", "help" = "Greeting recipient" }]
+
+[[commands]]
+path = ["greet"]
+workflow = "demo/install"
+about = "Review and apply a Wasm-generated greeting"
+provider = "demo"
+arguments = [{ "name" = "name", "help" = "Greeting recipient" }]

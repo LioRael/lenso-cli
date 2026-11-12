@@ -1,0 +1,129 @@
+schema_version = 1
+id = "code"
+version = "0.1.0"
+
+[handlers."code/select"]
+type = "wasm"
+module = "code.wasm"
+function = "select"
+sha256 = "auto"
+
+[handlers."code/select-update"]
+type = "wasm"
+module = "code.wasm"
+function = "select_update"
+sha256 = "auto"
+
+[handlers."code/resolve"]
+type = "wasm"
+module = "code.wasm"
+function = "resolve"
+sha256 = "auto"
+
+[handlers."code/diff"]
+type = "wasm"
+module = "code.wasm"
+function = "diff"
+sha256 = "auto"
+
+[handlers."code/verify"]
+type = "wasm"
+module = "code.wasm"
+function = "verify"
+sha256 = "auto"
+
+[handlers."code/search"]
+type = "wasm"
+module = "code.wasm"
+function = "search"
+sha256 = "auto"
+
+[[workflows]]
+id = "code/search"
+steps = [{ id = "search", handler = "code/search" }]
+
+[[workflows]]
+id = "code/preview"
+steps = [
+ { id = "select", handler = "code/select" },
+ { id = "resolve", handler = "code/resolve", needs = ["select"] },
+ { id = "plan", handler = "project/plan", needs = ["select", "resolve"] },
+]
+
+[[workflows]]
+id = "code/add"
+steps = [
+ { id = "select", handler = "code/select" },
+ { id = "resolve", handler = "code/resolve", needs = ["select"] },
+ { id = "plan", handler = "project/plan", needs = ["select", "resolve"] },
+ { id = "apply", handler = "project/apply", needs = ["plan"] },
+ { id = "verify", handler = "code/verify", needs = ["resolve", "apply"] },
+]
+
+[[workflows]]
+id = "code/diff"
+steps = [
+ { id = "select", handler = "code/select" },
+ { id = "resolve", handler = "code/diff", needs = ["select"] },
+ { id = "plan", handler = "project/diff", needs = ["select", "resolve"] },
+]
+
+[[workflows]]
+id = "code/update"
+steps = [
+ { id = "select", handler = "code/select-update" },
+ { id = "resolve", handler = "code/resolve", needs = ["select"] },
+ { id = "plan", handler = "project/plan", needs = ["select", "resolve"] },
+ { id = "apply", handler = "project/apply", needs = ["plan"] },
+ { id = "verify", handler = "code/verify", needs = ["resolve", "apply"] },
+]
+
+[[commands]]
+path = ["code", "search"]
+workflow = "code/search"
+about = "Search code resources"
+provider = "code"
+arguments = [
+ { name = "registry", help = "Configured resource registry" },
+ { name = "query", help = "Filter resource names and descriptions" },
+]
+
+[[commands]]
+path = ["code", "preview"]
+workflow = "code/preview"
+about = "Preview code resources"
+provider = "code"
+arguments = [
+ { name = "registry", help = "Configured resource registry" },
+ { name = "item", help = "Catalog resource names", positional = true, kind = "list" },
+]
+
+[[commands]]
+path = ["code", "add"]
+workflow = "code/add"
+about = "Review and add code resources"
+provider = "code"
+arguments = [
+ { name = "registry", help = "Configured resource registry" },
+ { name = "item", help = "Catalog resource names", positional = true, kind = "list" },
+]
+
+[[commands]]
+path = ["code", "diff"]
+workflow = "code/diff"
+about = "Compare code resources without applying changes"
+provider = "code"
+arguments = [
+ { name = "registry", help = "Configured resource registry" },
+ { name = "item", help = "Catalog resource names", positional = true, kind = "list" },
+]
+
+[[commands]]
+path = ["code", "update"]
+workflow = "code/update"
+about = "Refresh repository pins and review resource updates"
+provider = "code"
+arguments = [
+ { name = "registry", help = "Configured resource registry" },
+ { name = "item", help = "Catalog resource names", positional = true, kind = "list" },
+]

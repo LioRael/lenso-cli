@@ -1,0 +1,12 @@
+[cli]
+schema_version = 1
+
+[[cli.extensions]]
+id = "demo"
+source = "lenso/extensions/greeting/extension.toml"
+files = ["greeting.txt"]
+
+[[cli.extensions]]
+id = "native"
+source = "lenso/extensions/native/extension.toml"
+processes = [{ program = "rustc", args = ["--version"] }]

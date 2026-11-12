@@ -1,0 +1,179 @@
+schema_version = 1
+id = "shadcn"
+version = "0.1.0"
+
+[handlers."shadcn/detect"]
+type = "wasm"
+module = "shadcn.wasm"
+function = "detect"
+sha256 = "auto"
+
+[handlers."shadcn/select"]
+type = "wasm"
+module = "shadcn.wasm"
+function = "select"
+sha256 = "auto"
+
+[handlers."shadcn/resolve"]
+type = "wasm"
+module = "shadcn.wasm"
+function = "resolve"
+sha256 = "auto"
+
+[handlers."shadcn/validate-plan"]
+type = "wasm"
+module = "shadcn.wasm"
+function = "validate_plan"
+sha256 = "auto"
+
+[handlers."shadcn/verify"]
+type = "wasm"
+module = "shadcn.wasm"
+function = "verify"
+sha256 = "auto"
+
+[handlers."shadcn/initialize"]
+type = "wasm"
+module = "shadcn.wasm"
+function = "initialize"
+sha256 = "auto"
+
+[[workflows]]
+id = "shadcn/preview"
+steps = [
+  { "id" = "detect", "handler" = "shadcn/detect" },
+  { "id" = "select", "handler" = "shadcn/select", "needs" = ["detect"] },
+  { "id" = "resolve", "handler" = "shadcn/resolve", "needs" = ["detect", "select"] },
+  { "id" = "plan", "handler" = "project/plan", "needs" = ["detect", "select", "resolve"], "hooks" = { "validate" = ["shadcn/validate-plan"] } },
+]
+
+[[workflows]]
+id = "shadcn/add"
+steps = [
+  { "id" = "detect", "handler" = "shadcn/detect" },
+  { "id" = "select", "handler" = "shadcn/select", "needs" = ["detect"] },
+  { "id" = "resolve", "handler" = "shadcn/resolve", "needs" = ["detect", "select"] },
+  { "id" = "plan", "handler" = "project/plan", "needs" = ["detect", "select", "resolve"], "hooks" = { "validate" = ["shadcn/validate-plan"] } },
+  { "id" = "apply", "handler" = "project/apply", "needs" = ["plan"] },
+  { "id" = "verify", "handler" = "shadcn/verify", "needs" = ["resolve", "apply"] },
+]
+
+[[workflows]]
+id = "shadcn/init"
+steps = [
+  { "id" = "detect", "handler" = "shadcn/detect" },
+  { "id" = "initialize", "handler" = "shadcn/initialize", "needs" = ["detect"] },
+  { "id" = "plan", "handler" = "project/plan", "needs" = ["detect", "initialize"] },
+  { "id" = "apply", "handler" = "project/apply", "needs" = ["plan"] },
+]
+
+[[commands]]
+path = ["add"]
+workflow = "shadcn/add"
+about = "Review and install shadcn Registry resources"
+provider = "shadcn"
+arguments = [{ name = "item", help = "Names, URLs, @namespace/name, or local JSON paths", positional = true, kind = "list" }, { name = "cwd", help = "App/workspace directory relative to the Lenso project" }]
+
+[[commands]]
+path = ["preview"]
+workflow = "shadcn/preview"
+about = "Preview Registry files and dependencies before application"
+provider = "shadcn"
+arguments = [{ name = "item", help = "Names, URLs, @namespace/name, or local JSON paths", positional = true, kind = "list" }, { name = "cwd", help = "App/workspace directory relative to the Lenso project" }]
+
+[[commands]]
+path = ["init"]
+workflow = "shadcn/init"
+about = "Review components.json initialization for a prepared TypeScript/Tailwind project"
+provider = "shadcn"
+arguments = [{ name = "cwd", help = "App/workspace directory relative to the Lenso project" }]
+
+[handlers."shadcn/search"]
+type = "wasm"
+module = "shadcn.wasm"
+function = "search"
+sha256 = "auto"
+
+[handlers."shadcn/diff"]
+type = "wasm"
+module = "shadcn.wasm"
+function = "diff"
+sha256 = "auto"
+
+[handlers."shadcn/update"]
+type = "wasm"
+module = "shadcn.wasm"
+function = "update"
+sha256 = "auto"
+
+[handlers."shadcn/select-update"]
+type = "wasm"
+module = "shadcn.wasm"
+function = "select_update"
+sha256 = "auto"
+
+[[workflows]]
+id = "shadcn/search"
+steps = [{ id = "search", handler = "shadcn/search" }]
+
+[[workflows]]
+id = "shadcn/diff"
+steps = [
+  { id = "detect", handler = "shadcn/detect" },
+  { id = "select", handler = "shadcn/select-update", needs = ["detect"] },
+  { id = "resolve", handler = "shadcn/diff", needs = ["detect", "select"] },
+  { id = "plan", handler = "project/diff", needs = ["detect", "select", "resolve"], hooks = { validate = ["shadcn/validate-plan"] } },
+]
+
+[[workflows]]
+id = "shadcn/update"
+steps = [
+  { id = "detect", handler = "shadcn/detect" },
+  { id = "select", handler = "shadcn/select-update", needs = ["detect"] },
+  { id = "resolve", handler = "shadcn/update", needs = ["detect", "select"] },
+  { id = "plan", handler = "project/plan", needs = ["detect", "select", "resolve"], hooks = { validate = ["shadcn/validate-plan"] } },
+  { id = "apply", handler = "project/apply", needs = ["plan"] },
+  { id = "verify", handler = "shadcn/verify", needs = ["resolve", "apply"] },
+]
+
+[[commands]]
+path = ["search"]
+workflow = "shadcn/search"
+about = "Search or list Registry resources without installing them"
+provider = "shadcn"
+arguments = [
+  { name = "registry", help = "@namespace or catalog URL; defaults to @shadcn", positional = true, kind = "list" },
+  { name = "query", help = "Search names, titles, descriptions and categories" },
+  { name = "type", help = "Comma-separated Registry item types" },
+  { name = "limit", help = "Page size (1-1000, default 100)" },
+  { name = "offset", help = "Global result offset (0-10000, default 0)" },
+  { name = "cwd", help = "Workspace Registry configuration directory" },
+]
+
+[[commands]]
+path = ["list"]
+workflow = "shadcn/search"
+about = "Search or list Registry resources without installing them"
+provider = "shadcn"
+arguments = [
+  { name = "registry", help = "@namespace or catalog URL; defaults to @shadcn", positional = true, kind = "list" },
+  { name = "query", help = "Search names, titles, descriptions and categories" },
+  { name = "type", help = "Comma-separated Registry item types" },
+  { name = "limit", help = "Page size (1-1000, default 100)" },
+  { name = "offset", help = "Global result offset (0-10000, default 0)" },
+  { name = "cwd", help = "Workspace Registry configuration directory" },
+]
+
+[[commands]]
+path = ["diff"]
+workflow = "shadcn/diff"
+about = "Compare local files with current Registry resources without modifying files"
+provider = "shadcn"
+arguments = [{ name = "item", help = "Names, URLs, @namespace/name, or local JSON paths", positional = true, kind = "list" }, { name = "cwd", help = "App/workspace directory relative to the Lenso project" }]
+
+[[commands]]
+path = ["components", "update"]
+workflow = "shadcn/update"
+about = "Review and update installed component files from their Registry sources"
+provider = "shadcn"
+arguments = [{ name = "item", help = "Names, URLs, @namespace/name, or local JSON paths", positional = true, kind = "list" }, { name = "cwd", help = "App/workspace directory relative to the Lenso project" }]

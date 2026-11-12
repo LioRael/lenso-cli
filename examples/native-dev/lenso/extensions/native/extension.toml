@@ -1,0 +1,37 @@
+schema_version = 1
+id = "native"
+version = "0.1.0"
+
+[handlers."native/rustc"]
+type = "process"
+program = "rustc"
+args = ["--version"]
+
+[handlers."native/server"]
+type = "process"
+program = "python3"
+args = ["-u", "-m", "http.server", "0", "--bind", "127.0.0.1"]
+
+[[workflows]]
+id = "native/version"
+steps = [
+  { "id" = "version", "handler" = "native/rustc" },
+]
+
+[[workflows]]
+id = "native/dev"
+steps = [
+  { "id" = "server", "handler" = "native/server" },
+]
+
+[[commands]]
+path = ["toolchain", "version"]
+workflow = "native/version"
+about = "Run the explicitly granted Rust version command"
+provider = "native"
+
+[[commands]]
+path = ["dev"]
+workflow = "native/dev"
+about = "Serve this example on a free localhost port until Ctrl-C"
+provider = "native"

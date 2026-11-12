@@ -1,0 +1,291 @@
+{
+  "schema_version": 1,
+  "id": "shadcn",
+  "version": "0.1.0",
+  "handlers": {
+    "shadcn/detect": {
+      "type": "wasm",
+      "module": "shadcn.wasm",
+      "function": "detect",
+      "sha256": "85e9280bd3363d71b75551902afda632ffa89bd0378b4b8a6892d0ba2be1c7ec"
+    },
+    "shadcn/initialize": {
+      "type": "wasm",
+      "module": "shadcn.wasm",
+      "function": "initialize",
+      "sha256": "85e9280bd3363d71b75551902afda632ffa89bd0378b4b8a6892d0ba2be1c7ec"
+    },
+    "shadcn/resolve": {
+      "type": "wasm",
+      "module": "shadcn.wasm",
+      "function": "resolve",
+      "sha256": "85e9280bd3363d71b75551902afda632ffa89bd0378b4b8a6892d0ba2be1c7ec"
+    },
+    "shadcn/select": {
+      "type": "wasm",
+      "module": "shadcn.wasm",
+      "function": "select",
+      "sha256": "85e9280bd3363d71b75551902afda632ffa89bd0378b4b8a6892d0ba2be1c7ec"
+    },
+    "shadcn/validate-plan": {
+      "type": "wasm",
+      "module": "shadcn.wasm",
+      "function": "validate_plan",
+      "sha256": "85e9280bd3363d71b75551902afda632ffa89bd0378b4b8a6892d0ba2be1c7ec"
+    },
+    "shadcn/verify": {
+      "type": "wasm",
+      "module": "shadcn.wasm",
+      "function": "verify",
+      "sha256": "85e9280bd3363d71b75551902afda632ffa89bd0378b4b8a6892d0ba2be1c7ec"
+    }
+  },
+  "workflows": [
+    {
+      "id": "shadcn/preview",
+      "steps": [
+        {
+          "id": "detect",
+          "handler": "shadcn/detect",
+          "needs": [],
+          "hooks": {
+            "prepare": [],
+            "before": [],
+            "validate": [],
+            "after": []
+          }
+        },
+        {
+          "id": "select",
+          "handler": "shadcn/select",
+          "needs": [
+            "detect"
+          ],
+          "hooks": {
+            "prepare": [],
+            "before": [],
+            "validate": [],
+            "after": []
+          }
+        },
+        {
+          "id": "resolve",
+          "handler": "shadcn/resolve",
+          "needs": [
+            "detect",
+            "select"
+          ],
+          "hooks": {
+            "prepare": [],
+            "before": [],
+            "validate": [],
+            "after": []
+          }
+        },
+        {
+          "id": "plan",
+          "handler": "project/plan",
+          "needs": [
+            "detect",
+            "select",
+            "resolve"
+          ],
+          "hooks": {
+            "prepare": [],
+            "before": [],
+            "validate": [
+              "shadcn/validate-plan"
+            ],
+            "after": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "shadcn/add",
+      "steps": [
+        {
+          "id": "detect",
+          "handler": "shadcn/detect",
+          "needs": [],
+          "hooks": {
+            "prepare": [],
+            "before": [],
+            "validate": [],
+            "after": []
+          }
+        },
+        {
+          "id": "select",
+          "handler": "shadcn/select",
+          "needs": [
+            "detect"
+          ],
+          "hooks": {
+            "prepare": [],
+            "before": [],
+            "validate": [],
+            "after": []
+          }
+        },
+        {
+          "id": "resolve",
+          "handler": "shadcn/resolve",
+          "needs": [
+            "detect",
+            "select"
+          ],
+          "hooks": {
+            "prepare": [],
+            "before": [],
+            "validate": [],
+            "after": []
+          }
+        },
+        {
+          "id": "plan",
+          "handler": "project/plan",
+          "needs": [
+            "detect",
+            "select",
+            "resolve"
+          ],
+          "hooks": {
+            "prepare": [],
+            "before": [],
+            "validate": [
+              "shadcn/validate-plan"
+            ],
+            "after": []
+          }
+        },
+        {
+          "id": "apply",
+          "handler": "project/apply",
+          "needs": [
+            "plan"
+          ],
+          "hooks": {
+            "prepare": [],
+            "before": [],
+            "validate": [],
+            "after": []
+          }
+        },
+        {
+          "id": "verify",
+          "handler": "shadcn/verify",
+          "needs": [
+            "resolve",
+            "apply"
+          ],
+          "hooks": {
+            "prepare": [],
+            "before": [],
+            "validate": [],
+            "after": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "shadcn/init",
+      "steps": [
+        {
+          "id": "detect",
+          "handler": "shadcn/detect",
+          "needs": [],
+          "hooks": {
+            "prepare": [],
+            "before": [],
+            "validate": [],
+            "after": []
+          }
+        },
+        {
+          "id": "initialize",
+          "handler": "shadcn/initialize",
+          "needs": [
+            "detect"
+          ],
+          "hooks": {
+            "prepare": [],
+            "before": [],
+            "validate": [],
+            "after": []
+          }
+        },
+        {
+          "id": "plan",
+          "handler": "project/plan",
+          "needs": [
+            "detect",
+            "initialize"
+          ],
+          "hooks": {
+            "prepare": [],
+            "before": [],
+            "validate": [],
+            "after": []
+          }
+        },
+        {
+          "id": "apply",
+          "handler": "project/apply",
+          "needs": [
+            "plan"
+          ],
+          "hooks": {
+            "prepare": [],
+            "before": [],
+            "validate": [],
+            "after": []
+          }
+        }
+      ]
+    }
+  ],
+  "commands": [
+    {
+      "path": [
+        "add"
+      ],
+      "workflow": "shadcn/add",
+      "about": "Review and install an official shadcn component",
+      "provider": "shadcn",
+      "arguments": [
+        {
+          "name": "item",
+          "help": "Component name; omit to choose interactively",
+          "positional": true,
+          "kind": "text"
+        }
+      ]
+    },
+    {
+      "path": [
+        "preview"
+      ],
+      "workflow": "shadcn/preview",
+      "about": "Preview official shadcn files and dependencies without writing",
+      "provider": "shadcn",
+      "arguments": [
+        {
+          "name": "item",
+          "help": "Component name; omit to choose interactively",
+          "positional": true,
+          "kind": "text"
+        }
+      ]
+    },
+    {
+      "path": [
+        "init"
+      ],
+      "workflow": "shadcn/init",
+      "about": "Review components.json initialization for a prepared Vite/Tailwind project",
+      "provider": "shadcn",
+      "arguments": []
+    }
+  ]
+}

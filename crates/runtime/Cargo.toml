@@ -1,0 +1,33 @@
+[package]
+name = "lenso-runtime"
+description = "Explicit manifest discovery and restricted Wasm/process adapters for Lenso CLI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+lenso-cli.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+extism = { version = "1", default-features = false }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
+toml.workspace = true
+tempfile.workspace = true
+semver = { version = "1", features = ["serde"] }
+walkdir = "2"
+tar = "0.4"
+flate2 = "1"
+base64 = "0.22"
+sha1 = "0.10"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", features = ["signal", "process"] }
+
+[dev-dependencies]
+wat = "1"
+
+[lints]
+workspace = true
