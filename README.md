@@ -109,6 +109,8 @@ identical published releases without mutation. `--draft` keeps a verified draft;
 `--json`, `--answers` and `--yes` use the existing Agent protocol. See the
 [author guide](docs/github-distribution.md#publish-from-a-terminal-or-agent) for token
 configuration, discovery prerequisites and the included GitHub Actions workflow.
+See [live verification](docs/github-release-verification.md) for the real Release
+uploads, successful Actions run and Linux/macOS consumer results.
 
 ## Shared cache
 
@@ -312,6 +314,7 @@ python3 scripts/test-demo.py
 python3 scripts/test-dependencies.py
 python3 scripts/test-dependencies.py --registry
 python3 scripts/test-github.py
+python3 scripts/test-publish.py
 python3 scripts/test-shadcn.py
 python3 scripts/test-shadcn-registry.py --pnpm
 ```

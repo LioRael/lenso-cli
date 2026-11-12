@@ -157,7 +157,8 @@ the native CLI and portable `code` Wasm with the committed lockfiles, stages the
 declared in root `lenso.registry.toml`, and calls the same command. Push a `code-v<version>`
 tag matching `presets/code/extension.toml`, or dispatch the workflow manually (draft by
 default). Commit the discovery descriptor to the default branch before the first run.
-The workflow grants `contents: write` and exposes its token only to the publish step.
+The workflow grants `contents: write` and exposes its token to the native publish
+and post-publication consumer verification steps. It does not persist checkout credentials.
 
 Inside Actions, `--repo` defaults to `GITHUB_REPOSITORY` and `--target` defaults to
 `GITHUB_SHA`. A tag-triggered invocation verifies `GITHUB_REF_NAME` against the packaged
@@ -167,6 +168,26 @@ avoids a different `GH_TOKEN` taking precedence. Subsequent steps can use
 `state`; these are appended to `GITHUB_OUTPUT` after success (not during dry runs).
 Workflow builds may use development tools; consumers download the ready-to-run Wasm
 through the native CLI and need neither Node.js nor Git.
+
+Once a Release leaves draft state, the workflow runs
+`scripts/verify-github-release.py`. This creates a fresh consumer and cache, empties
+the CLI's PATH, and downloads the package and `fixtures/distribution` catalog/source
+at the workflow commit. It checks search, preview without writes, declined and approved
+file plans, exact file content, checksums, cache restoration under `--locked`, and
+offline replay with unreachable proxies. Draft releases skip consumer verification.
+The script retains `verification.json` and JSON command traces under its `--out`
+directory; Actions also writes a summary with the release and checksums.
+
+For a separate local consumer verification, export a named token and run:
+
+```sh
+python3 scripts/verify-github-release.py --binary target/debug/lenso \
+  --repo OWNER/REPO --version VERSION --ref FULL_SOURCE_COMMIT \
+  --token-env GH_TOKEN --out dist/live-consumer
+```
+
+`--out` must be new. The verification script requires Python as a test driver;
+each consumer command runs only the native Lenso binary with an empty PATH.
 
 ## Optional code resource extension
 
@@ -341,3 +362,7 @@ Publisher acceptance exercises the native REST upload path, consent/revision, pa
 resume, tag conflicts, immutable/idempotent releases, Actions variables/outputs and
 credential isolation, then consumes the uploaded package with an empty PATH. A local
 fixture does not establish a successful GitHub-hosted Actions run or public release.
+
+Real private Release uploads, a successful GitHub-hosted Actions build/publish/consume
+run, and independent macOS consumption are recorded in
+[live GitHub Release verification](github-release-verification.md).
