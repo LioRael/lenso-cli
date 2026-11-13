@@ -1,0 +1,145 @@
+schema_version=1
+id="app"
+version="0.1.0"
+host=">=0.2.4, <0.3.0"
+[dependencies.project]
+source="builtin:project"
+version="^0.1.2"
+[dependencies.code]
+source="registry:@lenso/code"
+version="^0.3.6"
+[setup]
+configure="app/configure"
+
+[handlers."app/configure"]
+type="wasm"
+module="app.wasm"
+function="configure"
+sha256="auto"
+fuel=20000000
+
+[handlers."app/bootstrap"]
+type="wasm"
+module="app.wasm"
+function="bootstrap"
+sha256="auto"
+fuel=20000000
+
+[handlers."app/prepare"]
+type="wasm"
+module="app.wasm"
+function="prepare"
+sha256="auto"
+fuel=20000000
+
+[handlers."app/check"]
+type="wasm"
+module="app.wasm"
+function="check"
+sha256="auto"
+fuel=20000000
+
+[[workflows]]
+id="app/configure"
+steps=[{id="configure",handler="app/configure"}]
+
+[[workflows]]
+id="app/preview"
+steps=[{id="app",handler="app/bootstrap"},{id="plan",handler="project/plan",needs=["app"]}]
+[[commands]]
+path=["app","preview"]
+workflow="app/preview"
+provider="app"
+about="Preview the native application"
+
+[[workflows]]
+id="app/init"
+steps=[{id="app",handler="app/bootstrap"},{id="plan",handler="project/plan",needs=["app"]},{id="apply",handler="project/apply",needs=["plan"]}]
+[[commands]]
+path=["app","init"]
+workflow="app/init"
+provider="app"
+about="Init the native application"
+
+[[workflows]]
+id="app/prepare"
+steps=[{id="app",handler="app/prepare"},{id="plan",handler="project/plan",needs=["app"]},{id="apply",handler="project/apply",needs=["plan"]}]
+[[commands]]
+path=["app","prepare"]
+workflow="app/prepare"
+provider="app"
+about="Prepare the native application"
+
+[[workflows]]
+id="app/check"
+steps=[{id="app",handler="app/check"},{id="plan",handler="project/plan",needs=["app"]},{id="apply",handler="project/apply",needs=["plan"]}]
+[[commands]]
+path=["app","check"]
+workflow="app/check"
+provider="app"
+about="Check the native application"
+
+
+[handlers."app/authorize-run"]
+type="wasm"
+module="app.wasm"
+function="authorize_run"
+sha256="auto"
+
+[handlers."app/run-typescript"]
+type="process"
+program="npm"
+args=["run", "start"]
+[[workflows]]
+id="app/run-typescript"
+steps=[{id="authorize",handler="app/authorize-run"},{id="process",handler="app/run-typescript",needs=["authorize"]}]
+[[commands]]
+path=["app","run-typescript"]
+workflow="app/run-typescript"
+provider="app"
+about="Run the native application"
+
+[handlers."app/run-rust"]
+type="process"
+program="cargo"
+args=["run", "--release"]
+[[workflows]]
+id="app/run-rust"
+steps=[{id="authorize",handler="app/authorize-run"},{id="process",handler="app/run-rust",needs=["authorize"]}]
+[[commands]]
+path=["app","run-rust"]
+workflow="app/run-rust"
+provider="app"
+about="Run the native application"
+
+[handlers."app/authorize-migrate"]
+type="wasm"
+module="app.wasm"
+function="authorize_migrate"
+sha256="auto"
+
+[handlers."app/migrate-typescript"]
+type="process"
+program="npm"
+args=["run", "migrate"]
+[[workflows]]
+id="app/migrate-typescript"
+steps=[{id="authorize",handler="app/authorize-migrate"},{id="process",handler="app/migrate-typescript",needs=["authorize"]}]
+[[commands]]
+path=["app","migrate-typescript"]
+workflow="app/migrate-typescript"
+provider="app"
+about="Migrate the native application"
+
+[handlers."app/migrate-rust"]
+type="process"
+program="cargo"
+args=["run", "--release", "--", "--migrate-only"]
+[[workflows]]
+id="app/migrate-rust"
+steps=[{id="authorize",handler="app/authorize-migrate"},{id="process",handler="app/migrate-rust",needs=["authorize"]}]
+[[commands]]
+path=["app","migrate-rust"]
+workflow="app/migrate-rust"
+provider="app"
+about="Migrate the native application"

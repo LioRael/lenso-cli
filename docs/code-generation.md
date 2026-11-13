@@ -219,3 +219,8 @@ and approves writes, compiles and runs all three samples, verifies store behavio
 checks adapter cleanup and no-op replay, and merges a template update with a local
 factory customization. Native compile/run steps are explicit acceptance-driver
 actions, not catalog code executed by author validation.
+
+For larger catalogs, `lenso code validate --sample NAME` validates all declarations
+and resources, then renders that named sample twice for determinism. Run each
+sample separately to stay inside the existing Host fuel limit. Omitting `--sample`
+still checks every sample in one invocation; unknown names fail before rendering.

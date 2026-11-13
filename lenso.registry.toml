@@ -11,3 +11,9 @@ id = "shadcn"
 path = "dist/author/shadcn"
 tag = "shadcn-v{version}"
 asset = "lenso-shadcn-{version}.tar.gz"
+
+[[extensions]]
+id="app"
+path="dist/author/app"
+tag="app-v{version}"
+asset="lenso-app-{version}.tar.gz"

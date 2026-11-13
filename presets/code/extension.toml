@@ -1,6 +1,6 @@
 schema_version = 1
 id = "code"
-version = "0.3.5"
+version = "0.3.6"
 host = ">=0.2.4, <0.3.0"
 
 [dependencies.project]
@@ -37,6 +37,7 @@ sha256 = "auto"
 type = "wasm"
 module = "code.wasm"
 function = "verify"
+fuel = 50000000
 sha256 = "auto"
 
 [handlers."code/search"]
@@ -240,9 +241,10 @@ steps = [{ id = "validate", handler = "code/validate" }]
 [[commands]]
 path = ["code", "validate"]
 workflow = "code/validate"
-about = "Validate all author resources, templates and deterministic composition samples"
+about = "Validate author resources, templates and deterministic composition samples"
 provider = "code"
 arguments = [
+ { name = "sample", help = "Validate one named sample within the Host execution budget" },
  { name = "registry", help = "Configured composition catalog" },
  { name = "refresh", help = "Refresh the pinned catalog repository", kind = "flag" },
 ]

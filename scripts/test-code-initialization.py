@@ -57,7 +57,7 @@ for name, settings in [('default', {}), ('explicit-official', {'repo': 'LioRael/
     call('ext', 'add', source, '--id', 'code', '--input', json.dumps(settings), '--yes', *credentials)
     installed = code(config())
     pin = next(e for e in json.loads((project / 'lenso.lock').read_text())['extensions'] if e['id'] == 'code')
-    assert pin['definition']['version'] == '0.3.5'
+    assert pin['definition']['version'] == '0.3.6'
     fresh = json.loads(json.dumps(installed))
     profile = installed['options']['registries']['main']
     assert profile['format'] == 'lenso-modules-v1' and profile['path'] == 'lenso.modules.toml'

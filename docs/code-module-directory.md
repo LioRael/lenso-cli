@@ -59,3 +59,21 @@ receipts are reused rather than claiming the same generated files twice.
 Preview returns the complete file/native plan, including module metadata. Only the
 existing Project apply workflow writes it after consent. Module directories do not
 execute generators or native database connections outside those existing flows.
+
+## Default and convention-specific targets
+
+Code 0.3.6 allows a target without `when` to coexist with specialized targets for
+the same language/runtime. Only fully matching targets are eligible. The match
+with the most convention predicates wins; equally specific matches remain an
+error. A default target avoids prompting for an optional specialization.
+
+For example, an ordinary Auth consumer selects `auth.rust.toml`, while an App
+project records `conventions.app_host = "lenso-http-v1"` and selects
+`auth.rust.app.toml`. Languages remain separate implementations. This selection
+only reads fixed project conventions; providers and options remain flexible
+composition choices. It grants no additional file, network or process access.
+
+`paths.modules` controls the physical destination independently of a generator's
+validated logical directory. The authored isolation rules still apply, and all
+final paths remain under the reviewed Code target. This supports the App default
+`src/modules/auth` without weakening the generator contract.

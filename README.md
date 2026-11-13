@@ -84,6 +84,37 @@ packages require that project's toolchain and separate process authorization.
 For an existing project, use `lenso init --preset empty`, followed by `lenso ext add`.
 Onboarding writes the configuration for you; editing TOML is a secondary option.
 
+### Create an application
+
+App 0.1.0 is implemented in this branch and awaits publication alongside Code
+0.3.6, Auth 0.3.0 and the official Registry records. After publication, the workflow
+below creates an editable native HTTP application. Its `app` preset
+installs App and Code; Auth remains a module added separately through Code.
+TypeScript requires Node.js 26; Rust requires Rust 1.99.0 and a native linker.
+
+```sh
+lenso new my-api --preset app
+cd my-api
+lenso code config --provider lenso.auth-store=sqlite
+lenso code preview auth
+lenso code add auth
+lenso app migrate
+lenso app check
+lenso app run
+```
+
+Choose TypeScript or Rust during creation. For Agents, provide
+`--input '{"language":"rust"}' --yes --json`; `--yes` does not select a language.
+The empty server exposes `GET /health`. Auth adds register, login, session and
+logout routes. PostgreSQL is selected with `--provider lenso.auth-store=postgres`;
+put `DATABASE_URL` in the generated application's `.env` before migrating.
+
+`lenso app preview` reviews initialization. `app prepare` retries dependency
+preparation. Native commands require authorization, and server output goes to
+stderr in JSON mode. Generated application source belongs to you; repeated
+`app init` preserves your edits. See [App workflows](docs/app-extension.md) for
+configuration, module hosts and development verification.
+
 ### Use a preset
 
 Presets select extensions and can provide a project creation or adoption recipe.
