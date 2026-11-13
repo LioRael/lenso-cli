@@ -6,7 +6,7 @@ mod modules;
 mod native;
 mod project_config;
 mod setup;
-use extism_pdk::{FnResult, Json, host_fn, plugin_fn};
+use extism_pdk::{FnResult, Json, host_fn};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -219,11 +219,11 @@ fn selection(ctx: &Value, refresh: bool) -> Result<Json<Value>> {
         json!({"selection":{"registry":name,"items":items,"commit":commit}}),
     ))
 }
-#[plugin_fn]
+#[cfg_attr(not(test), extism_pdk::plugin_fn)]
 pub fn select(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
     Ok(selection(&ctx, false)?)
 }
-#[plugin_fn]
+#[cfg_attr(not(test), extism_pdk::plugin_fn)]
 pub fn select_update(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
     Ok(selection(&ctx, true)?)
 }
@@ -315,15 +315,15 @@ fn resolve_items(ctx: &Value, diff: bool) -> Result<Json<Value>> {
         json!({"summary":{"checked":checked,"changed":files.len(),"unchanged":unchanged,"kept":kept.len()},"kept":kept,"files":files,"commands":[],"items":items,"repository":profile.source,"commit":commit,"catalog":catalog.name}),
     ))
 }
-#[plugin_fn]
+#[cfg_attr(not(test), extism_pdk::plugin_fn)]
 pub fn resolve(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
     Ok(resolve_items(&ctx, false)?)
 }
-#[plugin_fn]
+#[cfg_attr(not(test), extism_pdk::plugin_fn)]
 pub fn diff(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
     Ok(resolve_items(&ctx, true)?)
 }
-#[plugin_fn]
+#[cfg_attr(not(test), extism_pdk::plugin_fn)]
 pub fn verify(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
     let resolved = ctx["steps"]
         .as_object()
@@ -355,7 +355,7 @@ pub fn verify(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
         json!({"verified":resolved["items"].as_array().ok_or_else(||error("items are missing"))?.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")}),
     ))
 }
-#[plugin_fn]
+#[cfg_attr(not(test), extism_pdk::plugin_fn)]
 pub fn search(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
     if modules::enabled(&ctx)? {
         return Ok(modules::search(&ctx)?);
@@ -377,7 +377,7 @@ pub fn search(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
 }
 
 /// Ask for repository settings without reading files or fetching code.
-#[plugin_fn]
+#[cfg_attr(not(test), extism_pdk::plugin_fn)]
 pub fn configure(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
     configure_context(ctx)
 }
@@ -509,7 +509,7 @@ fn configure_input(mut ctx: Value) -> FnResult<Json<Value>> {
     Ok(complete(proposal))
 }
 
-#[plugin_fn]
+#[cfg_attr(not(test), extism_pdk::plugin_fn)]
 pub fn ready(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
     let composition = ctx["capabilities"]["extension.options"]["registries"]
         .as_object()

@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use extism_pdk::{FnResult, Json, plugin_fn};
+use extism_pdk::{FnResult, Json};
 use lenso_composition::{Binding, Choice, Evaluation, OptionKind, Request, Resolution};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -169,7 +169,8 @@ fn prompt(choice: &Choice) -> (String, Value) {
     }
 }
 
-#[plugin_fn]
+#[cfg_attr(not(test), extism_pdk::plugin_fn)]
+#[cfg_attr(test, expect(dead_code, reason = "Used only by Wasm entry points"))]
 pub fn compose(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
     let loaded = match crate::author::load(&ctx)? {
         Ok(loaded) => loaded,

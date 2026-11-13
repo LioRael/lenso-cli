@@ -26,9 +26,6 @@ jobs:
           cargo +1.99.0 clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Verify real Wasm onboarding
         run: |
-          cargo +1.99.0 fmt --manifest-path extensions/code/Cargo.toml --check
-          cargo +1.99.0 test --locked --manifest-path extensions/code/Cargo.toml
-          cargo +1.99.0 clippy --locked --manifest-path extensions/code/Cargo.toml --all-targets --all-features -- -D warnings
           cargo +1.99.0 build --locked -p lenso
           cargo +1.99.0 build --locked --release --target wasm32-unknown-unknown --manifest-path extensions/code/Cargo.toml
           cargo +1.99.0 build --locked --release --target wasm32-unknown-unknown --manifest-path extensions/shadcn/Cargo.toml
@@ -41,3 +38,16 @@ jobs:
           python3 scripts/test-onboarding.py
           python3 scripts/test-code-project-config.py
           python3 scripts/test-code-initialization.py
+
+  code:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Prepare Rust
+        run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
+      - name: Check pure Code extension logic
+        run: |
+          cargo +1.99.0 fmt --manifest-path extensions/code/Cargo.toml --check
+          cargo +1.99.0 check --locked --manifest-path extensions/code/Cargo.toml --all-targets
+          cargo +1.99.0 test --locked --manifest-path extensions/code/Cargo.toml
+          cargo +1.99.0 clippy --locked --manifest-path extensions/code/Cargo.toml --all-targets --all-features -- -D warnings
