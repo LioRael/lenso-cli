@@ -1,0 +1,21 @@
+scripts/release/publish.py
+  s_db0826ea383830::t_66bb8a64d3ba28 8,42-53,150
+scripts/release/test_publish.py
+  s_db0826ea383830::t_8d1196399ff2c2 1-29
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7a25c7f9ad72a014df7e77ad702ee3145f8fe1ae",
+  "prompts": {},
+  "sessions": {
+    "s_db0826ea383830": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d570-6bcc-75a1-a80c-75f063970d87",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
