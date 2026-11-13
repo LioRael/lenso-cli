@@ -226,8 +226,9 @@ cargo run
 This uses prebuilt CLI and extension packages; Cargo is needed to compile the
 generated example. See [the two-adapter example](examples/codegen-demo/README.md),
 [generator authoring](docs/code-generation.md), [native dependencies](docs/native-dependencies.md)
-and [composition design](docs/module-composition.md). SDK contracts and Registry
-module-catalog integration in the design document remain proposed work.
+and [composition design](docs/module-composition.md). The
+[official module delivery plan](docs/official-modules-plan.md) builds on the
+published TypeScript/Rust SDKs and proposes business adapters and module catalogs.
 
 ## Embed the Rust engine
 

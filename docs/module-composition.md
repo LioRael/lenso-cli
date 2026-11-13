@@ -1,9 +1,11 @@
 # Composable modules across CLI, SDK and Registry
 
 Status: CLI foundation implemented and Code 0.2.0 registered in the official extension
-catalog. SDK contracts and Registry module-catalog changes below are proposals,
-not shipped integrations. The example Auth
-catalog contains acceptance fixtures, not a production authentication service.
+catalog. The native TypeScript/Rust SDKs are published from `LioRael/lenso`.
+Business capability interfaces and Registry module catalogs below remain proposals;
+the example Auth catalog contains acceptance fixtures, not a production authentication
+service. See the [official module delivery plan](official-modules-plan.md) for the
+verified SDK baseline, repository ownership and implementation sequence.
 
 ## Decision
 
@@ -39,9 +41,9 @@ package resolution and build verification remain language-specific extension wor
 | --- | --- | --- |
 | Executable extension | `@lenso/code` package and version | CLI distribution; Release archive, digest, Host grants |
 | Preset/recipe | An onboarding selection of extensions and module intent | Registry author; does not duplicate implementation sources |
-| Contract | `example.auth-store`, contract version and future compiler fingerprint | SDK contract author |
+| Contract | `example.auth-store`, behavioral interface/version and native language types | Module contract author using the published SDK |
 | Module definition | `auth` or `pg`, module version in a pinned catalog | Registry module author |
-| Adapter | A module providing one or more contracts | SDK implementation plus Registry descriptor |
+| Adapter | A module providing one or more contracts | Native module implementation plus Code catalog descriptor |
 | Application instance | `auth`, `staff`, `auth.store` | Project composition intent |
 | Binding | `auth.store -> auth.store` or `auth.hasher -> shared-hash` | Project composition intent |
 
