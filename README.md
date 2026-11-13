@@ -13,7 +13,15 @@ structured JSON for Agents and CI.
 Prebuilt binaries are available for macOS Apple Silicon and Intel, Linux ARM64 and
 x64, and Windows x64. Installation requires no Node.js, Git or Rust.
 
-**macOS / Linux**
+**Homebrew (macOS / Linux)**
+
+```sh
+brew install LioRael/tap/lenso
+```
+
+Upgrade with `brew update && brew upgrade LioRael/tap/lenso`.
+
+**Native installer (macOS / Linux)**
 
 ```sh
 curl -fsSL https://github.com/LioRael/lenso-cli/releases/latest/download/install.sh -o install.sh

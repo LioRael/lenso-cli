@@ -163,3 +163,8 @@ jobs:
           ASSET_SEAL: ${{ needs.draft.outputs.asset_seal }}
           SOURCE_COMMIT: ${{ needs.version.outputs.source_commit }}
         run: python3 scripts/release/publish.py --version "$CLI_VERSION" --commit "$SOURCE_COMMIT" --finalize --expected-seal "$ASSET_SEAL"
+
+  homebrew:
+    needs: publish
+    uses: ./.github/workflows/homebrew.yml
+    secrets: inherit

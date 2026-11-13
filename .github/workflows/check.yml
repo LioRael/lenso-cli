@@ -17,6 +17,7 @@ jobs:
       - name: Check native workspace and optional composition
         run: |
           python3 scripts/release/test_publish.py
+          python3 scripts/release/test_homebrew.py
           cargo +1.99.0 fmt --all --check
           cargo +1.99.0 check --locked --workspace
           cargo +1.99.0 test --locked --workspace

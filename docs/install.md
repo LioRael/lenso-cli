@@ -30,7 +30,27 @@ Each archive contains `lenso` or `lenso.exe`, `release.json` with the target/ver
 binary SHA-256 and system-library dependencies, and `README.txt`. `SHA256SUMS` covers
 all five archives plus `install.sh` and `install.ps1`.
 
-## macOS and Linux
+## Homebrew (macOS and Linux)
+
+```sh
+brew install LioRael/tap/lenso
+lenso --version
+```
+
+The formula supports Apple Silicon and Intel macOS 13+, and ARM64 and x64 Linux
+with glibc 2.35+. It installs the matching native release archive with a pinned
+SHA-256; no Rust build is needed. Homebrew owns this installation:
+
+```sh
+brew update
+brew upgrade LioRael/tap/lenso
+```
+
+`lenso self update` directs Homebrew installations to `brew upgrade`. To remove
+the executable, run `brew uninstall lenso`; CLI configuration and caches remain.
+The formula is maintained in [LioRael/homebrew-tap](https://github.com/LioRael/homebrew-tap).
+
+## Native installer (macOS and Linux)
 
 Download the latest stable installer before running it:
 
@@ -233,3 +253,22 @@ After publication, dispatch `Verify latest native install` with the expected ver
 All five platforms download the public `latest/download` installer and install with
 GitHub credentials removed. They repeat the overwrite/tampering checks and Wasm
 consumer verification. Each job uploads its installation report as an artifact.
+
+### Automatic Homebrew updates
+
+After successful native publication, `Update Homebrew formula` resolves the latest
+published stable CLI release, checks all four archive hashes against `SHA256SUMS`
+and GitHub asset digests, and generates `Formula/lenso.rb`. Drafts, prereleases and
+extension releases cannot become formula versions. Four native runners perform
+`brew style`, `brew audit --strict`, `brew install` and `brew test` before the formula
+is committed to the tap. The test also verifies that self-update recognizes Homebrew
+ownership. The updater reads `latest` on each run, so rerunning an older release
+does not roll the formula back.
+
+The CLI repository's `HOMEBREW_TAP_DEPLOY_KEY` Actions secret holds an SSH deploy
+key with write access only to `LioRael/homebrew-tap`. It is used only after the
+installation jobs pass. No account-wide token is needed. Updates modify only
+`Formula/lenso.rb`; Agent formulae and workflows remain independent. A failure
+leaves the published CLI release available and the existing formula unchanged.
+After fixing a failure, dispatch `Update Homebrew formula` on `main` to retry
+without rebuilding binaries or changing release assets.
