@@ -198,9 +198,30 @@ checks destination/read/process grants and gathers file and command confirmation
 before writing any files, then applies files and runs commands in order. Command
 failures report completed files and commands; they do not imply global rollback.
 
+Project provider 0.1.1 also accepts `deletions`, an array of project-relative file
+paths, alongside `files`. Replacements and deletions share the 128-operation limit,
+path guards, exact preimages, read/write grants and consent digest. Duplicate or
+ancestor/descendant destinations are rejected across both lists. Preflight checks
+all destinations before mutations; replacements are staged, deletions applied,
+then replacements persisted. Deletions never recurse into directories. Partial
+failures report completed paths; no whole-plan rollback is implied. Extensions
+using this field must require a compatible Project provider version.
+
 `project/diff` builds the same read-only preview using file-read grants instead of
 write grants. It never applies the plan or executes its command requests; application
 still independently requires destination/read/process grants and consent.
+
+Project provider 0.1.2 adds `finalizations`, exact second-phase replacements for
+paths already present in prepared `files`. Their contents, paths and prepared
+preimages are included in the original plan digest and preview. All file/command
+approvals precede any mutations. After successful commands, Project checks the
+prepared replacement/deletion postconditions and commits the finalizations.
+Failed commands leave prepared state and never commit completion records. The
+combined prepared/completion content shares the 1 MiB plan budget; duplicate or
+undeclared completion paths are rejected. Empty finalization lists preserve the
+existing command behavior. This is a generic completion mechanism, not native
+package-manager logic. Native CLI 0.2.4 also supplies `host.offline` to extension
+workflows so their own installers can honor the Host access policy.
 
 Exports return exactly one tagged outcome:
 
@@ -228,6 +249,14 @@ and 256 logical HTTP calls per invocation. Compilation
 is outside the call timeout; these limits do not represent a total host-process
 memory/CPU quota. A synchronous host callback finishes under its own request timeout.
 Module loading and compilation happen only at invocation time.
+
+Native CLI 0.2.3 accepts optional `fuel` on a Wasm handler declaration, bounded to
+1..=50,000,000 units. Omission retains the 10,000,000 default. Invalid budgets fail
+metadata validation and invocation. Code's template composition and author
+validation handlers request 50,000,000 units; these declarations do not add Host
+grants or change memory/message/timeout limits. Extensions using this field must
+require a compatible Host version.
+
 
 The CLI emits one JSON object on stdout per invocation with `--json`. Result
 objects use `type: result`, `status: complete|needs_input`, a workflow ID, completed

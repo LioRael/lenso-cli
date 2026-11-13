@@ -1,0 +1,3 @@
+pub fn create() -> std::io::Result<std::sync::Arc<dyn crate::business::Store>> {
+    Ok(std::sync::Arc::new(super::{{ module|symbol }}::MemoryStore::default()))
+}

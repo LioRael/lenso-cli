@@ -234,6 +234,10 @@ try:
     assert curated_code['definition']['version']=='0.1.0'
     assert curated_code['github']['tag']=='code-v0.1.0'
     assert curated_code['source']=='registry:@test/code'
+    from composition_acceptance import verify as verify_composition
+    verify_composition(root, scratch, config, snapshot, run, application, no_node)
+    from author_acceptance import verify as verify_author
+    verify_author(root, scratch, config, snapshot, run, application, no_node)
     # No ref/release discovery is needed to restore a locked package after cache deletion.
     pinned=(first/'lenso.lock').read_bytes();ref_queries=requests['/repos/acme/tools/commits/HEAD'];release_queries=requests['/repos/acme/tools/releases']
     shutil.rmtree(cache)

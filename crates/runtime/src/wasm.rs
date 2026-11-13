@@ -16,6 +16,9 @@ pub struct WasmSpec {
     pub function: String,
     /// Lowercase SHA-256 of the exact module bytes.
     pub sha256: String,
+    /// Optional instruction budget, bounded by the Host to 1..=50 million units.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fuel: Option<u64>,
 }
 
 /// Maximum accepted ABI input and output, bounded before deserialization.
@@ -24,6 +27,16 @@ const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_MODULE_BYTES: u64 = 16 * 1024 * 1024;
 
 impl WasmSpec {
+    pub(crate) fn fuel_limit(&self) -> Result<u64, Error> {
+        let fuel = self.fuel.unwrap_or(10_000_000);
+        if !(1..=50_000_000).contains(&fuel) {
+            return Err(Error::Invalid(
+                "Wasm fuel must be between 1 and 50000000".into(),
+            ));
+        }
+        Ok(fuel)
+    }
+
     /// Invoke ABI v1 with no WASI and only explicitly granted host read/HTTPS capabilities.
     ///
     /// # Errors
@@ -63,6 +76,7 @@ impl WasmSpec {
         credentials: std::collections::BTreeMap<String, crate::Credential>,
         source_options: crate::LoadOptions,
     ) -> Result<Outcome, Error> {
+        let fuel = self.fuel_limit()?;
         let mut file = std::fs::File::open(module)?;
         use std::io::Read;
         let mut bytes = Vec::new();
@@ -98,7 +112,7 @@ impl WasmSpec {
                 .disallow_all_hosts();
             let mut plugin = PluginBuilder::new(manifest)
                 .with_wasi(false)
-                .with_fuel_limit(10_000_000)
+                .with_fuel_limit(fuel)
                 .with_function("source_resolve", [ValType::I64], [ValType::I64], host.clone(), crate::host::source_resolve)
                 .with_function("source_read", [ValType::I64], [ValType::I64], host.clone(), crate::host::source_read)
                 .with_function("read_file", [ValType::I64], [ValType::I64], host.clone(), crate::host::read_file)

@@ -1,0 +1,66 @@
+schema_version = 1
+
+[modules.auth]
+version = "1.0.0"
+[modules.auth.supports]
+language = ["typescript"]
+[modules.auth.options.cache-enabled]
+prompt = "Enable the optional session cache?"
+kind = { type = "boolean" }
+default = false
+[modules.auth.slots.store]
+contract = "example.auth-store"
+version = "^1"
+[modules.auth.slots.hasher]
+contract = "example.password-hash"
+version = "^1"
+attributes = { password-safe = "true" }
+[modules.auth.slots.cache]
+contract = "example.session-cache"
+version = "^1"
+optional = true
+when = { cache-enabled = true }
+
+[modules.sqlite]
+version = "1.0.0"
+[modules.sqlite.provides."example.auth-store"]
+version = "1.0.0"
+[modules.sqlite.options.path]
+prompt = "SQLite database path"
+kind = { type = "text" }
+default = "app.sqlite"
+
+[modules.pg]
+version = "1.0.0"
+[modules.pg.provides."example.auth-store"]
+version = "1.1.0"
+[modules.pg.options.connection]
+prompt = "Environment variable containing the PostgreSQL connection URL"
+kind = { type = "environment" }
+
+[modules.redis]
+version = "1.0.0"
+[modules.redis.provides."example.session-cache"]
+version = "1.0.0"
+[modules.redis.options.connection]
+prompt = "Environment variable containing the Redis connection URL"
+kind = { type = "environment" }
+
+[modules.memory]
+version = "1.0.0"
+[modules.memory.provides."example.session-cache"]
+version = "1.0.0"
+
+[modules.argon2]
+version = "1.0.0"
+[modules.argon2.provides."example.password-hash"]
+version = "1.0.0"
+attributes = { password-safe = "true" }
+
+[resources]
+auth = [{ path = "adapters/auth.ts", target = "index.ts" }]
+sqlite = [{ path = "adapters/sqlite.ts", target = "index.ts" }]
+pg = [{ path = "adapters/pg.ts", target = "index.ts" }]
+redis = [{ path = "adapters/redis.ts", target = "index.ts" }]
+memory = [{ path = "adapters/memory.ts", target = "index.ts" }]
+argon2 = [{ path = "adapters/argon2.ts", target = "index.ts" }]

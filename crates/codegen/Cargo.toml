@@ -1,0 +1,20 @@
+[package]
+name = "lenso-codegen"
+description = "Pure deterministic generation contracts for Lenso code extensions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+lenso-composition = { path = "../composition" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+minijinja = { version = "2", features = ["json", "fuel"] }
+
+[dev-dependencies]
+toml.workspace = true
+
+[lints]
+workspace = true

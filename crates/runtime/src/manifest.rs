@@ -88,6 +88,11 @@ pub(crate) fn validate_metadata(extension: &Extension) -> Result<(), Error> {
         semver::VersionReq::parse(&dependency.version)
             .map_err(|e| Error::Invalid(e.to_string()))?;
     }
+    for handler in extension.handlers.values() {
+        if let HandlerSpec::Wasm(spec) = handler {
+            spec.fuel_limit()?;
+        }
+    }
     let namespace = format!("{}/", extension.id);
     for id in extension
         .handlers
@@ -296,6 +301,7 @@ pub(crate) fn register_locked(
             for (name, value) in [
                 ("project.files", serde_json::to_value(&installed.files)?),
                 ("host.reads", serde_json::to_value(&installed.reads)?),
+                ("host.offline", serde_json::json!(options.offline)),
                 ("host.http", serde_json::to_value(&installed.http)?),
                 (
                     "host.read_roots",

@@ -119,6 +119,11 @@ pub(crate) fn register(cli: &mut Cli, options: &LoadOptions) -> Result<(), Error
             ],
         ),
         (
+            vec!["ext", "configure"],
+            "Review configuration and grants for an installed extension",
+            vec![argument("extension", true, "Installed provider ID")],
+        ),
+        (
             vec!["ext", "remove"],
             "Remove a direct extension selection",
             vec![argument("extension", true, "Provider ID")],
@@ -150,7 +155,7 @@ pub(crate) fn register(cli: &mut Cli, options: &LoadOptions) -> Result<(), Error
         let operation = path.join(" ");
         if matches!(
             operation.as_str(),
-            "new" | "init" | "ext add" | "preset apply"
+            "new" | "init" | "ext add" | "ext configure" | "preset apply"
         ) {
             args.push(argument(
                 "token-env",
@@ -489,7 +494,7 @@ async fn run(
                 .and_then(Value::as_str)
                 .map(String::from)
         });
-    if matches!(operation, "ext add" | "ext remove") && extension.is_none() {
+    if matches!(operation, "ext add" | "ext remove" | "ext configure") && extension.is_none() {
         return Ok(Outcome::NeedsInput {
             question: Question {
                 id: "extension".into(),
@@ -660,7 +665,20 @@ async fn run(
             new_packages.push(installed);
         }
     }
-    let added = new_packages;
+    let added = if operation == "ext configure" {
+        let id = extension.as_deref().expect("extension checked");
+        vec![
+            config
+                .cli
+                .extensions
+                .iter()
+                .find(|installed| installed.id == id)
+                .cloned()
+                .ok_or_else(|| Error::Invalid(format!("{id} is not installed")))?,
+        ]
+    } else {
+        new_packages
+    };
     if let Some((id, selection)) = selection {
         if let Some(previous) = config.cli.presets.get(&id)
             && previous.version == selection.version
@@ -713,7 +731,8 @@ async fn run(
         ));
     }
     for entry in &lock.extensions {
-        if added.iter().any(|installation| installation.id == entry.id)
+        if operation != "ext configure"
+            && added.iter().any(|installation| installation.id == entry.id)
             && let Some(setup) = &entry.definition.setup
         {
             let installed = config
@@ -750,6 +769,20 @@ async fn run(
             "preset recipe {recipe} is not provided by its extensions"
         )));
     }
+    if operation == "ext configure"
+        && !lock.extensions.iter().any(|entry| {
+            Some(entry.id.as_str()) == extension.as_deref()
+                && entry
+                    .definition
+                    .setup
+                    .as_ref()
+                    .is_some_and(|setup| setup.configure.is_some())
+        })
+    {
+        return Err(Error::Invalid(
+            "installed extension has no configuration workflow".into(),
+        ));
+    }
     let mut check = Cli::new("lenso");
     crate::register_management_with_options(&mut check, &options)?;
     crate::manifest::register_locked(&mut check, root, &config, &lock, &options)?;
@@ -757,17 +790,19 @@ async fn run(
     let approval = crate::cache::digest(&serde_json::to_vec(
         &json!({"target":target,"previous":old,"config":config,"lock":lock,"preset":preset_identity}),
     )?);
-    if let Some(outcome) = question(
-        &ctx,
-        &format!("configure:{approval}"),
-        format!(
-            "Project: {}\n{}\nExtensions:\n{}\nApprove this configuration and its explicit grants?",
-            target.display(),
-            bytes,
-            tree
-        ),
-        QuestionKind::Confirm,
-    )? {
+    if operation != "ext configure"
+        && let Some(outcome) = question(
+            &ctx,
+            &format!("configure:{approval}"),
+            format!(
+                "Project: {}\n{}\nExtensions:\n{}\nApprove this configuration and its explicit grants?",
+                target.display(),
+                bytes,
+                tree
+            ),
+            QuestionKind::Confirm,
+        )?
+    {
         return Ok(outcome);
     }
     if creating {

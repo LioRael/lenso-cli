@@ -117,3 +117,93 @@ fn symlink_destinations_and_newly_introduced_symlinks_are_rejected()
     assert!(!outside.path().join("file").exists());
     Ok(())
 }
+
+#[test]
+fn deletion_is_previewed_bound_to_consent_and_guarded_by_preimages()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    fs::write(root.path().join("old.txt"), "generated\n")?;
+    let plan = Plan::build_operations(
+        root.path(),
+        vec![file("receipt.json", "new receipt")],
+        vec!["old.txt".into()],
+    )?;
+    assert!(plan.preview().contains("Delete file: old.txt"));
+    assert!(root.path().join("old.txt").exists());
+    assert!(plan.apply("wrong approval").is_err());
+    fs::write(root.path().join("old.txt"), "local edit\n")?;
+    assert!(plan.apply(&plan.id()?).is_err());
+    assert!(!root.path().join("receipt.json").exists());
+    let plan = Plan::build_operations(
+        root.path(),
+        vec![file("receipt.json", "new receipt")],
+        vec!["old.txt".into()],
+    )?;
+    let completed = plan.apply(&plan.id()?)?;
+    assert_eq!(
+        completed,
+        vec![std::path::PathBuf::from("old.txt"), "receipt.json".into()]
+    );
+    assert!(!root.path().join("old.txt").exists());
+    assert!(root.path().join("receipt.json").exists());
+    assert!(
+        Plan::build_operations(root.path(), vec![file("same", "new")], vec!["same".into()])
+            .is_err()
+    );
+    for path in ["../escape", ".git/config", ".lenso/state", "/absolute"] {
+        assert!(Plan::build_operations(root.path(), vec![], vec![path.into()]).is_err());
+    }
+    fs::create_dir(root.path().join("directory"))?;
+    assert!(Plan::build_operations(root.path(), vec![], vec!["directory".into()]).is_err());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn deletion_rejects_a_symlink_introduced_after_review() -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir()?;
+    let outside = tempfile::tempdir()?;
+    fs::write(root.path().join("old"), "same")?;
+    fs::write(outside.path().join("protected"), "same")?;
+    let plan = Plan::build_operations(root.path(), vec![], vec!["old".into()])?;
+    fs::remove_file(root.path().join("old"))?;
+    symlink(outside.path().join("protected"), root.path().join("old"))?;
+    assert!(plan.apply(&plan.id()?).is_err());
+    assert!(outside.path().join("protected").exists());
+    Ok(())
+}
+
+#[test]
+fn completion_records_are_reviewed_and_written_only_in_the_second_phase()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let plan = Plan::build(
+        root.path(),
+        vec![
+            file("manifest", "new dependency"),
+            file("receipt", "pending"),
+        ],
+    )?
+    .with_finalizations(vec![file("receipt", "installed")])?;
+    assert!(plan.preview().contains("After successful commands"));
+    let id = plan.id()?;
+    plan.apply(&id)?;
+    assert_eq!(fs::read_to_string(root.path().join("receipt"))?, "pending");
+    assert!(plan.finalize("wrong").is_err());
+    fs::write(root.path().join("manifest"), "modified during command")?;
+    assert!(plan.finalize(&id).is_err());
+    assert_eq!(fs::read_to_string(root.path().join("receipt"))?, "pending");
+    fs::write(root.path().join("manifest"), "new dependency")?;
+    plan.finalize(&id)?;
+    assert_eq!(
+        fs::read_to_string(root.path().join("receipt"))?,
+        "installed"
+    );
+    assert!(
+        Plan::build(root.path(), vec![file("manifest", "next")])?
+            .with_finalizations(vec![file("unreviewed", "unsafe")])
+            .is_err()
+    );
+    Ok(())
+}

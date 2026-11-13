@@ -1,11 +1,11 @@
 schema_version = 1
 id = "code"
-version = "0.1.2"
-host = ">=0.2.0, <0.3.0"
+version = "0.2.0"
+host = ">=0.2.4, <0.3.0"
 
 [dependencies.project]
 source = "builtin:project"
-version = "^0.1.0"
+version = "^0.1.2"
 
 [handlers."code/select"]
 type = "wasm"
@@ -155,3 +155,73 @@ steps = [{ id = "configure", handler = "code/configure" }]
 [[workflows]]
 id = "code/ready"
 steps = [{ id = "ready", handler = "code/ready" }]
+
+[handlers."code/compose"]
+type = "wasm"
+module = "code.wasm"
+function = "compose"
+sha256 = "auto"
+fuel = 50000000
+
+[[workflows]]
+id = "code/compose-preview"
+steps = [
+ { id = "compose", handler = "code/compose" },
+ { id = "plan", handler = "project/plan", needs = ["compose"] },
+]
+
+[[workflows]]
+id = "code/compose"
+steps = [
+ { id = "compose", handler = "code/compose" },
+ { id = "plan", handler = "project/plan", needs = ["compose"] },
+ { id = "apply", handler = "project/apply", needs = ["plan"] },
+ { id = "verify", handler = "code/verify", needs = ["compose", "apply"] },
+]
+
+[[commands]]
+path = ["code", "compose-preview"]
+workflow = "code/compose-preview"
+about = "Resolve module capabilities and preview a single composition plan"
+provider = "code"
+arguments = [
+ { name = "registry", help = "Configured composition catalog" },
+ { name = "module", help = "Root module (or reuse the current composition)", positional = true },
+ { name = "sample", help = "Author sample providing complete composition intent" },
+ { name = "install", help = "Force native dependency installation or retry", kind = "flag" },
+ { name = "refresh", help = "Refresh the pinned catalog repository", kind = "flag" },
+]
+
+[[commands]]
+path = ["code", "compose"]
+workflow = "code/compose"
+about = "Resolve module instances and review their combined code changes"
+provider = "code"
+arguments = [
+ { name = "registry", help = "Configured composition catalog" },
+ { name = "module", help = "Root module (or reuse the current composition)", positional = true },
+ { name = "sample", help = "Author sample providing complete composition intent" },
+ { name = "install", help = "Force native dependency installation or retry", kind = "flag" },
+ { name = "refresh", help = "Refresh the pinned catalog repository", kind = "flag" },
+]
+
+[handlers."code/validate"]
+type = "wasm"
+module = "code.wasm"
+function = "validate"
+sha256 = "auto"
+fuel = 50000000
+
+[[workflows]]
+id = "code/validate"
+steps = [{ id = "validate", handler = "code/validate" }]
+
+[[commands]]
+path = ["code", "validate"]
+workflow = "code/validate"
+about = "Validate all author resources, templates and deterministic composition samples"
+provider = "code"
+arguments = [
+ { name = "registry", help = "Configured composition catalog" },
+ { name = "refresh", help = "Refresh the pinned catalog repository", kind = "flag" },
+]

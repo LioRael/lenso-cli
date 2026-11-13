@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "acme-example"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "lenso-cli",
  "lenso-runtime",
@@ -1431,7 +1431,7 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "lenso"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "lenso-cli",
  "lenso-project",
@@ -1445,7 +1445,7 @@ dependencies = [
 
 [[package]]
 name = "lenso-cli"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "clap",
  "console",
@@ -1459,8 +1459,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "lenso-codegen"
+version = "0.2.4"
+dependencies = [
+ "lenso-composition",
+ "minijinja",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "toml 1.2.1+spec-1.1.0",
+]
+
+[[package]]
+name = "lenso-composition"
+version = "0.2.4"
+dependencies = [
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
+ "toml 1.2.1+spec-1.1.0",
+]
+
+[[package]]
 name = "lenso-project"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "lenso-cli",
  "lenso-runtime",
@@ -1474,7 +1498,7 @@ dependencies = [
 
 [[package]]
 name = "lenso-runtime"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "base64 0.22.1",
  "extism",
@@ -1612,6 +1636,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57804b2c9b69967f1536a56f86297e367a33b19e98852ed624b84551cdbc0d90"
 dependencies = [
  "rustix",
+]
+
+[[package]]
+name = "memo-map"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5449c8c750f1a07ea702bbd212bd999fceece9b3d1508b17023b3e174583124b"
+
+[[package]]
+name = "minijinja"
+version = "2.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86886cf6dbf4e614b19c9a1eec9775f021869d7eadde0fc73921a81b90c9b4c9"
+dependencies = [
+ "memo-map",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

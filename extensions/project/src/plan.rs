@@ -32,6 +32,10 @@ pub struct Plan {
     project: PathBuf,
     files: Vec<FileChange>,
     snapshots: Vec<Snapshot>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    finalizations: Vec<FileChange>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    deletions: Vec<PathBuf>,
     #[serde(default)]
     evidence: Evidence,
     #[serde(default)]
@@ -54,9 +58,9 @@ pub enum PlanError {
     /// Serialization of the approval digest failed.
     #[error(transparent)]
     Json(#[from] serde_json::Error),
-    /// Some replacements completed before a later failure; no global rollback is claimed.
+    /// Some replacements or deletions completed; no global rollback is claimed.
     #[error(
-        "apply failed after writing {completed:?}: {cause}; inspect these files before retrying"
+        "apply failed after changing {completed:?}: {cause}; inspect these files before retrying"
     )]
     Partial {
         /// Files already replaced successfully.
@@ -75,29 +79,117 @@ impl Plan {
     /// # Errors
     /// Rejects traversal, symlinks, internal metadata, duplicate paths, and oversized files.
     pub fn build(project: &Path, files: Vec<FileChange>) -> Result<Self, PlanError> {
+        Self::build_operations(project, files, Vec::new())
+    }
+
+    /// Snapshot replacements and explicit file deletions in one reviewed plan.
+    /// # Errors
+    /// Rejects unsafe paths, duplicate operations and oversized plans.
+    pub fn build_operations(
+        project: &Path,
+        files: Vec<FileChange>,
+        deletions: Vec<PathBuf>,
+    ) -> Result<Self, PlanError> {
         let project = project.canonicalize()?;
         let mut plan = Self {
             schema_version: 1,
             project,
             files,
+            deletions,
             snapshots: Vec::new(),
+            finalizations: Vec::new(),
             evidence: Evidence::default(),
             commands: Vec::new(),
         };
         plan.validate_files()?;
         let mut size = 0;
-        for file in &plan.files {
-            let content = read_file(&guarded_path(&plan.project, &file.path)?)?;
+        for path in plan.paths().map(Path::to_path_buf).collect::<Vec<_>>() {
+            let content = read_file(&guarded_path(&plan.project, &path)?)?;
             size += content.as_ref().map_or(0, String::len);
             if size > MAX_PLAN_BYTES {
                 return Err(PlanError::Invalid("preimages exceed 1 MiB".into()));
             }
-            plan.snapshots.push(Snapshot {
-                path: file.path.clone(),
-                content,
-            });
+            plan.snapshots.push(Snapshot { path, content });
         }
         Ok(plan)
+    }
+
+    /// Add exact second-phase replacements committed only after successful commands.
+    /// Each path must already have a prepared replacement in this plan.
+    /// # Errors
+    /// Rejects undeclared paths, duplicate finalizations and excessive bytes.
+    pub fn with_finalizations(mut self, files: Vec<FileChange>) -> Result<Self, PlanError> {
+        self.finalizations = files;
+        self.validate_files()?;
+        Ok(self)
+    }
+
+    /// Commit reviewed completion records after commands succeed.
+    /// # Errors
+    /// Rejects altered prepared outputs, stale completion paths and invalid approval.
+    pub fn finalize(&self, approved_id: &str) -> Result<Vec<PathBuf>, PlanError> {
+        if self.id()? != approved_id {
+            return Err(PlanError::Invalid(
+                "approval digest does not match this plan".into(),
+            ));
+        }
+        self.validate_files()?;
+        if self.finalizations.is_empty() {
+            return Ok(Vec::new());
+        }
+        for file in &self.files {
+            if read_file(&guarded_path(&self.project, &file.path)?)?.as_deref()
+                != Some(&file.content)
+            {
+                return Err(PlanError::Stale(file.path.clone()));
+            }
+        }
+        for path in &self.deletions {
+            if read_file(&guarded_path(&self.project, path)?)?.is_some() {
+                return Err(PlanError::Stale(path.clone()));
+            }
+        }
+        let prepared: Vec<_> = self
+            .finalizations
+            .iter()
+            .map(|file| {
+                let parent = guarded_path(&self.project, &file.path)?
+                    .parent()
+                    .ok_or_else(|| PlanError::Invalid("completion path has no parent".into()))?
+                    .to_owned();
+                let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+                let target = guarded_path(&self.project, &file.path)?;
+                temp.write_all(file.content.as_bytes())?;
+                temp.as_file()
+                    .set_permissions(fs::metadata(target)?.permissions())?;
+                temp.as_file().sync_all()?;
+                Ok::<_, PlanError>(temp)
+            })
+            .collect::<Result<_, _>>()?;
+        let mut completed = Vec::new();
+        for (file, temp) in self.finalizations.iter().zip(prepared) {
+            let result = (|| {
+                let target = guarded_path(&self.project, &file.path)?;
+                let expected = self
+                    .files
+                    .iter()
+                    .find(|prepared| prepared.path == file.path)
+                    .ok_or_else(|| PlanError::Invalid("missing prepared replacement".into()))?;
+                if read_file(&target)?.as_deref() != Some(&expected.content) {
+                    return Err(PlanError::Stale(file.path.clone()));
+                }
+                temp.persist(target).map_err(|error| error.error)?;
+                Ok::<_, PlanError>(())
+            })();
+            if let Err(error) = result {
+                return Err(PlanError::Partial {
+                    completed,
+                    cause: error.to_string(),
+                });
+            }
+            completed.push(file.path.clone());
+        }
+        Ok(completed)
     }
 
     /// Bind host-recorded source digests and project reads into this approval.
@@ -136,7 +228,10 @@ impl Plan {
 
     /// Iterate the exact project-relative destinations included in this plan.
     pub fn paths(&self) -> impl Iterator<Item = &Path> {
-        self.files.iter().map(|file| file.path.as_path())
+        self.files
+            .iter()
+            .map(|file| file.path.as_path())
+            .chain(self.deletions.iter().map(PathBuf::as_path))
     }
 
     /// Compute the consent identifier over paths, preimages, content, and project root.
@@ -168,6 +263,38 @@ impl Plan {
                     .to_string(),
             );
         }
+        for path in &self.deletions {
+            let old = self
+                .snapshots
+                .iter()
+                .find(|s| &s.path == path)
+                .and_then(|s| s.content.as_deref())
+                .unwrap_or("");
+            preview.push_str(&format!("\nDelete file: {}\n", path.display()));
+            preview.push_str(
+                &similar::TextDiff::from_lines(old, "")
+                    .unified_diff()
+                    .header(&format!("a/{}", path.display()), "/dev/null")
+                    .to_string(),
+            );
+        }
+        for file in &self.finalizations {
+            let prepared = self
+                .files
+                .iter()
+                .find(|prepared| prepared.path == file.path)
+                .map_or("", |prepared| prepared.content.as_str());
+            preview.push_str(&format!(
+                "\nAfter successful commands: {}\n",
+                file.path.display()
+            ));
+            preview.push_str(
+                &similar::TextDiff::from_lines(prepared, &file.content)
+                    .unified_diff()
+                    .header("prepared", "completed")
+                    .to_string(),
+            );
+        }
         if !self.commands.is_empty() {
             preview.push_str("\nExternal commands (run after file changes):\n");
             for command in &self.commands {
@@ -194,12 +321,12 @@ impl Plan {
         }
         self.validate_files()?;
         self.check_reads()?;
-        if self.snapshots.len() != self.files.len()
+        if self.snapshots.len() != self.files.len() + self.deletions.len()
             || self
                 .snapshots
                 .iter()
-                .zip(&self.files)
-                .any(|(s, f)| s.path != f.path)
+                .zip(self.paths())
+                .any(|(s, path)| s.path != path)
         {
             return Err(PlanError::Invalid(
                 "snapshot paths do not match changes".into(),
@@ -224,6 +351,30 @@ impl Plan {
         }
         self.check_snapshots()?;
         let mut completed = Vec::new();
+        for path in &self.deletions {
+            let result = (|| {
+                let target = guarded_path(&self.project, path)?;
+                let snapshot = self
+                    .snapshots
+                    .iter()
+                    .find(|s| &s.path == path)
+                    .ok_or_else(|| PlanError::Invalid("missing deletion preimage".into()))?;
+                if read_file(&target)? != snapshot.content {
+                    return Err(PlanError::Stale(path.clone()));
+                }
+                if snapshot.content.is_some() {
+                    fs::remove_file(target)?;
+                }
+                Ok::<_, PlanError>(())
+            })();
+            if let Err(error) = result {
+                return Err(PlanError::Partial {
+                    completed,
+                    cause: error.to_string(),
+                });
+            }
+            completed.push(path.clone());
+        }
         for ((target, temp), snapshot) in staged.into_iter().zip(&self.snapshots) {
             let result = (|| {
                 guarded_path(&self.project, &snapshot.path)?;
@@ -258,29 +409,51 @@ impl Plan {
                 "unsupported schema or noncanonical project root".into(),
             ));
         }
-        if self.files.len() > 128
+        if self.files.len() + self.deletions.len() > 128
             || self.files.iter().map(|f| f.content.len()).sum::<usize>() > MAX_PLAN_BYTES
         {
             return Err(PlanError::Invalid(
                 "plans allow at most 128 files and 1 MiB of content".into(),
             ));
         }
-        let mut paths = BTreeSet::new();
-        for file in &self.files {
-            guarded_path(&self.project, &file.path)?;
-            if self
+        let mut finalized = BTreeSet::new();
+        if self.finalizations.len() > 128
+            || self
                 .files
                 .iter()
-                .any(|other| file.path != other.path && file.path.starts_with(&other.path))
+                .chain(&self.finalizations)
+                .map(|file| file.content.len())
+                .sum::<usize>()
+                > MAX_PLAN_BYTES
+        {
+            return Err(PlanError::Invalid(
+                "prepared and completion content exceed plan limits".into(),
+            ));
+        }
+        for file in &self.finalizations {
+            if !self.files.iter().any(|prepared| prepared.path == file.path)
+                || !finalized.insert(&file.path)
+            {
+                return Err(PlanError::Invalid(
+                    "completion paths must be unique prepared replacements".into(),
+                ));
+            }
+        }
+        let mut paths = BTreeSet::new();
+        for path in self.paths() {
+            guarded_path(&self.project, path)?;
+            if self
+                .paths()
+                .any(|other| path != other && path.starts_with(other))
             {
                 return Err(PlanError::Invalid(
                     "file destinations cannot contain one another".into(),
                 ));
             }
-            if !paths.insert(&file.path) {
+            if !paths.insert(path) {
                 return Err(PlanError::Invalid(format!(
                     "duplicate path: {}",
-                    file.path.display()
+                    path.display()
                 )));
             }
         }

@@ -1,0 +1,26 @@
+{% for module in modules %}
+{% if module != "greeter" %}
+#[path = "../modules/{{ module }}/adapter.rs"]
+mod {{ module|symbol }};
+{% endif %}
+{% endfor %}
+{% for id in resolution.order %}
+#[path = "../instances/{{ id }}/factory.rs"]
+mod {{ id|symbol }};
+{% endfor %}
+
+pub struct App {
+    pub greeters: std::collections::BTreeMap<&'static str, crate::business::Greeter>,
+}
+pub fn build() -> std::io::Result<App> {
+{% for id in resolution.order %}
+    let {{ id|symbol }} = {{ id|symbol }}::create({% for slot, target in resolution.instances[id].bindings|items %}{% if target %}{{ target|symbol }}.clone(),{% endif %}{% endfor %})?;
+{% endfor %}
+    Ok(App { greeters: [
+{% for id, module in request.instances|items %}
+{% if module == "greeter" %}
+        ({{ id|rust_string }}, {{ id|symbol }}),
+{% endif %}
+{% endfor %}
+    ].into() })
+}

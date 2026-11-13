@@ -1,0 +1,3 @@
+pub fn create(store: std::sync::Arc<dyn crate::business::Store>) -> std::io::Result<crate::business::Greeter> {
+    Ok(crate::business::Greeter::new({{ instance.configuration.prefix|rust_string }}.into(), store))
+}

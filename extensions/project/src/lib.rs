@@ -22,6 +22,9 @@ pub fn register(engine: &mut Engine) -> Result<(), Error> {
         let sources: Vec<_> = ctx.steps.values().filter_map(|v| v.get("files")).collect();
         if sources.len() != 1 { return Err(Error::Invalid("project/plan requires exactly one files dependency".into())); }
         let files: Vec<FileChange> = serde_json::from_value(sources[0].clone())?;
+        let deletions: Vec<std::path::PathBuf> = ctx.steps.values().filter_map(|output| output.get("deletions")).map(|value| serde_json::from_value::<Vec<std::path::PathBuf>>(value.clone())).collect::<Result<Vec<_>,_>>()?.into_iter().flatten().collect();
+        if writable { check_files_grant(&ctx, deletions.iter().map(std::path::PathBuf::as_path))?; }
+        else { check_reads_grant(&ctx, deletions.iter().map(std::path::PathBuf::as_path))?; }
         if writable { check_files_grant(&ctx, files.iter().map(|file| file.path.as_path()))?; }
         else { check_reads_grant(&ctx, files.iter().map(|file| file.path.as_path()))?; }
         let mut evidence = lenso_runtime::Evidence::default();
@@ -46,7 +49,8 @@ pub fn register(engine: &mut Engine) -> Result<(), Error> {
             }
         }
         check_reads_grant(&ctx, evidence.reads.keys().map(std::path::PathBuf::as_path))?;
-        let plan = Plan::build(&ctx.project, files).and_then(|p| p.with_evidence(evidence)).map_err(|e| Error::Operation(e.to_string()))?.with_commands(commands);
+        let finalizations: Vec<FileChange> = ctx.steps.values().filter_map(|output|output.get("finalizations")).map(|value|serde_json::from_value::<Vec<FileChange>>(value.clone())).collect::<Result<Vec<_>,_>>()?.into_iter().flatten().collect();
+        let plan = Plan::build_operations(&ctx.project, files, deletions).and_then(|plan|plan.with_finalizations(finalizations)).and_then(|p| p.with_evidence(evidence)).map_err(|e| Error::Operation(e.to_string()))?.with_commands(commands);
         Ok(Outcome::complete(serde_json::json!({"id": plan.id().map_err(|e| Error::Operation(e.to_string()))?, "diff":plan.preview(), "plan":plan})))
     })?;
     }
@@ -96,7 +100,8 @@ pub fn register(engine: &mut Engine) -> Result<(), Error> {
             if let Err(error) = command.run(ctx.clone()).await { return Err(Error::Operation(format!("files already applied: {completed:?}; commands completed: {executed:?}; failed command {} {:?}: {error}; inspect files and lockfile before retrying", command.program, command.args))); }
             executed.push(command.clone());
         }
-        Ok(Outcome::complete(serde_json::json!({"applied":completed,"commands":executed,"plan_id":id})))
+        let finalized = plan.finalize(&id).map_err(|error|Error::Operation(format!("files already applied: {completed:?}; commands completed: {executed:?}; completion failed: {error}")))?;
+        Ok(Outcome::complete(serde_json::json!({"applied":completed,"finalized":finalized,"commands":executed,"plan_id":id})))
     })
 }
 

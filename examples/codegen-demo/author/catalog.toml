@@ -1,0 +1,58 @@
+schema_version = 1
+
+[modules.greeter]
+version = "1.0.0"
+[modules.greeter.supports]
+language = ["rust"]
+[modules.greeter.options.prefix]
+prompt = "Greeting prefix"
+kind = { type = "text" }
+default = "Hello"
+[modules.greeter.slots.store]
+contract = "demo.store"
+version = "^1"
+
+[modules.memory]
+version = "1.0.0"
+[modules.memory.provides."demo.store"]
+version = "1.0.0"
+
+[modules.disk]
+version = "1.0.0"
+[modules.disk.provides."demo.store"]
+version = "1.0.0"
+[modules.disk.options.path]
+prompt = "Application state directory"
+kind = { type = "text" }
+default = "state"
+
+[resources]
+memory = [{ path = "adapters/memory.rs", target = "adapter.rs" }]
+disk = [{ path = "adapters/disk.rs", target = "adapter.rs" }]
+
+[generator]
+schema_version = 1
+directory = "generated"
+files = [
+  { scope = "composition", template = "templates/app.rs.j2", target = "app.rs" },
+  { scope = "instance", module = "greeter", template = "templates/greeter.rs.j2", target = "factory.rs" },
+  { scope = "instance", module = "memory", template = "templates/memory.rs.j2", target = "factory.rs" },
+  { scope = "instance", module = "disk", template = "templates/disk.rs.j2", target = "factory.rs" },
+]
+
+[samples.memory]
+instances = { primary = "greeter" }
+context = { language = "rust" }
+bindings = { "primary.store" = { type = "module", module = "memory" } }
+
+[samples.disk]
+instances = { primary = "greeter" }
+context = { language = "rust" }
+configuration = { primary = { prefix = "Welcome" } }
+bindings = { "primary.store" = { type = "module", module = "disk" } }
+
+[samples.shared]
+instances = { primary = "greeter", secondary = "greeter", shared = "memory" }
+context = { language = "rust" }
+configuration = { secondary = { prefix = "Hi" } }
+bindings = { "primary.store" = { type = "instance", instance = "shared" }, "secondary.store" = { type = "instance", instance = "shared" } }

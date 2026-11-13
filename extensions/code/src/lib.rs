@@ -1,4 +1,8 @@
 //! Optional repository code distribution. The Host owns transport, pins and permissions.
+mod author;
+mod composition;
+mod generation;
+mod native;
 use extism_pdk::{FnResult, Json, host_fn, plugin_fn};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -318,8 +322,19 @@ pub fn verify(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
         let path = entry["path"]
             .as_str()
             .ok_or_else(|| error("file path is missing"))?;
-        if local(path)?.as_deref() != entry["content"].as_str() {
+        let content = resolved["finalizations"]
+            .as_array()
+            .and_then(|files| files.iter().find(|file| file["path"] == entry["path"]))
+            .unwrap_or(entry);
+        if local(path)?.as_deref() != content["content"].as_str() {
             return Err(error("resource file verification failed").into());
+        }
+    }
+    if let Some(expected) = resolved["expected"].as_object() {
+        for (path, content) in expected {
+            if local(path)?.as_deref() != content.as_str() {
+                return Err(error("generated file postcondition failed").into());
+            }
         }
     }
     Ok(complete(
@@ -343,6 +358,44 @@ pub fn search(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
 /// Ask for repository settings without reading files or fetching code.
 #[plugin_fn]
 pub fn configure(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
+    if ctx["input"].get("native").is_some()
+        && ctx["input"].get("author_root").is_none()
+        && ctx["input"].get("repo").is_none()
+        && ctx["capabilities"]["extension.options"]["registries"].is_object()
+    {
+        let mut proposal =
+            json!({"installation":{"options":ctx["capabilities"]["extension.options"]}});
+        native_setup(&ctx, &mut proposal)?;
+        for (field, capability) in [
+            ("reads", "host.reads"),
+            ("files", "project.files"),
+            ("processes", "host.processes"),
+        ] {
+            if let Some(existing) = ctx["capabilities"][capability].as_array() {
+                let proposed = proposal["installation"][field]
+                    .as_array_mut()
+                    .ok_or_else(|| error("missing native setup field"))?;
+                for value in existing {
+                    if !proposed.contains(value) {
+                        proposed.push(value.clone());
+                    }
+                }
+            }
+        }
+        return Ok(complete(proposal));
+    }
+
+    if let Some(root) = ctx["input"]["author_root"].as_str() {
+        relative(root)?;
+        let target = ctx["input"]["target"].as_str().unwrap_or("src");
+        let catalog = ctx["input"]["catalog"].as_str().unwrap_or("catalog.toml");
+        lenso_codegen::relative(target)?;
+        lenso_codegen::relative(catalog)?;
+        let mut proposal = json!({"installation":{"sources":[],"read_roots":[root,target],"write_roots":[target],"options":{"registries":{"main":{"source":format!("project:{root}"),"ref":"working-tree","path":catalog,"format":"lenso-compose-v1","target":target}}}}});
+        native_setup(&ctx, &mut proposal)?;
+        return Ok(complete(proposal));
+    }
+
     let repo = ctx["input"]["repo"]
         .as_str()
         .or_else(|| ctx["answers"]["code:repository"].as_str());
@@ -367,15 +420,50 @@ pub fn configure(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
     let catalog = ctx["input"]["catalog"].as_str().unwrap_or("catalog.toml");
     relative(target)?;
     relative(catalog)?;
+    let format = ctx["input"]["format"].as_str().unwrap_or("lenso-code-v1");
+    if !matches!(format, "lenso-code-v1" | "lenso-compose-v1") {
+        return Err(error("unsupported catalog format").into());
+    }
     let reference = ctx["input"]["ref"].as_str().unwrap_or("HEAD");
-    Ok(complete(
-        json!({"installation":{"sources":[format!("github:{repo}")],"read_roots":[target],"write_roots":[target],"options":{"registries":{"main":{"source":format!("github-repo:{repo}"),"ref":reference,"path":catalog,"format":"lenso-code-v1","target":target}}}}}),
-    ))
+    let mut proposal = json!({"installation":{"sources":[format!("github:{repo}")],"read_roots":[target],"write_roots":[target],"options":{"registries":{"main":{"source":format!("github-repo:{repo}"),"ref":reference,"path":catalog,"format":format,"target":target}}}}});
+    native_setup(&ctx, &mut proposal)?;
+    Ok(complete(proposal))
 }
 
 #[plugin_fn]
-pub fn ready(_: Json<Value>) -> FnResult<Json<Value>> {
+pub fn ready(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
+    let composition = ctx["capabilities"]["extension.options"]["registries"]
+        .as_object()
+        .is_some_and(|profiles| {
+            profiles
+                .values()
+                .any(|profile| profile["format"] == "lenso-compose-v1")
+        });
+    let command = if composition {
+        "compose-preview"
+    } else {
+        "search"
+    };
     Ok(complete(
-        json!({"message":"Code source configured; use lenso code search"}),
+        json!({"message":format!("Code source configured; use lenso code {command}")}),
     ))
+}
+
+fn native_setup(ctx: &Value, proposal: &mut Value) -> Result<()> {
+    if let Some(value) = ctx["input"].get("native") {
+        let (settings, paths, commands) = native::configure(value)?;
+        proposal["installation"]["options"]["native"] = settings;
+        proposal["installation"]["reads"] = json!(paths);
+        proposal["installation"]["files"] = json!(
+            paths
+                .into_iter()
+                .filter(|path| path != "Cargo.lock"
+                    && !path.ends_with("/Cargo.lock")
+                    && path != "package-lock.json"
+                    && !path.ends_with("/package-lock.json"))
+                .collect::<Vec<_>>()
+        );
+        proposal["installation"]["processes"] = json!(commands);
+    }
+    Ok(())
 }

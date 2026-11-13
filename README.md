@@ -57,6 +57,27 @@ shared cache in place. A new project without extensions uses `--preset empty`.
 These commands require CLI 0.2 or a current source build; the earlier 0.1 binary
 continues to provide its original command set.
 
+## Composable code modules
+
+The next Code extension source version (0.2.0, not yet published) adds
+`code compose-preview` and `code compose` for capability-based module composition.
+Module instances select compatible adapters independently, share resources only
+through explicit bindings, track file ownership, reconcile incremental updates and
+safely clean up obsolete generated files through one reviewed plan. The generic runtime
+retains its existing Host and authorization responsibilities.
+
+See [module composition and the coordinated SDK/Registry design](docs/module-composition.md)
+for the working catalog format, author setup, Agent input and implementation limits.
+
+The author workflow also supports strict templates, isolated generated directories,
+`code validate` and complete named samples. See [authoring code generators](docs/code-generation.md)
+and the [compilable Rust two-adapter example](examples/codegen-demo/README.md).
+These author features require a source build of native CLI 0.2.4.
+
+Code's optional [native dependency management](docs/native-dependencies.md) applies
+Cargo/npm declarations to real manifests, preserves shared ownership, and proposes
+separately authorized installer commands with failure/retry state.
+
 ## Configuration and dependencies
 
 The editable project configuration lives in root `lenso.toml`. Commands prepare

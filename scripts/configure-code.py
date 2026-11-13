@@ -10,9 +10,12 @@ from project_config import load, save
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("project", type=Path)
-parser.add_argument("--repo", required=True, help="GitHub owner/repo")
+source = parser.add_mutually_exclusive_group(required=True)
+source.add_argument("--repo", help="GitHub owner/repo")
+source.add_argument("--author-root", help="Project-relative local author catalog directory")
 parser.add_argument("--ref", default="HEAD")
 parser.add_argument("--catalog", default="catalog.toml")
+parser.add_argument("--format", choices=["lenso-code-v1", "lenso-compose-v1"], default="lenso-code-v1")
 parser.add_argument("--registry", default="main")
 parser.add_argument("--target", default="src", help="Project-relative destination/read/write root")
 parser.add_argument("--file", action="append", help="Use explicit repository files instead of a remote catalog")
@@ -35,7 +38,9 @@ def safe(value):
     return path
 
 safe(args.target)
-if len(args.repo.split("/")) != 2:
+if args.author_root:
+    safe(args.author_root)
+if args.repo and len(args.repo.split("/")) != 2:
     parser.error("--repo must be owner/repo")
 crate = root / "extensions/code"
 subprocess.run([os.environ.get("CARGO", "cargo"), "build", "--manifest-path", str(crate / "Cargo.toml"), "--target", "wasm32-unknown-unknown", "--release"], check=True)
@@ -47,10 +52,14 @@ destination = safe(relative)
 destination.mkdir(parents=True, exist_ok=True)
 shutil.copyfile(module, destination / "code.wasm")
 shutil.copyfile(manifest, destination / "extension.toml")
-profile = {"source":"github-repo:" + args.repo, "ref":args.ref, "path":args.catalog, "format":"lenso-code-v1", "target":args.target}
+profile = {"source":("github-repo:" + args.repo if args.repo else "project:" + args.author_root), "ref":args.ref, "path":args.catalog, "format":args.format, "target":args.target}
+if args.author_root:
+    profile["format"] = "lenso-compose-v1"
 if args.file:
+    if args.author_root:
+        parser.error("--file is only available with --repo")
     profile.update({"format":"inline", "items":[{"name":args.item,"files":args.file}]})
-policy = {"id":"code", "source":relative + "/extension.toml", "sources":["github:" + args.repo], "read_roots":[args.target], "write_roots":[args.target],
+policy = {"id":"code", "source":relative + "/extension.toml", "sources":(["github:" + args.repo] if args.repo else []), "read_roots":([args.target] + ([args.author_root] if args.author_root else [])), "write_roots":[args.target],
           "options":{"registries":{args.registry:profile}}}
 path = project / "lenso.toml"
 config = load(path) if path.exists() else {"cli":{"schema_version":1,"extensions":[]}}
@@ -62,4 +71,4 @@ if args.github_api or args.token_env:
     if args.token_env:
         github["token_env"] = args.token_env
 save(path, config)
-print(f"Declared code extension and github:{args.repo}; destination grant: {args.target}")
+print(f"Declared code extension and {profile['source']}; destination grant: {args.target}")
