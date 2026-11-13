@@ -4,7 +4,7 @@ members = ["crates/*", "extensions/project", "examples/acme-cli"]
 exclude = ["examples/wasm-greeting", "extensions/shadcn", "extensions/code"]
 
 [workspace.package]
-version = "1.1.1"
+version = "1.1.2"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT OR Apache-2.0"
@@ -13,7 +13,7 @@ homepage = "https://github.com/LioRael/lenso-cli"
 readme = "README.md"
 
 [workspace.dependencies]
-lenso-cli = { path = "crates/framework", version = "1.1.1" }
+lenso-cli = { path = "crates/framework", version = "1.1.2" }
 lenso-runtime = { path = "crates/runtime", version = "0.2.4" }
 lenso-project = { path = "extensions/project", version = "0.1.2" }
 serde = { version = "1", features = ["derive"] }

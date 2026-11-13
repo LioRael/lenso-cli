@@ -75,6 +75,7 @@ jobs:
         run: |
           binary="target/${{ matrix.target }}/release/lenso"
           if [ "$RUNNER_OS" = Windows ]; then binary="$binary.exe"; fi
+          ${{ matrix.python }} scripts/test-update-notice.py --binary "$binary"
           ${{ matrix.python }} scripts/release/package.py --binary "$binary" \
             --target "${{ matrix.target }}" --version "$CLI_VERSION" --out dist/cli
       - uses: actions/upload-artifact@v7

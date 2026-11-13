@@ -119,7 +119,7 @@ can require reinstalling to repair the receipt.
 
 `--check` performs no installation writes. `--offline` prevents release requests.
 `--json` returns the normal command report, including the selected version and
-executable path. No update checks or replacements run during ordinary commands.
+executable path. Automatic checks never replace the executable.
 HTTP errors distinguish exhausted GitHub API quotas from missing versions and
 credential/access failures, without printing credentials or signed download URLs.
 The updater needs write access to the installation directory and never elevates
@@ -129,6 +129,26 @@ installer; credentials are stripped from redirects to a different origin.
 
 Checksums provide integrity against release metadata, not an independent publisher
 signature. Releases remain unsigned as described above.
+
+### Version reminders
+
+Successful interactive commands can show a newer-version reminder on stderr, using
+only a local cached result. The reminder adds no filesystem or network work before
+command startup. A missing or expired result schedules a detached worker after the command
+finishes; it queries the public GitHub release redirect with a three-second timeout.
+The first check's result becomes available to subsequent commands. The worker never
+downloads or installs an executable and does not use GitHub API credentials.
+
+Successful checks are cached for 24 hours; failed/interrupted checks back off for
+one hour. An operating-system lock prevents concurrent workers from repeating a
+request. Results live at `v1/update-notice/result.json` under `lenso cache path`,
+including when `LENSO_CACHE_DIR` overrides that directory. Cache and network errors
+are silent and never change the command's exit status.
+
+CI, non-interactive use, `--offline`, `--json`, `--no-interactive`, help/version output
+and `self` commands suppress both reminders and background checks. Set
+`LENSO_NO_UPDATE_CHECK=1` to disable them for all commands. Cargo and Homebrew users
+receive their package manager's upgrade instructions.
 
 ## Private repository access
 

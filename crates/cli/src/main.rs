@@ -1,9 +1,19 @@
 use lenso_cli::Cli;
 mod self_update;
+mod update_notice;
+
+fn main() {
+    let args: Vec<_> = std::env::args_os().collect();
+    if update_notice::is_worker(&args) {
+        update_notice::worker();
+    } else {
+        run(args);
+    }
+}
 
 #[tokio::main]
-async fn main() {
-    let args: Vec<_> = std::env::args_os().collect();
+async fn run(args: Vec<std::ffi::OsString>) {
+    let notify = update_notice::enabled(&args);
     let setup_args = args.clone();
     let setup = Cli::prepare(&args, move |events| {
         let args = setup_args;
@@ -56,5 +66,8 @@ async fn main() {
             1
         }
     };
+    if code == 0 && notify {
+        update_notice::after_command();
+    }
     std::process::exit(code);
 }

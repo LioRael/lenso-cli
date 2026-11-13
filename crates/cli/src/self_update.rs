@@ -114,7 +114,7 @@ fn target() -> Result<&'static str, Error> {
     }
 }
 
-fn managed_by(executable: &Path) -> Option<&'static str> {
+pub(super) fn managed_by(executable: &Path) -> Option<&'static str> {
     if executable
         .components()
         .any(|c| c.as_os_str() == "Cellar" || c.as_os_str() == "Homebrew")
@@ -183,12 +183,25 @@ struct Github {
     client: reqwest::blocking::Client,
     token: Option<String>,
 }
+
+pub(super) fn latest_public_version(timeout: Duration) -> Result<Version, Error> {
+    Github::anonymous(timeout)?.public_version(None)
+}
+
 impl Github {
     fn new() -> Result<Self, Error> {
+        let mut github = Self::anonymous(Duration::from_secs(300))?;
+        github.token = ["GH_TOKEN", "GITHUB_TOKEN"]
+            .into_iter()
+            .filter_map(|key| std::env::var(key).ok())
+            .find(|value| !value.is_empty());
+        Ok(github)
+    }
+    fn anonymous(timeout: Duration) -> Result<Self, Error> {
         let client = reqwest::blocking::Client::builder()
             .user_agent("lenso-self-update")
-            .connect_timeout(Duration::from_secs(20))
-            .timeout(Duration::from_secs(300))
+            .connect_timeout(timeout.min(Duration::from_secs(20)))
+            .timeout(timeout)
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
                 let url = attempt.url();
                 let allowed = url.scheme() == "https"
@@ -205,11 +218,10 @@ impl Github {
             }))
             .build()
             .map_err(|_| invalid("could not initialize update HTTP client"))?;
-        let token = ["GH_TOKEN", "GITHUB_TOKEN"]
-            .into_iter()
-            .filter_map(|key| std::env::var(key).ok())
-            .find(|value| !value.is_empty());
-        Ok(Self { client, token })
+        Ok(Self {
+            client,
+            token: None,
+        })
     }
     fn get(&self, endpoint: &str, accept: &str, limit: u64) -> Result<Vec<u8>, Error> {
         let mut request = self

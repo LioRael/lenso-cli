@@ -21,6 +21,7 @@ jobs:
           cargo +1.99.0 check --locked --workspace
           cargo +1.99.0 test --locked --workspace
           cargo +1.99.0 test --locked -p lenso --no-default-features
+          python3 scripts/test-update-notice.py --binary target/debug/lenso
           cargo +1.99.0 clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Verify real Wasm onboarding
         run: |
