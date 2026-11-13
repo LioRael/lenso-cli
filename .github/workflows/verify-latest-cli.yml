@@ -1,0 +1,67 @@
+name: Verify latest native install
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Expected latest stable CLI version
+        required: true
+        default: "1.0.0"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-22.04
+    outputs:
+      commit: ${{ steps.release.outputs.commit }}
+    steps:
+      - name: Resolve expected latest release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: |
+          python3 -c 'import os,re; assert re.fullmatch(r"\d+\.\d+\.\d+", os.environ["EXPECTED_VERSION"])'
+          tag=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+          test "$tag" = "v$EXPECTED_VERSION"
+          commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha)
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+  install:
+    needs: release
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-15, python: python3 }
+          - { runner: macos-15-intel, python: python3 }
+          - { runner: ubuntu-22.04, python: python3 }
+          - { runner: ubuntu-22.04-arm, python: python3 }
+          - { runner: windows-2022, python: python }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Verify anonymous latest installation and installed CLI
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CLI_VERSION: ${{ inputs.version }}
+          SOURCE_COMMIT: ${{ needs.release.outputs.commit }}
+        run: |
+          installer=install.sh
+          if [ "$RUNNER_OS" = Windows ]; then installer=install.ps1; fi
+          ${{ matrix.python }} scripts/release/verify.py \
+            --installer-url "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/$installer" \
+            --repo "$GITHUB_REPOSITORY" --commit "$SOURCE_COMMIT" --version "$CLI_VERSION" \
+            --public-latest --out "$RUNNER_TEMP/latest-install"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: latest-install-${{ matrix.runner }}
+          path: ${{ runner.temp }}/latest-install/installation.json
+          if-no-files-found: error

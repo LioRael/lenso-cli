@@ -6,7 +6,7 @@ installer uses operating-system tools; Python is only used by the release test d
 
 ## Release assets
 
-Download from the [CLI Releases](https://github.com/LioRael/lenso-cli/releases/tag/v0.2.2).
+Download from the [latest CLI Release](https://github.com/LioRael/lenso-cli/releases/latest).
 CLI tags use `v<VERSION>`; extension tags such as `code-v0.1.2` distribute separate
 packages. Native stable CLI Releases own the GitHub `latest` entry. Extension
 publication explicitly leaves that entry unchanged.
@@ -32,16 +32,16 @@ all five archives plus `install.sh` and `install.ps1`.
 
 ## macOS and Linux
 
-For a public repository, download the pinned installer before running it:
+Download the latest stable installer before running it:
 
 ```sh
-curl -fsSL https://github.com/LioRael/lenso-cli/releases/download/v0.2.2/install.sh -o install.sh
+curl -fsSL https://github.com/LioRael/lenso-cli/releases/latest/download/install.sh -o install.sh
 sh install.sh
 export PATH="$HOME/.local/bin:$PATH"
 lenso --version
 ```
 
-For the latest stable CLI installer, replace `download/v0.2.2` with `latest/download`.
+To pin CLI 1.0.0, replace `latest/download` with `download/v1.0.0`.
 Each downloaded installer is pinned to its own exact Release, even if `latest`
 changes during installation. Requirements are `sh`, `curl`, `tar`, `gzip`, standard file
 utilities and `sha256sum` (Linux) or `shasum` (macOS). It does not need jq or a JSON parser.
@@ -55,9 +55,10 @@ leave an existing installation intact. Shell startup files are not edited.
 
 ## Windows
 
-Download `install.ps1` from the Release page, then run it in PowerShell:
+Download and run the latest stable installer in PowerShell:
 
 ```powershell
+Invoke-WebRequest https://github.com/LioRael/lenso-cli/releases/latest/download/install.ps1 -OutFile install.ps1
 & .\install.ps1
 $env:PATH = "$env:LOCALAPPDATA\Lenso\bin;$env:PATH"
 lenso --version
@@ -72,7 +73,7 @@ use the manual ZIP installation below.
 
 ## Private repository access
 
-The repository is currently private. Browser downloads require an account with
+For private repositories, browser downloads require an account with
 repository access. For scripted installation, set `GH_TOKEN` or `GITHUB_TOKEN` to
 a credential allowed to read repository contents. Do not put the token in a URL.
 
@@ -96,7 +97,7 @@ browser if needed. Verify the relevant archive line before extraction:
 ```sh
 sha256sum --check --ignore-missing SHA256SUMS  # Linux
 shasum -a 256 --check --ignore-missing SHA256SUMS  # macOS
-tar -xzf lenso-v0.2.2-aarch64-apple-darwin.tar.gz
+tar -xzf lenso-v1.0.0-aarch64-apple-darwin.tar.gz
 mkdir -p "$HOME/.local/bin"
 cp lenso "$HOME/.local/bin/lenso"
 ```
@@ -147,3 +148,8 @@ the draft's sealed asset IDs, sizes, states and hashes again, preventing publica
 of assets changed after verification. Stable CLI releases explicitly become `latest`;
 prereleases and extension packages do not. Actions uses repository-scoped credentials;
 no personal token needs to be stored in repository secrets.
+
+After publication, dispatch `Verify latest native install` with the expected version.
+All five platforms download the public `latest/download` installer and install with
+GitHub credentials removed. They repeat the overwrite/tampering checks and Wasm
+consumer verification. Each job uploads its installation report as an artifact.

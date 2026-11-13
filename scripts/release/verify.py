@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import urllib.request
 from github import request
 
 parser = argparse.ArgumentParser(description=__doc__)
@@ -16,14 +17,25 @@ parser.add_argument("--repo", required=True)
 parser.add_argument("--commit", required=True)
 parser.add_argument("--version", required=True)
 parser.add_argument("--out", type=Path, required=True)
+parser.add_argument("--public-latest", action="store_true", help="Download and install the public latest release without credentials")
 args = parser.parse_args()
 args.out.mkdir(parents=True, exist_ok=False)
 output = args.out.resolve()
 windows = sys.platform == "win32"
 installer = output / ("install.ps1" if windows else "install.sh")
-installer.write_bytes(request(args.installer_url, binary=True))
+if args.public_latest:
+    expected = f"https://github.com/{args.repo}/releases/latest/download/{installer.name}"
+    if args.installer_url != expected:
+        parser.error("--public-latest requires the canonical latest installer URL")
+    with urllib.request.urlopen(urllib.request.Request(expected, headers={"User-Agent": "lenso-install-verification"}), timeout=300) as response:
+        installer.write_bytes(response.read())
+else:
+    installer.write_bytes(request(args.installer_url, binary=True))
 prefix = output / "installed bin"
 env = dict(os.environ)
+if args.public_latest:
+    env.pop("GH_TOKEN", None)
+    env.pop("GITHUB_TOKEN", None)
 if windows:
     shell = shutil.which("pwsh")
     if not shell:
@@ -68,6 +80,7 @@ subprocess.run([sys.executable, str(root / "scripts/verify-github-release.py"), 
                 "--token-env", "GITHUB_TOKEN", "--out", str(output / "consumer-check")], check=True)
 report = {"cli_version": args.version, "platform": sys.platform, "binary_sha256": before,
           "installed": True, "refused_overwrite": True, "refused_tampering": True,
-          "wasm_consumer_verified": True, "no_node_git_rust": True}
+          "wasm_consumer_verified": True, "no_node_git_rust": True,
+          "public_latest_without_credentials": args.public_latest}
 (output / "installation.json").write_text(json.dumps(report, indent=2) + "\n")
 print(json.dumps(report), flush=True)
