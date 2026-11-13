@@ -196,12 +196,11 @@ business-specific formats belong to extensions. Authors can configure release ta
 asset names and resource layouts. See [GitHub distribution and authoring](docs/github-distribution.md)
 for the package format, authentication and GitHub Actions publishing.
 
-## Code generation in development
+## Code generation
 
-**Code 0.2.0 is implemented in this repository but has not been published.**
-The official `code` package currently resolves to 0.1.2; installing CLI 1.0.0 does
-not add the newer extension commands. Use the local Code package with CLI 1.0.0
-to work on these features:
+Code 0.2.0 is available as a [GitHub Release](https://github.com/LioRael/lenso-cli/releases/tag/code-v0.2.0)
+and runs on CLI 1.0.0. The official Registry still selects Code 0.1.2; use the
+direct package source below to select 0.2.0. It adds:
 
 - Capability-based composition with independently selected adapters and explicit
   instance bindings, rather than a preset for every possible combination.
@@ -215,16 +214,18 @@ A local example generates a Rust application with memory and file-backed adapter
 
 ```sh
 cp -R examples/codegen-demo /tmp/lenso-codegen-demo
-python3 scripts/configure-code.py /tmp/lenso-codegen-demo --author-root author
 cd /tmp/lenso-codegen-demo
+lenso init --preset empty
+lenso ext add github-release:LioRael/lenso-cli/code --id code --constraint '=0.2.0' \
+  --input '{"author_root":"author","target":"src"}'
 lenso code validate
 lenso code compose-preview --sample memory
 lenso code compose --sample memory
 cargo run
 ```
 
-The helper builds the local Wasm extension and requires its Rust development
-toolchain. See [the two-adapter example](examples/codegen-demo/README.md),
+This uses prebuilt CLI and extension packages; Cargo is needed to compile the
+generated example. See [the two-adapter example](examples/codegen-demo/README.md),
 [generator authoring](docs/code-generation.md), [native dependencies](docs/native-dependencies.md)
 and [composition design](docs/module-composition.md). SDK and Registry integration
 in the design document remains proposed work.

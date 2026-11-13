@@ -1,9 +1,9 @@
 # Authoring code generators
 
 Implemented in the CLI repository, independently of the main Lenso SDK and official
-Registry. Requires native CLI 1.0.0 and a local build of the unpublished Code 0.2.0
-extension. The published CLI binary is sufficient; the official Code 0.1.2 package
-does not acquire these commands automatically.
+Registry. Requires native CLI 1.0.0 and the published Code 0.2.0 extension.
+Install it directly from GitHub Releases as shown below; the official Registry
+still selects Code 0.1.2. Neither consumer package needs a local Wasm build.
 
 ## Author workflow
 
@@ -22,17 +22,17 @@ my-project/
     composition.json            # Existing composition/ownership artifact
 ```
 
-After the new Code package is published, normal onboarding uses the existing
-reviewed extension setup, with no manual configuration editing:
+Install the published package through reviewed extension setup:
 
 ```sh
-lenso ext add code --input '{"author_root":"author","target":"src"}'
+lenso ext add github-release:LioRael/lenso-cli/code --id code --constraint '=0.2.0' \
+  --input '{"author_root":"author","target":"src"}'
 lenso code validate
 lenso code compose-preview --sample memory
 lenso code compose --sample memory
 ```
 
-For development before publication, build and declare the local package instead:
+To develop the Code extension itself, build and declare the local package instead:
 
 ```sh
 python3 scripts/configure-code.py /path/to/my-project --author-root author

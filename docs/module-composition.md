@@ -99,15 +99,16 @@ or answers files; those values are intentionally persisted as project intent.
 
 ## Code extension flow
 
-The new Code extension source package is version 0.2.0. It is not published or
-added to the official Registry by this change. Existing published Code versions
-retain their existing commands. Authors build and publish the Wasm package with
-the established Release pipeline; native consumers still require no Node.js or Git.
+Code 0.2.0 is published through GitHub Releases and runs on native CLI 1.0.0.
+The official Registry still selects Code 0.1.2. Select the direct Release source
+for composition commands; existing Code 0.1.x installations retain their commands.
+Native consumers require no Node.js, Git or Wasm compiler.
 
-With the new package available, onboarding uses the existing extension setup:
+Onboarding uses the existing extension setup:
 
 ```sh
-lenso ext add code --input '{"repo":"owner/modules","ref":"v1","catalog":"catalog.toml","target":"src/generated","format":"lenso-compose-v1"}'
+lenso ext add github-release:LioRael/lenso-cli/code --id code --constraint '=0.2.0' \
+  --input '{"repo":"owner/modules","ref":"v1","catalog":"catalog.toml","target":"src/generated","format":"lenso-compose-v1"}'
 lenso code compose-preview auth
 lenso code compose auth
 
@@ -233,8 +234,8 @@ identical run produces no file mutations. Source refresh is explicit through
 
 Project provider 0.1.1 introduced file deletions; current Code 0.2.0 requires
 provider 0.1.2 for reviewed completion writes used by native installation. Older native binaries fail dependency resolution instead
-of silently ignoring cleanup. CLI 1.0.0 includes Project 0.1.2; Code 0.2.0 still
-requires a local extension build. Project stages all replacement bytes and rechecks every preimage before
+of silently ignoring cleanup. CLI 1.0.0 includes Project 0.1.2. Project stages all
+replacement bytes and rechecks every preimage before
 applying deletions, then replacements, with the composition receipt last. Per-file
 operations are guarded, but a later I/O failure can leave completed changes. Errors
 list completed paths; no whole-plan filesystem transaction or rollback is claimed.

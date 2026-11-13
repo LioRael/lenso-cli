@@ -2,15 +2,17 @@
 
 A user-owned Rust business contract and entry point, two standard-library storage
 adapters, and extension-generated factories and assembly. No Lenso SDK or official
-Registry package is used. Run with native CLI 1.0.0 and a local build of the
-unpublished Code 0.2.0 extension.
+Registry package is used. Run with native CLI 1.0.0 and the prebuilt Code 0.2.0
+GitHub Release package.
 
-From the CLI repository, build and configure a copy of this directory:
+From the CLI repository, configure a copy of this directory:
 
 ```sh
 cp -R examples/codegen-demo /tmp/lenso-codegen-demo
-python3 scripts/configure-code.py /tmp/lenso-codegen-demo --author-root author
 cd /tmp/lenso-codegen-demo
+lenso init --preset empty
+lenso ext add github-release:LioRael/lenso-cli/code --id code --constraint '=0.2.0' \
+  --input '{"author_root":"author","target":"src"}'
 lenso code validate
 lenso code compose-preview --sample memory
 lenso code compose --sample memory
@@ -21,9 +23,10 @@ lenso code compose --sample shared
 cargo run
 ```
 
-The published CLI binary can run this example. After the new
-Code package is published, normal onboarding can use `lenso ext add code --input
-'{"author_root":"author","target":"src"}'` instead of the development helper.
+The official `code` alias still selects 0.1.2; the explicit source above selects
+the published 0.2.0 package. To develop the extension itself, use
+`python3 scripts/configure-code.py /path/to/project --author-root author` from the
+CLI repository with the Rust Wasm toolchain installed.
 `--json`, `--answers FILE`, `--yes`, and nonterminal execution use the normal Agent
 protocol. `--yes` approves file mutations but does not choose a conflict resolution.
 
