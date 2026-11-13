@@ -6,6 +6,9 @@ Business capability interfaces and Registry module catalogs below remain proposa
 the example Auth catalog contains acceptance fixtures, not a production authentication
 service. See the [official module delivery plan](official-modules-plan.md) for the
 verified SDK baseline, repository ownership and implementation sequence.
+The [variant experience](module-variants.md) makes language/runtime first-class
+target choices above module capability and adapter selection; that additional
+authoring/onboarding design is proposed work.
 
 ## Decision
 

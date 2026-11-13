@@ -125,6 +125,13 @@ neither native type compatibility nor correct behavior.
 
 ## First module: password authentication and opaque sessions
 
+Language is a first-class implementation variant for an application target. Auth
+remains one discoverable module family with native TypeScript/Rust implementations,
+then runtime, capability and adapter choices. A workspace can contain different
+language targets; language is not a repository-global flag. See the
+[variant selection and update experience](module-variants.md) for defaults,
+compatibility, Agent behavior and migration boundaries.
+
 Extract a reusable module from the SDK's Private Files reference implementation,
 reviewing application assumptions rather than treating an example as production
 identity infrastructure.
@@ -214,7 +221,7 @@ migration path. Do not present code cleanup as data migration.
 
 | Stage | Deliverable | Acceptance |
 | --- | --- | --- |
-| M0 | Module repository, SDK-based native interfaces and Code preset-default integration | Both languages consume published SDKs; preset defaults/input overrides and grant denial work through published CLI; no SDK redesign |
+| M0 | Module repository, SDK-based native interfaces, target/language context and Code preset-default integration | Both languages consume published SDKs; ambiguous targets and incompatible variants have clear decisions; defaults/input overrides and grant denial work through published CLI; no SDK redesign |
 | M1 | Auth + SQLite in TS/Rust, explicit HTTP adapter and small runnable consumer | Register/login/session/logout persist across restart; validation/authorization/expiry/revocation and uniqueness failures pass; generated consumers compile and run |
 | M2 | PostgreSQL AuthStore | Same business module and behavioral fixtures pass on real SQLite and PostgreSQL; user customizations survive generated updates; database migration scope is explicit |
 | M3 | Published source snapshot and official Auth preset | Fresh-project official onboarding uses immutable source pins, previews and approvals; native dependencies install; JSON, cache restore and locked/offline replay pass |
