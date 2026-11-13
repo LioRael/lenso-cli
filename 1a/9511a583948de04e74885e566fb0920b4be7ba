@@ -1,0 +1,21 @@
+scripts/verify-official-code.py
+  s_c5695907fe744f::t_5de251796f6498 1-113
+.github/workflows/verify-official-code.yml
+  s_c5695907fe744f::t_5de251796f6498 1-50
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1a9511a583948de04e74885e566fb0920b4be7ba",
+  "prompts": {},
+  "sessions": {
+    "s_c5695907fe744f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d06d-149b-7062-aa67-3c0145df9d90",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
