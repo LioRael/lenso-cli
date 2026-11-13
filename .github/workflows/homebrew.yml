@@ -52,6 +52,7 @@ jobs:
         run: |
           brew tap-new --no-git lenso/ci
           cp formula/lenso.rb "$(brew --repository lenso/ci)/Formula/lenso.rb"
+          brew trust --formula lenso/ci/lenso
           brew style lenso/ci/lenso
           brew audit --strict lenso/ci/lenso
           brew install lenso/ci/lenso
