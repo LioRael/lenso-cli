@@ -1,0 +1,45 @@
+docs/install.md
+  s_db0826ea383830::t_e706de37388cf9 122,133-135,138-151
+  s_db0826ea383830::t_b9f9aa8ad95deb 136-137
+  s_db0826ea383830::t_c1bcae27d1c64a 152
+crates/cli/src/update_notice.rs
+  s_db0826ea383830::t_7ba53128669513 272-275
+  s_db0826ea383830::t_6990327741a4e7 1-173,179-189,191-247,279-382
+  s_db0826ea383830::t_6f9c85a84d6b27 174-178,190,248-271,276-278
+crates/cli/src/main.rs
+  s_db0826ea383830::t_6990327741a4e7 3,5,7-16,69-71
+.github/workflows/check.yml
+  s_db0826ea383830::t_0c36e124cd1d83 24
+scripts/test-update-notice.py
+  s_db0826ea383830::t_0c36e124cd1d83 1-98
+.github/workflows/release-cli.yml
+  s_db0826ea383830::t_99fd1005dfcd32 78
+Cargo.lock
+  s_db0826ea383830::t_b34829c1b4c2e5 7,1434,1456
+Cargo.toml
+  s_db0826ea383830::t_ce33aa2417a328 7,16
+README.md
+  s_db0826ea383830::t_eb5fcd639e32e6 37
+crates/cli/src/self_update.rs
+  s_db0826ea383830::t_7a435b16e2d230 117,186-190,193-200,203-204,221-224
+docs/crates-release.md
+  s_db0826ea383830::t_57b29ee4ab0c2b 11,16,25
+scripts/release/publish.py
+  s_db0826ea383830::t_1ee639f6323306 183
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a61c654110d9123d70c1a416f036438335227b92",
+  "prompts": {},
+  "sessions": {
+    "s_db0826ea383830": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d570-6bcc-75a1-a80c-75f063970d87",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
