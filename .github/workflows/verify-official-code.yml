@@ -43,8 +43,12 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then binary="$binary.exe"; fi
           ${{ matrix.python }} scripts/verify-official-code.py --binary "$binary" \
             --token-env GITHUB_TOKEN --out "$RUNNER_TEMP/official-code"
+          ${{ matrix.python }} scripts/test-code-project-config.py --binary "$binary" --official \
+            --token-env GITHUB_TOKEN --out "$RUNNER_TEMP/official-code/project-config"
       - uses: actions/upload-artifact@v7
         with:
           name: official-code-${{ matrix.runner }}
-          path: ${{ runner.temp }}/official-code/verification.json
+          path: |
+            ${{ runner.temp }}/official-code/verification.json
+            ${{ runner.temp }}/official-code/project-config/verification.json
           if-no-files-found: error
