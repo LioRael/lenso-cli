@@ -1,0 +1,21 @@
+scripts/test-code-project-config.py
+  s_c5695907fe744f::t_21c9e61af182db 3,6-18,64-66,68-83,136
+.github/workflows/verify-official-code.yml
+  s_c5695907fe744f::t_21c9e61af182db 46-47,51-53
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5f17f44a1d6e44c0a8fd8cd26d15359e78bd43cb",
+  "prompts": {},
+  "sessions": {
+    "s_c5695907fe744f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d06d-149b-7062-aa67-3c0145df9d90",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
