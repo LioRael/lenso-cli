@@ -64,11 +64,11 @@ try {
         binary_sha256 = (Get-FileHash -LiteralPath $Staged -Algorithm SHA256).Hash.ToLowerInvariant() }
     [IO.File]::WriteAllText($StagedReceipt, ($Record | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
     if (Test-Path -LiteralPath $Destination) {
-        [IO.File]::Replace($Staged, $Destination, $null)
+        [IO.File]::Replace($Staged, $Destination, [NullString]::Value)
     } else { [IO.File]::Move($Staged, $Destination) }
     $Staged = $null
     if (Test-Path -LiteralPath $Receipt) {
-        [IO.File]::Replace($StagedReceipt, $Receipt, $null)
+        [IO.File]::Replace($StagedReceipt, $Receipt, [NullString]::Value)
     } else { [IO.File]::Move($StagedReceipt, $Receipt) }
     $StagedReceipt = $null
     Write-Output "Installed Lenso $Version to $Destination"
