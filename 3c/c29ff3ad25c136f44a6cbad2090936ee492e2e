@@ -1,0 +1,26 @@
+scripts/check-published-extension.py
+  s_c5695907fe744f::t_80aeaad786a88d 1-59
+scripts/verify-shadcn-release.py
+  s_c5695907fe744f::t_3b7874f2aa7db1 10,28,30
+  s_c5695907fe744f::t_80aeaad786a88d 1-9,11-27,29,31-36
+.github/workflows/publish-extension.yml
+  s_c5695907fe744f::t_80aeaad786a88d 31,48-53,57,61,71-72,75-79,92-99
+scripts/verify-official-onboarding.py
+  s_c5695907fe744f::t_aa98f4339ff58b 1-49
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3cc29ff3ad25c136f44a6cbad2090936ee492e2e",
+  "prompts": {},
+  "sessions": {
+    "s_c5695907fe744f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d06d-149b-7062-aa67-3c0145df9d90",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
