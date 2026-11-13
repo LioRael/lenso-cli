@@ -199,8 +199,8 @@ for the package format, authentication and GitHub Actions publishing.
 ## Code generation
 
 Code 0.2.0 is available as a [GitHub Release](https://github.com/LioRael/lenso-cli/releases/tag/code-v0.2.0)
-and runs on CLI 1.0.0. The official Registry still selects Code 0.1.2; use the
-direct package source below to select 0.2.0. It adds:
+and runs on CLI 1.0.0. Both `lenso ext add code` and the official `code` preset
+resolve Code 0.2.0. It adds:
 
 - Capability-based composition with independently selected adapters and explicit
   instance bindings, rather than a preset for every possible combination.
@@ -216,8 +216,7 @@ A local example generates a Rust application with memory and file-backed adapter
 cp -R examples/codegen-demo /tmp/lenso-codegen-demo
 cd /tmp/lenso-codegen-demo
 lenso init --preset empty
-lenso ext add github-release:LioRael/lenso-cli/code --id code --constraint '=0.2.0' \
-  --input '{"author_root":"author","target":"src"}'
+lenso ext add code --input '{"author_root":"author","target":"src"}'
 lenso code validate
 lenso code compose-preview --sample memory
 lenso code compose --sample memory
@@ -227,8 +226,8 @@ cargo run
 This uses prebuilt CLI and extension packages; Cargo is needed to compile the
 generated example. See [the two-adapter example](examples/codegen-demo/README.md),
 [generator authoring](docs/code-generation.md), [native dependencies](docs/native-dependencies.md)
-and [composition design](docs/module-composition.md). SDK and Registry integration
-in the design document remains proposed work.
+and [composition design](docs/module-composition.md). SDK contracts and Registry
+module-catalog integration in the design document remain proposed work.
 
 ## Embed the Rust engine
 

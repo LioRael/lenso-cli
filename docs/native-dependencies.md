@@ -1,8 +1,8 @@
 # Code extension native dependency management
 
 Implemented in this CLI repository. Requires native CLI 1.0.0, Project provider
-0.1.2 (included in CLI 1.0.0) and the published Code 0.2.0 extension. SDK and official
-Registry changes are not part of this implementation; select Code 0.2.0 directly.
+0.1.2 (included in CLI 1.0.0) and Code 0.2.0, available through the official `code`
+alias and preset. SDK integration remains separate work.
 
 Cargo and npm behavior belongs to the Code extension. The runtime still exposes
 only generic reads, source resolution and explicitly granted processes. The
@@ -13,7 +13,7 @@ Project provider handles exact file plans, approvals and generic completion writ
 Enable native manifest targets through normal reviewed Code extension setup:
 
 ```sh
-lenso ext add github-release:LioRael/lenso-cli/code --id code --constraint '=0.2.0' \
+lenso ext add code \
   --input '{"repo":"owner/modules","format":"lenso-compose-v1","target":"src","native":{"cargo":{"manifest":"Cargo.toml"},"npm":{"manifest":"package.json"}}}'
 lenso code compose-preview --sample app
 lenso code compose --sample app

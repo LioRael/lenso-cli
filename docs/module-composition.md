@@ -1,7 +1,8 @@
 # Composable modules across CLI, SDK and Registry
 
-Status: CLI foundation implemented in this repository. SDK and official Registry
-changes below are proposed contracts, not shipped integrations. The example Auth
+Status: CLI foundation implemented and Code 0.2.0 registered in the official extension
+catalog. SDK contracts and Registry module-catalog changes below are proposals,
+not shipped integrations. The example Auth
 catalog contains acceptance fixtures, not a production authentication service.
 
 ## Decision
@@ -100,14 +101,14 @@ or answers files; those values are intentionally persisted as project intent.
 ## Code extension flow
 
 Code 0.2.0 is published through GitHub Releases and runs on native CLI 1.0.0.
-The official Registry still selects Code 0.1.2. Select the direct Release source
-for composition commands; existing Code 0.1.x installations retain their commands.
+The official `code` alias and preset select 0.2.0; existing locked Code 0.1.x
+installations retain their pinned versions until explicitly updated.
 Native consumers require no Node.js, Git or Wasm compiler.
 
 Onboarding uses the existing extension setup:
 
 ```sh
-lenso ext add github-release:LioRael/lenso-cli/code --id code --constraint '=0.2.0' \
+lenso ext add code \
   --input '{"repo":"owner/modules","ref":"v1","catalog":"catalog.toml","target":"src/generated","format":"lenso-compose-v1"}'
 lenso code compose-preview auth
 lenso code compose auth

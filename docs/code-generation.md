@@ -1,9 +1,8 @@
 # Authoring code generators
 
-Implemented in the CLI repository, independently of the main Lenso SDK and official
-Registry. Requires native CLI 1.0.0 and the published Code 0.2.0 extension.
-Install it directly from GitHub Releases as shown below; the official Registry
-still selects Code 0.1.2. Neither consumer package needs a local Wasm build.
+Implemented in the CLI repository, independently of the main Lenso SDK.
+Requires native CLI 1.0.0 and Code 0.2.0, available through the official `code`
+alias and preset. Neither consumer package needs a local Wasm build.
 
 ## Author workflow
 
@@ -25,8 +24,7 @@ my-project/
 Install the published package through reviewed extension setup:
 
 ```sh
-lenso ext add github-release:LioRael/lenso-cli/code --id code --constraint '=0.2.0' \
-  --input '{"author_root":"author","target":"src"}'
+lenso ext add code --input '{"author_root":"author","target":"src"}'
 lenso code validate
 lenso code compose-preview --sample memory
 lenso code compose --sample memory
