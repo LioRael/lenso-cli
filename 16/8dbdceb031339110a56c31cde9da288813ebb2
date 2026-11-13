@@ -1,0 +1,26 @@
+examples/codegen-demo/README.md
+  s_c5695907fe744f::t_3c5d0d866a73bd 5-6,24
+docs/code-generation.md
+  s_c5695907fe744f::t_3c5d0d866a73bd 4-6
+docs/module-composition.md
+  s_c5695907fe744f::t_3c5d0d866a73bd 236-237
+README.md
+  s_c5695907fe744f::t_a74908c0e99975 172-173
+  s_c5695907fe744f::t_0ffdf95e3506d8 3-4,6-9,11,13-14,16,18-32,34,37-46,48-52,57-58,60-71,73-85,88-90,92-100,103-104,107-108,111-156,159-161,164-171,174,176,178-242,263-264,266-273,275-280,282,284,288-290,293-300
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "168dbdceb031339110a56c31cde9da288813ebb2",
+  "prompts": {},
+  "sessions": {
+    "s_c5695907fe744f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d06d-149b-7062-aa67-3c0145df9d90",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
