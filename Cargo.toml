@@ -14,7 +14,7 @@ readme = "README.md"
 
 [workspace.dependencies]
 lenso-cli = { path = "crates/framework", version = "1.0.0" }
-lenso-runtime = { path = "crates/runtime", version = "1.0.0" }
+lenso-runtime = { path = "crates/runtime", version = "0.2.4" }
 lenso-project = { path = "extensions/project", version = "0.1.2" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

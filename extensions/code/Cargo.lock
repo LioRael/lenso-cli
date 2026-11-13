@@ -212,7 +212,7 @@ dependencies = [
 
 [[package]]
 name = "lenso-codegen"
-version = "1.0.0"
+version = "0.2.4"
 dependencies = [
  "lenso-composition",
  "minijinja",
@@ -223,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "lenso-composition"
-version = "1.0.0"
+version = "0.2.4"
 dependencies = [
  "semver",
  "serde",

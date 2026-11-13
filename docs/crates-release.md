@@ -9,9 +9,9 @@ its other packages are not modified by this release.
 | Crate | Version | Role |
 | --- | --- | --- |
 | `lenso-cli` | 1.0.0 | Embeddable command/workflow engine |
-| `lenso-runtime` | 1.0.0 | Generic Host and extension distribution |
-| `lenso-composition` | 1.0.0 | Pure capability/instance resolution |
-| `lenso-codegen` | 1.0.0 | Pure generator contracts and templates |
+| `lenso-runtime` | 0.2.4 | Generic Host and extension distribution |
+| `lenso-composition` | 0.2.4 | Pure capability/instance resolution |
+| `lenso-codegen` | 0.2.4 | Pure generator contracts and templates |
 | `lenso-project` | 0.1.2 | Optional reviewed file/command application |
 | `lenso` | 1.0.0 | Standalone native executable, binary name `lenso` |
 
@@ -25,10 +25,14 @@ handler, workflow and Session interfaces in this repository.
 cargo install lenso --version 1.0.0 --locked
 ```
 
-CLI 1.0 retains the current JSON ABI 1 and root project format. The Code 0.2.0
-extension requires Host >=1.0.0,<2.0.0 and optional Project >=0.1.2. Shadcn 0.1.2
-broadens the compatible Host range to include CLI 1.x without changing its business
-behavior. Main SDK/application contract integration remains separate work.
+CLI 1.0 retains JSON ABI 1 and root project format. Host requirements in extension
+manifests are checked against the independently versioned `lenso-runtime` Host
+(0.2.4), not the executable's Cargo version. Existing shadcn 0.1.x releases remain
+compatible with that Host line. Code 0.2.0 requires Host >=0.2.4,<0.3.0 and optional
+Project >=0.1.2. This preserves existing extension/preset compatibility while the
+Rust engine and executable names undergo their 1.0 product migration. The three
+new independent support libraries start at 0.2.4; Project remains at 0.1.2.
+Main SDK/application contract integration remains separate work.
 
 Public Cargo path dependencies have explicit published version requirements.
 `python3 scripts/release/crates.py` prints the dependency-ordered release set;

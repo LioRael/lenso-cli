@@ -1,7 +1,7 @@
 [package]
 name = "lenso-codegen"
 description = "Pure deterministic generation contracts for Lenso code extensions"
-version.workspace = true
+version = "0.2.4"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -11,7 +11,7 @@ readme.workspace = true
 include = ["src/**", "Cargo.toml", "README.md"]
 
 [dependencies]
-lenso-composition = { path = "../composition", version = "1.0.0" }
+lenso-composition = { path = "../composition", version = "0.2.4" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

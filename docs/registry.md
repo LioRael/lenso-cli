@@ -128,7 +128,7 @@ providers. A dependency may reference another dependency recursively. The resolv
 chooses one compatible version per provider, backtracks on conflicts, and rejects
 cycles and incompatible sources or host versions. Native implementations must already
 exist in the host; the resolver never downloads an older native implementation.
-`host = ">=0.2.0, <0.3.0"` constrains the CLI version. Handler ABI remains version 1.
+`host = ">=0.2.0, <0.3.0"` constrains the independently versioned runtime Host, not the executable Cargo version. Handler ABI remains version 1.
 
 `lenso ext add NAME --constraint '^1'` resolves metadata before asking for consent.
 Its `setup.defaults` are proposed Installation fields. After approval, an optional
