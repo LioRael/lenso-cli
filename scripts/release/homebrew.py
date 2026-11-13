@@ -31,7 +31,6 @@ def render(release, checksums):
         "class Lenso < Formula",
         '  desc "Native CLI with composable Wasm extensions"',
         f'  homepage "https://github.com/{REPO}"',
-        f'  version "{tag[1:]}"',
         '  license any_of: ["MIT", "Apache-2.0"]',
     ]
     for system, targets in TARGETS.items():
