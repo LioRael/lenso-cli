@@ -1,0 +1,27 @@
+scripts/verify-code-release.py
+  s_c5695907fe744f::t_8063d671e02928 1-80
+scripts/test-native.py
+  s_c5695907fe744f::t_6449ff37b18c5c 14-18,21-24,104-112,225-231,236
+scripts/author_acceptance.py
+  s_c5695907fe744f::t_6449ff37b18c5c 10,13-19,93,99-103
+.github/workflows/publish-extension.yml
+  s_c5695907fe744f::t_8063d671e02928 89-93,96-105
+scripts/check-published-extension.py
+  s_c5695907fe744f::t_aa79a14aceb9cc 45-48
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f6b56d03fa251f60be452ad6bcef3e1ee9e25eb7",
+  "prompts": {},
+  "sessions": {
+    "s_c5695907fe744f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d06d-149b-7062-aa67-3c0145df9d90",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
