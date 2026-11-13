@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   publish:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       CARGO_BUILD_JOBS: "2"
@@ -45,12 +45,20 @@ jobs:
           case "$GITHUB_REF_NAME" in code-v*) id=code ;; shadcn-v*) id=shadcn ;; esac
           case "$id" in code|shadcn) ;; *) exit 1 ;; esac
           echo "id=$id" >> "$GITHUB_OUTPUT"
+      - name: Detect an already published version
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE_ID: ${{ steps.package.outputs.id }}
+        run: python3 scripts/check-published-extension.py --id "$PACKAGE_ID"
       - name: Build CLI and Wasm
         env:
           PACKAGE_ID: ${{ steps.package.outputs.id }}
+          EXISTING: ${{ steps.existing.outputs.existing }}
         run: |
           rustup toolchain install 1.99.0 --profile minimal --target wasm32-unknown-unknown
           cargo +1.99.0 build --locked --release -p lenso
+          if [ "$EXISTING" = true ]; then exit 0; fi
           cargo +1.99.0 build --locked --release --target wasm32-unknown-unknown --manifest-path "extensions/$PACKAGE_ID/Cargo.toml"
           mkdir -p "dist/author/$PACKAGE_ID"
           cp "presets/$PACKAGE_ID/extension.toml" "dist/author/$PACKAGE_ID/extension.toml"
@@ -60,8 +68,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           PACKAGE_ID: ${{ steps.package.outputs.id }}
+          EXISTING: ${{ steps.existing.outputs.existing }}
+          PACKAGE_VERSION: ${{ steps.existing.outputs.version }}
           KEEP_DRAFT: ${{ inputs.draft || false }}
         run: |
+          if [ "$EXISTING" = true ]; then
+            echo "state=published" >> "$GITHUB_OUTPUT"
+            echo "version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           args=(publish --github --id "$PACKAGE_ID" --token-env GITHUB_TOKEN --yes --json)
           if [ "$KEEP_DRAFT" = true ]; then args+=(--draft); fi
           target/release/lenso "${args[@]}"
@@ -74,6 +89,14 @@ jobs:
           python3 scripts/verify-github-release.py --binary target/release/lenso \
             --repo "$GITHUB_REPOSITORY" --version "$PACKAGE_VERSION" --ref "$GITHUB_SHA" \
             --out "$RUNNER_TEMP/lenso-release-e2e"
+      - name: Verify published Shadcn onboarding
+        if: steps.publish.outputs.state == 'published' && steps.package.outputs.id == 'shadcn'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PACKAGE_VERSION: ${{ steps.publish.outputs.version }}
+        run: |
+          python3 scripts/verify-shadcn-release.py --binary target/release/lenso \
+            --repo "$GITHUB_REPOSITORY" --version "$PACKAGE_VERSION" --token-env GITHUB_TOKEN
       - name: Submit official Registry record for review
         if: inputs.register && steps.publish.outputs.state == 'published'
         env:
