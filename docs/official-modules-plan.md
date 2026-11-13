@@ -1,8 +1,11 @@
 # Official functional modules on the published SDKs
 
-Status: implementation proposal. This plan creates no repositories or packages and
-changes no SDK code. It supersedes the assumption that the foundational SDK must
-be designed before functional modules can start.
+Status: initial Auth + SQLite implementation is available in
+[Lenso Modules](https://github.com/LioRael/lenso-modules). It includes TypeScript and
+Rust native sources, scrypt, explicit migrations, reference HTTP hosts and generated
+consumer acceptance. Code 0.3 supplies target selection and functional preset
+defaults; later adapters and broader product flows below remain planned. No SDK
+code was changed.
 
 ## Verified baseline
 

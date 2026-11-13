@@ -201,12 +201,14 @@ for the package format, authentication and GitHub Actions publishing.
 
 ## Code generation
 
-Code 0.2.0 is available as a [GitHub Release](https://github.com/LioRael/lenso-cli/releases/tag/code-v0.2.0)
+Code 0.3.0 is available as a [GitHub Release](https://github.com/LioRael/lenso-cli/releases/tag/code-v0.3.0)
 and runs on CLI 1.0.0. Both `lenso ext add code` and the official `code` preset
-resolve Code 0.2.0. It adds:
+resolve Code 0.3.0. It provides:
 
 - Capability-based composition with independently selected adapters and explicit
   instance bindings, rather than a preset for every possible combination.
+- Target language/runtime choices supplied by functional presets, with explicit
+  Agent input and protected installed selections.
 - Strict templates, isolated generated directories and named author samples.
 - Generated-file ownership, incremental updates, three-way merging and explicit
   conflict handling. Switching adapters proposes cleanup of obsolete outputs.
@@ -231,7 +233,11 @@ generated example. See [the two-adapter example](examples/codegen-demo/README.md
 [generator authoring](docs/code-generation.md), [native dependencies](docs/native-dependencies.md)
 and [composition design](docs/module-composition.md). The
 [official module delivery plan](docs/official-modules-plan.md) builds on the
-published TypeScript/Rust SDKs and proposes business adapters and module catalogs.
+published TypeScript/Rust SDKs. The first [Auth module](https://github.com/LioRael/lenso-modules)
+provides TypeScript/Node.js and Rust/Tokio implementations with SQLite and scrypt.
+In a prepared native application, run `lenso init --preset auth`, then preview and
+compose the `default` sample. See [target variants](docs/code-target-variants.md)
+for selection, native project requirements and current boundaries.
 
 ## Embed the Rust engine
 

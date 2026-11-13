@@ -3,6 +3,7 @@ mod author;
 mod composition;
 mod generation;
 mod native;
+mod setup;
 use extism_pdk::{FnResult, Json, host_fn, plugin_fn};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -358,6 +359,16 @@ pub fn search(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
 /// Ask for repository settings without reading files or fetching code.
 #[plugin_fn]
 pub fn configure(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
+    let (prepared, selection) = match setup::prepare(&ctx)? {
+        setup::Preparation::Question(question) => return Ok(question),
+        setup::Preparation::Ready { context, selection } => (context, selection),
+    };
+    let mut result = configure_input(prepared)?;
+    setup::finish(&ctx, selection, &mut result.0);
+    Ok(result)
+}
+
+fn configure_input(ctx: Value) -> FnResult<Json<Value>> {
     if ctx["input"].get("native").is_some()
         && ctx["input"].get("author_root").is_none()
         && ctx["input"].get("repo").is_none()

@@ -12,6 +12,8 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--binary', type=Path, required=True)
 parser.add_argument('--token-env', help='Explicit GitHub credential binding for API quota')
 parser.add_argument('--out', type=Path, required=True)
+parser.add_argument('--code-version', default='0.3.0')
+parser.add_argument('--preset-version', default='0.3.0')
 args = parser.parse_args()
 binary = args.binary.resolve(strict=True)
 assert subprocess.check_output([str(binary), '--version'], text=True).strip() == 'lenso 1.0.0'
@@ -73,12 +75,12 @@ for scenario in ('ext-add', 'new-preset', 'init-preset', 'apply-preset'):
     assert selected['source'] == 'registry:@lenso/code'
     if scenario != 'ext-add':
         preset = config['presets']['@lenso/code']
-        assert preset['version'] == '0.2.0'
-        assert preset['extensions']['code']['version'] == '^0.2.0'
+        assert preset['version'] == args.preset_version
+        assert preset['extensions']['code']['version'] == '^' + args.code_version
     lock = json.loads((project / 'lenso.lock').read_text())
     pin = next(item for item in lock['extensions'] if item['id'] == 'code')
-    assert pin['definition']['version'] == '0.2.0'
-    assert pin['github']['tag'] == 'code-v0.2.0'
+    assert pin['definition']['version'] == args.code_version
+    assert pin['github']['tag'] == 'code-v' + args.code_version
     tree = run(project, 'ext', 'tree', '--locked', '--offline', offline=True)['outputs']['main']['extensions']
     assert {item['id'] for item in tree} == {'code', 'project'}
     checked = run(project, 'code', 'validate')['outputs']['validate']
