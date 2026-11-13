@@ -1,0 +1,24 @@
+docs/install.md
+  s_c5695907fe744f::t_a5426350cc8d10 151-155
+  s_c5695907fe744f::t_c0ed8135c2dbed 9,35,38,44,58,61,76,100
+scripts/release/verify.py
+  s_c5695907fe744f::t_32118c84d61197 11,20,26-33,36-38,83-84
+.github/workflows/verify-latest-cli.yml
+  s_c5695907fe744f::t_32118c84d61197 1-67
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1738bc034c05ad3916a888929b0b9997d51003ae",
+  "prompts": {},
+  "sessions": {
+    "s_c5695907fe744f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d06d-149b-7062-aa67-3c0145df9d90",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
