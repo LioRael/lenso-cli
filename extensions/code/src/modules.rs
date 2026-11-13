@@ -327,8 +327,10 @@ pub fn plan(ctx: &Value, refresh: bool) -> Result<Json<Value>> {
     if !state.language.is_empty() && state.language != language {
         return Err(error("changing language requires a new project target"));
     }
+    let rq = format!("code:module-runtime:{id}:{}:{language}", release.version);
     let selected_runtime = ctx["input"]["runtime"]
         .as_str()
+        .or_else(|| ctx["answers"][&rq].as_str())
         .or_else(|| (!state.runtime.is_empty()).then_some(state.runtime.as_str()))
         .or_else(|| fixed.get("runtime").map(String::as_str))
         .map(str::to_owned);
@@ -397,6 +399,7 @@ pub fn plan(ctx: &Value, refresh: bool) -> Result<Json<Value>> {
         .iter()
         .filter(|t| {
             t.language == language
+                && selected_runtime.as_ref().is_none_or(|r| &t.runtime == r)
                 && t.when
                     .iter()
                     .all(|(k, v)| crate::project_config::scalar(v).as_ref() == fixed.get(k))
@@ -414,7 +417,6 @@ pub fn plan(ctx: &Value, refresh: bool) -> Result<Json<Value>> {
             "ambiguous module targets for the configured project conventions",
         ));
     }
-    let rq = format!("code:module-runtime:{id}:{}:{language}", release.version);
     if let Some(configured) = fixed.get("runtime")
         && (ctx["input"]["runtime"]
             .as_str()
