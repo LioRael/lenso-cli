@@ -38,6 +38,8 @@ struct Target {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Installed {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    when: BTreeMap<String, Value>,
     version: String,
     profile: Profile,
     artifact: String,
@@ -396,15 +398,27 @@ pub fn plan(ctx: &Value, refresh: bool) -> Result<Json<Value>> {
     }
     if let Some(old) = previous
         && old.version == release.version
-        && (old.profile.source != source.source
-            || (old.profile.path != source.path
-                && !ctx["input"]["reconfigure"].as_bool().unwrap_or(false))
-            || old.profile.r#ref != source.r#ref
-            || old.root != entry.root)
     {
-        return Err(error(
-            "published module descriptor changed without a new version",
-        ));
+        if old.profile.source != source.source
+            || old.profile.r#ref != source.r#ref
+            || old.root != entry.root
+        {
+            return Err(error(
+                "published module descriptor changed without a new version",
+            ));
+        }
+        if old.profile.path != source.path {
+            if old.when == target.when {
+                return Err(error(
+                    "published module descriptor changed without a new version",
+                ));
+            }
+            if !ctx["input"]["reconfigure"].as_bool().unwrap_or(false) {
+                return Err(error(
+                    "project conventions select a different implementation; preview with --reconfigure to review the change",
+                ));
+            }
+        }
     }
     let mut context = ctx.clone();
     context["input"]["refresh"] = json!(refresh);
@@ -438,6 +452,7 @@ pub fn plan(ctx: &Value, refresh: bool) -> Result<Json<Value>> {
     state.modules.insert(
         id.clone(),
         Installed {
+            when: target.when.clone(),
             version: release.version.clone(),
             profile: source,
             artifact,
