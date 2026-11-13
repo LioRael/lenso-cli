@@ -1,0 +1,61 @@
+README.md
+  s_c5695907fe744f::t_66fe88c9c5b926 326-331
+  s_c5695907fe744f::t_e37b13a8de7927 212,214
+extensions/code/src/setup.rs
+  s_c5695907fe744f::t_96b323f5034733 6-13,18-23,27-30,54-55,63-70,76,79-84
+  s_c5695907fe744f::t_dd458db1701f7b 14-17,24-26,33-43,71-73,77-78
+  s_c5695907fe744f::t_3232e120d3d4d6 31-32,44-53,56-62
+  s_c5695907fe744f::t_12eea4e54f14d0 74-75
+scripts/configure-code.py
+  s_c5695907fe744f::t_d346b9131f9a23 79-81
+  s_c5695907fe744f::t_b88c957b33df63 17-18,26-29,60
+.github/workflows/verify-official-code.yml
+  s_c5695907fe744f::t_fee02155929aa2 48-49,56
+.github/workflows/check.yml
+  s_c5695907fe744f::t_fee02155929aa2 43
+  s_c5695907fe744f::t_9447edbe11b678 29-31
+extensions/code/src/lib.rs
+  s_c5695907fe744f::t_06f32dd7d55eee 382-384,669
+  s_c5695907fe744f::t_3232e120d3d4d6 389-390,393-394,396,398-400
+  s_c5695907fe744f::t_96b323f5034733 131,391-392,401-406,420-422,427,436,439-442,456,562,568-571,575,579-581
+  s_c5695907fe744f::t_f35dbba9c2790b 583,619-637,646-648,662-665,667-668,695-698,721,728-730
+  s_c5695907fe744f::t_31f133982aaa39 699-720
+  s_c5695907fe744f::t_dd458db1701f7b 429-435,437-438,563-567,572-574,576-578,638-645,649-661,666,670-694,722-727
+  s_c5695907fe744f::t_c6dd9527793ecd 385-388,395,397,582,584
+extensions/code/src/modules.rs
+  s_c5695907fe744f::t_96b323f5034733 78-81
+scripts/test-code-initialization.py
+  s_c5695907fe744f::t_4fad2a39c730fc 61,76-79,102-105
+  s_c5695907fe744f::t_fee02155929aa2 1-58,62-75,80-101,106-114,116-118,124-125,127,129-131
+  s_c5695907fe744f::t_66fe88c9c5b926 59-60,126
+  s_c5695907fe744f::t_aa77c3fe12f710 115,119-123,128
+docs/code-project-configuration.md
+  s_c5695907fe744f::t_d346b9131f9a23 88-96,99-116
+  s_c5695907fe744f::t_b72174c778508f 22,97-98
+extensions/code/Cargo.lock
+  s_c5695907fe744f::t_a9c3c9bc03e94f 200
+extensions/code/Cargo.toml
+  s_c5695907fe744f::t_c1fe3d1403d518 3
+presets/code/extension.toml
+  s_c5695907fe744f::t_75d7443617b16a 3
+scripts/test-code-project-config.py
+  s_c5695907fe744f::t_8db02ce1281f92 86,88,91
+scripts/verify-official-code.py
+  s_c5695907fe744f::t_49a735563dd87c 15-16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fd46aac0a4b66c41800f0a240ac1152a2108b02c",
+  "prompts": {},
+  "sessions": {
+    "s_c5695907fe744f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d06d-149b-7062-aa67-3c0145df9d90",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
