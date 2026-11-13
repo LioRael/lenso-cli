@@ -1,0 +1,48 @@
+extensions/code/src/lib.rs
+  s_c5695907fe744f::t_8201d7058da6b1 5,48,228,233,388-390,401
+  s_c5695907fe744f::t_2fefa28c05a076 184-186,229-232,357-359,365-369,391-400,436-439,469-472
+extensions/code/src/modules.rs
+  s_c5695907fe744f::t_74f7053414a5b0 188-203,263-265,355-364
+  s_c5695907fe744f::t_2fefa28c05a076 1-80,82-138,140-158,160-187,205-220,222-244,246-262,266-354,365-371,373-410,412-414
+  s_c5695907fe744f::t_594ad29a0558bc 81,159,245
+  s_c5695907fe744f::t_bf2e6f050586f4 139,221,372,411
+  s_c5695907fe744f::t_00612738e79186 204
+extensions/code/Cargo.toml
+  s_c5695907fe744f::t_56060660e72812 3
+  s_c5695907fe744f::t_8201d7058da6b1 18
+extensions/code/src/author.rs
+  s_c5695907fe744f::t_8201d7058da6b1 57-59,107
+presets/code/extension.toml
+  s_c5695907fe744f::t_8201d7058da6b1 26,33,96,107-109,120-122,133-135,146-148
+  s_c5695907fe744f::t_56060660e72812 3
+extensions/code/src/composition.rs
+  s_c5695907fe744f::t_74f7053414a5b0 163,345,367,397
+  s_c5695907fe744f::t_8201d7058da6b1 152-154
+  s_c5695907fe744f::t_2fefa28c05a076 155-159
+scripts/test-onboarding.py
+  s_c5695907fe744f::t_e42263417ff04a 49
+docs/code-module-directory.md
+  s_c5695907fe744f::t_f9f8d880343cf5 1-60
+README.md
+  s_c5695907fe744f::t_f9f8d880343cf5 212,214,246-248
+scripts/verify-official-code.py
+  s_c5695907fe744f::t_f9f8d880343cf5 15-16
+extensions/code/Cargo.lock
+  s_c5695907fe744f::t_9309dcdbfd6c8f 200,205
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4c3a0d25fdf49e62cc1174c00c110fd47431177f",
+  "prompts": {},
+  "sessions": {
+    "s_c5695907fe744f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d06d-149b-7062-aa67-3c0145df9d90",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
