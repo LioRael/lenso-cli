@@ -1,0 +1,50 @@
+name: Verify official Code onboarding
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  consume:
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-22.04, python: python3 }
+          - { runner: macos-15, python: python3 }
+          - { runner: windows-2022, python: python }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install published CLI 1.0.0
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/official-cli"
+          if [ "$RUNNER_OS" = Windows ]; then
+            curl -fsSL --retry 2 "https://github.com/$GITHUB_REPOSITORY/releases/download/v1.0.0/install.ps1" -o "$RUNNER_TEMP/official-cli/install.ps1"
+            pwsh -NoLogo -NoProfile -NonInteractive -File "$RUNNER_TEMP/official-cli/install.ps1" -InstallDir "$RUNNER_TEMP/official-cli/bin"
+          else
+            curl -fsSL --retry 2 "https://github.com/$GITHUB_REPOSITORY/releases/download/v1.0.0/install.sh" -o "$RUNNER_TEMP/official-cli/install.sh"
+            sh "$RUNNER_TEMP/official-cli/install.sh" --prefix "$RUNNER_TEMP/official-cli/bin"
+          fi
+      - name: Consume official alias and presets with fresh caches and no development tools
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          binary="$RUNNER_TEMP/official-cli/bin/lenso"
+          if [ "$RUNNER_OS" = Windows ]; then binary="$binary.exe"; fi
+          ${{ matrix.python }} scripts/verify-official-code.py --binary "$binary" \
+            --token-env GITHUB_TOKEN --out "$RUNNER_TEMP/official-code"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: official-code-${{ matrix.runner }}
+          path: ${{ runner.temp }}/official-code/verification.json
+          if-no-files-found: error
