@@ -1,0 +1,36 @@
+Cargo.toml
+  s_db0826ea383830::t_f2e5ea9843a905 7,16
+.github/workflows/check.yml
+  s_db0826ea383830::t_f2e5ea9843a905 19
+crates/cli/src/self_update.rs
+  s_db0826ea383830::t_f2e5ea9843a905 222-228,230-238,261-294,480-506,551-554,558-561,744-762
+  s_db0826ea383830::t_0040ac2a5dd4c4 763
+docs/install.md
+  s_db0826ea383830::t_f2e5ea9843a905 88-93,110
+README.md
+  s_db0826ea383830::t_f2e5ea9843a905 37
+docs/crates-release.md
+  s_db0826ea383830::t_f2e5ea9843a905 11,16,25
+scripts/release/verify.py
+  s_db0826ea383830::t_cba03e514a60fe 101-131,140
+Cargo.lock
+  s_db0826ea383830::t_b589264fae1e1d 7,1434,1456
+scripts/release/publish.py
+  s_db0826ea383830::t_a34d6ad891a23f 182
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "78aa91da59508ba1ab4fb51be6c2736b1628c956",
+  "prompts": {},
+  "sessions": {
+    "s_db0826ea383830": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d570-6bcc-75a1-a80c-75f063970d87",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
