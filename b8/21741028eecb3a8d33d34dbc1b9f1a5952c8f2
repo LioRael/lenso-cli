@@ -1,0 +1,37 @@
+docs/crates-release.md
+  s_c5695907fe744f::t_89cb5f2dac9707 12-14,28-35
+presets/code/extension.toml
+  s_c5695907fe744f::t_89cb5f2dac9707 4
+crates/codegen/Cargo.toml
+  s_c5695907fe744f::t_89cb5f2dac9707 4,14
+Cargo.toml
+  s_c5695907fe744f::t_89cb5f2dac9707 17
+presets/shadcn/extension.toml
+  s_c5695907fe744f::t_89cb5f2dac9707 3-4
+crates/runtime/Cargo.toml
+  s_c5695907fe744f::t_89cb5f2dac9707 4
+docs/registry.md
+  s_c5695907fe744f::t_89cb5f2dac9707 131
+crates/composition/Cargo.toml
+  s_c5695907fe744f::t_89cb5f2dac9707 4
+Cargo.lock
+  s_c5695907fe744f::t_a3abd3960ede55 1463,1475,1501
+extensions/code/Cargo.lock
+  s_c5695907fe744f::t_64f232f816389c 215,226
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b821741028eecb3a8d33d34dbc1b9f1a5952c8f2",
+  "prompts": {},
+  "sessions": {
+    "s_c5695907fe744f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d06d-149b-7062-aa67-3c0145df9d90",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
