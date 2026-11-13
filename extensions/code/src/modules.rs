@@ -198,12 +198,19 @@ fn roots(ctx: &mut Value, root: &str, previous: Option<&str>) -> Result<()> {
     if !ctx["input"]["instances"].is_null() || !ctx["input"]["sample"].is_null() {
         return Ok(());
     }
-    let saved = previous
+    let mut saved = previous
         .map(local)
         .transpose()?
         .flatten()
         .map(|s| serde_json::from_str::<Value>(&s))
         .transpose()?;
+    if let Some(saved) = &mut saved
+        && !ctx["input"]["bindings"].is_null()
+    {
+        let mut request = serde_json::from_value(saved["request"].clone())?;
+        crate::composition::replace_bindings(&mut request, &ctx["input"]["bindings"])?;
+        saved["request"] = serde_json::to_value(request)?;
+    }
     if let Some(saved) = &saved {
         for field in ["bindings", "configuration", "context"] {
             if ctx["input"][field].is_null() {

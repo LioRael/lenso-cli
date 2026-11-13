@@ -19,7 +19,7 @@ Writes use the existing Project plan/approval flow. `code config` without settin
 is read-only. JSON/Agent clients can replace settings using
 `--input '{"settings":{"project":{"language":"typescript","runtime":"node26"}}}'`.
 Individual flags update existing settings; mixing flags and replacement JSON is an
-error. Older installations first upgrade Code with `lenso ext add code --constraint '^0.3.3'`.
+error. Older installations first upgrade Code with `lenso ext add code --constraint '^0.3.4'`.
 Review `lenso ext configure code` if access is still missing, to grant
 read/write access to the new root config file. The extension never bypasses grants.
 
@@ -81,3 +81,7 @@ Preview does not write files. Apply uses existing ownership/conflict handling an
 native dependency reconciliation; changing fixed catalogs preserves the original
 native ownership identity. Language/runtime changes require another project target.
 This is not data migration, a framework detector or a platform installer.
+
+An explicit provider replacement resets saved options only below that slot address.
+Other instance settings remain saved, and project defaults for the new provider
+are applied before its author defaults. Explicit new configuration still wins.

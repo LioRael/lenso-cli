@@ -9,6 +9,30 @@ use sha2::{Digest, Sha256};
 use crate::author::destination;
 use crate::{complete, error, local, question};
 
+pub(crate) fn replace_bindings(request: &mut Request, value: &Value) -> crate::Result<()> {
+    let bindings: std::collections::BTreeMap<String, Binding> =
+        serde_json::from_value(value.clone())?;
+    for (address, next) in &bindings {
+        let unchanged = request
+            .bindings
+            .get(address)
+            .is_some_and(|old| match (old, next) {
+                (Binding::Module { module: a }, Binding::Module { module: b }) => a == b,
+                (Binding::Instance { instance: a }, Binding::Instance { instance: b }) => a == b,
+                (Binding::Disabled, Binding::Disabled) => true,
+                _ => false,
+            });
+        if !unchanged && request.bindings.contains_key(address) {
+            let prefix = format!("{address}.");
+            request
+                .configuration
+                .retain(|key, _| key != address && !key.starts_with(&prefix));
+        }
+    }
+    request.bindings = bindings;
+    Ok(())
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Artifact {
@@ -301,11 +325,11 @@ pub(crate) fn plan_with_policy(
             ));
         }
     }
+    if let Some(value) = ctx["input"].get("bindings") {
+        replace_bindings(&mut request, value)?;
+    }
     if let Some(value) = ctx["input"].get("configuration") {
         request.configuration = serde_json::from_value(value.clone())?;
-    }
-    if let Some(value) = ctx["input"].get("bindings") {
-        request.bindings = serde_json::from_value(value.clone())?;
     }
     if let Some(value) = ctx["input"].get("context") {
         request.context = serde_json::from_value(value.clone())?;
@@ -457,4 +481,38 @@ pub(crate) fn plan_with_policy(
     Ok(complete(
         json!({"message":format!("Composed {} instances from {} module definitions",artifact.resolution.instances.len(),modules.len()),"files":files,"deletions":changes.deletions,"expected":changes.expected,"summary":changes.summary,"commands":native.commands,"finalizations":native.finalizations,"native":native.summary,"dependencies":artifact.dependencies,"items":modules,"composition":artifact,"composition_id":digest}),
     ))
+}
+
+#[cfg(test)]
+mod reconfiguration_tests {
+    use super::*;
+    #[test]
+    fn changing_a_provider_discards_only_its_owned_configuration() {
+        let mut request: Request = serde_json::from_value(json!({
+            "instances":{"auth":"auth"},
+            "bindings":{"auth.store":{"type":"module","module":"sqlite"}},
+            "configuration":{"auth":{"ttl_ms":120000},"auth.store":{"path":"auth.db"},
+                "auth.store.cache":{"size":32},"other.store":{"path":"other.db"}}
+        }))
+        .unwrap();
+        replace_bindings(
+            &mut request,
+            &json!({"auth.store":{"type":"module","module":"postgres"}}),
+        )
+        .unwrap();
+        assert_eq!(request.configuration["auth"]["ttl_ms"], 120000);
+        assert!(request.configuration.contains_key("other.store"));
+        assert!(!request.configuration.contains_key("auth.store"));
+        assert!(!request.configuration.contains_key("auth.store.cache"));
+    }
+    #[test]
+    fn retaining_a_provider_preserves_its_saved_configuration() {
+        let value = json!({"auth.store":{"type":"module","module":"sqlite"}});
+        let mut request: Request = serde_json::from_value(json!({
+            "bindings":value,"configuration":{"auth.store":{"path":"custom.db"}}
+        }))
+        .unwrap();
+        replace_bindings(&mut request, &value).unwrap();
+        assert_eq!(request.configuration["auth.store"]["path"], "custom.db");
+    }
 }

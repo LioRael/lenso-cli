@@ -48,9 +48,17 @@ default="author"
 [modules.feature.slots.store]
 contract="demo.store"
 version="^1"
+[modules.sqlite.options.path]
+prompt="SQLite path"
+kind={type="text"}
+default="auth.sqlite"
 [modules.sqlite]
 version="1.0.0"
 provides={"demo.store"={version="1.0.0"}}
+[modules.postgres.options.connection]
+prompt="Postgres environment"
+kind={type="environment"}
+default={env="DATABASE_URL"}
 [modules.postgres]
 version="1.0.0"
 provides={"demo.store"={version="1.0.0"}}
@@ -75,13 +83,13 @@ credentials=('--token-env',args.token_env) if args.token_env else ()
 call('init','--preset','code' if args.official else 'preset.toml','--input',json.dumps({'author_root':'author','format':'lenso-modules-v1','catalog':'lenso.modules.toml'}),'--yes',*credentials)
 lock=json.loads((project/'lenso.lock').read_text())
 pin=next(item for item in lock['extensions'] if item['id']=='code')
-assert pin['definition']['version']=='0.3.3'
+assert pin['definition']['version']=='0.3.4'
 if args.official:
- assert pin['github']['tag']=='code-v0.3.3'
+ assert pin['github']['tag']=='code-v0.3.4'
  config=call('config')['outputs']['main']['config']['cli']
  assert next(item for item in config['extensions'] if item['id']=='code')['source']=='registry:@lenso/code'
- assert config['presets']['@lenso/code']['version']=='0.3.3'
-settings={'project':{'language':'typescript','runtime':'node26'},'conventions':{'styles':'plain','rsc':True},'paths':{'modules':'src/features','import_alias':'@/features'},'defaults':{'providers':{'demo.store':'sqlite'}},'modules':{'feature':{'options':{'label':'project'}}}}
+ assert config['presets']['@lenso/code']['version']=='0.3.4'
+settings={'project':{'language':'typescript','runtime':'node26'},'conventions':{'styles':'plain','rsc':True},'paths':{'modules':'src/features','import_alias':'@/features'},'defaults':{'providers':{'demo.store':'sqlite'}},'modules':{'feature':{'options':{'label':'project'}},'sqlite':{'options':{'path':'configured.sqlite'}},'postgres':{'options':{'connection':{'env':'AUTH_DATABASE_URL'}}}}}
 initial={**settings,'conventions':{}}
 call('code','config','--input',json.dumps({'settings':initial}),'--yes')
 configfile=project/'lenso.code.toml';before=configfile.read_text()
@@ -129,7 +137,12 @@ assert json.loads(receipt.read_text())['native_catalog']==group
 assert '"fancy"' in output.read_text() and '"sqlite"' in output.read_text()
 assert call('code','preview','feature','--locked','--offline')['outputs']['resolve']['files']==[]
 call('code','add','feature','--input',json.dumps({'bindings':{'feature.store':{'type':'module','module':'postgres'}}}),'--yes')
-assert '"postgres"' in output.read_text()
+assert '"postgres"' in output.read_text() and '"project"' in output.read_text()
+request=json.loads(receipt.read_text())['request']
+assert request['configuration']['feature.store']=={'connection':{'env':'AUTH_DATABASE_URL'}}
+assert request['configuration']['feature']['label']=='project'
+call('code','add','feature','--input',json.dumps({'bindings':{'feature.store':{'type':'module','module':'sqlite'}}}),'--yes')
+assert json.loads(receipt.read_text())['request']['configuration']['feature.store']=={'path':'configured.sqlite'}
 settings['project']['language']='rust'
 call('code','config','--input',json.dumps({'settings':settings}),'--yes',expected=1)
 print('Project config passed: approved config writes, fixed variants, aliases/paths, defaults, retained choices, explicit convention migration and offline replay')
