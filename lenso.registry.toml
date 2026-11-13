@@ -5,3 +5,9 @@ id = "code"
 path = "dist/author/code"
 tag = "code-v{version}"
 asset = "lenso-code-{version}.tar.gz"
+
+[[extensions]]
+id = "shadcn"
+path = "dist/author/shadcn"
+tag = "shadcn-v{version}"
+asset = "lenso-shadcn-{version}.tar.gz"

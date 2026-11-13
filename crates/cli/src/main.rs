@@ -8,15 +8,33 @@ async fn main() {
         let args = setup_args;
         let mut options = lenso_runtime::LoadOptions::from_args(&args);
         options.events = events;
+        #[cfg(feature = "project")]
+        options.providers.insert(
+            "project".into(),
+            lenso_runtime::NativeProvider {
+                version: lenso_project::VERSION.into(),
+                register: lenso_project::register,
+            },
+        );
         let mut cli = Cli::new("lenso");
         lenso_runtime::register_management_with_options(&mut cli, &options)?;
-        lenso_project::register(cli.engine_mut())?;
         let version_only = Cli::command_from_args(&args).is_none()
             && args.iter().any(|arg| arg == "--version" || arg == "-V");
         if !version_only
             && !matches!(
                 Cli::command_from_args(&args),
-                Some("update" | "config" | "migrate" | "cache" | "package" | "publish")
+                Some(
+                    "new"
+                        | "init"
+                        | "ext"
+                        | "preset"
+                        | "update"
+                        | "config"
+                        | "migrate"
+                        | "cache"
+                        | "package"
+                        | "publish"
+                )
             )
         {
             lenso_runtime::load_project_with_options(

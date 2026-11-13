@@ -1,6 +1,11 @@
 schema_version = 1
 id = "code"
-version = "0.1.1"
+version = "0.1.2"
+host = ">=0.2.0, <0.3.0"
+
+[dependencies.project]
+source = "builtin:project"
+version = "^0.1.0"
 
 [handlers."code/select"]
 type = "wasm"
@@ -127,3 +132,26 @@ arguments = [
  { name = "registry", help = "Configured resource registry" },
  { name = "item", help = "Catalog resource names", positional = true, kind = "list" },
 ]
+
+[setup]
+configure = "code/configure"
+
+[handlers."code/configure"]
+type = "wasm"
+module = "code.wasm"
+function = "configure"
+sha256 = "auto"
+
+[handlers."code/ready"]
+type = "wasm"
+module = "code.wasm"
+function = "ready"
+sha256 = "auto"
+
+[[workflows]]
+id = "code/configure"
+steps = [{ id = "configure", handler = "code/configure" }]
+
+[[workflows]]
+id = "code/ready"
+steps = [{ id = "ready", handler = "code/ready" }]

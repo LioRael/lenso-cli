@@ -64,7 +64,7 @@ assert "SHA-256 mismatch" in failure.stdout + failure.stderr
 assert hashlib.sha256(binary.read_bytes()).hexdigest() == before
 root = Path(__file__).resolve().parents[2]
 subprocess.run([sys.executable, str(root / "scripts/verify-github-release.py"), "--binary", str(binary),
-                "--repo", args.repo, "--version", "0.1.1", "--ref", args.commit,
+                "--repo", args.repo, "--version", "0.1.2", "--ref", args.commit,
                 "--token-env", "GITHUB_TOKEN", "--out", str(output / "consumer-check")], check=True)
 report = {"cli_version": args.version, "platform": sys.platform, "binary_sha256": before,
           "installed": True, "refused_overwrite": True, "refused_tampering": True,

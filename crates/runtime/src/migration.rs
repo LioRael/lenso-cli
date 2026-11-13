@@ -117,6 +117,7 @@ pub fn migrate_project(project: &Path) -> Result<usize, Error> {
             schema_version: 1,
             extensions,
             registries: Default::default(),
+            presets: Default::default(),
             github: Default::default(),
         },
     };

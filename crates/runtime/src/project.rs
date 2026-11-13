@@ -8,6 +8,7 @@ use crate::source::Source;
 use lenso_cli::Error;
 use serde::{Deserialize, Serialize};
 
+use crate::dependencies::resolve;
 use crate::{Extension, HandlerSpec, ProcessSpec, project_path};
 
 /// Register explicit update, configuration inspection, migration, and cache discovery.
@@ -27,6 +28,7 @@ pub fn register_management_with_options(
     options: &LoadOptions,
 ) -> Result<(), Error> {
     use lenso_cli::{CommandSpec, Outcome};
+    crate::onboarding::register(cli, options)?;
     cli.command(
         CommandSpec {
             path: vec!["package".into()],
@@ -222,6 +224,8 @@ pub enum LoadMode {
 /// Host-owned dependency preparation policy; never supplied by an extension.
 #[derive(Debug, Clone, Default)]
 pub struct LoadOptions {
+    /// Native implementations available to this host; availability grants no activation.
+    pub providers: BTreeMap<String, crate::NativeProvider>,
     /// Disable network access for dependency preparation.
     pub offline: bool,
     /// Reject missing or changed project locks.
@@ -300,6 +304,9 @@ pub struct ProjectCli {
     /// Explicit local or remote extension packages.
     #[serde(default)]
     pub extensions: Vec<Installation>,
+    /// Exact reviewed preset compositions; package grants remain visible above.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub presets: BTreeMap<String, crate::PresetSelection>,
     /// Explicit namespace-to-base-URL routes for extension distribution.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub registries: BTreeMap<String, String>,
@@ -325,6 +332,9 @@ pub struct Installation {
     /// Optional semantic version requirement for the declared source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// Whether the user directly selected this package, independently of presets.
+    #[serde(default = "enabled", skip_serializing_if = "is_true")]
+    pub direct: bool,
     /// Whether commands from this declaration are enabled.
     #[serde(default = "enabled")]
     pub enabled: bool,
@@ -367,6 +377,18 @@ pub struct Installation {
     pub aliases: BTreeMap<String, Vec<String>>,
 }
 
+impl Installation {
+    /// Declare a package without granting any external capabilities.
+    pub fn new(id: String, source: String, version: Option<String>) -> Result<Self, Error> {
+        serde_json::from_value(serde_json::json!({"id":id,"source":source,"version":version}))
+            .map_err(Error::from)
+    }
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
 fn enabled() -> bool {
     true
 }
@@ -374,8 +396,10 @@ fn enabled() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProjectLock {
-    schema_version: u32,
+    pub(crate) schema_version: u32,
     pub extensions: Vec<LockedExtension>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub presets: BTreeMap<String, crate::PresetSelection>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub resources: BTreeMap<String, crate::resources::ResourcePin>,
 }
@@ -386,22 +410,22 @@ pub(crate) struct LockedExtension {
     pub id: String,
     pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    requirement: Option<String>,
-    source_sha256: String,
+    pub(crate) requirement: Option<String>,
+    pub(crate) source_sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    registry: Option<String>,
+    pub(crate) registry: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    resolved_source: Option<String>,
+    pub(crate) resolved_source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    github: Option<crate::package::ReleasePin>,
-    definition_sha256: String,
+    pub(crate) github: Option<crate::package::ReleasePin>,
+    pub(crate) definition_sha256: String,
     pub definition: Extension,
-    modules: BTreeMap<String, LockedModule>,
+    pub(crate) modules: BTreeMap<String, LockedModule>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct LockedModule {
+pub(crate) struct LockedModule {
     source: String,
     sha256: String,
 }
@@ -435,6 +459,19 @@ pub fn read_project(project: &Path) -> Result<Option<Project>, Error> {
         crate::registry::reference(&format!("registry:{namespace}/check"))?;
         crate::registry::validate_base(project, url)?;
     }
+    for (id, preset) in &config.cli.presets {
+        preset.validate(id)?;
+        for (provider, dependency) in &preset.extensions {
+            if !config.cli.extensions.iter().any(|entry| {
+                entry.enabled && entry.id == *provider && entry.source == dependency.source
+            }) {
+                return Err(Error::Invalid(format!(
+                    "preset {id} requires an enabled {provider} declaration from {}",
+                    dependency.source
+                )));
+            }
+        }
+    }
     let mut ids = BTreeSet::new();
     for installed in &config.cli.extensions {
         if installed.id.is_empty() || !ids.insert(&installed.id) {
@@ -448,7 +485,8 @@ pub fn read_project(project: &Path) -> Result<Option<Project>, Error> {
                 Error::Invalid("source grants require github:owner/repo".into())
             })?)?;
         }
-        if crate::package::reference(&installed.source)?.is_none()
+        if !installed.source.starts_with("builtin:")
+            && crate::package::reference(&installed.source)?.is_none()
             && crate::registry::route(&installed.source, &config.cli.registries)?.is_none()
         {
             Source::parse(project, &installed.source)?;
@@ -472,6 +510,9 @@ pub(crate) fn read_lock(project: &Path) -> Result<Option<ProjectLock>, Error> {
     if lock.schema_version != 1 {
         return Err(Error::Invalid("unsupported lock schema_version".into()));
     }
+    for (id, preset) in &lock.presets {
+        preset.validate(id)?;
+    }
     if lock.resources.len() > 128 {
         return Err(Error::Invalid(
             "repository source pin limit exceeded".into(),
@@ -488,7 +529,8 @@ pub(crate) fn read_lock(project: &Path) -> Result<Option<ProjectLock>, Error> {
         check_digest(&entry.source_sha256)?;
         if let Some(pin) = &entry.github {
             pin.validate()?;
-            if crate::package::reference(&entry.source)?.is_none()
+            if crate::package::reference(entry.resolved_source.as_deref().unwrap_or(&entry.source))?
+                .is_none()
                 || pin.metadata.id != entry.id
                 || pin.metadata.version != entry.definition.version
             {
@@ -500,14 +542,16 @@ pub(crate) fn read_lock(project: &Path) -> Result<Option<ProjectLock>, Error> {
                 crate::registry::reference(&entry.source)?
                     .ok_or_else(|| Error::Invalid("locked Registry reference is missing".into()))?;
                 crate::registry::validate_base(project, base)?;
-                if !matches!(Source::parse(project, source)?, Source::Remote(_)) {
+                if crate::package::reference(source)?.is_none()
+                    && !matches!(Source::parse(project, source)?, Source::Remote(_))
+                {
                     return Err(Error::Invalid(
                         "locked Registry manifest must be remote".into(),
                     ));
                 }
             }
             (None, None) => {
-                if entry.github.is_none() {
+                if entry.github.is_none() && !entry.source.starts_with("builtin:") {
                     Source::parse(project, &entry.source)?;
                 }
             }
@@ -558,12 +602,17 @@ pub fn prepare_project(project: &Path, options: &LoadOptions) -> Result<usize, E
         read_project(&project)?.ok_or_else(|| Error::Invalid("no lenso.toml found".into()))?;
     let _guard = resolution_guard(&project, &config, options)?;
     let next = resolve(&project, &config, options)?;
-    validate(&project, &config, &next)?;
+    validate(&project, &config, &next, options)?;
     save_lock(&project, &next, options)?;
     Ok(next.extensions.len())
 }
 
-pub(crate) fn validate(project: &Path, config: &Project, next: &ProjectLock) -> Result<(), Error> {
+pub(crate) fn validate(
+    project: &Path,
+    config: &Project,
+    next: &ProjectLock,
+    options: &LoadOptions,
+) -> Result<(), Error> {
     // Validate all definitions together before replacing the lock or touching cache.
     let mut check = lenso_cli::Cli::new("validation");
     register_management(&mut check)?;
@@ -593,6 +642,10 @@ pub(crate) fn validate(project: &Path, config: &Project, next: &ProjectLock) -> 
                 // Host-native dependencies are checked against the real application at load time.
                 if !defined.contains(id)
                     && !namespaces.iter().any(|namespace| id.starts_with(namespace))
+                    && !options
+                        .providers
+                        .keys()
+                        .any(|provider| id.starts_with(&format!("{provider}/")))
                     && !check.engine_mut().contains_handler(id)
                 {
                     check.engine_mut().handler(id, |_| async {
@@ -602,7 +655,7 @@ pub(crate) fn validate(project: &Path, config: &Project, next: &ProjectLock) -> 
             }
         }
     }
-    crate::manifest::register_locked(&mut check, project, config, next, &LoadOptions::default())?;
+    crate::manifest::register_locked(&mut check, project, config, next, options)?;
     Ok(())
 }
 
@@ -621,26 +674,41 @@ pub(crate) fn resolution_guard(
     ))
 }
 
-fn declarations_match(lock: &ProjectLock, config: &Project) -> bool {
-    lock.extensions.len() == config.cli.extensions.len()
-        && config.cli.extensions.iter().all(|installed| {
-            lock.extensions.iter().any(|entry| {
-                entry.id == installed.id
-                    && entry.source == installed.source
-                    && entry.requirement == installed.version
-                    && entry
-                        .github
-                        .as_ref()
-                        .is_none_or(|pin| pin.api == config.cli.github.api)
-                    && entry.registry.as_deref()
-                        == crate::registry::route(&installed.source, &config.cli.registries)
-                            .ok()
-                            .flatten()
-            })
+pub(crate) fn declarations_match(lock: &ProjectLock, config: &Project) -> bool {
+    lock.presets == config.cli.presets
+        && lock.extensions.iter().all(|entry| {
+            entry.registry.as_deref()
+                == crate::registry::route(&entry.source, &config.cli.registries)
+                    .ok()
+                    .flatten()
+                && entry
+                    .github
+                    .as_ref()
+                    .is_none_or(|pin| pin.api == config.cli.github.api)
         })
+        && config
+            .cli
+            .extensions
+            .iter()
+            .filter(|entry| entry.enabled)
+            .all(|installed| {
+                lock.extensions.iter().any(|entry| {
+                    entry.id == installed.id
+                        && entry.source == installed.source
+                        && entry.requirement == installed.version
+                        && entry
+                            .github
+                            .as_ref()
+                            .is_none_or(|pin| pin.api == config.cli.github.api)
+                        && entry.registry.as_deref()
+                            == crate::registry::route(&installed.source, &config.cli.registries)
+                                .ok()
+                                .flatten()
+                })
+            })
 }
 
-pub(crate) fn resolve(
+pub(crate) fn resolve_flat(
     project: &Path,
     config: &Project,
     options: &LoadOptions,
@@ -664,18 +732,45 @@ pub(crate) fn resolve(
                     .ok()
                     .flatten()
     };
-    if options.locked
-        && previous
-            .as_ref()
-            .is_none_or(|lock| !declarations_match(lock, config))
-    {
-        return Err(Error::Invalid(
-            "lenso.lock is missing or declarations changed with --locked".into(),
-        ));
-    }
     let cache = options.cache()?;
     let mut entries = Vec::new();
-    for installed in &config.cli.extensions {
+    for installed in config.cli.extensions.iter().filter(|entry| entry.enabled) {
+        if let Some(id) = installed.source.strip_prefix("builtin:") {
+            let provider = options.providers.get(id).ok_or_else(|| {
+                Error::Invalid(format!("native provider {id} is unavailable in this CLI"))
+            })?;
+            let definition: Extension = serde_json::from_value(
+                serde_json::json!({"schema_version":1,"id":id,"version":provider.version,"handlers":{},"workflows":[],"commands":[]}),
+            )?;
+            if installed.id != id {
+                return Err(Error::Invalid("native provider identity mismatch".into()));
+            }
+            let version = semver::Version::parse(&provider.version)
+                .map_err(|e| Error::Invalid(e.to_string()))?;
+            if let Some(req) = &installed.version
+                && !semver::VersionReq::parse(req)
+                    .map_err(|e| Error::Invalid(e.to_string()))?
+                    .matches(&version)
+            {
+                return Err(Error::Invalid(format!(
+                    "native provider {id} version {version} does not satisfy {req}; upgrade CLI"
+                )));
+            }
+            let hash = digest(&serde_json::to_vec(&definition)?);
+            entries.push(LockedExtension {
+                id: id.into(),
+                source: installed.source.clone(),
+                requirement: installed.version.clone(),
+                source_sha256: hash.clone(),
+                definition_sha256: hash,
+                registry: None,
+                resolved_source: None,
+                github: None,
+                definition,
+                modules: BTreeMap::new(),
+            });
+            continue;
+        }
         if options.mode != LoadMode::Update
             && let Some(entry) = previous.as_ref().and_then(|lock| {
                 lock.extensions
@@ -696,10 +791,28 @@ pub(crate) fn resolve(
         {
             source_options.mode = LoadMode::Update;
         }
-        if crate::package::reference(&installed.source)?.is_some() {
+        let registry = crate::registry::route(&installed.source, &config.cli.registries)?;
+        let package = registry
+            .map(|base| {
+                crate::registry::resolve(
+                    project,
+                    &installed.source,
+                    base,
+                    installed.version.as_deref(),
+                    &cache,
+                    &source_options,
+                )
+            })
+            .transpose()?;
+        let release_source = package
+            .as_ref()
+            .map_or(installed.source.as_str(), |package| {
+                package.manifest.as_str()
+            });
+        if crate::package::reference(release_source)?.is_some() {
             let github = crate::github::Github::new(&config.cli.github)?;
             let (pin, bytes) = crate::package::resolve(
-                &installed.source,
+                release_source,
                 &installed.id,
                 installed.version.as_deref(),
                 &github,
@@ -720,23 +833,20 @@ pub(crate) fn resolve(
             if entry.definition.version != pin.metadata.version {
                 return Err(Error::Invalid("release manifest version mismatch".into()));
             }
+            if let Some(package) = &package
+                && (digest(&bytes) != package.sha256
+                    || entry.definition.version != package.version.to_string())
+            {
+                return Err(Error::Permission(
+                    "GitHub package does not match Registry digest/version".into(),
+                ));
+            }
+            entry.registry = registry.map(str::to_owned);
+            entry.resolved_source = package.map(|package| package.manifest);
             entry.github = Some(pin);
             entries.push(entry);
             continue;
         }
-        let registry = crate::registry::route(&installed.source, &config.cli.registries)?;
-        let package = registry
-            .map(|base| {
-                crate::registry::resolve(
-                    project,
-                    &installed.source,
-                    base,
-                    installed.version.as_deref(),
-                    &cache,
-                    &source_options,
-                )
-            })
-            .transpose()?;
         let declaration = package
             .as_ref()
             .map_or(installed.source.as_str(), |package| {
@@ -769,6 +879,7 @@ pub(crate) fn resolve(
     Ok(ProjectLock {
         schema_version: 1,
         extensions: entries,
+        presets: config.cli.presets.clone(),
         resources: previous.map(|p| p.resources).unwrap_or_default(),
     })
 }
@@ -887,7 +998,10 @@ fn write_lock(
     if let Some(current) = read_lock(project)? {
         match scope {
             LockWrite::Extensions => next.resources = current.resources,
-            LockWrite::Resources => next.extensions = current.extensions,
+            LockWrite::Resources => {
+                next.extensions = current.extensions;
+                next.presets = current.presets;
+            }
         }
     }
     let path = project_path(project, Path::new("lenso.lock"))?;

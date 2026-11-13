@@ -541,3 +541,120 @@ fn invalid_registry_metadata_never_replaces_an_existing_lock_or_executes_modules
     );
     assert!(!unknown.path().join("lenso.lock").exists());
 }
+
+#[test]
+fn dependency_solver_backtracks_locks_edges_and_rejects_cycles_without_writes() {
+    let server = Server::new();
+    let root = tempfile::tempdir().unwrap();
+    let base = format!("http://{}/registry/", server.address);
+    let put = |id: &str, versions: Vec<(&str, Value)>| {
+        let releases=versions.into_iter().map(|(version,deps)|{
+            let body=serde_json::to_vec(&json!({"schema_version":1,"id":id,"version":version,"dependencies":deps,"handlers":{},"workflows":[],"commands":[]})).unwrap();
+            let path=format!("/packages/{id}/{version}.json");
+            server.set(&path,body.clone());
+            json!({"version":version,"manifest":path,"sha256":format!("{:x}",Sha256::digest(&body))})
+        }).collect::<Vec<_>>();
+        server.set(
+            &format!("/registry/{id}.json"),
+            serde_json::to_vec(
+                &json!({"schema_version":1,"name":format!("@test/{id}"),"releases":releases}),
+            )
+            .unwrap(),
+        );
+    };
+    put(
+        "a",
+        vec![
+            (
+                "1.1.0",
+                json!({"shared":{"source":"registry:@test/shared","version":"^2"}}),
+            ),
+            (
+                "1.0.0",
+                json!({"shared":{"source":"registry:@test/shared","version":"^1"}}),
+            ),
+        ],
+    );
+    put("shared", vec![("1.0.0", json!({})), ("2.0.0", json!({}))]);
+    put(
+        "z",
+        vec![(
+            "1.0.0",
+            json!({"shared":{"source":"registry:@test/shared","version":"^1"}}),
+        )],
+    );
+    let config:lenso_runtime::Project=serde_json::from_value(json!({"cli":{"schema_version":1,"registries":{"@test":base},"extensions":[{"id":"a","source":"registry:@test/a","version":"^1"},{"id":"z","source":"registry:@test/z","version":"^1"}]}})).unwrap();
+    std::fs::write(
+        root.path().join("lenso.toml"),
+        toml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    let mut options = LoadOptions {
+        cache_dir: Some(root.path().join("cache")),
+        ..Default::default()
+    };
+    lenso_runtime::prepare_project(root.path(), &options).unwrap();
+    let before = std::fs::read(root.path().join("lenso.lock")).unwrap();
+    let lock: Value = serde_json::from_slice(&before).unwrap();
+    assert_eq!(lock["extensions"].as_array().unwrap().len(), 3);
+    assert_eq!(lock["extensions"][0]["definition"]["version"], "1.0.0");
+    assert_eq!(
+        lock["extensions"][0]["definition"]["dependencies"]["shared"]["version"],
+        "^1"
+    );
+    options.offline = true;
+    options.locked = true;
+    lenso_runtime::prepare_project(root.path(), &options).unwrap();
+    assert_eq!(
+        std::fs::read(root.path().join("lenso.lock")).unwrap(),
+        before
+    );
+    put(
+        "a",
+        vec![(
+            "1.2.0",
+            json!({"shared":{"source":"registry:@test/shared","version":"^1"}}),
+        )],
+    );
+    let mut changed = config.clone();
+    changed.cli.extensions.push(
+        lenso_runtime::Installation::new(
+            "shared".into(),
+            "registry:@test/shared".into(),
+            Some("^1".into()),
+        )
+        .unwrap(),
+    );
+    std::fs::write(
+        root.path().join("lenso.toml"),
+        toml::to_string(&changed).unwrap(),
+    )
+    .unwrap();
+    options.offline = false;
+    options.locked = false;
+    lenso_runtime::prepare_project(root.path(), &options).unwrap();
+    let before = std::fs::read(root.path().join("lenso.lock")).unwrap();
+    let pinned: Value = serde_json::from_slice(&before).unwrap();
+    assert_eq!(
+        pinned["extensions"][0]["definition"]["version"], "1.0.0",
+        "adding another root must preserve compatible pins"
+    );
+    put(
+        "shared",
+        vec![(
+            "1.0.0",
+            json!({"a":{"source":"registry:@test/a","version":"^1"}}),
+        )],
+    );
+    options.offline = false;
+    options.locked = false;
+    options.mode = LoadMode::Update;
+    let error = lenso_runtime::prepare_project(root.path(), &options)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("cycle"), "{error}");
+    assert_eq!(
+        std::fs::read(root.path().join("lenso.lock")).unwrap(),
+        before
+    );
+}

@@ -17,6 +17,7 @@ struct Index {
 #[serde(deny_unknown_fields)]
 struct Release {
     version: semver::Version,
+    #[serde(alias = "source")]
     manifest: String,
     sha256: String,
     #[serde(default)]
@@ -57,6 +58,11 @@ pub(crate) fn route<'a>(
     let Some((namespace, _)) = reference(source)? else {
         return Ok(None);
     };
+    if namespace == "@lenso" && !registries.contains_key(namespace) {
+        return Ok(Some(
+            "https://raw.githubusercontent.com/LioRael/lenso-registry/main/extensions/",
+        ));
+    }
     registries
         .get(namespace)
         .map(|url| Some(url.as_str()))
@@ -127,6 +133,13 @@ pub(crate) fn resolve(
             .ok_or_else(|| {
                 Error::Invalid(format!("no release of {source} satisfies {requirement}"))
             })?;
+        if crate::package::reference(&release.manifest)?.is_some() {
+            return Ok(Package {
+                manifest: release.manifest,
+                sha256: release.sha256,
+                version: release.version,
+            });
+        }
         let manifest = index_url
             .join(&release.manifest)
             .map_err(|_| Error::Invalid("invalid Registry manifest address".into()))?;

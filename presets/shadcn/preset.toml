@@ -1,0 +1,10 @@
+schema_version = 1
+id = "@lenso/shadcn"
+version = "0.1.0"
+create = "shadcn/create"
+adopt = "shadcn/init"
+
+[[extensions]]
+id = "shadcn"
+source = "registry:@lenso/shadcn"
+version = "^0.1.1"

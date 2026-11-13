@@ -52,7 +52,18 @@ async fn main() {
         if !version_only
             && !matches!(
                 Cli::command_from_args(&args),
-                Some("update" | "config" | "migrate" | "cache" | "package" | "publish")
+                Some(
+                    "new"
+                        | "init"
+                        | "ext"
+                        | "preset"
+                        | "update"
+                        | "config"
+                        | "migrate"
+                        | "cache"
+                        | "package"
+                        | "publish"
+                )
             )
         {
             lenso_runtime::load_project_with_options(

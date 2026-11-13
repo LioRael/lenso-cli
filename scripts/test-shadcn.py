@@ -22,7 +22,7 @@ shutil.copytree(root / "examples/vite-shadcn", project,
                 ignore=shutil.ignore_patterns("node_modules", "dist", ".lenso", "lenso", "lenso.toml", "lenso.lock"))
 
 def run(*arguments, expected=0, env=None):
-    result = subprocess.run([str(binary), "--project", str(project), *arguments, "--json"],
+    result = subprocess.run([str(binary), "--project", str(project), "shadcn", *arguments, "--json"],
                             capture_output=True, text=True, env=env, timeout=300)
     assert result.returncode == expected, (arguments, result.returncode, result.stdout, result.stderr)
     return json.loads(result.stdout)

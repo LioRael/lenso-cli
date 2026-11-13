@@ -369,3 +369,24 @@ fixture does not establish a successful GitHub-hosted Actions run or public rele
 Real private Release uploads, a successful GitHub-hosted Actions build/publish/consume
 run, and independent macOS consumption are recorded in
 [live GitHub Release verification](github-release-verification.md).
+
+## Submit an official Registry record
+
+After publishing, authors can prepare an immutable Registry record and optionally
+open a review PR using the repository's author helper:
+
+```sh
+python3 scripts/registry-entry.py --metadata dist/lenso/lenso-release.json \
+  --repo owner/extensions --name @lenso/package --out dist/registry-entry.json
+python3 scripts/registry-entry.py --metadata dist/lenso/lenso-release.json \
+  --repo owner/extensions --name @lenso/package --submit
+```
+
+The submit path uses authenticated `gh` and Python on the author's machine. It uses
+the GitHub API, creates a branch/PR, and refuses to replace an existing version or
+an unrelated review branch. Authors without direct Registry write access create a
+fork and pass `--head-repo ACCOUNT/lenso-registry`. Consumers need none of these tools.
+Registry review and CI validate the public release metadata and exact manifest digest
+before a maintainer merges. The extension publishing workflow supports Code/Shadcn
+selection and an optional `register` input; cross-repository PRs require an explicitly
+configured `LENSO_REGISTRY_TOKEN` secret. No personal token is installed automatically.

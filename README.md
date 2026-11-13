@@ -9,7 +9,7 @@ The previous CLI implementation is preserved in
 [LioRael/lenso-cli-previous](https://github.com/LioRael/lenso-cli-previous).
 
 Native binaries and SHA-256-verified installers are distributed through
-[GitHub Releases](https://github.com/LioRael/lenso-cli/releases/tag/v0.1.0) for macOS
+[GitHub Releases](https://github.com/LioRael/lenso-cli/releases/latest) for macOS
 (Intel/Apple Silicon), Linux (x64/ARM64) and Windows x64. See
 [installation and release instructions](docs/install.md), including private-repository
 downloads. Neither installation nor the native CLI requires Node.js, Git or Rust.
@@ -19,19 +19,44 @@ The runtime owns restricted Host operations, extension distribution, integrity,
 locking, and the user cache. Business protocols live under `extensions/`; the
 runtime does not parse component catalogs, npm metadata, or workspace formats.
 
+## Start a project
+
+The 0.2 CLI provides native onboarding; editing TOML is optional:
+
 ```sh
-cargo build --workspace
-python3 scripts/build-demo.py
-cargo run -p lenso -- --project examples/m0 preview --name Rust
-cargo run -p lenso -- --project examples/m0 greet --name Rust
+lenso new my-app --preset shadcn
+cd my-app
+lenso shadcn add button
+
+# Existing projects
+lenso init --preset shadcn
+lenso ext add code
+lenso code search
+lenso ext tree
 ```
 
-The greeting fixture demonstrates Wasm, read-only preview, interactive approval,
-and file application without depending on a frontend ecosystem.
+`new` creates a Vite/React/TypeScript/Tailwind project through the shadcn preset.
+`init` adopts an existing prepared project. The Code extension asks for its GitHub
+repository; `--input '{"repo":"owner/repo","ref":"v1","catalog":"catalog.toml","target":"src"}'`
+provides the same settings to Agents. Configurations and proposed grants are reviewed
+before saving; application changes have a separate file preview and confirmation.
+Frontend development and approved package-manager operations still require the
+project's own toolchain. Fetching and running Lenso extensions requires no Node.js or Git.
+
+Official aliases resolve through [lenso-registry](https://github.com/LioRael/lenso-registry).
+`lenso ext add @acme/tool --constraint '^1'` uses an explicitly configured namespace;
+`lenso ext add github-release:owner/repo/tool --id tool` uses a direct source.
+`lenso preset apply NAME_OR_URL` composes packages and runs its adoption recipe.
+`lenso ext remove ID` and `lenso preset remove ID` retain packages still selected by
+another preset or required by another extension. They leave generated code and the
+shared cache in place. A new project without extensions uses `--preset empty`.
+
+These commands require CLI 0.2 or a current source build; the earlier 0.1 binary
+continues to provide its original command set.
 
 ## Configuration and dependencies
 
-Human-authored project configuration lives in root `lenso.toml`. Commands prepare
+The editable project configuration lives in root `lenso.toml`. Commands prepare
 their dependencies automatically; no `install` command is required. Commit the
 root declaration and generated `lenso.lock`. Keep local source packages available
 when using local declarations.
@@ -64,12 +89,22 @@ configured static index. Manifest identity/version and content digests are check
 before registration. Direct-source version requirements remain validation checks.
 Remote manifests must pin exact Wasm digests; local sources may use `auto`.
 See [extension distribution](docs/registry.md) for the protocol, lock semantics,
-limits, and command-level acceptance. No official hosted Registry is assumed.
+limits, and command-level acceptance. The official `@lenso` namespace is built in.
 GitHub Releases and repository code sources are also supported. See
 [GitHub distribution](docs/github-distribution.md) for author configuration,
 packaging, source grants, lock/cache behavior, and the optional `code` extension.
 The [design record](docs/distribution-design.md) distinguishes later goals such as
 repository-hosted executable packages and installed-file receipts.
+
+Extensions declare `dependencies` with provider IDs, sources, and semantic version
+constraints. Resolution supports transitive dependencies, shared providers, version
+backtracking, cycles/conflicts, and a complete locked graph. Each provider has one
+version per project. Dependencies receive no inherited grants. The optional native
+`project` provider is activated only when selected or required; a minimal executable
+can omit it with `cargo build -p lenso --no-default-features`.
+When upgrading an existing 0.1 project, run `lenso update` to obtain packages with
+explicit dependencies. For an intentionally pinned older package, select its native
+provider explicitly with `lenso ext add project`.
 
 The first command resolves metadata, validates definitions, and saves the lock.
 Each Wasm file is downloaded or copied into the user cache only when a handler
@@ -96,8 +131,8 @@ project dependencies.
 lenso --project AUTHOR_PROJECT publish --github --repo acme/lenso-tools --id code --dry-run
 lenso --project AUTHOR_PROJECT publish --github --repo acme/lenso-tools --id code --target FULL_COMMIT_SHA
 
-# Consumer: configure the optional code extension and a repository source.
-python3 scripts/configure-code.py PROJECT --repo acme/ui-kits --target src
+# Consumer: add the optional Code extension and answer its repository question.
+lenso --project PROJECT ext add code
 lenso --project PROJECT code search
 lenso --project PROJECT code preview button
 lenso --project PROJECT code add button
@@ -110,8 +145,7 @@ an extension's opaque options and separate `sources = ["github:owner/repo"]` gra
 Node.js and Git are not needed for either consumer path. Repository source pins live
 beside extension pins in `lenso.lock`; immutable bytes reuse the user cache. Read-only
 commands may prepare these metadata pins, while file application still requires the
-existing project grants and review. The examples use illustrative repository names;
-no official hosted package is assumed.
+existing project grants and review. Official packages use curated Registry entries; custom repositories remain supported.
 
 Publishing validates deterministic packages, asks for approval, uploads to a draft,
 verifies checksums and then publishes. Reruns resume matching draft assets and accept

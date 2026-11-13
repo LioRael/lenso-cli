@@ -161,7 +161,7 @@ def fixture(project, mono=False, manager="npm"):
     return active
 
 def run(project, *arguments, expected=0, overrides=None, cwd=None):
-    child = subprocess.Popen([str(binary),"--project",str(project),*arguments,"--json"],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,
+    child = subprocess.Popen([str(binary),"--project",str(project),"shadcn",*arguments,"--json"],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,
                              env=env if overrides is None else overrides,cwd=cwd)
     try:
         stdout, stderr = child.communicate(timeout=180)
@@ -207,7 +207,7 @@ try:
         assert empty["outputs"]["search"]["results"] == []
         run(project,"search","@public","--limit","0",*options,expected=1)
         assert before == snapshot(project), "search changed project files"
-        human_search = subprocess.run([str(binary),"--project",str(project),"search","@public","--query","badge",*options,"--color","always"],capture_output=True,text=True,env=env,timeout=30)
+        human_search = subprocess.run([str(binary),"--project",str(project),"shadcn","search","@public","--query","badge",*options,"--color","always"],capture_output=True,text=True,env=env,timeout=30)
         assert human_search.returncode == 0 and "@public/badge" in human_search.stdout and "1 results" in human_search.stdout and "\x1b[" in human_search.stdout
         assert all(secret not in human_search.stdout + human_search.stderr for secret in [token,query_token,tool_token])
         paths = [entry["path"] for entry in result["outputs"]["resolve"]["files"]]
@@ -225,7 +225,7 @@ try:
             feature = next(entry["content"] for entry in result["outputs"]["resolve"]["files"] if entry["path"].endswith("feature.tsx"))
             assert '"@workspace/ui/components/custom-button"' in feature and '"@workspace/ui/lib/variant"' in feature
         if not mono:
-            human = subprocess.run([str(binary),"--project",str(project),"preview","@private/feature","--color","always"],capture_output=True,text=True,env=env,timeout=40)
+            human = subprocess.run([str(binary),"--project",str(project),"shadcn","preview","@private/feature","--color","always"],capture_output=True,text=True,env=env,timeout=40)
             assert human.returncode == 0 and "Registry acceptance instructions" in human.stdout and "\x1b[" in human.stdout
             assert all(secret not in human.stdout + human.stderr for secret in [token,query_token,tool_token])
         local = run(project,"preview","./registry/local.json",*options)

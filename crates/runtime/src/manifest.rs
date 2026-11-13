@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::LoadOptions;
-use crate::project::{Project, ProjectLock, read_project, resolution_guard, resolve, save_lock};
+use crate::dependencies::resolve;
+use crate::project::{Project, ProjectLock, read_project, resolution_guard, save_lock};
 use crate::{ProcessSpec, WasmSpec};
 
 /// Static extension metadata and executable adapter declarations.
@@ -19,12 +20,40 @@ pub struct Extension {
     pub id: String,
     /// Human-readable installed version.
     pub version: String,
+    /// Explicit package dependencies keyed by provider identity.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub dependencies: BTreeMap<String, Dependency>,
+    /// Minimum compatible CLI version requirement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// Optional author-owned onboarding suggestions and configuration workflow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<crate::Setup>,
     /// Handler identifiers owned by this extension namespace.
     pub handlers: BTreeMap<String, HandlerSpec>,
     /// Workflow definitions, using registered native or extension handlers.
     pub workflows: Vec<Workflow>,
     /// Statically discoverable command aliases.
     pub commands: Vec<CommandSpec>,
+}
+
+/// A required provider and its independently resolved distribution source.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Dependency {
+    /// Local manifest, Registry reference, GitHub Release, or native provider.
+    pub source: String,
+    /// Semantic version constraint.
+    pub version: String,
+}
+
+/// A native provider made available by the embedding executable, activated by dependencies.
+#[derive(Debug, Clone)]
+pub struct NativeProvider {
+    /// Version compiled into this host.
+    pub version: String,
+    /// Register this provider's handlers only when selected by the graph.
+    pub register: fn(&mut lenso_cli::Engine) -> Result<(), Error>,
 }
 
 /// Runtime adapters available to explicitly installed extensions.
@@ -43,6 +72,22 @@ pub(crate) fn validate_metadata(extension: &Extension) -> Result<(), Error> {
             "unsupported or empty extension identity".into(),
         ));
     }
+    if let Some(host) = &extension.host {
+        let requirement =
+            semver::VersionReq::parse(host).map_err(|e| Error::Invalid(e.to_string()))?;
+        let current = semver::Version::parse(env!("CARGO_PKG_VERSION"))
+            .map_err(|e| Error::Invalid(e.to_string()))?;
+        if !requirement.matches(&current) {
+            return Err(Error::Invalid(format!(
+                "{} requires CLI {host}; current {current}",
+                extension.id
+            )));
+        }
+    }
+    for dependency in extension.dependencies.values() {
+        semver::VersionReq::parse(&dependency.version)
+            .map_err(|e| Error::Invalid(e.to_string()))?;
+    }
     let namespace = format!("{}/", extension.id);
     for id in extension
         .handlers
@@ -54,6 +99,45 @@ pub(crate) fn validate_metadata(extension: &Extension) -> Result<(), Error> {
                 "identifier {id} is outside {}",
                 extension.id
             )));
+        }
+    }
+    if let Some(configure) = extension
+        .setup
+        .as_ref()
+        .and_then(|setup| setup.configure.as_deref())
+        && (!configure.starts_with(&namespace)
+            || !extension
+                .workflows
+                .iter()
+                .any(|workflow| workflow.id == configure))
+    {
+        return Err(Error::Invalid(
+            "setup must reference an extension-owned workflow".into(),
+        ));
+    }
+    if let Some(configure) = extension
+        .setup
+        .as_ref()
+        .and_then(|setup| setup.configure.as_deref())
+    {
+        let workflow = extension
+            .workflows
+            .iter()
+            .find(|workflow| workflow.id == configure)
+            .ok_or_else(|| Error::Invalid("setup workflow is missing".into()))?;
+        for step in &workflow.steps {
+            for handler in std::iter::once(&step.handler)
+                .chain(&step.hooks.prepare)
+                .chain(&step.hooks.before)
+                .chain(&step.hooks.validate)
+                .chain(&step.hooks.after)
+            {
+                if !matches!(extension.handlers.get(handler), Some(HandlerSpec::Wasm(_))) {
+                    return Err(Error::Invalid(
+                        "setup configuration may only use extension-owned Wasm handlers".into(),
+                    ));
+                }
+            }
         }
     }
     for command in &extension.commands {
@@ -109,17 +193,26 @@ pub(crate) fn register_locked(
     let mut next = cli.clone();
     let mut extensions = Vec::new();
     let mut ids = BTreeSet::new();
-    for installed in config.cli.extensions.iter().filter(|entry| entry.enabled) {
+    let installations = crate::dependencies::installations(config, lock)?;
+    for locked in &lock.extensions {
+        if let Some(id) = locked.source.strip_prefix("builtin:") {
+            let provider = options.providers.get(id).ok_or_else(|| {
+                Error::Invalid(format!("native provider {id} is unavailable in this CLI"))
+            })?;
+            if provider.version != locked.definition.version {
+                return Err(Error::Invalid(format!(
+                    "native provider {id} changed; run lenso update"
+                )));
+            }
+            (provider.register)(next.engine_mut())?;
+        }
+    }
+    for installed in &installations {
         let locked = lock
             .extensions
             .iter()
-            .find(|entry| entry.id == installed.id && entry.source == installed.source)
-            .ok_or_else(|| {
-                Error::Invalid(format!(
-                    "{} is not resolved in lenso.lock; run lenso update",
-                    installed.id
-                ))
-            })?;
+            .find(|entry| entry.id == installed.id)
+            .ok_or_else(|| Error::Invalid(format!("{} is absent from lock", installed.id)))?;
         let extension = &locked.definition;
         validate_metadata(extension)?;
         if !ids.insert(extension.id.clone()) {
@@ -179,6 +272,26 @@ pub(crate) fn register_locked(
     }
     for (installed, extension) in &extensions {
         for workflow in &extension.workflows {
+            for step in &workflow.steps {
+                for id in std::iter::once(&step.handler)
+                    .chain(&step.hooks.prepare)
+                    .chain(&step.hooks.before)
+                    .chain(&step.hooks.validate)
+                    .chain(&step.hooks.after)
+                {
+                    if !next.engine_mut().contains_handler(id)
+                        && let Some(provider) = options
+                            .providers
+                            .keys()
+                            .find(|provider| id.starts_with(&format!("{provider}/")))
+                    {
+                        return Err(Error::Invalid(format!(
+                            "{} references {id}, but native provider {provider} is not selected; update the extension or run lenso ext add {provider}",
+                            extension.id
+                        )));
+                    }
+                }
+            }
             next.engine_mut().workflow(workflow.clone())?;
             for (name, value) in [
                 ("project.files", serde_json::to_value(&installed.files)?),
@@ -231,4 +344,44 @@ pub(crate) fn register_locked(
     }
     *cli = next;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn setup_cannot_invoke_processes_or_native_file_writers() {
+        let mut definition: Extension=serde_json::from_value(json!({
+            "schema_version":1,"id":"example","version":"1.0.0",
+            "setup":{"configure":"example/configure"},
+            "handlers":{"example/configure":{"type":"process","program":"tool","args":[]}},
+            "workflows":[{"id":"example/configure","steps":[{"id":"configure","handler":"example/configure"}]}],"commands":[]
+        })).unwrap();
+        assert!(
+            validate_metadata(&definition)
+                .unwrap_err()
+                .to_string()
+                .contains("Wasm handlers")
+        );
+        definition.handlers.insert(
+            "example/configure".into(),
+            serde_json::from_value(
+                json!({"type":"wasm","module":"setup.wasm","function":"configure","sha256":"auto"}),
+            )
+            .unwrap(),
+        );
+        validate_metadata(&definition).unwrap();
+        definition.workflows[0].steps[0]
+            .hooks
+            .after
+            .push("project/apply".into());
+        assert!(
+            validate_metadata(&definition)
+                .unwrap_err()
+                .to_string()
+                .contains("Wasm handlers")
+        );
+    }
 }

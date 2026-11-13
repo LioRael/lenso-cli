@@ -1,6 +1,11 @@
 schema_version = 1
 id = "shadcn"
-version = "0.1.0"
+version = "0.1.1"
+host = ">=0.2.0, <0.3.0"
+
+[dependencies.project]
+source = "builtin:project"
+version = "^0.1.0"
 
 [handlers."shadcn/detect"]
 type = "wasm"
@@ -68,21 +73,21 @@ steps = [
 ]
 
 [[commands]]
-path = ["add"]
+path = ["shadcn", "add"]
 workflow = "shadcn/add"
 about = "Review and install shadcn Registry resources"
 provider = "shadcn"
 arguments = [{ name = "item", help = "Names, URLs, @namespace/name, or local JSON paths", positional = true, kind = "list" }, { name = "cwd", help = "App/workspace directory relative to the Lenso project" }]
 
 [[commands]]
-path = ["preview"]
+path = ["shadcn", "preview"]
 workflow = "shadcn/preview"
 about = "Preview Registry files and dependencies before application"
 provider = "shadcn"
 arguments = [{ name = "item", help = "Names, URLs, @namespace/name, or local JSON paths", positional = true, kind = "list" }, { name = "cwd", help = "App/workspace directory relative to the Lenso project" }]
 
 [[commands]]
-path = ["init"]
+path = ["shadcn", "init"]
 workflow = "shadcn/init"
 about = "Review components.json initialization for a prepared TypeScript/Tailwind project"
 provider = "shadcn"
@@ -137,7 +142,7 @@ steps = [
 ]
 
 [[commands]]
-path = ["search"]
+path = ["shadcn", "search"]
 workflow = "shadcn/search"
 about = "Search or list Registry resources without installing them"
 provider = "shadcn"
@@ -151,7 +156,7 @@ arguments = [
 ]
 
 [[commands]]
-path = ["list"]
+path = ["shadcn", "list"]
 workflow = "shadcn/search"
 about = "Search or list Registry resources without installing them"
 provider = "shadcn"
@@ -165,15 +170,48 @@ arguments = [
 ]
 
 [[commands]]
-path = ["diff"]
+path = ["shadcn", "diff"]
 workflow = "shadcn/diff"
 about = "Compare local files with current Registry resources without modifying files"
 provider = "shadcn"
 arguments = [{ name = "item", help = "Names, URLs, @namespace/name, or local JSON paths", positional = true, kind = "list" }, { name = "cwd", help = "App/workspace directory relative to the Lenso project" }]
 
 [[commands]]
-path = ["components", "update"]
+path = ["shadcn", "components", "update"]
 workflow = "shadcn/update"
 about = "Review and update installed component files from their Registry sources"
 provider = "shadcn"
 arguments = [{ name = "item", help = "Names, URLs, @namespace/name, or local JSON paths", positional = true, kind = "list" }, { name = "cwd", help = "App/workspace directory relative to the Lenso project" }]
+
+[setup]
+configure = "shadcn/configure"
+
+[setup.defaults]
+reads = ["package.json", "components.json", "pnpm-workspace.yaml", "tsconfig.json", "tsconfig.app.json", "package-lock.json", "pnpm-lock.yaml", "bun.lock"]
+read_roots = ["src", "app", "components", "hooks", "lib", "apps", "packages"]
+discover = true
+http = ["https://registry.npmjs.org/", "https://ui.shadcn.com/r/"]
+
+[handlers."shadcn/configure"]
+type = "wasm"
+module = "shadcn.wasm"
+function = "configure"
+sha256 = "auto"
+
+[handlers."shadcn/scaffold"]
+type = "wasm"
+module = "shadcn.wasm"
+function = "scaffold"
+sha256 = "auto"
+
+[[workflows]]
+id = "shadcn/configure"
+steps = [{ id = "configure", handler = "shadcn/configure" }]
+
+[[workflows]]
+id = "shadcn/create"
+steps = [
+  { id = "scaffold", handler = "shadcn/scaffold" },
+  { id = "plan", handler = "project/plan", needs = ["scaffold"] },
+  { id = "apply", handler = "project/apply", needs = ["plan"] },
+]

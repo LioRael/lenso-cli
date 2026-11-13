@@ -339,3 +339,43 @@ pub fn search(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
         json!({"pagination":{"total":results.len(),"offset":0,"limit":128,"hasMore":false},"results":results,"commit":commit}),
     ))
 }
+
+/// Ask for repository settings without reading files or fetching code.
+#[plugin_fn]
+pub fn configure(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
+    let repo = ctx["input"]["repo"]
+        .as_str()
+        .or_else(|| ctx["answers"]["code:repository"].as_str());
+    let Some(repo) = repo else {
+        return Ok(question(
+            "code:repository",
+            "GitHub repository containing your code catalog (owner/repo)",
+            json!({"type":"text"}),
+        ));
+    };
+    if repo.split('/').count() != 2
+        || repo.split('/').any(|part| {
+            part.is_empty()
+                || !part
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+        })
+    {
+        return Err(error("repository must be owner/repo").into());
+    }
+    let target = ctx["input"]["target"].as_str().unwrap_or("src");
+    let catalog = ctx["input"]["catalog"].as_str().unwrap_or("catalog.toml");
+    relative(target)?;
+    relative(catalog)?;
+    let reference = ctx["input"]["ref"].as_str().unwrap_or("HEAD");
+    Ok(complete(
+        json!({"installation":{"sources":[format!("github:{repo}")],"read_roots":[target],"write_roots":[target],"options":{"registries":{"main":{"source":format!("github-repo:{repo}"),"ref":reference,"path":catalog,"format":"lenso-code-v1","target":target}}}}}),
+    ))
+}
+
+#[plugin_fn]
+pub fn ready(_: Json<Value>) -> FnResult<Json<Value>> {
+    Ok(complete(
+        json!({"message":"Code source configured; use lenso code search"}),
+    ))
+}

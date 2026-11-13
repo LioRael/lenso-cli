@@ -1,5 +1,8 @@
 //! Optional file planning and guarded application, independent of the execution engine.
 
+/// Native provider version, independent of the executable release version.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 mod plan;
 
 pub use plan::{FileChange, Plan, PlanError};

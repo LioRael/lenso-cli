@@ -301,3 +301,97 @@ fn cancellation_stops_the_process_group() {
         "descendant survived cancellation"
     );
 }
+
+#[test]
+fn onboarding_is_reviewed_and_optional_native_providers_are_selected_explicitly() {
+    let root = tempfile::tempdir().unwrap();
+    let output = cli(root.path(), &["init", "--preset", "empty", "--json"]);
+    assert_eq!(output.status.code(), Some(2));
+    let pending: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(pending["status"], "needs_input");
+    assert!(!root.path().join("lenso.toml").exists());
+    assert!(!root.path().join("lenso.lock").exists());
+    let answers = root.path().join("answers.json");
+    fs::write(
+        &answers,
+        serde_json::to_vec(&json!({pending["question"]["id"].as_str().unwrap():false})).unwrap(),
+    )
+    .unwrap();
+    let output = cli(
+        root.path(),
+        &[
+            "init",
+            "--preset",
+            "empty",
+            "--answers",
+            answers.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(130));
+    assert!(!root.path().join("lenso.toml").exists());
+    let output = cli(
+        root.path(),
+        &["init", "--preset", "empty", "--yes", "--json"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let lock: Value =
+        serde_json::from_slice(&fs::read(root.path().join("lenso.lock")).unwrap()).unwrap();
+    assert_eq!(lock["extensions"], json!([]));
+    let output = cli(
+        root.path(),
+        &["ext", "add", "builtin:project", "--yes", "--json"],
+    );
+    #[cfg(feature = "project")]
+    {
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let output = cli(
+            root.path(),
+            &["ext", "tree", "--locked", "--offline", "--json"],
+        );
+        assert!(output.status.success());
+        let tree: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            tree["outputs"]["main"]["extensions"][0]["source"],
+            "builtin:project"
+        );
+        let output = cli(
+            root.path(),
+            &["ext", "remove", "project", "--yes", "--json"],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let lock: Value =
+            serde_json::from_slice(&fs::read(root.path().join("lenso.lock")).unwrap()).unwrap();
+        assert_eq!(lock["extensions"], json!([]));
+    }
+    #[cfg(not(feature = "project"))]
+    assert!(!output.status.success());
+    let output = cli(
+        root.path(),
+        &["new", "child", "--preset", "empty", "--json"],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!root.path().join("child").exists());
+    let output = cli(
+        root.path(),
+        &["new", "child", "--preset", "empty", "--yes", "--json"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(root.path().join("child/lenso.toml").is_file());
+}

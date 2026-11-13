@@ -4,12 +4,18 @@
     {
       "id": "demo",
       "source": "lenso/extensions/greeting/extension.toml",
-      "source_sha256": "0e44033ba16407a144721aa3ab0e6bc46af4dbe94a556daceab67a3fc1a6c289",
-      "definition_sha256": "b1537a25d615048d6aa2f292e72869752aaf254710fedcfd616f7c22ef03f83d",
+      "source_sha256": "44160c13ef7a8a944a7057e371caf39c75b204291f66914b920ac68c5b5a0cfc",
+      "definition_sha256": "47df9e676d91b285309284ca30bec9ba2c0f2115d2203618c1b35a6c0097bbf6",
       "definition": {
         "schema_version": 1,
         "id": "demo",
         "version": "0.1.0",
+        "dependencies": {
+          "project": {
+            "source": "builtin:project",
+            "version": "^0.1.0"
+          }
+        },
         "handlers": {
           "demo/greeting": {
             "type": "wasm",
@@ -191,6 +197,21 @@
             "arguments": []
           }
         ]
+      },
+      "modules": {}
+    },
+    {
+      "id": "project",
+      "source": "builtin:project",
+      "source_sha256": "270f9c2bf272d366fff1e296447be9c7628112b3067c89bcc784d5ba69f3f410",
+      "definition_sha256": "270f9c2bf272d366fff1e296447be9c7628112b3067c89bcc784d5ba69f3f410",
+      "definition": {
+        "schema_version": 1,
+        "id": "project",
+        "version": "0.1.0",
+        "handlers": {},
+        "workflows": [],
+        "commands": []
       },
       "modules": {}
     }

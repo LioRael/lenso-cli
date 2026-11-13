@@ -30,13 +30,15 @@ def literal(value):
     raise ValueError(f"unsupported TOML value: {type(value).__name__}")
 
 def save(path, config):
-    if set(config) != {"cli"} or set(config["cli"]) - {"schema_version", "extensions", "registries", "github"}:
+    if set(config) != {"cli"} or set(config["cli"]) - {"schema_version", "extensions", "registries", "github", "presets"}:
         raise ValueError("development installer cannot rewrite unrelated TOML sections; edit lenso.toml manually")
     lines = ["[cli]", f"schema_version = {config['cli']['schema_version']}"]
     if config["cli"].get("registries"):
         lines.append("registries = " + literal(config["cli"]["registries"]))
     if config["cli"].get("github"):
         lines.append("github = " + literal(config["cli"]["github"]))
+    if config["cli"].get("presets"):
+        lines.append("presets = " + literal(config["cli"]["presets"]))
     for entry in config["cli"].get("extensions", []):
         lines += ["", "[[cli.extensions]]"]
         lines += [f"{key} = {literal(value)}" for key, value in entry.items()]

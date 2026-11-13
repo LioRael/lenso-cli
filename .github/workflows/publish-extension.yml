@@ -1,10 +1,19 @@
-name: Publish code extension
+name: Publish extension
 
 on:
   push:
-    tags: ["code-v*"]
+    tags: ["code-v*", "shadcn-v*"]
   workflow_dispatch:
     inputs:
+      package:
+        description: Extension to publish
+        type: choice
+        options: [code, shadcn]
+        default: code
+      register:
+        description: Open an official Registry PR using LENSO_REGISTRY_TOKEN
+        type: boolean
+        default: false
       draft:
         description: Keep the verified release as a draft
         type: boolean
@@ -14,7 +23,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: publish-code-${{ github.repository }}
+  group: publish-extension-${{ github.repository }}
   cancel-in-progress: false
 
 jobs:
@@ -27,25 +36,37 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - name: Select package
+        id: package
+        env:
+          REQUESTED: ${{ inputs.package }}
+        run: |
+          id="$REQUESTED"
+          case "$GITHUB_REF_NAME" in code-v*) id=code ;; shadcn-v*) id=shadcn ;; esac
+          case "$id" in code|shadcn) ;; *) exit 1 ;; esac
+          echo "id=$id" >> "$GITHUB_OUTPUT"
       - name: Build CLI and Wasm
+        env:
+          PACKAGE_ID: ${{ steps.package.outputs.id }}
         run: |
           rustup toolchain install 1.99.0 --profile minimal --target wasm32-unknown-unknown
           cargo +1.99.0 build --locked --release -p lenso
-          cargo +1.99.0 build --locked --release --target wasm32-unknown-unknown --manifest-path extensions/code/Cargo.toml
-          mkdir -p dist/author/code
-          cp presets/code/extension.toml dist/author/code/extension.toml
-          cp extensions/code/target/wasm32-unknown-unknown/release/lenso_code.wasm dist/author/code/code.wasm
+          cargo +1.99.0 build --locked --release --target wasm32-unknown-unknown --manifest-path "extensions/$PACKAGE_ID/Cargo.toml"
+          mkdir -p "dist/author/$PACKAGE_ID"
+          cp "presets/$PACKAGE_ID/extension.toml" "dist/author/$PACKAGE_ID/extension.toml"
+          cp "extensions/$PACKAGE_ID/target/wasm32-unknown-unknown/release/lenso_${PACKAGE_ID}.wasm" "dist/author/$PACKAGE_ID/$PACKAGE_ID.wasm"
       - name: Publish verified assets
         id: publish
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          PACKAGE_ID: ${{ steps.package.outputs.id }}
           KEEP_DRAFT: ${{ inputs.draft || false }}
         run: |
-          args=(publish --github --id code --token-env GITHUB_TOKEN --yes --json)
+          args=(publish --github --id "$PACKAGE_ID" --token-env GITHUB_TOKEN --yes --json)
           if [ "$KEEP_DRAFT" = true ]; then args+=(--draft); fi
           target/release/lenso "${args[@]}"
       - name: Verify published extension in a fresh consumer
-        if: steps.publish.outputs.state == 'published'
+        if: steps.publish.outputs.state == 'published' && steps.package.outputs.id == 'code'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           PACKAGE_VERSION: ${{ steps.publish.outputs.version }}
@@ -53,3 +74,12 @@ jobs:
           python3 scripts/verify-github-release.py --binary target/release/lenso \
             --repo "$GITHUB_REPOSITORY" --version "$PACKAGE_VERSION" --ref "$GITHUB_SHA" \
             --out "$RUNNER_TEMP/lenso-release-e2e"
+      - name: Submit official Registry record for review
+        if: inputs.register && steps.publish.outputs.state == 'published'
+        env:
+          GH_TOKEN: ${{ secrets.LENSO_REGISTRY_TOKEN }}
+          PACKAGE_ID: ${{ steps.package.outputs.id }}
+        run: |
+          test -n "$GH_TOKEN" || { echo 'LENSO_REGISTRY_TOKEN is required for the optional cross-repository PR'; exit 1; }
+          python3 scripts/registry-entry.py --metadata dist/lenso/lenso-release.json \
+            --repo "$GITHUB_REPOSITORY" --name "@lenso/$PACKAGE_ID" --submit

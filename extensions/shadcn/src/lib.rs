@@ -360,3 +360,266 @@ pub fn verify(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
         json!({"verified":output["installed_item"],"package_manager":output["package_manager"],"scope":"reviewed files; run the project's build to verify compilation"}),
     ))
 }
+
+#[plugin_fn]
+pub fn configure(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
+    let package: Value = read("package.json")?
+        .map(|text| serde_json::from_str(&text))
+        .transpose()?
+        .unwrap_or_else(|| json!({}));
+    let manager = package["packageManager"]
+        .as_str()
+        .unwrap_or("npm")
+        .split('@')
+        .next()
+        .unwrap_or("npm");
+    let args = match manager {
+        "npm" => vec!["install", "--ignore-scripts", "--no-audit", "--no-fund"],
+        "pnpm" | "bun" => vec!["install", "--ignore-scripts"],
+        _ => return Err(error("supported package managers are npm, pnpm and bun").into()),
+    };
+    let mut files = vec![
+        "package.json".to_owned(),
+        "components.json".to_owned(),
+        "index.html".to_owned(),
+        "tsconfig.json".to_owned(),
+        "vite.config.ts".to_owned(),
+    ];
+    let mut reads = vec![
+        "package.json".to_owned(),
+        "components.json".to_owned(),
+        "package-lock.json".to_owned(),
+        "pnpm-lock.yaml".to_owned(),
+        "bun.lock".to_owned(),
+        "pnpm-workspace.yaml".to_owned(),
+        "tsconfig.json".to_owned(),
+        "tsconfig.app.json".to_owned(),
+    ];
+    let mut read_roots = vec![
+        "src".to_owned(),
+        "app".to_owned(),
+        "components".to_owned(),
+        "hooks".to_owned(),
+        "lib".to_owned(),
+        "apps".to_owned(),
+        "packages".to_owned(),
+    ];
+    let phase = ctx["input"]["_lenso_setup"]["phase"].as_u64().unwrap_or(0);
+    let mut patterns: Vec<String> = package
+        .get("workspaces")
+        .map(|value| value.get("packages").unwrap_or(value))
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?
+        .unwrap_or_default();
+    if let Some(text) = read("pnpm-workspace.yaml")? {
+        let yaml: Value = serde_yaml_ng::from_str(&text)?;
+        if let Some(packages) = yaml.get("packages") {
+            patterns.extend(serde_json::from_value::<Vec<String>>(packages.clone())?);
+        }
+    }
+    let mut needs_roots = false;
+    for pattern in patterns.iter().filter(|pattern| !pattern.starts_with('!')) {
+        layout::normalize("", pattern)?;
+        let prefix = pattern
+            .trim_start_matches("./")
+            .split('/')
+            .take_while(|part| !part.contains(['*', '?', '[', '{']))
+            .collect::<Vec<_>>()
+            .join("/");
+        if prefix.is_empty() {
+            needs_roots = true;
+        } else {
+            read_roots.push(prefix);
+        }
+    }
+    if needs_roots {
+        let roots = ctx["input"]["workspace_roots"]
+            .as_array()
+            .map(|values| {
+                values
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .ok_or_else(|| error("workspace roots must be strings"))
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .transpose()?;
+        let answered = ctx["answers"]["shadcn:workspace-roots"].as_str();
+        let selected =
+            roots.or_else(|| answered.map(|value| value.split(',').map(str::trim).collect()));
+        let Some(selected) = selected else {
+            return Ok(question(
+                "shadcn:workspace-roots",
+                "Workspace directories to inspect (comma separated)".into(),
+                json!({"type":"text"}),
+            ));
+        };
+        for directory in selected {
+            let directory = layout::normalize("", directory)?;
+            if directory.is_empty() {
+                return Err(error("workspace roots must name directories").into());
+            }
+            read_roots.push(directory);
+        }
+    }
+    let mut write_roots = vec![
+        "src".to_owned(),
+        "app".to_owned(),
+        "components".to_owned(),
+        "hooks".to_owned(),
+        "lib".to_owned(),
+    ];
+    let mut http = vec![
+        "https://registry.npmjs.org/".to_owned(),
+        "https://ui.shadcn.com/r/".to_owned(),
+    ];
+    let mut env = std::collections::BTreeSet::new();
+    let mut credentials = serde_json::Map::new();
+    let mut directories = vec![String::new()];
+    if phase > 0 && package.as_object().is_some_and(|p| !p.is_empty()) {
+        directories.extend(workspace_paths()?);
+    }
+    for directory in directories {
+        for name in [
+            "package.json",
+            "components.json",
+            "tsconfig.json",
+            "tsconfig.app.json",
+        ] {
+            reads.push(file(&directory, name));
+        }
+        files.push(file(&directory, "package.json"));
+        files.push(file(&directory, "components.json"));
+        for name in ["src", "app", "components", "hooks", "lib"] {
+            read_roots.push(file(&directory, name));
+            write_roots.push(file(&directory, name));
+        }
+        if let Some(text) = read(&file(&directory, "components.json"))? {
+            let config: Value = serde_json::from_str(&text)?;
+            if let Some(registries) = config["registries"].as_object() {
+                for (namespace, entry) in registries {
+                    let template = entry
+                        .as_str()
+                        .or_else(|| entry["url"].as_str())
+                        .ok_or_else(|| error("Registry URL is missing"))?;
+                    if !template.contains("{name}") || template.contains("${") {
+                        return Err(error(
+                            "Registry URL must use {name}; credentials belong in headers or params",
+                        )
+                        .into());
+                    }
+                    registry::Reference::parse(&template.replace("{name}", "resource"), None)?;
+                    let prefix = template.split("{name}").next().unwrap_or("");
+                    let prefix = if prefix.ends_with('/') {
+                        prefix.to_owned()
+                    } else {
+                        format!(
+                            "{}/",
+                            prefix
+                                .rsplit_once('/')
+                                .map(|(prefix, _)| prefix)
+                                .ok_or_else(|| error("Registry prefix is missing"))?
+                        )
+                    };
+                    http.push(prefix.clone());
+                    let mut binding = json!({"prefix":prefix,"headers":{},"params":{}});
+                    let mut authenticated = false;
+                    for section in ["headers", "params"] {
+                        if let Some(fields) = entry.get(section) {
+                            let fields = fields.as_object().ok_or_else(|| {
+                                error("Registry authentication fields must be objects")
+                            })?;
+                            binding[section] = json!(fields);
+                            authenticated |= !fields.is_empty();
+                            for value in fields.values() {
+                                let mut rest = value.as_str().ok_or_else(|| {
+                                    error("Registry authentication values must be strings")
+                                })?;
+                                while let Some((_, tail)) = rest.split_once("${") {
+                                    let (variable, remaining) =
+                                        tail.split_once('}').ok_or_else(|| {
+                                            error("unclosed Registry authentication variable")
+                                        })?;
+                                    let name = variable.split(":-").next().unwrap_or("");
+                                    if name.is_empty()
+                                        || !name.bytes().enumerate().all(|(i, b)| {
+                                            b == b'_'
+                                                || b.is_ascii_alphabetic()
+                                                || i > 0 && b.is_ascii_digit()
+                                        })
+                                    {
+                                        return Err(error(
+                                            "invalid Registry authentication variable",
+                                        )
+                                        .into());
+                                    }
+                                    env.insert(name.to_owned());
+                                    rest = remaining;
+                                }
+                            }
+                        }
+                    }
+                    if authenticated {
+                        credentials.insert(
+                            format!("{}#{namespace}", file(&directory, "components.json")),
+                            binding,
+                        );
+                    }
+                }
+            }
+            if let Some(css) = config["tailwind"]["css"].as_str() {
+                let css = layout::normalize(&directory, css)?;
+                files.push(css.clone());
+                reads.push(css);
+            }
+        }
+    }
+    for paths in [
+        &mut files,
+        &mut reads,
+        &mut read_roots,
+        &mut write_roots,
+        &mut http,
+    ] {
+        paths.sort();
+        paths.dedup();
+    }
+    Ok(complete(
+        json!({"installation":{"files":files,"reads":reads,"read_roots":read_roots,"write_roots":write_roots,"http":http,"env":env,"credentials":credentials,"processes":[{"program":manager,"args":args}]},"continue":phase==0}),
+    ))
+}
+
+#[plugin_fn]
+pub fn scaffold(_: Json<Value>) -> FnResult<Json<Value>> {
+    let mut package: Value = serde_json::from_str(include_str!("../templates/vite/package.json"))?;
+    package["name"] = json!("lenso-project");
+    let mut files = vec![
+        json!({"path":"package.json","content":format!("{}\n",serde_json::to_string_pretty(&package)?)}),
+    ];
+    for (path, content) in [
+        ("index.html", include_str!("../templates/vite/index.html")),
+        (
+            "tsconfig.json",
+            include_str!("../templates/vite/tsconfig.json"),
+        ),
+        (
+            "vite.config.ts",
+            include_str!("../templates/vite/vite.config.ts"),
+        ),
+        (
+            "src/main.tsx",
+            include_str!("../templates/vite/src/main.tsx"),
+        ),
+        (
+            "src/index.css",
+            include_str!("../templates/vite/src/index.css"),
+        ),
+    ] {
+        files.push(json!({"path":path,"content":content}));
+    }
+    files.push(json!({"path":"components.json","content":format!("{}\n",serde_json::to_string_pretty(&layout::default_config())?)}));
+    Ok(complete(json!({"files":files})))
+}

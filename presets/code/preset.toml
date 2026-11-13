@@ -1,0 +1,10 @@
+schema_version = 1
+id = "@lenso/code"
+version = "0.1.0"
+create = "code/ready"
+adopt = "code/ready"
+
+[[extensions]]
+id = "code"
+source = "registry:@lenso/code"
+version = "^0.1.2"
