@@ -7,7 +7,10 @@ use lenso_codegen::{
 use lenso_composition::{Catalog, Evaluation, Module, Request, Resolution};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    cell::{OnceCell, RefCell},
+    collections::{BTreeMap, BTreeSet},
+};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,6 +30,9 @@ pub struct Loaded {
     pub catalog: Catalog,
     pub commit: String,
     handle: Option<String>,
+    // Freeze author inputs for this call; sample determinism checks share the same snapshot.
+    sources: RefCell<BTreeMap<String, String>>,
+    templates: OnceCell<BTreeMap<String, String>>,
 }
 pub struct Rendered {
     pub files: BTreeMap<String, OwnedFile>,
@@ -91,6 +97,8 @@ pub fn load(ctx: &Value) -> crate::Result<Result<Loaded, Json<Value>>> {
         catalog,
         commit,
         handle,
+        sources: RefCell::new(BTreeMap::new()),
+        templates: OnceCell::new(),
     };
     loaded.validate_declarations()?;
     Ok(Ok(loaded))
@@ -98,13 +106,17 @@ pub fn load(ctx: &Value) -> crate::Result<Result<Loaded, Json<Value>>> {
 impl Loaded {
     pub fn read(&self, path: &str) -> crate::Result<String> {
         lenso_codegen::relative(path)?;
+        if let Some(content) = self.sources.borrow().get(path) {
+            return Ok(content.clone());
+        }
+        let source = path.to_owned();
         let path = self
             .profile
             .path
             .rsplit_once('/')
             .map_or_else(|| path.to_owned(), |(parent, _)| destination(parent, path));
-        if let Some(handle) = &self.handle {
-            remote(handle, &path)
+        let content = if let Some(handle) = &self.handle {
+            remote(handle, &path)?
         } else {
             let root = self
                 .profile
@@ -112,8 +124,14 @@ impl Loaded {
                 .strip_prefix("project:")
                 .ok_or_else(|| error("missing author root"))?;
             let path = destination(root, &path);
-            local(&path)?.ok_or_else(|| error(format!("missing author source {path}")))
+            local(&path)?.ok_or_else(|| error(format!("missing author source {path}")))?
+        };
+        let mut sources = self.sources.borrow_mut();
+        if content.len() + sources.values().map(String::len).sum::<usize>() > 1024 * 1024 {
+            return Err(error("author sources exceed 1 MiB"));
         }
+        sources.insert(source, content.clone());
+        Ok(content)
     }
     fn validate_declarations(&self) -> crate::Result<()> {
         if self.document.resources.len() > 128 || self.document.samples.len() > 16 {
@@ -179,6 +197,9 @@ impl Loaded {
         Ok(())
     }
     fn templates(&self) -> crate::Result<BTreeMap<String, String>> {
+        if let Some(templates) = self.templates.get() {
+            return Ok(templates.clone());
+        }
         let mut templates = BTreeMap::new();
         if let Some(spec) = &self.document.generator {
             let mut bytes = 0;
@@ -198,6 +219,7 @@ impl Loaded {
             }
             .validate_templates()?;
         }
+        let _ = self.templates.set(templates.clone());
         Ok(templates)
     }
     pub fn render(&self, request: &Request, resolution: &Resolution) -> crate::Result<Rendered> {
