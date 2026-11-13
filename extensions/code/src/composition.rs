@@ -274,6 +274,20 @@ pub fn compose(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
     if let Some(value) = ctx["input"].get("context") {
         request.context = serde_json::from_value(value.clone())?;
     }
+    if let Some(selection) = ctx["capabilities"]["extension.options"]["selection"].as_object() {
+        for field in ["language", "runtime"] {
+            if let Some(value) = selection.get(field).and_then(Value::as_str) {
+                if request
+                    .context
+                    .get(field)
+                    .is_some_and(|existing| existing != value)
+                {
+                    return Err(error(format!("composition {field} conflicts with the installed target; configure a new project target")).into());
+                }
+                request.context.insert(field.into(), value.into());
+            }
+        }
+    }
     let resolution = loop {
         match catalog.evaluate(&request)? {
             Evaluation::Complete { resolution } => break resolution,

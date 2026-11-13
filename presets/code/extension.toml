@@ -1,6 +1,6 @@
 schema_version = 1
 id = "code"
-version = "0.2.0"
+version = "0.3.0"
 host = ">=0.2.4, <0.3.0"
 
 [dependencies.project]
