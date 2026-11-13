@@ -387,7 +387,10 @@ pub fn configure(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
 
 fn configure_input(mut ctx: Value) -> FnResult<Json<Value>> {
     let explicit = ctx["input"]["repo"].is_string() || ctx["input"]["author_root"].is_string();
-    if !explicit && !ctx["capabilities"]["extension.options"]["registries"].is_object() {
+    if !explicit
+        && (ctx["input"]["format"].is_null() || ctx["input"]["format"] == "lenso-modules-v1")
+        && !ctx["capabilities"]["extension.options"]["registries"].is_object()
+    {
         let input = ctx["input"]
             .as_object_mut()
             .ok_or_else(|| error("invalid setup input"))?;
@@ -514,4 +517,39 @@ fn native_setup(ctx: &Value, proposal: &mut Value) -> Result<()> {
         proposal["installation"]["processes"] = json!(commands);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod configuration_tests {
+    use super::*;
+    fn context(input: Value) -> Value {
+        json!({"input":input,"answers":{},"capabilities":{"extension.options":{}}})
+    }
+    #[test]
+    fn empty_setup_prepares_a_directory_without_selecting_a_language() {
+        let output = configure_input(context(json!({}))).unwrap().0;
+        assert_eq!(output["status"], "complete");
+        assert_eq!(
+            output["output"]["installation"]["options"]["registries"]["main"]["format"],
+            "lenso-modules-v1"
+        );
+        assert!(output["output"]["installation"]["options"]["selection"].is_null());
+    }
+    #[test]
+    fn explicit_resource_format_keeps_its_repository_question() {
+        let output = configure_input(context(json!({"format":"lenso-code-v1"})))
+            .unwrap()
+            .0;
+        assert_eq!(output["question"]["id"], "code:repository");
+    }
+    #[test]
+    fn explicit_resource_repository_is_not_replaced() {
+        let output = configure_input(context(json!({"repo":"acme/resources"})))
+            .unwrap()
+            .0;
+        assert_eq!(
+            output["output"]["installation"]["options"]["registries"]["main"]["source"],
+            "github-repo:acme/resources"
+        );
+    }
 }
