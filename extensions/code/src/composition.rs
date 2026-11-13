@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use crate::author::destination;
 use crate::{complete, error, local, question};
 
-fn replace_bindings(request: &mut Request, value: &Value) -> crate::Result<()> {
+pub(crate) fn replace_bindings(request: &mut Request, value: &Value) -> crate::Result<()> {
     let bindings: std::collections::BTreeMap<String, Binding> =
         serde_json::from_value(value.clone())?;
     for (address, next) in &bindings {
