@@ -102,8 +102,8 @@ for scenario in ('ext-add', 'new-preset', 'init-preset', 'apply-preset'):
     assert replay['outputs']['compose']['files'] == []
     assert (project / 'lenso.lock').read_bytes() == before
     assert not (project / '.lenso').exists() and not (project / 'node_modules').exists()
-    reports.append({'scenario': scenario, 'extension_version': '0.2.0',
-                    'preset_version': None if scenario == 'ext-add' else '0.2.0',
+    reports.append({'scenario': scenario, 'extension_version': args.code_version,
+                    'preset_version': None if scenario == 'ext-add' else args.preset_version,
                     'source': selected['source'], 'release_id': pin['github']['release_id'],
                     'manifest_sha256': pin['github']['metadata']['manifest']['sha256'],
                     'fresh_cache': True, 'empty_path': True, 'validation_and_generation': True,
