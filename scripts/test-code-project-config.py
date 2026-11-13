@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
 """Real Wasm project conventions, provider defaults and safe convention migration."""
-import json,os,shutil,subprocess,tempfile
+import argparse,json,os,shutil,subprocess,tempfile,sys
 from pathlib import Path
 root=Path(__file__).resolve().parent.parent
-project=Path(tempfile.mkdtemp(prefix='lenso-config-'))
-code=project/'lenso/extensions/code';code.mkdir(parents=True)
-for name in ['extension.toml','code.wasm']:shutil.copyfile(root/'dist/author/code'/name,code/name)
-(project/'preset.toml').write_text('schema_version=1\nid="@test/code"\nversion="1.0.0"\nadopt="code/ready"\n[[extensions]]\nid="code"\nsource="lenso/extensions/code/extension.toml"\n')
+parser=argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--binary',type=Path,default=root/'target/debug/lenso')
+parser.add_argument('--official',action='store_true',help='Install code through the live official preset')
+parser.add_argument('--token-env')
+parser.add_argument('--out',type=Path)
+args=parser.parse_args()
+binary=args.binary.resolve(strict=True)
+project=args.out.resolve() if args.out else Path(tempfile.mkdtemp(prefix='lenso-config-'))
+project.mkdir(parents=True,exist_ok=args.out is None)
+if not args.official:
+ code=project/'lenso/extensions/code';code.mkdir(parents=True)
+ for name in ['extension.toml','code.wasm']:shutil.copyfile(root/'dist/author/code'/name,code/name)
+ (project/'preset.toml').write_text('schema_version=1\nid="@test/code"\nversion="1.0.0"\nadopt="code/ready"\n[[extensions]]\nid="code"\nsource="lenso/extensions/code/extension.toml"\n')
 author=project/'author';author.mkdir()
 (author/'lenso.modules.toml').write_text('''schema_version=1
 namespace="test"
@@ -52,10 +61,26 @@ files=[{scope="composition",template="module.j2",target="index.ts"}]
 ''')
 (author/'module.j2').write_text('export const variant = {{ resolution.context.styles|tojson }};\nexport const alias = {{ resolution.context.import_alias|tojson }};\nexport const provider = {{ resolution.instances[resolution.instances.feature.bindings.store].module|tojson }};\nexport const label = {{ resolution.instances.feature.configuration.label|tojson }};\n')
 env=dict(os.environ,LENSO_CACHE_DIR=str(project/'cache'))
+if args.official:env['PATH']=''
+commands=[]
+token=os.environ.get(args.token_env) if args.token_env else None
 def call(*args,expected=0):
- r=subprocess.run([str(root/'target/debug/lenso'),'--project',str(project),*args,'--json'],env=env,text=True,capture_output=True,timeout=120)
- assert r.returncode==expected,(args,r.stdout[-4000:],r.stderr[-2000:]);return json.loads(r.stdout)
-call('init','--preset','preset.toml','--input',json.dumps({'author_root':'author','format':'lenso-modules-v1','catalog':'lenso.modules.toml'}),'--yes')
+ r=subprocess.run([str(binary),'--project',str(project),*args,'--json'],env=env,text=True,capture_output=True,timeout=120)
+ assert r.returncode==expected,(args,r.stdout[-4000:],r.stderr[-2000:])
+ assert '\x1b' not in r.stdout
+ if token:assert token not in r.stdout+r.stderr
+ commands.append({'args':list(args),'exit_code':r.returncode})
+ return json.loads(r.stdout)
+credentials=('--token-env',args.token_env) if args.token_env else ()
+call('init','--preset','code' if args.official else 'preset.toml','--input',json.dumps({'author_root':'author','format':'lenso-modules-v1','catalog':'lenso.modules.toml'}),'--yes',*credentials)
+lock=json.loads((project/'lenso.lock').read_text())
+pin=next(item for item in lock['extensions'] if item['id']=='code')
+assert pin['definition']['version']=='0.3.3'
+if args.official:
+ assert pin['github']['tag']=='code-v0.3.3'
+ config=call('config')['outputs']['main']['config']['cli']
+ assert next(item for item in config['extensions'] if item['id']=='code')['source']=='registry:@lenso/code'
+ assert config['presets']['@lenso/code']['version']=='0.3.3'
 settings={'project':{'language':'typescript','runtime':'node26'},'conventions':{'styles':'plain','rsc':True},'paths':{'modules':'src/features','import_alias':'@/features'},'defaults':{'providers':{'demo.store':'sqlite'}},'modules':{'feature':{'options':{'label':'project'}}}}
 initial={**settings,'conventions':{}}
 call('code','config','--input',json.dumps({'settings':initial}),'--yes')
@@ -108,4 +133,5 @@ assert '"postgres"' in output.read_text()
 settings['project']['language']='rust'
 call('code','config','--input',json.dumps({'settings':settings}),'--yes',expected=1)
 print('Project config passed: approved config writes, fixed variants, aliases/paths, defaults, retained choices, explicit convention migration and offline replay')
+(project/'verification.json').write_text(json.dumps({'platform':sys.platform,'official':args.official,'extension_version':pin['definition']['version'],'project_conventions':True,'decline_without_mutation':True,'approved_discovery':True,'fixed_variant_reconfiguration':True,'provider_retention':True,'offline_replay':True,'commands':commands},indent=2)+'\n')
 print(project)
