@@ -29,6 +29,8 @@ struct Release {
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Target {
+    #[serde(default)]
+    when: BTreeMap<String, Value>,
     language: String,
     runtime: String,
     catalog: String,
@@ -127,9 +129,18 @@ fn directory(p: &Profile, refresh: bool) -> Result<Directory> {
             let mut targets = std::collections::BTreeSet::new();
             for t in &release.targets {
                 crate::relative(&t.catalog)?;
+                if t.when.len() > 32
+                    || t.when
+                        .values()
+                        .any(|v| crate::project_config::scalar(v).is_none())
+                {
+                    return Err(error(
+                        "target conditions must be scalar project conventions",
+                    ));
+                }
                 if !slug(&t.language)
                     || !slug(&t.runtime)
-                    || !targets.insert((&t.language, &t.runtime))
+                    || !targets.insert((&t.language, &t.runtime, serde_json::to_string(&t.when)?))
                 {
                     return Err(error("invalid module target"));
                 }
@@ -209,6 +220,8 @@ fn roots(ctx: &mut Value, root: &str, previous: Option<&str>) -> Result<()> {
 }
 pub fn plan(ctx: &Value, refresh: bool) -> Result<Json<Value>> {
     let refresh = refresh || ctx["input"]["refresh"].as_bool().unwrap_or(false);
+    let policy = crate::project_config::load(ctx)?;
+    let fixed = policy.fixed();
     let p = profile(ctx)?.ok_or_else(|| error("choose a registry"))?;
     let name = item(ctx)?;
     if p.format == "lenso-compose-v1" {
@@ -285,10 +298,22 @@ pub fn plan(ctx: &Value, refresh: bool) -> Result<Json<Value>> {
             &json!({"id":id,"version":release.version,"languages":languages})
         )?)
     );
+    if let Some(configured) = fixed.get("language") {
+        if ctx["input"]["language"]
+            .as_str()
+            .is_some_and(|v| v != configured)
+        {
+            return Err(error("language conflicts with lenso.code.toml"));
+        }
+        if !state.language.is_empty() && state.language != *configured {
+            return Err(error("changing project language requires a new target"));
+        }
+    }
     let language = ctx["input"]["language"]
         .as_str()
         .or_else(|| ctx["answers"][&q].as_str())
-        .or_else(|| (!state.language.is_empty()).then_some(state.language.as_str()));
+        .or_else(|| (!state.language.is_empty()).then_some(state.language.as_str()))
+        .or_else(|| fixed.get("language").map(String::as_str));
     let Some(language) = language else {
         return Ok(question(
             &q,
@@ -302,16 +327,32 @@ pub fn plan(ctx: &Value, refresh: bool) -> Result<Json<Value>> {
     let targets: Vec<_> = release
         .targets
         .iter()
-        .filter(|t| t.language == language)
+        .filter(|t| {
+            t.language == language
+                && t.when
+                    .iter()
+                    .all(|(k, v)| crate::project_config::scalar(v).as_ref() == fixed.get(k))
+        })
         .collect();
     if targets.is_empty() {
         return Err(error("module does not support the selected language"));
     }
     let rq = format!("code:module-runtime:{id}:{}:{language}", release.version);
+    if let Some(configured) = fixed.get("runtime")
+        && (ctx["input"]["runtime"]
+            .as_str()
+            .is_some_and(|v| v != configured)
+            || !state.runtime.is_empty() && state.runtime != *configured)
+    {
+        return Err(error(
+            "runtime conflicts with lenso.code.toml; use a new target",
+        ));
+    }
     let runtime = ctx["input"]["runtime"]
         .as_str()
         .or_else(|| ctx["answers"][&rq].as_str())
-        .or_else(|| (!state.runtime.is_empty()).then_some(state.runtime.as_str()));
+        .or_else(|| (!state.runtime.is_empty()).then_some(state.runtime.as_str()))
+        .or_else(|| fixed.get("runtime").map(String::as_str));
     let target = if let Some(runtime) = runtime {
         targets
             .iter()
@@ -356,7 +397,8 @@ pub fn plan(ctx: &Value, refresh: bool) -> Result<Json<Value>> {
     if let Some(old) = previous
         && old.version == release.version
         && (old.profile.source != source.source
-            || old.profile.path != source.path
+            || (old.profile.path != source.path
+                && !ctx["input"]["reconfigure"].as_bool().unwrap_or(false))
             || old.profile.r#ref != source.r#ref
             || old.root != entry.root)
     {

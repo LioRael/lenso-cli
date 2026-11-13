@@ -209,9 +209,9 @@ for the package format, authentication and GitHub Actions publishing.
 
 ## Code generation
 
-Code 0.3.2 is available as a [GitHub Release](https://github.com/LioRael/lenso-cli/releases/tag/code-v0.3.2)
+Code 0.3.3 is available as a [GitHub Release](https://github.com/LioRael/lenso-cli/releases/tag/code-v0.3.3)
 and runs on CLI 1.0.0. Both `lenso ext add code` and the official `code` preset
-resolve Code 0.3.2. It provides:
+resolve Code 0.3.3. It provides:
 
 - Capability-based composition with independently selected adapters and explicit
   instance bindings, rather than a preset for every possible combination.
@@ -247,6 +247,12 @@ In a prepared native application, run `lenso init --preset code`, then
 `lenso code preview auth` and `lenso code add auth`. Code resolves its own module
 directory and asks for project language/runtime and adapter bindings. See [target variants](docs/code-target-variants.md)
 for selection, native project requirements and current boundaries.
+
+Project conventions and overridable preferences live in extension-owned
+`lenso.code.toml`. Use `lenso code config` to inspect settings and flags such as
+`--convention styles=tailwind` or `--provider lenso.auth-store=postgres` to review
+changes. Authors can select fixed targets with `when` conditions while retaining
+flexible capability slots. See [Code project configuration](docs/code-project-configuration.md).
 
 ## Embed the Rust engine
 

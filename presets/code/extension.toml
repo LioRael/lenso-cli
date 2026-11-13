@@ -1,6 +1,6 @@
 schema_version = 1
 id = "code"
-version = "0.3.2"
+version = "0.3.3"
 host = ">=0.2.4, <0.3.0"
 
 [dependencies.project]
@@ -108,6 +108,7 @@ arguments = [
  { name = "runtime", help = "Target runtime" },
 
  { name = "refresh", help = "Preview refreshed directory and source pins", kind = "flag" },
+ {name="reconfigure",help="Review changed project conventions for this module",kind="flag"},
 ]
 
 [[commands]]
@@ -121,6 +122,7 @@ arguments = [
  { name = "language", help = "Target language" },
  { name = "runtime", help = "Target runtime" },
 
+ {name="reconfigure",help="Review changed project conventions for this module",kind="flag"},
 ]
 
 [[commands]]
@@ -147,6 +149,7 @@ arguments = [
  { name = "language", help = "Target language" },
  { name = "runtime", help = "Target runtime" },
 
+ {name="reconfigure",help="Review changed project conventions for this module",kind="flag"},
 ]
 
 [setup]
@@ -206,6 +209,7 @@ arguments = [
  { name = "sample", help = "Author sample providing complete composition intent" },
  { name = "install", help = "Force native dependency installation or retry", kind = "flag" },
  { name = "refresh", help = "Refresh the pinned catalog repository", kind = "flag" },
+ {name="reconfigure",help="Review changed project conventions for this module",kind="flag"},
 ]
 
 [[commands]]
@@ -219,6 +223,7 @@ arguments = [
  { name = "sample", help = "Author sample providing complete composition intent" },
  { name = "install", help = "Force native dependency installation or retry", kind = "flag" },
  { name = "refresh", help = "Refresh the pinned catalog repository", kind = "flag" },
+ {name="reconfigure",help="Review changed project conventions for this module",kind="flag"},
 ]
 
 [handlers."code/validate"]
@@ -240,4 +245,26 @@ provider = "code"
 arguments = [
  { name = "registry", help = "Configured composition catalog" },
  { name = "refresh", help = "Refresh the pinned catalog repository", kind = "flag" },
+]
+
+[handlers."code/project-config"]
+type="wasm"
+module="code.wasm"
+function="config"
+sha256="auto"
+[[workflows]]
+id="code/project-config"
+steps=[{id="config",handler="code/project-config"},{id="plan",handler="project/plan",needs=["config"]},{id="apply",handler="project/apply",needs=["plan"]}]
+[[commands]]
+path=["code","config"]
+workflow="code/project-config"
+provider="code"
+about="Read Code project settings or review replacement settings supplied through --input"
+arguments=[
+ {name="language",help="Set the project language"},
+ {name="runtime",help="Set the project runtime"},
+ {name="modules-path",help="Generated module root within the configured Code target"},
+ {name="import-alias",help="Project import alias"},
+ {name="convention",help="Fixed project convention key=value",kind="list"},
+ {name="provider",help="Default capability provider contract=module",kind="list"},
 ]

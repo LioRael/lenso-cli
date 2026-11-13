@@ -36,3 +36,4 @@ jobs:
             target/debug/lenso package --id "$id" --out "dist/mainline/$id" --json
           done
           python3 scripts/test-onboarding.py
+          python3 scripts/test-code-project-config.py
