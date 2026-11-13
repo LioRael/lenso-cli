@@ -26,7 +26,10 @@ try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         $Headers = @{ Accept = 'application/octet-stream' }
         $Token = if ($env:GH_TOKEN) { $env:GH_TOKEN } else { $env:GITHUB_TOKEN }
-        if ($Token) { $Headers.Authorization = "Bearer $Token" }
+        if ($Token) {
+            $Headers.Authorization = "Bearer $Token"
+            $Url = $ApiUrl
+        }
         # Redirects must strip credentials; HttpClient does so when auto-redirecting.
         Add-Type -AssemblyName System.Net.Http
         $Client = [Net.Http.HttpClient]::new()

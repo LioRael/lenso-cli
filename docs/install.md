@@ -81,8 +81,9 @@ The Release body includes a Unix bootstrap command with the actual `install.sh`
 GitHub asset API URL, so private installation needs no gh or JSON parser. Download
 the installer using that command, inspect it, then run `sh install.sh`. On Windows,
 download the PowerShell installer from the authenticated Release page, then run it
-with the token environment variable set. Both generated installers use pinned
-asset API IDs and built-in archive hashes. Authorization is sent to GitHub's API;
+with the token environment variable set. Authenticated downloads use pinned
+asset API IDs; anonymous downloads use exact-version Release URLs. Both paths
+verify built-in archive hashes. Authorization is sent to GitHub's API;
 download redirects clear it before contacting a different origin.
 
 For public repositories no token is needed. An expiring signed CDN URL is never

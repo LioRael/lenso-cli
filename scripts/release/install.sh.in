@@ -44,7 +44,7 @@ if [ -z "$archive" ]; then
     curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
       --connect-timeout 20 --max-time 300 --retry 2 \
       --header "Authorization: Bearer $token" --header 'Accept: application/octet-stream' \
-      --output "$archive" "$url"
+      --output "$archive" "$api_url"
   else
     curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
       --connect-timeout 20 --max-time 300 --retry 2 \

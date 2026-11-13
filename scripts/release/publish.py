@@ -79,14 +79,16 @@ def render_installers(directory, version, repo, assets, metadata):
         if "windows" in target:
             continue
         item = metadata[target]
-        url = f"https://api.github.com/repos/{repo}/releases/assets/{assets[item['name']]['id']}"
-        rows.append(f"  {target}) url='{url}'; sha256='{item['sha256']}' ;;")
+        api_url = f"https://api.github.com/repos/{repo}/releases/assets/{assets[item['name']]['id']}"
+        url = f"https://github.com/{repo}/releases/download/v{version}/{item['name']}"
+        rows.append(f"  {target}) url='{url}'; api_url='{api_url}'; sha256='{item['sha256']}' ;;")
     shell = shell.replace("@VERSION@", version).replace("@ASSETS@", "\n".join(rows))
     (directory / "install.sh").write_text(shell)
     item = metadata["x86_64-pc-windows-msvc"]
-    url = f"https://api.github.com/repos/{repo}/releases/assets/{assets[item['name']]['id']}"
+    api_url = f"https://api.github.com/repos/{repo}/releases/assets/{assets[item['name']]['id']}"
+    url = f"https://github.com/{repo}/releases/download/v{version}/{item['name']}"
     powershell = (template / "install.ps1.in").read_text().replace("@VERSION@", version)
-    powershell = powershell.replace("@ASSET@", f"$Url = '{url}'\n$Sha256 = '{item['sha256']}'")
+    powershell = powershell.replace("@ASSET@", f"$Url = '{url}'\n$ApiUrl = '{api_url}'\n$Sha256 = '{item['sha256']}'")
     (directory / "install.ps1").write_text(powershell)
 
 def main():
