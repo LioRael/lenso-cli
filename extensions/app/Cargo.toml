@@ -1,0 +1,19 @@
+[package]
+name = "lenso-app-extension"
+version = "0.1.0"
+edition = "2024"
+publish = false
+[lib]
+name = "lenso_app"
+crate-type = ["cdylib"]
+[dependencies]
+extism-pdk = "1"
+serde_json = "1"
+toml = "1"
+toml_edit = { version = "0.25", features = ["serde"] }
+lenso-codegen = { path = "../../crates/codegen" }
+[workspace]
+[profile.release]
+opt-level = "s"
+strip = true
+lto = true

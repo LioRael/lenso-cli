@@ -16,3 +16,5 @@
 **/__pycache__/
 /examples/m0/lenso/extensions/greeting/greeting.wasm
 /examples/vite-shadcn/lenso/extensions/shadcn/**/shadcn.wasm
+
+/extensions/app/target/

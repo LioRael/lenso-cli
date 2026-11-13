@@ -227,11 +227,22 @@ impl Loaded {
         Ok(templates)
     }
     pub fn render(&self, request: &Request, resolution: &Resolution) -> crate::Result<Rendered> {
+        self.render_at(request, resolution, None)
+    }
+    pub fn render_at(
+        &self,
+        request: &Request,
+        resolution: &Resolution,
+        directory: Option<&str>,
+    ) -> crate::Result<Rendered> {
         let directory = self
             .document
             .generator
             .as_ref()
-            .map(|spec| spec.directory.clone());
+            .map(|spec| directory.unwrap_or(&spec.directory).to_owned());
+        if let Some(directory) = &directory {
+            lenso_codegen::relative(directory)?;
+        }
         let root = directory.as_ref().map_or_else(
             || self.profile.target.clone(),
             |directory| destination(&self.profile.target, directory),
@@ -343,9 +354,16 @@ pub fn validate(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
             error("a generator catalog requires at least one complete author sample").into(),
         );
     }
+    let sample = ctx["input"]["sample"].as_str();
+    if sample.is_some_and(|name| !loaded.document.samples.contains_key(name)) {
+        return Err(error("unknown author sample").into());
+    }
     let mut results = Vec::new();
     let mut covered = BTreeSet::new();
     for (name, request) in &loaded.document.samples {
+        if sample.is_some_and(|selected| name != selected) {
+            continue;
+        }
         let resolution = match loaded.catalog.evaluate(request)? {
             Evaluation::Complete { resolution } => resolution,
             Evaluation::NeedsInput { choice } => {

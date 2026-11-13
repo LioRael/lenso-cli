@@ -230,6 +230,33 @@ fn roots(ctx: &mut Value, root: &str, previous: Option<&str>) -> Result<()> {
     ctx["input"]["instances"] = json!(instances);
     Ok(())
 }
+fn matching_targets<'a>(
+    targets: &'a [Target],
+    language: &str,
+    runtime: Option<&str>,
+    fixed: &BTreeMap<String, String>,
+) -> Vec<&'a Target> {
+    let matches: Vec<_> = targets
+        .iter()
+        .filter(|t| {
+            t.language == language
+                && runtime.is_none_or(|r| t.runtime == r)
+                && t.when.iter().all(|(key, value)| {
+                    crate::project_config::scalar(value).as_ref() == fixed.get(key)
+                })
+        })
+        .collect();
+    matches
+        .iter()
+        .copied()
+        .filter(|target| {
+            !matches.iter().any(|other| {
+                other.runtime == target.runtime && other.when.len() > target.when.len()
+            })
+        })
+        .collect()
+}
+
 pub fn plan(ctx: &Value, refresh: bool) -> Result<Json<Value>> {
     let refresh = refresh || ctx["input"]["refresh"].as_bool().unwrap_or(false);
     let mut policy = crate::project_config::load(ctx)?;
@@ -364,6 +391,14 @@ pub fn plan(ctx: &Value, refresh: bool) -> Result<Json<Value>> {
                 "module does not support the configured project conventions",
             ));
         }
+        if candidates.iter().any(|target| {
+            target
+                .when
+                .iter()
+                .all(|(key, value)| crate::project_config::scalar(value).as_ref() == fixed.get(key))
+        }) {
+            break;
+        }
         let missing: std::collections::BTreeSet<_> = candidates
             .iter()
             .flat_map(|t| t.when.keys())
@@ -404,17 +439,12 @@ pub fn plan(ctx: &Value, refresh: bool) -> Result<Json<Value>> {
         fixed = policy.fixed();
     }
     policy.validate()?;
-    let targets: Vec<_> = release
-        .targets
-        .iter()
-        .filter(|t| {
-            t.language == language
-                && selected_runtime.as_ref().is_none_or(|r| &t.runtime == r)
-                && t.when
-                    .iter()
-                    .all(|(k, v)| crate::project_config::scalar(v).as_ref() == fixed.get(k))
-        })
-        .collect();
+    let targets = matching_targets(
+        &release.targets,
+        &language,
+        selected_runtime.as_deref(),
+        &fixed,
+    );
     if targets.is_empty() {
         return Err(error("module does not support the selected language"));
     }
@@ -585,4 +615,35 @@ pub fn plan(ctx: &Value, refresh: bool) -> Result<Json<Value>> {
     result.0["output"]["expected"][&index_path] = json!(content);
     result.0["output"]["module"] = json!({"id":id,"version":release.version,"language":state.language,"runtime":state.runtime});
     Ok(result)
+}
+
+#[cfg(test)]
+mod target_tests {
+    use super::*;
+    #[test]
+    fn fallback_is_used_until_a_more_specific_target_matches() {
+        let targets: Vec<Target> = serde_json::from_value(json!([
+            {"language":"rust","runtime":"tokio","catalog":"base.toml"},
+            {"language":"rust","runtime":"tokio","catalog":"app.toml","when":{"app_host":"lenso-http-v1"}}
+        ])).unwrap();
+        assert_eq!(
+            matching_targets(&targets, "rust", None, &BTreeMap::new())[0].catalog,
+            "base.toml"
+        );
+        let fixed = BTreeMap::from([("app_host".into(), "lenso-http-v1".into())]);
+        assert_eq!(
+            matching_targets(&targets, "rust", None, &fixed)[0].catalog,
+            "app.toml"
+        );
+    }
+    #[test]
+    fn equally_specific_matches_remain_ambiguous() {
+        let targets: Vec<Target> = serde_json::from_value(json!([
+            {"language":"rust","runtime":"tokio","catalog":"a.toml","when":{"a":true}},
+            {"language":"rust","runtime":"tokio","catalog":"b.toml","when":{"b":true}}
+        ]))
+        .unwrap();
+        let fixed = BTreeMap::from([("a".into(), "true".into()), ("b".into(), "true".into())]);
+        assert_eq!(matching_targets(&targets, "rust", None, &fixed).len(), 2);
+    }
 }

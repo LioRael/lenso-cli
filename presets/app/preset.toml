@@ -1,0 +1,13 @@
+schema_version=1
+id="@lenso/app"
+version="0.1.0"
+create="app/init"
+adopt="app/init"
+[[extensions]]
+id="app"
+source="registry:@lenso/app"
+version="^0.1.0"
+[[extensions]]
+id="code"
+source="registry:@lenso/code"
+version="^0.3.6"

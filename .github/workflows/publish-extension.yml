@@ -2,13 +2,13 @@ name: Publish extension
 
 on:
   push:
-    tags: ["code-v*", "shadcn-v*"]
+    tags: ["code-v*", "shadcn-v*", "app-v*"]
   workflow_dispatch:
     inputs:
       package:
         description: Extension to publish
         type: choice
-        options: [code, shadcn]
+        options: [code, shadcn, app]
         default: code
       register:
         description: Open an official Registry PR using LENSO_REGISTRY_TOKEN
@@ -23,7 +23,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: publish-extension-${{ github.repository }}-${{ inputs.package || (startsWith(github.ref_name, 'shadcn-v') && 'shadcn' || 'code') }}
+  group: publish-extension-${{ github.repository }}-${{ inputs.package || (startsWith(github.ref_name, 'app-v') && 'app' || startsWith(github.ref_name, 'shadcn-v') && 'shadcn' || 'code') }}
   cancel-in-progress: false
 
 jobs:
@@ -42,8 +42,8 @@ jobs:
           REQUESTED: ${{ inputs.package }}
         run: |
           id="$REQUESTED"
-          case "$GITHUB_REF_NAME" in code-v*) id=code ;; shadcn-v*) id=shadcn ;; esac
-          case "$id" in code|shadcn) ;; *) exit 1 ;; esac
+          case "$GITHUB_REF_NAME" in code-v*) id=code ;; shadcn-v*) id=shadcn ;; app-v*) id=app ;; esac
+          case "$id" in code|shadcn|app) ;; *) exit 1 ;; esac
           echo "id=$id" >> "$GITHUB_OUTPUT"
       - name: Detect an already published version
         id: existing

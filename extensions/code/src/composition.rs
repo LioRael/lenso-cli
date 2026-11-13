@@ -189,25 +189,26 @@ pub(crate) fn plan(
 }
 pub(crate) fn plan_with_policy(
     ctx: &Value,
-    mut loaded: crate::author::Loaded,
+    loaded: crate::author::Loaded,
     artifact_path: &str,
     policy: &crate::project_config::Config,
 ) -> FnResult<Json<Value>> {
+    let mut output_directory = None;
     if let Some(root) = &policy.paths.modules {
         let prefix = format!("{}/", loaded.profile.target);
         let relative=if root==&loaded.profile.target{Some("")}else{root.strip_prefix(&prefix)}.ok_or_else(||error("paths.modules must stay within the configured Code target; review Code setup to change target grants"))?;
-        if let Some(generator) = loaded.document.generator.as_mut() {
+        if let Some(generator) = loaded.document.generator.as_ref() {
             let family = generator
                 .directory
                 .rsplit('/')
                 .next()
                 .unwrap_or("module")
                 .to_owned();
-            generator.directory = if relative.is_empty() {
+            output_directory = Some(if relative.is_empty() {
                 family
             } else {
                 format!("{relative}/{family}")
-            };
+            });
         }
     }
     let profile = &loaded.profile;
@@ -415,7 +416,7 @@ pub(crate) fn plan_with_policy(
         .values()
         .map(|instance| instance.module.clone())
         .collect::<BTreeSet<_>>();
-    let rendered = loaded.render(&request, &resolution)?;
+    let rendered = loaded.render_at(&request, &resolution, output_directory.as_deref())?;
     let changes = match crate::generation::reconcile(
         ctx,
         rendered.files,

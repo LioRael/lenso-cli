@@ -1,0 +1,68 @@
+name: Verify native App consumers
+on:
+  workflow_dispatch:
+    inputs:
+      modules_ref:
+        description: Reviewed commit or tag in LioRael/lenso-modules containing App HTTP catalogs
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  app:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [typescript, rust]
+    env:
+      CARGO_BUILD_JOBS: "2"
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: lenso
+          POSTGRES_PASSWORD: test-only-password
+          POSTGRES_DB: app
+        ports: ['5432/tcp']
+        options: >-
+          --health-cmd "pg_isready -U lenso -d app"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: LioRael/lenso-modules
+          ref: ${{ inputs.modules_ref }}
+          path: dist/app-module-source
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+      - name: Prepare Rust
+        run: rustup toolchain install 1.99.0 --profile minimal --target wasm32-unknown-unknown
+      - name: Build native CLI and real extensions
+        run: |
+          cargo +1.99.0 build --locked -p lenso
+          for id in code app; do
+            cargo +1.99.0 build --locked --release --target wasm32-unknown-unknown --manifest-path "extensions/$id/Cargo.toml"
+            mkdir -p "dist/author/$id"
+            cp "presets/$id/extension.toml" "dist/author/$id/extension.toml"
+            cp "extensions/$id/target/wasm32-unknown-unknown/release/lenso_${id}.wasm" "dist/author/$id/$id.wasm"
+            target/debug/lenso package --id "$id" --out "dist/mainline/$id" --json
+          done
+      - name: Verify SQLite and PostgreSQL application lifecycles
+        env:
+          LANGUAGE: ${{ matrix.language }}
+          DATABASE_URL: postgresql://lenso:test-only-password@127.0.0.1:${{ job.services.postgres.ports[5432] }}/app?sslmode=disable
+        run: |
+          python3 scripts/verify-app.py --binary target/debug/lenso \
+            --modules dist/app-module-source --language "$LANGUAGE" --storage both \
+            --out "dist/app-verification-$LANGUAGE"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: app-${{ matrix.language }}-verification
+          path: dist/app-verification-${{ matrix.language }}/**/verification.json
+          if-no-files-found: warn
