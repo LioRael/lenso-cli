@@ -233,8 +233,8 @@ identical run produces no file mutations. Source refresh is explicit through
 
 Project provider 0.1.1 introduced file deletions; current Code 0.2.0 requires
 provider 0.1.2 for reviewed completion writes used by native installation. Older native binaries fail dependency resolution instead
-of silently ignoring cleanup. Use a current source build until these versions are
-released. Project stages all replacement bytes and rechecks every preimage before
+of silently ignoring cleanup. CLI 1.0.0 includes Project 0.1.2; Code 0.2.0 still
+requires a local extension build. Project stages all replacement bytes and rechecks every preimage before
 applying deletions, then replacements, with the composition receipt last. Per-file
 operations are guarded, but a later I/O failure can leave completed changes. Errors
 list completed paths; no whole-plan filesystem transaction or rollback is claimed.

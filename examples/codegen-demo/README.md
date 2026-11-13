@@ -2,7 +2,8 @@
 
 A user-owned Rust business contract and entry point, two standard-library storage
 adapters, and extension-generated factories and assembly. No Lenso SDK or official
-Registry package is used. Run with a current CLI source build and Code extension.
+Registry package is used. Run with native CLI 1.0.0 and a local build of the
+unpublished Code 0.2.0 extension.
 
 From the CLI repository, build and configure a copy of this directory:
 
@@ -20,7 +21,7 @@ lenso code compose --sample shared
 cargo run
 ```
 
-Use the freshly built CLI's absolute path if it is not installed. After the new
+The published CLI binary can run this example. After the new
 Code package is published, normal onboarding can use `lenso ext add code --input
 '{"author_root":"author","target":"src"}'` instead of the development helper.
 `--json`, `--answers FILE`, `--yes`, and nonterminal execution use the normal Agent

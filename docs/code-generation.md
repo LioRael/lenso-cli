@@ -1,8 +1,9 @@
 # Authoring code generators
 
 Implemented in the CLI repository, independently of the main Lenso SDK and official
-Registry. Requires a source build of native CLI 1.0.0 and the unpublished Code 0.2.0
-extension. Existing published packages do not acquire these commands automatically.
+Registry. Requires native CLI 1.0.0 and a local build of the unpublished Code 0.2.0
+extension. The published CLI binary is sufficient; the official Code 0.1.2 package
+does not acquire these commands automatically.
 
 ## Author workflow
 
