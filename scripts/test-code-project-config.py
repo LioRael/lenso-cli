@@ -57,6 +57,28 @@ def call(*args,expected=0):
  assert r.returncode==expected,(args,r.stdout[-4000:],r.stderr[-2000:]);return json.loads(r.stdout)
 call('init','--preset','preset.toml','--input',json.dumps({'author_root':'author','format':'lenso-modules-v1','catalog':'lenso.modules.toml'}),'--yes')
 settings={'project':{'language':'typescript','runtime':'node26'},'conventions':{'styles':'plain','rsc':True},'paths':{'modules':'src/features','import_alias':'@/features'},'defaults':{'providers':{'demo.store':'sqlite'}},'modules':{'feature':{'options':{'label':'project'}}}}
+initial={**settings,'conventions':{}}
+call('code','config','--input',json.dumps({'settings':initial}),'--yes')
+configfile=project/'lenso.code.toml';before=configfile.read_text()
+answers={};answerfile=project/'answers.json'
+for value in ['true','plain']:
+ answerfile.write_text(json.dumps(answers))
+ question=call('code','preview','feature','--answers',str(answerfile),'--yes',expected=2)['question']
+ assert question['id'].startswith('code:project-convention:')
+ answers[question['id']]=value
+answerfile.write_text(json.dumps(answers))
+call('code','preview','feature','--answers',str(answerfile),'--yes')
+assert configfile.read_text()==before and not (project/'src/features').exists()
+pending=call('code','add','feature','--answers',str(answerfile),expected=2)
+assert configfile.read_text()==before
+answerfile.write_text(json.dumps({**answers,pending['question']['id']:False}))
+call('code','add','feature','--answers',str(answerfile),expected=130)
+assert configfile.read_text()==before and not (project/'src/features').exists()
+answerfile.write_text(json.dumps(answers))
+call('code','add','feature','--answers',str(answerfile),'--yes')
+assert 'rsc = true' in configfile.read_text() and 'styles = "plain"' in configfile.read_text()
+# Reset the fixture so explicit configuration is independently checked below.
+configfile.unlink()
 pending=call('code','config','--input',json.dumps({'settings':settings}),expected=2)
 assert not (project/'lenso.code.toml').exists()
 call('code','config','--input',json.dumps({'settings':settings}),'--yes')
@@ -64,7 +86,8 @@ configfile=project/'lenso.code.toml';configfile.write_text('# user note\n'+confi
 call('code','config','--convention','rsc=true','--yes')
 assert configfile.read_text().startswith('# user note')
 assert call('code','config')['outputs']['config']['config']['project']['language']=='typescript'
-call('code','preview','feature','--yes');assert not (project/'src/features').exists()
+existing=(project/'src/features/feature/assembly/index.ts').read_text()
+call('code','preview','feature','--yes');assert (project/'src/features/feature/assembly/index.ts').read_text()==existing
 call('code','add','feature','--yes')
 receipt=project/'src/code/modules/test/feature.json'
 group=json.loads(receipt.read_text())['native_catalog']

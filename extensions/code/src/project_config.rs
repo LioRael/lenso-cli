@@ -65,7 +65,7 @@ impl Config {
         value.validate()?;
         Ok(value)
     }
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if self.schema_version != 1
             || self.project.len() + self.conventions.len() > 32
             || self.modules.len() > 64

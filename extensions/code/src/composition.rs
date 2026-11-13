@@ -156,10 +156,18 @@ pub fn compose(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
 }
 pub(crate) fn plan(
     ctx: &Value,
-    mut loaded: crate::author::Loaded,
+    loaded: crate::author::Loaded,
     artifact_path: &str,
 ) -> FnResult<Json<Value>> {
     let policy = crate::project_config::load(ctx)?;
+    plan_with_policy(ctx, loaded, artifact_path, &policy)
+}
+pub(crate) fn plan_with_policy(
+    ctx: &Value,
+    mut loaded: crate::author::Loaded,
+    artifact_path: &str,
+    policy: &crate::project_config::Config,
+) -> FnResult<Json<Value>> {
     if let Some(root) = &policy.paths.modules {
         let prefix = format!("{}/", loaded.profile.target);
         let relative=if root==&loaded.profile.target{Some("")}else{root.strip_prefix(&prefix)}.ok_or_else(||error("paths.modules must stay within the configured Code target; review Code setup to change target grants"))?;

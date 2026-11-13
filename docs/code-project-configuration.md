@@ -57,6 +57,11 @@ catalog = "widget.tailwind.toml"
 when = { styles = "tailwind", rsc = true }
 ```
 
+When a target requires a convention that is not configured, Code asks for it.
+`--yes` does not invent domain choices. Preview includes the proposed config write;
+only approved installation saves it alongside the generated files. JSON/Agent
+clients can supply question answers or `input.context` values.
+
 Targets must match project conventions. Catalog `supports` constraints validate
 context, and templates can use it for file layout/content. Flexible adapters still
 use capability slots. Explicit instance settings and saved choices take precedence
