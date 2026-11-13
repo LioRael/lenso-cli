@@ -1,0 +1,31 @@
+.github/workflows/homebrew.yml
+  s_db0826ea383830::t_b4358ad05167bb 1-85
+docs/install.md
+  s_db0826ea383830::t_f37f994ebdca80 33-53,256-274
+.github/workflows/release-cli.yml
+  s_db0826ea383830::t_f37f994ebdca80 166-170
+.github/workflows/check.yml
+  s_db0826ea383830::t_f37f994ebdca80 20
+scripts/release/test_homebrew.py
+  s_db0826ea383830::t_f37f994ebdca80 1-41
+README.md
+  s_db0826ea383830::t_fc970e6ac6de96 16-24
+scripts/release/homebrew.py
+  s_db0826ea383830::t_b4358ad05167bb 1-84
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "13b1f1d47f7e692a347a361fd220ededb1291f05",
+  "prompts": {},
+  "sessions": {
+    "s_db0826ea383830": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d570-6bcc-75a1-a80c-75f063970d87",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
