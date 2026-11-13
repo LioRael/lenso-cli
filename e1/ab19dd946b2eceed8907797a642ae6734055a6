@@ -1,0 +1,25 @@
+scripts/release/install.sh.in
+  s_c5695907fe744f::t_701f1e1842bcb4 47
+docs/install.md
+  s_c5695907fe744f::t_701f1e1842bcb4 84-86
+scripts/release/install.ps1.in
+  s_c5695907fe744f::t_701f1e1842bcb4 29-32
+scripts/release/publish.py
+  s_c5695907fe744f::t_701f1e1842bcb4 82-84,88-89,91
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e1ab19dd946b2eceed8907797a642ae6734055a6",
+  "prompts": {},
+  "sessions": {
+    "s_c5695907fe744f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d06d-149b-7062-aa67-3c0145df9d90",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
