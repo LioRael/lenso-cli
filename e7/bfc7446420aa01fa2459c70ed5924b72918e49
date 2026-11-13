@@ -1,0 +1,33 @@
+extensions/code/Cargo.toml
+  s_c5695907fe744f::t_4ca12b7e632380 3
+extensions/code/src/composition.rs
+  s_c5695907fe744f::t_4ca12b7e632380 12-35,328-330,485-518
+README.md
+  s_c5695907fe744f::t_4ca12b7e632380 212,214
+scripts/test-code-project-config.py
+  s_c5695907fe744f::t_4ca12b7e632380 78,80,83
+scripts/verify-official-code.py
+  s_c5695907fe744f::t_4ca12b7e632380 15-16
+docs/code-project-configuration.md
+  s_c5695907fe744f::t_4ca12b7e632380 22,84-87
+presets/code/extension.toml
+  s_c5695907fe744f::t_4ca12b7e632380 3
+extensions/code/Cargo.lock
+  s_c5695907fe744f::t_90a94e31addc62 200
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e7bfc7446420aa01fa2459c70ed5924b72918e49",
+  "prompts": {},
+  "sessions": {
+    "s_c5695907fe744f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d06d-149b-7062-aa67-3c0145df9d90",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
