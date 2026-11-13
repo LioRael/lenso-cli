@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import time
 import urllib.parse
 from github import api, request
 from package import TARGETS, sha256
@@ -37,6 +38,18 @@ def check_tag(repo, tag, commit):
     if actual != commit:
         raise RuntimeError("Tag points to a different commit; tags are never moved")
     return True
+
+def confirm_publication(repo, release_id, tag, commit):
+    # Release publication and the new tag can become readable at different times.
+    for attempt in range(5):
+        release = api(repo, "releases/" + str(release_id))
+        if release["tag_name"] != tag:
+            raise RuntimeError("Published release tag changed")
+        if not release["draft"] and check_tag(repo, tag, commit):
+            return release
+        if attempt < 4:
+            time.sleep(2)
+    raise RuntimeError("Release publication or tag is not yet visible; inspect its state before retrying")
 
 def release_target(repo, tag, commit):
     # Existing tags are authoritative; supplying an old commitish can require
@@ -134,8 +147,7 @@ def main():
             raise RuntimeError("Draft target changed")
         if release["draft"]:
             release = api(args.repo, "releases/" + str(release["id"]), method="PATCH", data={**release_target(args.repo, tag, args.commit), "draft": False, "make_latest": "false" if "-" in args.version else "true"})
-        if release["draft"] or release["tag_name"] != tag or not check_tag(args.repo, tag, args.commit):
-            raise RuntimeError("Release was not published")
+        release = confirm_publication(args.repo, release["id"], tag, args.commit)
         print("Published " + release["html_url"])
         return
     metadata = {}
