@@ -1,0 +1,99 @@
+presets/app/extension.toml
+  s_c5695907fe744f::t_4c1182d538d8af 1-145
+extensions/app/src/templates/README.md
+  s_c5695907fe744f::t_747134d2ed37bc 1-22,25-26,29-52
+  s_c5695907fe744f::t_4c1182d538d8af 23-24,27-28
+.github/workflows/check.yml
+  s_c5695907fe744f::t_97f4cba1194d5c 43-46,52-54,56-59
+  s_c5695907fe744f::t_e8c0273df1d772 32-33
+.github/workflows/verify-app.yml
+  s_c5695907fe744f::t_97f4cba1194d5c 1-68
+README.md
+  s_c5695907fe744f::t_40d78ec9e61820 87-88,92-117
+  s_c5695907fe744f::t_264aaad5c1a280 89-91
+docs/app-extension.md
+  s_c5695907fe744f::t_40d78ec9e61820 1-88
+  s_c5695907fe744f::t_e8c0273df1d772 89-96
+extensions/app/src/templates/main.ts
+  s_c5695907fe744f::t_4c1182d538d8af 51,53
+  s_c5695907fe744f::t_c4cbd99d169025 1-6,9-24,26-50,52,54-65,67-93
+  s_c5695907fe744f::t_246b278fcbc2c8 7-8
+  s_c5695907fe744f::t_747134d2ed37bc 25,66
+extensions/app/src/lib.rs
+  s_c5695907fe744f::t_747134d2ed37bc 1-6,10,17-21,36-38,64,72-74,154,182,185,190,201-202,305,310-313,316,335,351-352
+  s_c5695907fe744f::t_45c729d4062551 7-9,11-16,22-35,39-50,52,54-59,61-63,65-68,70-71,75-96,100-103,117-153,155-181,183,186-189,192-200,203-205,209,211-214,227-236,240-243,263-264,270-281,306,309,314-315,318-334,336-350
+  s_c5695907fe744f::t_7edd4e7b580d3c 104-116,206-208,210,215-226,237-239,244-262,265-269
+  s_c5695907fe744f::t_f8aba4bd6087f3 317
+  s_c5695907fe744f::t_246b278fcbc2c8 184
+  s_c5695907fe744f::t_4c1182d538d8af 51,53,60,69,97-99,282-304,307-308
+  s_c5695907fe744f::t_49118374550832 191
+docs/code-module-directory.md
+  s_c5695907fe744f::t_40d78ec9e61820 62-79
+extensions/app/Cargo.toml
+  s_c5695907fe744f::t_c4cbd99d169025 1-6,8-19
+  s_c5695907fe744f::t_40d78ec9e61820 7
+.github/workflows/publish-extension.yml
+  s_c5695907fe744f::t_40d78ec9e61820 5,11,26,45-46
+extensions/app/src/templates/build.rs
+  s_c5695907fe744f::t_c4cbd99d169025 1-4,17-19,23,47-48,53-54
+  s_c5695907fe744f::t_f8aba4bd6087f3 5-16,20-22,24-46,49-52
+scripts/verify-app.py
+  s_c5695907fe744f::t_246b278fcbc2c8 66-69,75-78,110-112,114,165
+  s_c5695907fe744f::t_4c1182d538d8af 80
+  s_c5695907fe744f::t_97f4cba1194d5c 124-127
+  s_c5695907fe744f::t_ccddefc067aa59 1-49,51-65,70-74,79,81-108,113,115-123,131-164,166-170
+  s_c5695907fe744f::t_3dff5ca3728bd9 50
+  s_c5695907fe744f::t_5ef73a15326da1 109,128-130
+scripts/check-published-extension.py
+  s_c5695907fe744f::t_40d78ec9e61820 46
+extensions/app/src/templates/main.rs
+  s_c5695907fe744f::t_c4cbd99d169025 1-5,12,17,24-25,31-32
+  s_c5695907fe744f::t_4c1182d538d8af 6-11,18-20
+  s_c5695907fe744f::t_f8aba4bd6087f3 13-16,21-23,26-30
+.gitignore
+  s_c5695907fe744f::t_cc4c0a78a36ca4 19-20
+docs/code-generation.md
+  s_c5695907fe744f::t_8570628263ad8b 222-226
+extensions/app/Cargo.lock
+  s_c5695907fe744f::t_55e2eba5b7f23a 1-578
+extensions/code/Cargo.lock
+  s_c5695907fe744f::t_5728d67b14312d 200
+extensions/code/Cargo.toml
+  s_c5695907fe744f::t_7fd010f5f21fe2 3
+extensions/code/src/author.rs
+  s_c5695907fe744f::t_2af945577ea045 230-237,242-245,357-360,364-366
+extensions/code/src/composition.rs
+  s_c5695907fe744f::t_ab89b434c2c414 192,196,200,207,211,419
+extensions/code/src/modules.rs
+  s_c5695907fe744f::t_f4cf2250f88153 233-259,394-401,442-447,619-649
+lenso.registry.toml
+  s_c5695907fe744f::t_c111ff17fe54e6 14-19
+presets/app/preset.toml
+  s_c5695907fe744f::t_9ea4d2b226ac57 1-13
+presets/code/extension.toml
+  s_c5695907fe744f::t_18ac7159b81c2b 3,40,244,247
+presets/code/preset.toml
+  s_c5695907fe744f::t_5ce68dd8d35247 3,10
+scripts/test-code-initialization.py
+  s_c5695907fe744f::t_b738aa6ec2f239 60
+scripts/test-code-project-config.py
+  s_c5695907fe744f::t_bcd8817a444662 86,88,91
+scripts/verify-official-code.py
+  s_c5695907fe744f::t_9d34528247173f 15-16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9023775604e41aff1375251ee88ba3c52210c491",
+  "prompts": {},
+  "sessions": {
+    "s_c5695907fe744f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d06d-149b-7062-aa67-3c0145df9d90",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
