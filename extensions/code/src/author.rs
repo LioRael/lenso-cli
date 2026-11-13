@@ -1,6 +1,6 @@
 use crate::generation::{OwnedFile, digest};
 use crate::{Profile, ResourceFile, complete, error, local, registry, relative, remote};
-use extism_pdk::{FnResult, Json, plugin_fn};
+use extism_pdk::{FnResult, Json};
 use lenso_codegen::{
     Dependency, Generator, GeneratorInput, GeneratorSpec, Scope, TemplateGenerator,
 };
@@ -46,6 +46,7 @@ pub fn destination(root: &str, path: &str) -> String {
         format!("{root}/{path}")
     }
 }
+#[cfg_attr(test, expect(dead_code, reason = "Used only by Wasm entry points"))]
 pub fn load(ctx: &Value) -> crate::Result<Result<Loaded, Json<Value>>> {
     let name = match registry(ctx)? {
         Ok(name) => name,
@@ -320,7 +321,8 @@ fn resource_paths(resource: &ResourceFile) -> (&str, &str) {
         ResourceFile::Target(file) => (&file.path, &file.target),
     }
 }
-#[plugin_fn]
+#[cfg_attr(not(test), extism_pdk::plugin_fn)]
+#[cfg_attr(test, expect(dead_code, reason = "Used only by Wasm entry points"))]
 pub fn validate(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
     let loaded = match load(&ctx)? {
         Ok(loaded) => loaded,

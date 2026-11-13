@@ -3,6 +3,87 @@ use extism_pdk::Json;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+pub const OFFICIAL_REPO: &str = "LioRael/lenso-modules";
+pub const MODULE_DIRECTORY: &str = "lenso.modules.toml";
+
+pub fn official_repo(repo: &str) -> bool {
+    repo.eq_ignore_ascii_case(OFFICIAL_REPO)
+}
+
+pub fn legacy_profile(profile: &Value) -> bool {
+    profile["source"]
+        .as_str()
+        .and_then(|s| s.strip_prefix("github-repo:"))
+        .is_some_and(official_repo)
+        && profile["format"].as_str().unwrap_or("lenso-code-v1") == "lenso-code-v1"
+        && profile["path"].as_str().unwrap_or("catalog.toml") == "catalog.toml"
+        && matches!(profile["ref"].as_str().unwrap_or("HEAD"), "HEAD" | "main")
+}
+
+pub fn require_current_profile(profile: &Value) -> Result<()> {
+    if legacy_profile(profile) {
+        return Err(error(
+            "Legacy official Code profile uses catalog.toml. Run `lenso ext configure code` to review migration to lenso.modules.toml, then retry. Custom references and generated files are preserved.",
+        ));
+    }
+    Ok(())
+}
+
+fn source_overrides(ctx: &Value) -> bool {
+    [
+        "repo",
+        "author_root",
+        "catalog",
+        "format",
+        "target",
+        "ref",
+        "language",
+        "runtime",
+    ]
+    .iter()
+    .any(|key| ctx["input"].get(*key).is_some())
+}
+
+pub fn configured_options(ctx: &Value) -> Option<Value> {
+    let options = &ctx["capabilities"]["extension.options"];
+    if source_overrides(ctx)
+        || options["variants"].is_object()
+        || !options["registries"]
+            .as_object()
+            .is_some_and(|profiles| !profiles.is_empty())
+    {
+        return None;
+    }
+    Some(options.clone())
+}
+
+pub fn migration_options(ctx: &Value) -> Option<Value> {
+    if source_overrides(ctx) {
+        return None;
+    }
+    let mut options = ctx["capabilities"]["extension.options"].clone();
+    let profiles = options["registries"].as_object_mut()?;
+    let mut changed = false;
+    for profile in profiles.values_mut().filter(|p| legacy_profile(p)) {
+        profile["format"] = json!("lenso-modules-v1");
+        profile["path"] = json!(MODULE_DIRECTORY);
+        changed = true;
+    }
+    if !changed {
+        return None;
+    }
+    if let Some(defaults) = options.get_mut("setup")
+        && defaults["repo"].as_str().is_some_and(official_repo)
+        && defaults["format"].as_str().unwrap_or("lenso-code-v1") == "lenso-code-v1"
+        && defaults["catalog"].as_str().unwrap_or("catalog.toml") == "catalog.toml"
+        && matches!(defaults["ref"].as_str().unwrap_or("HEAD"), "HEAD" | "main")
+    {
+        defaults["format"] = json!("lenso-modules-v1");
+        defaults["catalog"] = json!(MODULE_DIRECTORY);
+    }
+    Some(options)
+}
+
 pub enum Preparation {
     Ready {
         context: Value,

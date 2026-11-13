@@ -19,7 +19,7 @@ Writes use the existing Project plan/approval flow. `code config` without settin
 is read-only. JSON/Agent clients can replace settings using
 `--input '{"settings":{"project":{"language":"typescript","runtime":"node26"}}}'`.
 Individual flags update existing settings; mixing flags and replacement JSON is an
-error. Older installations first upgrade Code with `lenso ext add code --constraint '^0.3.4'`.
+error. Older installations first upgrade Code with `lenso ext add code --constraint '^0.3.5'`.
 Review `lenso ext configure code` if access is still missing, to grant
 read/write access to the new root config file. The extension never bypasses grants.
 
@@ -85,3 +85,37 @@ This is not data migration, a framework detector or a platform installer.
 An explicit provider replacement resets saved options only below that slot address.
 Other instance settings remain saved, and project defaults for the new provider
 are applied before its author defaults. Explicit new configuration still wins.
+
+## Official directory defaults and legacy migration
+
+Code 0.3.5 selects the official `lenso-modules-v1` directory at
+`lenso.modules.toml` for empty setup and for an explicitly supplied
+`LioRael/lenso-modules` repository. Module-format custom/local authors use that
+filename by default too; explicit catalog paths and other formats remain supported.
+
+Existing official profiles on `HEAD`/`main` that still use `lenso-code-v1` with
+`catalog.toml` are
+migrated through the extension configuration proposal. Current Host versions keep
+existing settings on package upgrades, so review the migration after upgrading:
+
+```sh
+lenso ext add code --constraint '^0.3.5'
+lenso ext configure code
+lenso code preview auth --refresh
+```
+
+The migration changes only the recognized official format/path and corresponding
+old setup defaults. It retains profile names, target roots, repository references,
+custom profiles, project options, native settings and existing grants. Required
+project/native access is included in the ordinary consent prompt. Declining leaves
+configuration and lock unchanged. Repeated configuration is stable. Preview/search
+never rewrite configuration or broaden grants; an unmigrated profile gives an
+explicit `ext configure code` diagnostic before reading repository files.
+
+Custom branches and pinned commits/tags retain their original format and path;
+they may intentionally host a resource catalog. To switch such a profile to the
+standard official module directory, review an explicit configuration:
+
+```sh
+lenso ext configure code --input '{"repo":"LioRael/lenso-modules","ref":"main","format":"lenso-modules-v1","catalog":"lenso.modules.toml"}'
+```

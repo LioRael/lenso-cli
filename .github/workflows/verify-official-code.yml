@@ -45,10 +45,13 @@ jobs:
             --token-env GITHUB_TOKEN --out "$RUNNER_TEMP/official-code"
           ${{ matrix.python }} scripts/test-code-project-config.py --binary "$binary" --official \
             --token-env GITHUB_TOKEN --out "$RUNNER_TEMP/official-code/project-config"
+          ${{ matrix.python }} scripts/test-code-initialization.py --binary "$binary" --official \
+            --token-env GITHUB_TOKEN --out "$RUNNER_TEMP/official-code/initialization"
       - uses: actions/upload-artifact@v7
         with:
           name: official-code-${{ matrix.runner }}
           path: |
             ${{ runner.temp }}/official-code/verification.json
             ${{ runner.temp }}/official-code/project-config/verification.json
+            ${{ runner.temp }}/official-code/initialization/verification.json
           if-no-files-found: error

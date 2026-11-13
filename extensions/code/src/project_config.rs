@@ -193,7 +193,8 @@ pub fn load(ctx: &Value) -> Result<Config> {
         .transpose()
         .map(|v| v.unwrap_or_default())
 }
-#[extism_pdk::plugin_fn]
+#[cfg_attr(not(test), extism_pdk::plugin_fn)]
+#[cfg_attr(test, expect(dead_code, reason = "Used only by Wasm entry points"))]
 pub fn config(
     extism_pdk::Json(ctx): extism_pdk::Json<Value>,
 ) -> extism_pdk::FnResult<extism_pdk::Json<Value>> {

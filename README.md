@@ -209,9 +209,9 @@ for the package format, authentication and GitHub Actions publishing.
 
 ## Code generation
 
-Code 0.3.4 is available as a [GitHub Release](https://github.com/LioRael/lenso-cli/releases/tag/code-v0.3.4)
+Code 0.3.5 is available as a [GitHub Release](https://github.com/LioRael/lenso-cli/releases/tag/code-v0.3.5)
 and runs on CLI 1.0.0. Both `lenso ext add code` and the official `code` preset
-resolve Code 0.3.4. It provides:
+resolve Code 0.3.5. It provides:
 
 - Capability-based composition with independently selected adapters and explicit
   instance bindings, rather than a preset for every possible combination.
@@ -323,3 +323,9 @@ onboarding; focused acceptance scripts live under [`scripts/`](scripts/).
 For release maintenance, see [native binary releases](docs/install.md#publish-the-cli),
 [crate publishing](docs/crates-release.md) and the
 [native release workflow](.github/workflows/release-cli.yml).
+
+Code 0.3.5 initializes the official module directory at `lenso.modules.toml`,
+including when the official repository is supplied explicitly. For an older
+project still pointing at `catalog.toml`, upgrade Code and run
+`lenso ext configure code` to review migration. Custom profiles, references and
+grants are retained. See the [configuration and migration guide](docs/code-project-configuration.md).

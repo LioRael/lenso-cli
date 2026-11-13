@@ -330,6 +330,7 @@ fn requests(
     }
     Ok(output)
 }
+#[cfg_attr(test, expect(dead_code, reason = "Used only by Wasm entry points"))]
 pub fn validate(dependencies: &[Dependency], resolution: &Resolution) -> crate::Result<()> {
     requests(dependencies, resolution).map(|_| ())
 }

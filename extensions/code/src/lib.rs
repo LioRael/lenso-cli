@@ -6,7 +6,7 @@ mod modules;
 mod native;
 mod project_config;
 mod setup;
-use extism_pdk::{FnResult, Json, host_fn, plugin_fn};
+use extism_pdk::{FnResult, Json, host_fn};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -128,6 +128,7 @@ fn registry(ctx: &Value) -> Result<std::result::Result<String, Json<Value>>> {
     )))
 }
 fn load(ctx: &Value, name: &str, refresh: bool) -> Result<(Profile, Catalog, String, String)> {
+    setup::require_current_profile(&ctx["capabilities"]["extension.options"]["registries"][name])?;
     let profile: Profile = serde_json::from_value(
         ctx["capabilities"]["extension.options"]["registries"][name].clone(),
     )?;
@@ -218,11 +219,11 @@ fn selection(ctx: &Value, refresh: bool) -> Result<Json<Value>> {
         json!({"selection":{"registry":name,"items":items,"commit":commit}}),
     ))
 }
-#[plugin_fn]
+#[cfg_attr(not(test), extism_pdk::plugin_fn)]
 pub fn select(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
     Ok(selection(&ctx, false)?)
 }
-#[plugin_fn]
+#[cfg_attr(not(test), extism_pdk::plugin_fn)]
 pub fn select_update(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
     Ok(selection(&ctx, true)?)
 }
@@ -314,15 +315,15 @@ fn resolve_items(ctx: &Value, diff: bool) -> Result<Json<Value>> {
         json!({"summary":{"checked":checked,"changed":files.len(),"unchanged":unchanged,"kept":kept.len()},"kept":kept,"files":files,"commands":[],"items":items,"repository":profile.source,"commit":commit,"catalog":catalog.name}),
     ))
 }
-#[plugin_fn]
+#[cfg_attr(not(test), extism_pdk::plugin_fn)]
 pub fn resolve(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
     Ok(resolve_items(&ctx, false)?)
 }
-#[plugin_fn]
+#[cfg_attr(not(test), extism_pdk::plugin_fn)]
 pub fn diff(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
     Ok(resolve_items(&ctx, true)?)
 }
-#[plugin_fn]
+#[cfg_attr(not(test), extism_pdk::plugin_fn)]
 pub fn verify(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
     let resolved = ctx["steps"]
         .as_object()
@@ -354,7 +355,7 @@ pub fn verify(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
         json!({"verified":resolved["items"].as_array().ok_or_else(||error("items are missing"))?.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")}),
     ))
 }
-#[plugin_fn]
+#[cfg_attr(not(test), extism_pdk::plugin_fn)]
 pub fn search(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
     if modules::enabled(&ctx)? {
         return Ok(modules::search(&ctx)?);
@@ -376,8 +377,33 @@ pub fn search(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
 }
 
 /// Ask for repository settings without reading files or fetching code.
-#[plugin_fn]
+#[cfg_attr(not(test), extism_pdk::plugin_fn)]
 pub fn configure(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
+    configure_context(ctx)
+}
+fn configure_context(ctx: Value) -> FnResult<Json<Value>> {
+    if !ctx["input"].is_object() {
+        return Err(error("setup input must be an object").into());
+    }
+    if let Some(options) =
+        setup::migration_options(&ctx).or_else(|| setup::configured_options(&ctx))
+    {
+        let mut migration = ctx.clone();
+        if migration["input"]["native"].is_null() {
+            if let Some(native) = options.get("native") {
+                migration["input"]["native"] = native.clone();
+            } else if options["registries"].as_object().is_some_and(|profiles| {
+                profiles.values().any(|p| p["format"] == "lenso-modules-v1")
+            }) {
+                migration["input"]["native"] =
+                    json!({"npm":{"manifest":"package.json"},"cargo":{"manifest":"Cargo.toml"}});
+            }
+        }
+        let mut proposal = json!({"installation":{"options":options}});
+        native_setup(&migration, &mut proposal)?;
+        preserve_setup_grants(&ctx, &mut proposal)?;
+        return Ok(complete(proposal));
+    }
     let (prepared, selection) = match setup::prepare(&ctx)? {
         setup::Preparation::Question(question) => return Ok(question),
         setup::Preparation::Ready { context, selection } => (context, selection),
@@ -391,14 +417,29 @@ fn configure_input(mut ctx: Value) -> FnResult<Json<Value>> {
     let explicit = ctx["input"]["repo"].is_string() || ctx["input"]["author_root"].is_string();
     if !explicit
         && (ctx["input"]["format"].is_null() || ctx["input"]["format"] == "lenso-modules-v1")
-        && !ctx["capabilities"]["extension.options"]["registries"].is_object()
+        && ctx["capabilities"]["extension.options"]["registries"]
+            .as_object()
+            .is_none_or(|p| p.is_empty())
     {
         let input = ctx["input"]
             .as_object_mut()
             .ok_or_else(|| error("invalid setup input"))?;
-        input.insert("repo".into(), json!("LioRael/lenso-modules"));
+        input.insert("repo".into(), json!(setup::OFFICIAL_REPO));
         input.insert("format".into(), json!("lenso-modules-v1"));
-        input.insert("catalog".into(), json!("lenso.modules.toml"));
+        input
+            .entry("catalog")
+            .or_insert(json!(setup::MODULE_DIRECTORY));
+    }
+    if ctx["input"]["repo"]
+        .as_str()
+        .is_some_and(setup::official_repo)
+        && ctx["input"]["format"].is_null()
+        && (ctx["input"]["catalog"].is_null() || ctx["input"]["catalog"] == setup::MODULE_DIRECTORY)
+    {
+        ctx["input"]["format"] = json!("lenso-modules-v1");
+    }
+    if ctx["input"]["format"] == "lenso-modules-v1" && ctx["input"]["catalog"].is_null() {
+        ctx["input"]["catalog"] = json!(setup::MODULE_DIRECTORY);
     }
     if ctx["input"]["format"] == "lenso-modules-v1" && ctx["input"]["native"].is_null() {
         ctx["input"]["native"] =
@@ -412,22 +453,7 @@ fn configure_input(mut ctx: Value) -> FnResult<Json<Value>> {
         let mut proposal =
             json!({"installation":{"options":ctx["capabilities"]["extension.options"]}});
         native_setup(&ctx, &mut proposal)?;
-        for (field, capability) in [
-            ("reads", "host.reads"),
-            ("files", "project.files"),
-            ("processes", "host.processes"),
-        ] {
-            if let Some(existing) = ctx["capabilities"][capability].as_array() {
-                let proposed = proposal["installation"][field]
-                    .as_array_mut()
-                    .ok_or_else(|| error("missing native setup field"))?;
-                for value in existing {
-                    if !proposed.contains(value) {
-                        proposed.push(value.clone());
-                    }
-                }
-            }
-        }
+        preserve_setup_grants(&ctx, &mut proposal)?;
         return Ok(complete(proposal));
     }
 
@@ -483,7 +509,7 @@ fn configure_input(mut ctx: Value) -> FnResult<Json<Value>> {
     Ok(complete(proposal))
 }
 
-#[plugin_fn]
+#[cfg_attr(not(test), extism_pdk::plugin_fn)]
 pub fn ready(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
     let composition = ctx["capabilities"]["extension.options"]["registries"]
         .as_object()
@@ -533,6 +559,29 @@ fn native_setup(ctx: &Value, proposal: &mut Value) -> Result<()> {
     Ok(())
 }
 
+fn preserve_setup_grants(ctx: &Value, proposal: &mut Value) -> Result<()> {
+    for (field, capability) in [
+        ("reads", "host.reads"),
+        ("files", "project.files"),
+        ("processes", "host.processes"),
+    ] {
+        if proposal["installation"][field].is_null() {
+            proposal["installation"][field] = json!([]);
+        }
+        if let Some(existing) = ctx["capabilities"][capability].as_array() {
+            let proposed = proposal["installation"][field]
+                .as_array_mut()
+                .ok_or_else(|| error("missing native setup field"))?;
+            for value in existing {
+                if !proposed.contains(value) {
+                    proposed.push(value.clone());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod configuration_tests {
     use super::*;
@@ -565,5 +614,118 @@ mod configuration_tests {
             output["output"]["installation"]["options"]["registries"]["main"]["source"],
             "github-repo:acme/resources"
         );
+    }
+}
+
+#[cfg(test)]
+mod official_directory_tests {
+    use super::*;
+    #[test]
+    fn empty_profile_map_uses_official_defaults() {
+        let result = configure_input(
+            json!({"input":{},"answers":{},"capabilities":{"extension.options":{"registries":{}}}}),
+        )
+        .unwrap()
+        .0;
+        assert_eq!(
+            result["output"]["installation"]["options"]["registries"]["main"]["path"],
+            setup::MODULE_DIRECTORY
+        );
+    }
+    #[test]
+    fn explicit_official_repository_uses_the_module_directory() {
+        let result = configure_input(json!({"input":{"repo":"LioRael/lenso-modules"},"answers":{},"capabilities":{"extension.options":{}}})).unwrap().0;
+        assert_eq!(
+            result["output"]["installation"]["options"]["registries"]["main"]["format"],
+            "lenso-modules-v1"
+        );
+        assert_eq!(
+            result["output"]["installation"]["options"]["registries"]["main"]["path"],
+            "lenso.modules.toml"
+        );
+    }
+    #[test]
+    fn module_format_uses_a_module_directory_for_custom_and_local_authors() {
+        for source in [
+            json!({"repo":"acme/modules","format":"lenso-modules-v1"}),
+            json!({"author_root":"author","format":"lenso-modules-v1"}),
+        ] {
+            let result = configure_input(
+                json!({"input":source,"answers":{},"capabilities":{"extension.options":{}}}),
+            )
+            .unwrap()
+            .0;
+            assert_eq!(
+                result["output"]["installation"]["options"]["registries"]["main"]["path"],
+                "lenso.modules.toml"
+            );
+        }
+    }
+    #[test]
+    fn migration_preserves_custom_profiles_options_and_grants() {
+        let options = json!({"selection":{"language":"rust","runtime":"tokio"},"unrelated":"retained","registries":{
+            "official":{"source":"github-repo:LioRael/lenso-modules","ref":"HEAD","path":"catalog.toml","format":"lenso-code-v1","target":"src/custom"},
+            "custom":{"source":"github-repo:acme/resources","ref":"v1","path":"catalog.toml","format":"lenso-code-v1","target":"src/other"}}});
+        let result=configure_context(json!({"input":{},"answers":{},"capabilities":{"extension.options":options,"host.reads":["custom.toml"],"project.files":["custom.toml"],"host.processes":[{"program":"custom","args":[]}]}})).unwrap().0;
+        assert_eq!(result["status"], "complete");
+        let installation = &result["output"]["installation"];
+        let migrated = &installation["options"]["registries"]["official"];
+        assert_eq!(migrated["format"], "lenso-modules-v1");
+        assert_eq!(migrated["path"], "lenso.modules.toml");
+        assert_eq!(migrated["ref"], "HEAD");
+        assert_eq!(migrated["target"], "src/custom");
+        assert_eq!(installation["options"]["selection"], options["selection"]);
+        assert_eq!(
+            installation["options"]["registries"]["custom"],
+            options["registries"]["custom"]
+        );
+        assert_eq!(installation["options"]["unrelated"], "retained");
+        assert!(
+            installation["reads"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("custom.toml"))
+        );
+        assert!(
+            installation["processes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!({"program":"custom","args":[]}))
+        );
+        assert!(installation.get("sources").is_none());
+        assert!(installation.get("write_roots").is_none());
+    }
+    #[test]
+    fn custom_and_current_profiles_are_never_reinterpreted() {
+        for profile in [
+            json!({"source":"github-repo:acme/resources","ref":"v1","format":"lenso-code-v1","path":"catalog.toml","target":"src"}),
+            json!({"source":"github-repo:LioRael/lenso-modules","ref":"feature/resources","format":"lenso-code-v1","path":"catalog.toml","target":"src"}),
+            json!({"source":"github-repo:LioRael/lenso-modules","ref":"v0.2.0","format":"lenso-compose-v1","path":"auth.rust.toml","target":"src"}),
+            json!({"source":"github-repo:LioRael/lenso-modules","ref":"custom","format":"lenso-code-v1","path":"custom.toml","target":"src"}),
+            json!({"source":"github-repo:LioRael/lenso-modules","ref":"pinned","format":"lenso-modules-v1","path":"lenso.modules.toml","target":"src"}),
+        ] {
+            let options = json!({"registries":{"named":profile},"unrelated":true});
+            let ctx = json!({"input":{},"answers":{},"capabilities":{"extension.options":options}});
+            assert!(setup::migration_options(&ctx).is_none());
+            let result = configure_context(ctx).unwrap().0;
+            assert_eq!(
+                result["output"]["installation"]["options"]["registries"],
+                options["registries"]
+            );
+            assert_eq!(
+                result["output"]["installation"]["options"]["unrelated"],
+                true
+            );
+        }
+    }
+    #[test]
+    fn legacy_profile_stops_before_attempting_a_repository_read() {
+        let result = modules::enabled(
+            &json!({"input":{},"answers":{},"capabilities":{"extension.options":{"registries":{"main":{"source":"github-repo:LioRael/lenso-modules","ref":"HEAD","path":"catalog.toml","format":"lenso-code-v1","target":"src"}}}}}),
+        );
+        let diagnostic = result
+            .expect_err("legacy profile reached the resource loader")
+            .to_string();
+        assert!(diagnostic.contains("lenso ext configure code"));
     }
 }
