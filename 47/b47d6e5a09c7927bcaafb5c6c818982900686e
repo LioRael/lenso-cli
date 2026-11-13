@@ -1,0 +1,21 @@
+scripts/release/install.ps1.in
+  s_db0826ea383830::t_43337684fab4cc 67,71
+scripts/release/publish.py
+  s_db0826ea383830::t_16b5bf6a36e4a9 171-172
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "47b47d6e5a09c7927bcaafb5c6c818982900686e",
+  "prompts": {},
+  "sessions": {
+    "s_db0826ea383830": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d570-6bcc-75a1-a80c-75f063970d87",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
