@@ -1,0 +1,41 @@
+crates/runtime/src/package.rs
+  s_c5695907fe744f::t_c7b0bf9ad6e348 200,247
+scripts/test-github.py
+  s_c5695907fe744f::t_008d0dff7377c2 216
+  s_c5695907fe744f::t_07baa6d9697c1b 68-70,224-236
+crates/runtime/src/onboarding.rs
+  s_c5695907fe744f::t_902b4299f27d61 507-511,520-522,525-527
+  s_c5695907fe744f::t_d4daf1a9ed1f2e 90,151-157,159-162,164-165,283,506,512,514-516,530
+  s_c5695907fe744f::t_748e4ab7327d3b 519,523-524,528
+  s_c5695907fe744f::t_7f9a2e48e8e522 158,163,513,517-518,529
+crates/runtime/src/project.rs
+  s_c5695907fe744f::t_c7b0bf9ad6e348 818
+.github/workflows/publish-extension.yml
+  s_c5695907fe744f::t_6222569da6ffd0 26
+Cargo.lock
+  s_c5695907fe744f::t_e96e1068dd4cd1 7,1434,1448,1477
+Cargo.toml
+  s_c5695907fe744f::t_d95234f8f08623 7
+README.md
+  s_c5695907fe744f::t_f725b6486cbf28 50-52
+docs/install.md
+  s_c5695907fe744f::t_095a358fcd48fc 9,38,44,99
+scripts/verify-official-onboarding.py
+  s_c5695907fe744f::t_9b622eacdb271a 12,19-20,30,32,40,52
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a93e21c421a0fe109351c939a4e36a843e063167",
+  "prompts": {},
+  "sessions": {
+    "s_c5695907fe744f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d06d-149b-7062-aa67-3c0145df9d90",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
