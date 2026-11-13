@@ -1,0 +1,27 @@
+README.md
+  s_c5695907fe744f::t_88eebf87f35960 199,201-203,218-220,227-228
+docs/code-generation.md
+  s_c5695907fe744f::t_88eebf87f35960 4-6,25,28-29,35
+docs/module-composition.md
+  s_c5695907fe744f::t_88eebf87f35960 102-105,107,110-111,237-238
+docs/native-dependencies.md
+  s_c5695907fe744f::t_88eebf87f35960 4-5,16-17,23-24
+examples/codegen-demo/README.md
+  s_c5695907fe744f::t_88eebf87f35960 5-6,8,13-15,26-29
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d8ede7cf72ea74788c8fdf5cb210b360fb723644",
+  "prompts": {},
+  "sessions": {
+    "s_c5695907fe744f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d06d-149b-7062-aa67-3c0145df9d90",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
