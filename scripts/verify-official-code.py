@@ -13,7 +13,7 @@ parser.add_argument('--binary', type=Path, required=True)
 parser.add_argument('--token-env', help='Explicit GitHub credential binding for API quota')
 parser.add_argument('--out', type=Path, required=True)
 parser.add_argument('--code-version', default='0.3.1')
-parser.add_argument('--preset-version', default='0.3.0')
+parser.add_argument('--preset-version', default='0.3.1')
 args = parser.parse_args()
 binary = args.binary.resolve(strict=True)
 assert subprocess.check_output([str(binary), '--version'], text=True).strip() == 'lenso 1.0.0'
