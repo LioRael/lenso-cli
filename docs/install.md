@@ -6,7 +6,7 @@ installer uses operating-system tools; Python is only used by the release test d
 
 ## Release assets
 
-Download from the [CLI Releases](https://github.com/LioRael/lenso-cli/releases/tag/v0.2.1).
+Download from the [CLI Releases](https://github.com/LioRael/lenso-cli/releases/tag/v0.2.2).
 CLI tags use `v<VERSION>`; extension tags such as `code-v0.1.2` distribute separate
 packages. Native stable CLI Releases own the GitHub `latest` entry. Extension
 publication explicitly leaves that entry unchanged.
@@ -35,13 +35,13 @@ all five archives plus `install.sh` and `install.ps1`.
 For a public repository, download the pinned installer before running it:
 
 ```sh
-curl -fsSL https://github.com/LioRael/lenso-cli/releases/download/v0.2.1/install.sh -o install.sh
+curl -fsSL https://github.com/LioRael/lenso-cli/releases/download/v0.2.2/install.sh -o install.sh
 sh install.sh
 export PATH="$HOME/.local/bin:$PATH"
 lenso --version
 ```
 
-For the latest stable CLI installer, replace `download/v0.2.1` with `latest/download`.
+For the latest stable CLI installer, replace `download/v0.2.2` with `latest/download`.
 Each downloaded installer is pinned to its own exact Release, even if `latest`
 changes during installation. Requirements are `sh`, `curl`, `tar`, `gzip`, standard file
 utilities and `sha256sum` (Linux) or `shasum` (macOS). It does not need jq or a JSON parser.
@@ -96,7 +96,7 @@ browser if needed. Verify the relevant archive line before extraction:
 ```sh
 sha256sum --check --ignore-missing SHA256SUMS  # Linux
 shasum -a 256 --check --ignore-missing SHA256SUMS  # macOS
-tar -xzf lenso-v0.2.1-aarch64-apple-darwin.tar.gz
+tar -xzf lenso-v0.2.2-aarch64-apple-darwin.tar.gz
 mkdir -p "$HOME/.local/bin"
 cp lenso "$HOME/.local/bin/lenso"
 ```

@@ -197,6 +197,7 @@ pub(crate) fn resolve(
     source: &str,
     id: &str,
     requirement: Option<&str>,
+    selected_version: Option<&semver::Version>,
     github: &Github,
     cache: &Cache,
     options: &LoadOptions,
@@ -243,6 +244,7 @@ pub(crate) fn resolve(
                 .ok_or_else(|| Error::Invalid("GitHub release tag is missing".into()))?;
             if let Some(version) = version_of(tag, &config.tag, &config.id)?
                 && requirement.matches(&version)
+                && selected_version.is_none_or(|selected| selected == &version)
                 && (entry["prerelease"] != true || !version.pre.is_empty())
                 && selected.as_ref().is_none_or(|(old, _)| version > *old)
             {

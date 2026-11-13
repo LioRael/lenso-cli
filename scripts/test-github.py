@@ -65,6 +65,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         url=urlsplit(self.path)
         path=unquote(url.path)
         requests[path]+=1
+        if path=='/index/code.json':
+            if self.headers.get('Authorization'):leaks.append('API credential reached public Registry')
+            return self.reply(200,{'schema_version':1,'name':'@test/code','releases':[{'version':'0.1.0','source':'github-release:acme/tools/code','sha256':hashlib.sha256(assets[101]).hexdigest()}]})
         if path.startswith('/download/'):
             if self.headers.get('Authorization'):leaks.append('API credential reached download redirect')
             if parse_qs(url.query).get('temporary') != [signed]:return self.reply(403,b'')
@@ -210,7 +213,7 @@ try:
     no_node=dict(env,PATH=str(scratch/'empty-path'))
     run(first,'code','diff','button','--offline','--locked',overrides=no_node)
     # Explicit extension update chooses compatible releases, and preserves resource pins.
-    releases.extend([publish('0.2.0',300),publish('0.1.1',200)])
+    releases.extend([publish('0.2.0',300),publish('0.1.1',200),publish('0.1.0+unlisted',400)])
     releases[:0]=[{'id':1000+i,'tag_name':f'other-v0.0.{i}','draft':False,'prerelease':False,'assets':[]} for i in range(30)]
     run(first,'code','diff','button')
     assert json.loads((first/'lenso.lock').read_text())['extensions'][0]['definition']['version']=='0.1.0'
@@ -218,6 +221,19 @@ try:
     updated=json.loads((first/'lenso.lock').read_text())
     assert updated['extensions'][0]['definition']['version']=='0.1.1' and updated['resources']
     run(first,'code','diff','button')
+    # Curated Registry versions bind Release selection even when newer unlisted versions exist.
+    curated=scratch/'curated';curated.mkdir()
+    run(curated,'init','--preset','empty','--api',api,'--token-env','LENSO_TEST_GH_TOKEN','--yes')
+    curated_config=load(curated/'lenso.toml')
+    assert curated_config['cli']['github']['token_env']=='LENSO_TEST_GH_TOKEN'
+    curated_config['cli']['registries']={'@test':api+'index/'}
+    save(curated/'lenso.toml',curated_config)
+    run(curated,'ext','add','@test/code','--input',json.dumps({'repo':'acme/resources'}),'--yes')
+    curated_lock=json.loads((curated/'lenso.lock').read_text())
+    curated_code=next(item for item in curated_lock['extensions'] if item['id']=='code')
+    assert curated_code['definition']['version']=='0.1.0'
+    assert curated_code['github']['tag']=='code-v0.1.0'
+    assert curated_code['source']=='registry:@test/code'
     # No ref/release discovery is needed to restore a locked package after cache deletion.
     pinned=(first/'lenso.lock').read_bytes();ref_queries=requests['/repos/acme/tools/commits/HEAD'];release_queries=requests['/repos/acme/tools/releases']
     shutil.rmtree(cache)

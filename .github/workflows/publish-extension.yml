@@ -23,7 +23,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: publish-extension-${{ github.repository }}
+  group: publish-extension-${{ github.repository }}-${{ inputs.package || (startsWith(github.ref_name, 'shadcn-v') && 'shadcn' || 'code') }}
   cancel-in-progress: false
 
 jobs:

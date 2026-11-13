@@ -87,7 +87,7 @@ fn argument(name: &str, positional: bool, help: &str) -> Argument {
 }
 
 pub(crate) fn register(cli: &mut Cli, options: &LoadOptions) -> Result<(), Error> {
-    for (path, about, args) in [
+    for (path, about, mut args) in [
         (
             vec!["new"],
             "Create a project from an optional preset",
@@ -148,6 +148,21 @@ pub(crate) fn register(cli: &mut Cli, options: &LoadOptions) -> Result<(), Error
         ),
     ] {
         let operation = path.join(" ");
+        if matches!(
+            operation.as_str(),
+            "new" | "init" | "ext add" | "preset apply"
+        ) {
+            args.push(argument(
+                "token-env",
+                false,
+                "Explicit GitHub credential environment variable",
+            ));
+            args.push(argument(
+                "api",
+                false,
+                "Explicit compatible GitHub API base",
+            ));
+        }
         let workflow = format!("lenso/{}", path.join("-"));
         let options = options.clone();
         cli.command(
@@ -265,6 +280,7 @@ fn preset(project: &Path, reference: &str, options: &LoadOptions) -> Result<Pres
     let source = if reference.contains(':')
         || reference.contains('/')
         || reference.ends_with(".toml")
+        || reference.ends_with(".json")
     {
         reference.to_owned()
     } else {
@@ -487,6 +503,31 @@ async fn run(
     let old = if creating { None } else { read_project(root)? };
     let mut config = old.clone().unwrap_or_default();
     config.cli.schema_version = 1;
+    if let Some(name) = ctx.input["token-env"].as_str() {
+        if name.is_empty()
+            || !name.bytes().enumerate().all(|(index, byte)| {
+                byte == b'_' || byte.is_ascii_alphabetic() || index > 0 && byte.is_ascii_digit()
+            })
+        {
+            return Err(Error::Invalid(
+                "token-env must name an environment variable".into(),
+            ));
+        }
+        config.cli.github.token_env = Some(name.to_owned());
+    }
+    if let Some(api) = ctx.input["api"].as_str() {
+        let crate::source::Source::Remote(url) = crate::source::Source::parse(root, api)? else {
+            return Err(Error::Invalid(
+                "GitHub API base requires an HTTPS URL".into(),
+            ));
+        };
+        if !api.ends_with('/') || url.query().is_some() {
+            return Err(Error::Invalid(
+                "GitHub API base must end in / without a query".into(),
+            ));
+        }
+        config.cli.github.api = api.to_owned();
+    }
     let mut recipe = None;
     let mut preset_identity = None;
     let mut selection = None;

@@ -47,6 +47,9 @@ Official aliases resolve through [lenso-registry](https://github.com/LioRael/len
 `lenso ext add @acme/tool --constraint '^1'` uses an explicitly configured namespace;
 `lenso ext add github-release:owner/repo/tool --id tool` uses a direct source.
 `lenso preset apply NAME_OR_URL` composes packages and runs its adoption recipe.
+Private packages and authenticated API quota use explicit `--token-env NAME`;
+`--api URL` selects a compatible GitHub API. Credentials remain in the environment,
+and only their binding names are saved.
 `lenso ext remove ID` and `lenso preset remove ID` retain packages still selected by
 another preset or required by another extension. They leave generated code and the
 shared cache in place. A new project without extensions uses `--preset empty`.

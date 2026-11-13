@@ -815,6 +815,7 @@ pub(crate) fn resolve_flat(
                 release_source,
                 &installed.id,
                 installed.version.as_deref(),
+                package.as_ref().map(|package| &package.version),
                 &github,
                 &cache,
                 &source_options,

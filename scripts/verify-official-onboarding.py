@@ -9,13 +9,15 @@ import tempfile
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--binary", type=Path, required=True)
+parser.add_argument("--token-env", help="Explicit credential for API quota or private access")
 args = parser.parse_args()
 binary = args.binary.resolve()
 with tempfile.TemporaryDirectory(prefix="lenso-official-") as directory:
     root = Path(directory)
     env = dict(os.environ, PATH="", LENSO_CACHE_DIR=str(root / "cache"))
     for key in ("GH_TOKEN", "GITHUB_TOKEN", "LENSO_PUBLISH_TOKEN"):
-        env.pop(key, None)
+        if key != args.token_env:
+            env.pop(key, None)
     def run(project, *arguments, offline=False):
         environment = dict(env)
         if offline:
@@ -25,8 +27,9 @@ with tempfile.TemporaryDirectory(prefix="lenso-official-") as directory:
         report = json.loads(result.stdout)
         assert report["status"] == "complete"
         return report
+    credentials = ("--token-env", args.token_env) if args.token_env else ()
     settings = json.dumps({"repo": "LioRael/lenso-cli", "ref": "v0.1.0", "catalog": "fixtures/distribution/catalog.toml"})
-    run(root, "new", "code-project", "--preset", "code", "--input", settings, "--yes")
+    run(root, "new", "code-project", "--preset", "code", "--input", settings, "--yes", *credentials)
     code = root / "code-project"
     run(code, "code", "search")
     run(code, "code", "preview", "hello")
@@ -34,7 +37,7 @@ with tempfile.TemporaryDirectory(prefix="lenso-official-") as directory:
     run(code, "code", "add", "hello", "--yes")
     assert (code / "src/hello.txt").read_text() == "Hello from a published Lenso Wasm extension.\n"
     run(code, "code", "diff", "hello", "--locked", "--offline", offline=True)
-    run(root, "new", "vite-project", "--preset", "shadcn", "--yes")
+    run(root, "new", "vite-project", "--preset", "shadcn", "--yes", *credentials)
     vite = root / "vite-project"
     run(vite, "shadcn", "preview", "button")
     assert not (vite / "src/components/ui/button.tsx").exists()
@@ -46,4 +49,4 @@ with tempfile.TemporaryDirectory(prefix="lenso-official-") as directory:
         assert "project" in {node["id"] for node in nodes}
         assert not (project / ".lenso").exists()
         assert not (project / "node_modules").exists()
-print("Official onboarding passed: anonymous curated aliases, published Wasm, Code application, Shadcn Vite creation/preview, locked offline reuse, empty PATH, JSON/Agent.")
+print("Official onboarding passed: curated aliases, published Wasm, Code application, Shadcn Vite creation/preview, locked offline reuse, empty PATH, JSON/Agent.")
