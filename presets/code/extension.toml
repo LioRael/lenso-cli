@@ -107,6 +107,7 @@ arguments = [
  { name = "language", help = "Target language" },
  { name = "runtime", help = "Target runtime" },
 
+ { name = "refresh", help = "Preview refreshed directory and source pins", kind = "flag" },
 ]
 
 [[commands]]

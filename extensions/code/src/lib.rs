@@ -181,6 +181,7 @@ fn load(ctx: &Value, name: &str, refresh: bool) -> Result<(Profile, Catalog, Str
     ))
 }
 fn selection(ctx: &Value, refresh: bool) -> Result<Json<Value>> {
+    let refresh = refresh || ctx["input"]["refresh"].as_bool().unwrap_or(false);
     if modules::enabled(ctx)? {
         return Ok(complete(json!({"module_request":true,"refresh":refresh})));
     }

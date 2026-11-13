@@ -208,6 +208,7 @@ fn roots(ctx: &mut Value, root: &str, previous: Option<&str>) -> Result<()> {
     Ok(())
 }
 pub fn plan(ctx: &Value, refresh: bool) -> Result<Json<Value>> {
+    let refresh = refresh || ctx["input"]["refresh"].as_bool().unwrap_or(false);
     let p = profile(ctx)?.ok_or_else(|| error("choose a registry"))?;
     let name = item(ctx)?;
     if p.format == "lenso-compose-v1" {

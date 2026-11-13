@@ -9,6 +9,7 @@ lenso init --preset code
 lenso code search auth
 lenso code preview auth
 lenso code add auth
+lenso code preview auth --refresh
 lenso code update auth
 ```
 
