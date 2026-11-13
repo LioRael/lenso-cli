@@ -1,0 +1,34 @@
+extensions/code/src/composition.rs
+  s_c5695907fe744f::t_1a92f81dacd2b1 277-290
+extensions/code/src/setup.rs
+  s_c5695907fe744f::t_1a92f81dacd2b1 1-27,30-104,106,126,132-159,161-189,191-215
+  s_c5695907fe744f::t_bb57ab4604cd07 105,107-125,127-131
+  s_c5695907fe744f::t_f45197cbd31deb 28-29
+  s_c5695907fe744f::t_f93eeb063185d8 160,190
+docs/code-target-variants.md
+  s_c5695907fe744f::t_aa473f6b7187b9 1-62
+extensions/code/Cargo.lock
+  s_c5695907fe744f::t_32283b46ec5523 200
+extensions/code/Cargo.toml
+  s_c5695907fe744f::t_3d4e399ec316d8 3
+extensions/code/src/lib.rs
+  s_c5695907fe744f::t_bc95b68e79f9f2 6,362-371
+presets/code/extension.toml
+  s_c5695907fe744f::t_6d44575341c558 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "70a175f46cb8dd6fb6097cdb830a0cd3ae2f5c1c",
+  "prompts": {},
+  "sessions": {
+    "s_c5695907fe744f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d06d-149b-7062-aa67-3c0145df9d90",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
