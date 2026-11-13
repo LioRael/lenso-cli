@@ -98,32 +98,37 @@ offline = subprocess.run([str(binary), 'self', 'update', '--offline', '--json'],
                          env=dict(env, PATH=''), capture_output=True, text=True)
 assert offline.returncode != 0 and 'requires network access' in offline.stdout + offline.stderr
 # Exercise the real network updater in a disposable copy, keeping consumer verification intact.
-update_dir = output / 'self-update'
-update_dir.mkdir()
-updater = update_dir / binary.name
-shutil.copy2(binary, updater)
-update_version = args.version if args.public_latest else '1.0.0'
-update_env = dict(env, PATH='')
-check = subprocess.run([str(updater), 'self', 'update', '--check', '--version', update_version, '--json'],
-                       env=update_env, capture_output=True, text=True, timeout=600)
-assert check.returncode == 0, check.stdout + check.stderr
-assert not (update_dir / 'lenso-install.json').exists()
-assert hashlib.sha256(updater.read_bytes()).hexdigest() == before
-updated = subprocess.run([str(updater), 'self', 'update', '--adopt', '--version', update_version, '--json'],
-                         env=update_env, capture_output=True, text=True, timeout=600)
-for name in ('GH_TOKEN', 'GITHUB_TOKEN'):
-    token = os.environ.get(name)
-    if token and token in updated.stdout + updated.stderr:
-        raise RuntimeError('Credential in self-update output')
-assert updated.returncode == 0, updated.stdout + updated.stderr
-result = json.loads(updated.stdout)['outputs']['main']
-assert result['state'] == 'updated' and result['version'] == update_version
-updated_receipt = json.loads((update_dir / 'lenso-install.json').read_bytes())
-assert updated_receipt['version'] == update_version
-assert updated_receipt['binary_sha256'] == hashlib.sha256(updater.read_bytes()).hexdigest()
-assert subprocess.check_output([str(updater), '--version'], env=update_env, text=True).strip() == 'lenso ' + update_version
-if update_version != args.version:
-    assert updated_receipt['binary_sha256'] != before
+update_modes = ['anonymous'] if args.public_latest else ['authenticated', 'anonymous']
+for mode in update_modes:
+    update_dir = output / ('self-update-' + mode)
+    update_dir.mkdir()
+    updater = update_dir / binary.name
+    shutil.copy2(binary, updater)
+    update_version = args.version if args.public_latest else '1.0.0'
+    update_env = dict(env, PATH='')
+    if mode == 'anonymous':
+        update_env.pop('GH_TOKEN', None)
+        update_env.pop('GITHUB_TOKEN', None)
+    check = subprocess.run([str(updater), 'self', 'update', '--check', '--version', update_version, '--json'],
+                           env=update_env, capture_output=True, text=True, timeout=600)
+    assert check.returncode == 0, check.stdout + check.stderr
+    assert not (update_dir / 'lenso-install.json').exists()
+    assert hashlib.sha256(updater.read_bytes()).hexdigest() == before
+    updated = subprocess.run([str(updater), 'self', 'update', '--adopt', '--version', update_version, '--json'],
+                             env=update_env, capture_output=True, text=True, timeout=600)
+    for name in ('GH_TOKEN', 'GITHUB_TOKEN'):
+        token = os.environ.get(name)
+        if token and token in updated.stdout + updated.stderr:
+            raise RuntimeError('Credential in self-update output')
+    assert updated.returncode == 0, updated.stdout + updated.stderr
+    result = json.loads(updated.stdout)['outputs']['main']
+    assert result['state'] == 'updated' and result['version'] == update_version
+    updated_receipt = json.loads((update_dir / 'lenso-install.json').read_bytes())
+    assert updated_receipt['version'] == update_version
+    assert updated_receipt['binary_sha256'] == hashlib.sha256(updater.read_bytes()).hexdigest()
+    assert subprocess.check_output([str(updater), '--version'], env=update_env, text=True).strip() == 'lenso ' + update_version
+    if update_version != args.version:
+        assert updated_receipt['binary_sha256'] != before
 root = Path(__file__).resolve().parents[2]
 subprocess.run([sys.executable, str(root / "scripts/verify-github-release.py"), "--binary", str(binary),
                 "--repo", args.repo, "--version", "0.1.2", "--ref", args.commit,
@@ -132,6 +137,7 @@ report = {"cli_version": args.version, "platform": sys.platform, "binary_sha256"
           "installed": True, "refused_overwrite": True, "refused_tampering": True,
           "native_receipt_verified": True, "self_update_offline_verified": True,
           "online_self_update_verified": True, "self_update_target_version": update_version,
+          "self_update_modes": update_modes,
           "wasm_consumer_verified": True, "no_node_git_rust": True,
           "public_latest_without_credentials": args.public_latest}
 (output / "installation.json").write_text(json.dumps(report, indent=2) + "\n")

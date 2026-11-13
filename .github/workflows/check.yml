@@ -16,6 +16,7 @@ jobs:
         run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy --target wasm32-unknown-unknown
       - name: Check native workspace and optional composition
         run: |
+          python3 scripts/release/test_publish.py
           cargo +1.99.0 fmt --all --check
           cargo +1.99.0 check --locked --workspace
           cargo +1.99.0 test --locked --workspace

@@ -219,14 +219,23 @@ impl Github {
         if let Some(token) = &self.token {
             request = request.bearer_auth(token);
         }
-        let response = request
-            .send()
-            .map_err(|_| invalid("release request failed (check network access)"))?;
-        if !response.status().is_success() {
-            return Err(http_error(response.status(), response.headers()));
+        response_bytes(send(request)?, limit)
+    }
+    fn public_version(&self, requested: Option<&Version>) -> Result<Version, Error> {
+        if let Some(version) = requested {
+            let url = format!("https://github.com/{REPO}/releases/download/v{version}/SHA256SUMS");
+            send(self.client.head(url))?;
+            return Ok(version.clone());
         }
-        read_limited(response, limit)
-            .map_err(|_| invalid("release response is unreadable or exceeds the size limit"))
+        let response = send(
+            self.client
+                .head(format!("https://github.com/{REPO}/releases/latest")),
+        )?;
+        public_version(response.url())
+    }
+    fn public_asset(&self, version: &Version, name: &str, limit: u64) -> Result<Vec<u8>, Error> {
+        let url = format!("https://github.com/{REPO}/releases/download/v{version}/{name}");
+        response_bytes(send(self.client.get(url))?, limit)
     }
     fn asset(&self, asset: &Asset, limit: u64) -> Result<Vec<u8>, Error> {
         if asset.size > limit {
@@ -247,6 +256,40 @@ impl Github {
         }
         Ok(bytes)
     }
+}
+
+fn send(request: reqwest::blocking::RequestBuilder) -> Result<reqwest::blocking::Response, Error> {
+    let response = request
+        .send()
+        .map_err(|_| invalid("release request failed (check network access and proxy settings)"))?;
+    if !response.status().is_success() {
+        return Err(http_error(response.status(), response.headers()));
+    }
+    Ok(response)
+}
+fn response_bytes(response: reqwest::blocking::Response, limit: u64) -> Result<Vec<u8>, Error> {
+    if response.content_length().is_some_and(|size| size > limit) {
+        return Err(invalid("release asset exceeds size limit"));
+    }
+    read_limited(response, limit)
+        .map_err(|_| invalid("release response is unreadable or exceeds the size limit"))
+}
+fn public_version(url: &reqwest::Url) -> Result<Version, Error> {
+    let prefix = format!("/{REPO}/releases/tag/v");
+    let version = url
+        .path()
+        .strip_prefix(&prefix)
+        .and_then(|v| Version::parse(v).ok());
+    if url.scheme() != "https"
+        || url.host_str() != Some("github.com")
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(invalid("unexpected public release URL"));
+    }
+    version
+        .filter(|v| v.pre.is_empty())
+        .ok_or_else(|| invalid("latest public release is not a stable CLI version"))
 }
 
 fn http_error(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) -> Error {
@@ -434,28 +477,33 @@ fn run(ctx: Context, offline: bool) -> Result<Outcome, Error> {
         ));
     }
     let github = Github::new()?;
-    let endpoint = requested.as_ref().map_or_else(
-        || "releases/latest".to_owned(),
-        |v| format!("releases/tags/v{v}"),
-    );
-    let release: Release = serde_json::from_slice(&github.get(
-        &endpoint,
-        "application/vnd.github+json",
-        MAX_METADATA,
-    )?)?;
-    let version = release
-        .tag_name
-        .strip_prefix('v')
-        .and_then(|s| Version::parse(s).ok())
-        .ok_or_else(|| invalid("release does not have a CLI version tag"))?;
-    if release.draft
-        || requested.as_ref().is_some_and(|v| *v != version)
-        || (requested.is_none() && (release.prerelease || !version.pre.is_empty()))
-    {
-        return Err(invalid(
-            "release does not match the requested update channel/version",
-        ));
-    }
+    let (version, release) = if github.token.is_none() {
+        (github.public_version(requested.as_ref())?, None)
+    } else {
+        let endpoint = requested.as_ref().map_or_else(
+            || "releases/latest".to_owned(),
+            |v| format!("releases/tags/v{v}"),
+        );
+        let release: Release = serde_json::from_slice(&github.get(
+            &endpoint,
+            "application/vnd.github+json",
+            MAX_METADATA,
+        )?)?;
+        let version = release
+            .tag_name
+            .strip_prefix('v')
+            .and_then(|s| Version::parse(s).ok())
+            .ok_or_else(|| invalid("release does not have a CLI version tag"))?;
+        if release.draft
+            || requested.as_ref().is_some_and(|v| *v != version)
+            || (requested.is_none() && (release.prerelease || !version.pre.is_empty()))
+        {
+            return Err(invalid(
+                "release does not match the requested update channel/version",
+            ));
+        }
+        (version, Some(release))
+    };
     let current = Version::parse(env!("CARGO_PKG_VERSION"))
         .map_err(|_| invalid("invalid current CLI version"))?;
     let change = if requested.is_some() {
@@ -500,12 +548,17 @@ fn run(ctx: Context, offline: bool) -> Result<Outcome, Error> {
         "lenso-v{version}-{platform}.{}",
         if windows { "zip" } else { "tar.gz" }
     );
-    let asset = select_asset(&release, &archive_name)?;
-    let sums = github.asset(select_asset(&release, "SHA256SUMS")?, MAX_METADATA)?;
+    let sums = match &release {
+        Some(release) => github.asset(select_asset(release, "SHA256SUMS")?, MAX_METADATA)?,
+        None => github.public_asset(&version, "SHA256SUMS", MAX_METADATA)?,
+    };
     let expected = archive_hash(&sums, &archive_name)?;
     ctx.events
         .preparing(format!("Downloading Lenso {version} ({platform})"));
-    let archive = github.asset(asset, MAX_ARCHIVE)?;
+    let archive = match &release {
+        Some(release) => github.asset(select_asset(release, &archive_name)?, MAX_ARCHIVE)?,
+        None => github.public_asset(&version, &archive_name, MAX_ARCHIVE)?,
+    };
     if digest(&archive) != expected {
         return Err(invalid(
             "archive SHA-256 mismatch; existing installation was not changed",
@@ -686,6 +739,26 @@ mod tests {
             .output()
             .unwrap();
         assert!(output.status.success());
+    }
+
+    #[test]
+    fn public_latest_requires_the_official_stable_release_url() {
+        let valid = reqwest::Url::parse("https://github.com/LioRael/lenso-cli/releases/tag/v1.1.1")
+            .unwrap();
+        assert_eq!(public_version(&valid).unwrap(), Version::new(1, 1, 1));
+        for url in [
+            "http://github.com/LioRael/lenso-cli/releases/tag/v1.1.1",
+            "https://example.com/LioRael/lenso-cli/releases/tag/v1.1.1",
+            "https://github.com/other/repo/releases/tag/v1.1.1",
+            "https://github.com/LioRael/lenso-cli/releases/tag/code-v1.1.1",
+            "https://github.com/LioRael/lenso-cli/releases/tag/v1.1.1-beta.1",
+            "https://github.com/LioRael/lenso-cli/releases/tag/v1.1.1?redirect=other",
+        ] {
+            assert!(
+                public_version(&reqwest::Url::parse(url).unwrap()).is_err(),
+                "{url}"
+            );
+        }
     }
 
     #[test]

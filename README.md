@@ -34,7 +34,7 @@ lenso --version
 **Cargo**
 
 ```sh
-cargo install lenso --version 1.1.0 --locked
+cargo install lenso --version 1.1.1 --locked
 ```
 
 The native installers verify SHA-256 and the executable version before installing.

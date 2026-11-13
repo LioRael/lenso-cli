@@ -85,7 +85,12 @@ CLI 1.0.0 predates this command: first download the latest installer and rerun i
 with `--force` (Unix) or `-Force` (Windows). Subsequent native upgrades use the
 commands above.
 
-The default channel is the official CLI's latest stable GitHub Release. An exact
+The default channel is the official CLI's latest stable GitHub Release. Anonymous
+updates resolve the public release redirect and download exact-version assets
+directly from GitHub, without consuming the anonymous API quota. Credentialed
+updates use release and asset API IDs. CLI 1.1.0 used the API for both paths; if
+its anonymous quota is exhausted, provide a token or rerun the latest installer
+to upgrade to 1.1.1 or newer. An exact
 `--version` permits prereleases and downgrades. `lenso update` continues to update
 project extension pins; it does not update the executable.
 
@@ -102,7 +107,7 @@ when `--adopt` is supplied. Custom Cargo roots are recognized through Cargo's in
 metadata. Unknown package-manager locations cannot always be identified; only use
 `--adopt` for executables you intend to manage through the native updater.
 
-Updates select the current build target, pin the selected release's asset IDs, and
+Updates select the current build target, use exact-version URLs or authenticated asset IDs, and
 check archive size/SHA-256, archive contents, package identity, binary SHA-256 and the
 executable's reported version before replacement. GitHub asset digests are checked
 when supplied. Downloads and verification failures preserve the existing executable
