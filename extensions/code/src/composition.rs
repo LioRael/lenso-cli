@@ -149,11 +149,18 @@ pub fn compose(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
         Ok(loaded) => loaded,
         Err(question) => return Ok(question),
     };
+    let path = destination(&loaded.profile.target, "composition.json");
+    plan(&ctx, loaded, &path)
+}
+pub(crate) fn plan(
+    ctx: &Value,
+    loaded: crate::author::Loaded,
+    artifact_path: &str,
+) -> FnResult<Json<Value>> {
     let profile = &loaded.profile;
     let commit = &loaded.commit;
     let catalog = &loaded.catalog;
-    let artifact_path = destination(&profile.target, "composition.json");
-    let previous: Option<Artifact> = local(&artifact_path)?
+    let previous: Option<Artifact> = local(artifact_path)?
         .map(|content| serde_json::from_str(&content))
         .transpose()?;
     if let Some(previous) = &previous {
@@ -335,7 +342,7 @@ pub fn compose(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
         .collect::<BTreeSet<_>>();
     let rendered = loaded.render(&request, &resolution)?;
     let changes = match crate::generation::reconcile(
-        &ctx,
+        ctx,
         rendered.files,
         previous
             .as_ref()
@@ -357,7 +364,7 @@ pub fn compose(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
         )
         .into());
     }
-    let native = match crate::native::plan(&ctx, &rendered.dependencies, &resolution, &group)? {
+    let native = match crate::native::plan(ctx, &rendered.dependencies, &resolution, &group)? {
         Ok(plan) => plan,
         Err(question) => return Ok(question),
     };
@@ -387,7 +394,7 @@ pub fn compose(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
     {
         return Err(error("composition artifact exceeds project plan limits").into());
     }
-    if local(&artifact_path)?.as_deref() != Some(&content) {
+    if local(artifact_path)?.as_deref() != Some(&content) {
         files.push(json!({"path":artifact_path,"content":content}));
     }
     Ok(complete(

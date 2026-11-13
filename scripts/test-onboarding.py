@@ -46,7 +46,7 @@ with tempfile.TemporaryDirectory(prefix="lenso-onboarding-") as directory:
     assert not (project / "lenso.toml").exists()
     assert not (project / "lenso.lock").exists()
     # Confirmation alone cannot answer extension-owned text questions.
-    pending = invoke(project, "ext", "add", f"{base}/code/extension.toml", "--id", "code", "--yes", expected=2)
+    pending = invoke(project, "ext", "add", f"{base}/code/extension.toml", "--id", "code", "--input", '{"format":"lenso-code-v1"}', "--yes", expected=2)
     assert pending["question"]["id"] == "code:repository"
     assert not (project / "lenso.toml").exists()
     settings = json.dumps({"repo": "LioRael/lenso-cli", "ref": "v0.1.0", "catalog": "fixtures/distribution/catalog.toml"})

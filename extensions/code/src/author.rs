@@ -54,6 +54,9 @@ pub fn load(ctx: &Value) -> crate::Result<Result<Loaded, Json<Value>>> {
     let profile: Profile = serde_json::from_value(
         ctx["capabilities"]["extension.options"]["registries"][&name].clone(),
     )?;
+    load_profile(ctx, profile).map(Ok)
+}
+pub(crate) fn load_profile(ctx: &Value, profile: Profile) -> crate::Result<Loaded> {
     if profile.format != "lenso-compose-v1" {
         return Err(error(
             "composition commands require a lenso-compose-v1 resource registry",
@@ -101,7 +104,7 @@ pub fn load(ctx: &Value) -> crate::Result<Result<Loaded, Json<Value>>> {
         templates: OnceCell::new(),
     };
     loaded.validate_declarations()?;
-    Ok(Ok(loaded))
+    Ok(loaded)
 }
 impl Loaded {
     pub fn read(&self, path: &str) -> crate::Result<String> {

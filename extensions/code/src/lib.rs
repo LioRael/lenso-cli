@@ -2,6 +2,7 @@
 mod author;
 mod composition;
 mod generation;
+mod modules;
 mod native;
 mod setup;
 use extism_pdk::{FnResult, Json, host_fn, plugin_fn};
@@ -44,7 +45,7 @@ fn relative(path: &str) -> Result<()> {
     }
     Ok(())
 }
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Profile {
     source: String,
@@ -180,6 +181,10 @@ fn load(ctx: &Value, name: &str, refresh: bool) -> Result<(Profile, Catalog, Str
     ))
 }
 fn selection(ctx: &Value, refresh: bool) -> Result<Json<Value>> {
+    let refresh = refresh || ctx["input"]["refresh"].as_bool().unwrap_or(false);
+    if modules::enabled(ctx)? {
+        return Ok(complete(json!({"module_request":true,"refresh":refresh})));
+    }
     let name = match registry(ctx)? {
         Ok(name) => name,
         Err(question) => return Ok(question),
@@ -221,6 +226,12 @@ pub fn select_update(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
     Ok(selection(&ctx, true)?)
 }
 fn resolve_items(ctx: &Value, diff: bool) -> Result<Json<Value>> {
+    if modules::enabled(ctx)? {
+        let refresh = ctx["steps"]
+            .as_object()
+            .is_some_and(|steps| steps.values().any(|s| s["refresh"] == true));
+        return modules::plan(ctx, refresh).map_err(|e| error(e.to_string()));
+    }
     let selection = ctx["steps"]
         .as_object()
         .and_then(|steps| steps.values().find_map(|s| s.get("selection")))
@@ -344,12 +355,19 @@ pub fn verify(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
 }
 #[plugin_fn]
 pub fn search(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
+    if modules::enabled(&ctx)? {
+        return Ok(modules::search(&ctx)?);
+    }
     let name = match registry(&ctx)? {
         Ok(name) => name,
         Err(question) => return Ok(question),
     };
     let (_, catalog, _, commit) = load(&ctx, &name, false)?;
-    let query = ctx["input"]["query"].as_str().unwrap_or("").to_lowercase();
+    let query = ctx["input"]["query"]
+        .as_str()
+        .or_else(|| ctx["input"]["term"].as_str())
+        .unwrap_or("")
+        .to_lowercase();
     let results:Vec<_>=catalog.items.iter().filter(|i|format!("{} {}",i.name,i.description).to_lowercase().contains(&query)).map(|i|json!({"name":i.name,"description":i.description,"registry":name,"type":"code:resource","add":i.name})).collect();
     Ok(complete(
         json!({"pagination":{"total":results.len(),"offset":0,"limit":128,"hasMore":false},"results":results,"commit":commit}),
@@ -368,7 +386,23 @@ pub fn configure(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
     Ok(result)
 }
 
-fn configure_input(ctx: Value) -> FnResult<Json<Value>> {
+fn configure_input(mut ctx: Value) -> FnResult<Json<Value>> {
+    let explicit = ctx["input"]["repo"].is_string() || ctx["input"]["author_root"].is_string();
+    if !explicit
+        && (ctx["input"]["format"].is_null() || ctx["input"]["format"] == "lenso-modules-v1")
+        && !ctx["capabilities"]["extension.options"]["registries"].is_object()
+    {
+        let input = ctx["input"]
+            .as_object_mut()
+            .ok_or_else(|| error("invalid setup input"))?;
+        input.insert("repo".into(), json!("LioRael/lenso-modules"));
+        input.insert("format".into(), json!("lenso-modules-v1"));
+        input.insert("catalog".into(), json!("lenso.modules.toml"));
+    }
+    if ctx["input"]["format"] == "lenso-modules-v1" && ctx["input"]["native"].is_null() {
+        ctx["input"]["native"] =
+            json!({"npm":{"manifest":"package.json"},"cargo":{"manifest":"Cargo.toml"}});
+    }
     if ctx["input"].get("native").is_some()
         && ctx["input"].get("author_root").is_none()
         && ctx["input"].get("repo").is_none()
@@ -403,6 +437,10 @@ fn configure_input(ctx: Value) -> FnResult<Json<Value>> {
         lenso_codegen::relative(target)?;
         lenso_codegen::relative(catalog)?;
         let mut proposal = json!({"installation":{"sources":[],"read_roots":[root,target],"write_roots":[target],"options":{"registries":{"main":{"source":format!("project:{root}"),"ref":"working-tree","path":catalog,"format":"lenso-compose-v1","target":target}}}}});
+        if ctx["input"]["format"] == "lenso-modules-v1" {
+            proposal["installation"]["options"]["registries"]["main"]["format"] =
+                json!("lenso-modules-v1");
+        }
         native_setup(&ctx, &mut proposal)?;
         return Ok(complete(proposal));
     }
@@ -432,7 +470,10 @@ fn configure_input(ctx: Value) -> FnResult<Json<Value>> {
     relative(target)?;
     relative(catalog)?;
     let format = ctx["input"]["format"].as_str().unwrap_or("lenso-code-v1");
-    if !matches!(format, "lenso-code-v1" | "lenso-compose-v1") {
+    if !matches!(
+        format,
+        "lenso-code-v1" | "lenso-compose-v1" | "lenso-modules-v1"
+    ) {
         return Err(error("unsupported catalog format").into());
     }
     let reference = ctx["input"]["ref"].as_str().unwrap_or("HEAD");
@@ -477,4 +518,39 @@ fn native_setup(ctx: &Value, proposal: &mut Value) -> Result<()> {
         proposal["installation"]["processes"] = json!(commands);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod configuration_tests {
+    use super::*;
+    fn context(input: Value) -> Value {
+        json!({"input":input,"answers":{},"capabilities":{"extension.options":{}}})
+    }
+    #[test]
+    fn empty_setup_prepares_a_directory_without_selecting_a_language() {
+        let output = configure_input(context(json!({}))).unwrap().0;
+        assert_eq!(output["status"], "complete");
+        assert_eq!(
+            output["output"]["installation"]["options"]["registries"]["main"]["format"],
+            "lenso-modules-v1"
+        );
+        assert!(output["output"]["installation"]["options"]["selection"].is_null());
+    }
+    #[test]
+    fn explicit_resource_format_keeps_its_repository_question() {
+        let output = configure_input(context(json!({"format":"lenso-code-v1"})))
+            .unwrap()
+            .0;
+        assert_eq!(output["question"]["id"], "code:repository");
+    }
+    #[test]
+    fn explicit_resource_repository_is_not_replaced() {
+        let output = configure_input(context(json!({"repo":"acme/resources"})))
+            .unwrap()
+            .0;
+        assert_eq!(
+            output["output"]["installation"]["options"]["registries"]["main"]["source"],
+            "github-repo:acme/resources"
+        );
+    }
 }
