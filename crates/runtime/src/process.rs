@@ -43,6 +43,12 @@ impl ProcessSpec {
         }
         #[cfg(unix)]
         command.process_group(0);
+        // Register before spawning: a child can start before ctrl_c() is first polled.
+        #[cfg(unix)]
+        let mut interrupts =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+        #[cfg(windows)]
+        let mut interrupts = tokio::signal::windows::ctrl_c()?;
         let mut child = command.spawn()?;
         let logs = if events.is_enabled() {
             let stdout = child
@@ -62,8 +68,8 @@ impl ProcessSpec {
         };
         let status = tokio::select! {
             result = child.wait() => result?,
-            signal = tokio::signal::ctrl_c() => {
-                signal?;
+            signal = interrupts.recv() => {
+                signal.ok_or_else(|| Error::Operation("interrupt signal stream closed".into()))?;
                 #[cfg(unix)]
                 if let Some(id) = child.id() {
                     use nix::sys::signal::{Signal, killpg};

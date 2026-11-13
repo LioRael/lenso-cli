@@ -1,6 +1,6 @@
 # shadcn Registry consumer
 
-The preset consumes Registry data through restricted Rust host functions and runs
+The extension consumes Registry data through restricted Rust host functions and runs
 as Wasm. Source files, dependency declarations, CSS, and environment-file defaults
 become one reviewed plan. The host owns reads, HTTP, credentials, approval, writes,
 and package-manager processes. It does not execute commands found in Registry docs.
@@ -31,20 +31,20 @@ Existing differing application files still produce explicit overwrite/keep quest
 Merged package/CSS/env files appear in the final diff and require plan approval.
 
 The target must already have a TypeScript configuration and a Tailwind 4 CSS entry.
-`init` can create `components.json`; it does not scaffold a framework, CSS theme, or
-monorepo. The preset preserves `rsc` and existing source directives; it requires
+`shadcn init` creates `components.json` for a prepared project. The separate
+`lenso new --preset shadcn` composition creates the Vite starter. The preset preserves `rsc` and existing source directives; it requires
 `tsx: true`, CSS variables, and no Tailwind class prefix. Conventional source imports and references to files in the resolved Registry graph
 are rewritten using destination aliases, relative imports, and source exports.
 
 ## Search, differences, and component updates
 
 ```sh
-lenso search --query button
-lenso list @private --type registry:ui --limit 20 --offset 20
-lenso search @private @public --query navigation
-lenso search https://registry.example.com/r/registry.json --query card
-lenso diff button @private/dashboard --cwd apps/web
-lenso components update button @private/dashboard --cwd apps/web
+lenso shadcn search --query button
+lenso shadcn list @private --type registry:ui --limit 20 --offset 20
+lenso shadcn search @private @public --query navigation
+lenso shadcn search https://registry.example.com/r/registry.json --query card
+lenso shadcn diff button @private/dashboard --cwd apps/web
+lenso shadcn components update button @private/dashboard --cwd apps/web
 ```
 
 `search` and its `list` alias default to the official catalog. Namespaces use the
@@ -139,12 +139,12 @@ read still requires its own read grant.
 
 ```sh
 # Select explicitly from the repository root.
-lenso preview @private/dashboard --cwd apps/web
-lenso add button input --cwd apps/web
+lenso shadcn preview @private/dashboard --cwd apps/web
+lenso shadcn add button input --cwd apps/web
 
 # Or run inside the app; the nearest ancestor lenso.toml selects the repository.
 cd apps/web
-lenso add dialog
+lenso shadcn add dialog
 ```
 
 Without an unambiguous active workspace, the CLI asks a workspace question; JSON
@@ -178,8 +178,8 @@ including when its source files already match, so dependency installation can be
 ```sh
 cargo build --workspace
 python3 scripts/configure-shadcn.py PROJECT --allow-install
-lenso preview input dialog
-lenso add input dialog
+lenso shadcn preview input dialog
+lenso shadcn add input dialog
 ```
 
 The helper builds an immutable local source package and declares it in root

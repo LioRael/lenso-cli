@@ -252,14 +252,14 @@ they are not sandboxed.
   checks, read-input guards, source/module provenance, staging, and atomic replacement
   per file. Reviewed dependency commands require their own grant and confirmation.
 
-The **shadcn preset** consumes official names, custom Registry URLs, namespaces,
+The **shadcn extension** consumes official names, custom Registry URLs, namespaces,
 and local JSON resources in prepared TypeScript/Tailwind 4 projects and monorepos.
-The preset runs as Wasm; Rust owns reads, credentials, HTTP, review, application,
+The extension runs as Wasm; Rust owns reads, credentials, HTTP, review, application,
 and dependency processes. The Vite fixture remains the runnable button demo.
 
-## Optional shadcn consumer
+## Develop the shadcn extension
 
-Requires Rust 1.99+, the `wasm32-unknown-unknown` target, Python 3, Node.js, and npm.
+The local development workflow requires Rust 1.99+, the `wasm32-unknown-unknown` target, Python 3, Node.js, and npm.
 The configuration script builds a local development Wasm artifact and writes the
 declaration; it does not prepare the lock or cache. The included fixture pins
 React 19, Vite 8, TypeScript 7, and Tailwind 4.
@@ -272,13 +272,13 @@ python3 scripts/configure-shadcn.py examples/vite-shadcn --allow-install
 cargo run -p lenso -- --project examples/vite-shadcn --help
 
 # Live Registry resolution and a complete diff, without changing application files.
-cargo run -p lenso -- --project examples/vite-shadcn preview button --json
+cargo run -p lenso -- --project examples/vite-shadcn shadcn preview button --json
 
 # Choose from the live catalog, review files, then authorize package installation.
-cargo run -p lenso -- --project examples/vite-shadcn add
+cargo run -p lenso -- --project examples/vite-shadcn shadcn add
 
 # Agent/CI uses the same workflow and explicit consent.
-cargo run -p lenso -- --project examples/vite-shadcn add button --yes --json
+cargo run -p lenso -- --project examples/vite-shadcn shadcn add button --yes --json
 
 # Build and open the installed React component.
 cd examples/vite-shadcn
@@ -297,16 +297,16 @@ external commands require a separate confirmation.
 
 The demo is an existing npm project with `@/* -> src/*`, Vite aliases, and a
 shadcn-compatible Tailwind 4 theme. The preset also routes configured workspace
-aliases and package exports; project scaffolding remains outside its scope.
-`init` can review/create `components.json`; it does not install or rewrite a theme.
+aliases and package exports. `lenso new --preset shadcn` supplies the Vite starter;
+`shadcn init` reviews `components.json` in an existing prepared project.
 Multiple resources, custom registries, and workspaces use the same review flow:
 
 ```sh
-lenso search --query button
-lenso preview input dialog
-lenso add @private/dashboard --cwd apps/web
-lenso diff button
-lenso components update button
+lenso shadcn search --query button
+lenso shadcn preview input dialog
+lenso shadcn add @private/dashboard --cwd apps/web
+lenso shadcn diff button
+lenso shadcn components update button
 ```
 
 See [Registry, authentication, monorepo scope and verification](docs/shadcn.md).
@@ -315,12 +315,12 @@ See [Registry, authentication, monorepo scope and verification](docs/shadcn.md).
 ## Boundaries and next work
 
 Extensions are declared as local sources, remote manifests, or Registry package references and prepared
-automatically. There is no hosted marketplace, global discovery, or untrusted
-native plugin loader. Discovery reads
+automatically. The official Registry supplies curated names and preset selection.
+Native providers come from the embedding host. Discovery reads
 static locked metadata; execution checks shared cached bytes and SHA-256. Root
 configuration declares file destinations, readable paths, HTTPS prefixes, and exact
-process grants. `init`, `add`, `preview`, `search`/`list`, `diff`, and `components update`
-are shadcn preset aliases. Core `update` refreshes extension dependencies.
+process grants. Shadcn commands use the `shadcn` namespace; core `init` configures
+Lenso, and core `update` refreshes extension dependencies.
 
 The initial scheduler is sequential. It validates a static graph of at most 256
 steps; dynamically added steps and persistent sessions are not implemented.
