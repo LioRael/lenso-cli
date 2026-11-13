@@ -1,4 +1,5 @@
 use lenso_cli::Cli;
+mod self_update;
 
 #[tokio::main]
 async fn main() {
@@ -17,6 +18,7 @@ async fn main() {
             },
         );
         let mut cli = Cli::new("lenso");
+        self_update::register(&mut cli, options.offline)?;
         lenso_runtime::register_management_with_options(&mut cli, &options)?;
         let version_only = Cli::command_from_args(&args).is_none()
             && args.iter().any(|arg| arg == "--version" || arg == "-V");
@@ -25,6 +27,7 @@ async fn main() {
                 Cli::command_from_args(&args),
                 Some(
                     "new"
+                        | "self"
                         | "init"
                         | "ext"
                         | "preset"

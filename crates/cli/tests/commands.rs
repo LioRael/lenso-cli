@@ -395,3 +395,87 @@ fn onboarding_is_reviewed_and_optional_native_providers_are_selected_explicitly(
     );
     assert!(root.path().join("child/lenso.toml").is_file());
 }
+
+#[test]
+fn self_update_is_project_independent_and_requires_explicit_adoption() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(
+        root.path().join("lenso.toml"),
+        "invalid project declaration",
+    )
+    .unwrap();
+    let executable = root
+        .path()
+        .join(if cfg!(windows) { "lenso.exe" } else { "lenso" });
+    fs::copy(env!("CARGO_BIN_EXE_lenso"), &executable).unwrap();
+    let run = |args: &[&str]| {
+        Command::new(&executable)
+            .current_dir(root.path())
+            .args(args)
+            .env("PATH", "")
+            .output()
+            .unwrap()
+    };
+    let help = run(&["self", "update", "--help"]);
+    assert!(
+        help.status.success(),
+        "{}",
+        String::from_utf8_lossy(&help.stderr)
+    );
+    assert!(String::from_utf8_lossy(&help.stdout).contains("--version"));
+    let invalid = run(&["self", "update", "--version", "bad", "--json"]);
+    assert!(!invalid.status.success());
+    assert!(String::from_utf8_lossy(&invalid.stdout).contains("semantic version"));
+    let unmanaged = run(&["self", "update", "--offline", "--json"]);
+    assert!(!unmanaged.status.success());
+    assert!(String::from_utf8_lossy(&unmanaged.stdout).contains("--adopt"));
+    let adopted = run(&[
+        "self",
+        "update",
+        "--adopt",
+        "--version",
+        "1.0.0",
+        "--offline",
+        "--json",
+    ]);
+    assert!(!adopted.status.success());
+    assert!(String::from_utf8_lossy(&adopted.stdout).contains("requires network access"));
+    assert!(!root.path().join("lenso-install.json").exists());
+    assert_eq!(
+        fs::read(&executable).unwrap(),
+        fs::read(env!("CARGO_BIN_EXE_lenso")).unwrap()
+    );
+}
+
+#[test]
+fn package_manager_ownership_cannot_be_overridden_by_adoption() {
+    let root = tempfile::tempdir().unwrap();
+    let name = if cfg!(windows) { "lenso.exe" } else { "lenso" };
+    for (directory, expected) in [
+        (root.path().join("custom-cargo/bin"), "Cargo"),
+        (root.path().join("Cellar/lenso/1.0.0/bin"), "Homebrew"),
+    ] {
+        fs::create_dir_all(&directory).unwrap();
+        if expected == "Cargo" {
+            fs::write(directory.parent().unwrap().join(".crates2.json"), "{}").unwrap();
+        }
+        let executable = directory.join(name);
+        fs::copy(env!("CARGO_BIN_EXE_lenso"), &executable).unwrap();
+        let result = Command::new(&executable)
+            .current_dir(root.path())
+            .args(["self", "update", "--adopt", "--offline", "--json"])
+            .env("PATH", "")
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        let report: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(report["outputs"]["main"]["state"], "managed");
+        assert!(
+            report["outputs"]["main"]["message"]
+                .as_str()
+                .unwrap()
+                .contains(expected)
+        );
+        assert!(!directory.join("lenso-install.json").exists());
+    }
+}

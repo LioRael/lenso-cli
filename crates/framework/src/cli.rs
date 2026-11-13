@@ -89,7 +89,6 @@ impl Cli {
         const RESERVED: &[&str] = &["run", "help", "version"];
         const FLAGS: &[&str] = &[
             "help",
-            "version",
             "json",
             "answers",
             "project",

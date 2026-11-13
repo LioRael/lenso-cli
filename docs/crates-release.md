@@ -8,12 +8,12 @@ its other packages are not modified by this release.
 
 | Crate | Version | Role |
 | --- | --- | --- |
-| `lenso-cli` | 1.0.0 | Embeddable command/workflow engine |
+| `lenso-cli` | 1.1.0 | Embeddable command/workflow engine |
 | `lenso-runtime` | 0.2.4 | Generic Host and extension distribution |
 | `lenso-composition` | 0.2.4 | Pure capability/instance resolution |
 | `lenso-codegen` | 0.2.4 | Pure generator contracts and templates |
 | `lenso-project` | 0.1.2 | Optional reviewed file/command application |
-| `lenso` | 1.0.0 | Standalone native executable, binary name `lenso` |
+| `lenso` | 1.1.0 | Standalone native executable, binary name `lenso` |
 
 Applications using the old main-framework SDK should keep their existing 0.x
 constraints. Do not replace a main-framework `[dependencies] lenso = "0.5"` with
@@ -22,7 +22,7 @@ Existing old CLI APIs similarly require an explicit migration to the command,
 handler, workflow and Session interfaces in this repository.
 
 ```sh
-cargo install lenso --version 1.0.0 --locked
+cargo install lenso --version 1.1.0 --locked
 ```
 
 CLI 1.0 retains JSON ABI 1 and root project format. Host requirements in extension

@@ -71,6 +71,60 @@ It requires no curl, archive utility or development tool. Persistent PATH and
 PowerShell execution policy are not changed. If local policy disallows scripts,
 use the manual ZIP installation below.
 
+## Upgrade the CLI
+
+Native installations support explicit self-updates:
+
+```sh
+lenso self update --check
+lenso self update
+lenso self update --version 1.2.3
+```
+
+CLI 1.0.0 predates this command: first download the latest installer and rerun it
+with `--force` (Unix) or `-Force` (Windows). Subsequent native upgrades use the
+commands above.
+
+The default channel is the official CLI's latest stable GitHub Release. An exact
+`--version` permits prereleases and downgrades. `lenso update` continues to update
+project extension pins; it does not update the executable.
+
+The installer writes `lenso-install.json` beside the executable, recording the
+native installation method, version, target, executable name and SHA-256. Self-update
+validates that receipt against the running CLI. Older native installations and
+manually copied binaries have no receipt: use `lenso self update --adopt` to explicitly
+allow native ownership. Adoption downloads and verifies a release even when the
+selected version is already installed. A mismatched/corrupt receipt requires
+reinstalling with the official installer. Keep the receipt with the binary when moving it.
+
+Recognized Cargo and Homebrew locations are left to their package managers, including
+when `--adopt` is supplied. Custom Cargo roots are recognized through Cargo's install
+metadata. Unknown package-manager locations cannot always be identified; only use
+`--adopt` for executables you intend to manage through the native updater.
+
+Updates select the current build target, pin the selected release's asset IDs, and
+check archive size/SHA-256, archive contents, package identity, binary SHA-256 and the
+executable's reported version before replacement. GitHub asset digests are checked
+when supplied. Downloads and verification failures preserve the existing executable
+and receipt. Replacement uses a file staged in the installation directory; Windows
+uses `self-replace` to replace the running executable and clean up the old image.
+Concurrent self-updates are excluded through an operating-system file lock. The
+executable and receipt are separate files: interruption between their replacements
+can require reinstalling to repair the receipt.
+
+`--check` performs no installation writes. `--offline` prevents release requests.
+`--json` returns the normal command report, including the selected version and
+executable path. No update checks or replacements run during ordinary commands.
+HTTP errors distinguish exhausted GitHub API quotas from missing versions and
+credential/access failures, without printing credentials or signed download URLs.
+The updater needs write access to the installation directory and never elevates
+privileges. It uses native HTTPS and archive handling, without shell installers or
+external tools. Private access uses `GH_TOKEN`, then `GITHUB_TOKEN`, just like the
+installer; credentials are stripped from redirects to a different origin.
+
+Checksums provide integrity against release metadata, not an independent publisher
+signature. Releases remain unsigned as described above.
+
 ## Private repository access
 
 For private repositories, browser downloads require an account with

@@ -34,11 +34,14 @@ lenso --version
 **Cargo**
 
 ```sh
-cargo install lenso --version 1.0.0 --locked
+cargo install lenso --version 1.1.0 --locked
 ```
 
 The native installers verify SHA-256 and the executable version before installing.
 Use `--force` on Unix or `-Force` on Windows to replace an existing installation.
+Native installations can subsequently run `lenso self update` or
+`lenso self update --check`. Older/manual installations require `--adopt` once;
+Cargo and Homebrew installations use their package manager to upgrade.
 macOS requires 13.0 or newer; Linux requires glibc 2.35 or newer. See
 [installation](docs/install.md) for manual downloads, custom destinations and
 platform details, or browse the [latest Release](https://github.com/LioRael/lenso-cli/releases/latest).

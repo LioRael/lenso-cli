@@ -26,6 +26,10 @@ case "$target" in
 @ASSETS@
 esac
 destination=$prefix/lenso
+receipt=$prefix/lenso-install.json
+if [ -L "$receipt" ] || { [ -e "$receipt" ] && [ ! -f "$receipt" ]; }; then
+  echo "Refusing a non-regular installation receipt: $receipt" >&2; exit 1
+fi
 if [ -L "$destination" ] || [ -d "$destination" ]; then
   echo "Refusing to replace a link or directory: $destination" >&2; exit 1
 fi
@@ -34,7 +38,8 @@ if [ -e "$destination" ] && [ "$force" != true ]; then
 fi
 temporary=$(mktemp -d)
 staged=
-trap 'rm -rf "$temporary"; if [ -n "$staged" ]; then rm -f "$staged"; fi' EXIT
+staged_receipt=
+trap 'rm -rf "$temporary"; if [ -n "$staged" ]; then rm -f "$staged"; fi; if [ -n "$staged_receipt" ]; then rm -f "$staged_receipt"; fi' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 if [ -z "$archive" ]; then
@@ -71,7 +76,18 @@ mkdir -p "$prefix"
 staged=$(mktemp "$prefix/.lenso.XXXXXX")
 cat "$temporary/lenso" > "$staged"
 chmod 755 "$staged"
+if command -v sha256sum >/dev/null 2>&1; then
+  binary_hash=$(sha256sum "$staged")
+else
+  binary_hash=$(shasum -a 256 "$staged")
+fi
+binary_hash=${binary_hash%% *}
+staged_receipt=$(mktemp "$prefix/.lenso-receipt.XXXXXX")
+printf '{"schema_version":1,"method":"native","version":"%s","target":"%s","binary":"lenso","binary_sha256":"%s"}\n' \
+  "$version" "$target" "$binary_hash" > "$staged_receipt"
 mv -f "$staged" "$destination"
 staged=
+mv -f "$staged_receipt" "$receipt"
+staged_receipt=
 printf 'Installed Lenso %s to %s\n' "$version" "$destination"
 printf 'Add this directory to PATH if needed: %s\n' "$prefix"

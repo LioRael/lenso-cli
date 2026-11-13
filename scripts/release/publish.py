@@ -167,6 +167,7 @@ def main():
     script_sh = f"https://api.github.com/repos/{args.repo}/releases/assets/{assets['install.sh']['id']}"
     script_ps = f"https://api.github.com/repos/{args.repo}/releases/assets/{assets['install.ps1']['id']}"
     body = f"Native CLI for macOS (Intel/Apple Silicon), Linux (x64/ARM64, glibc 2.35+), Windows x64.\n\nNo Node.js, Git or Rust is required. Archives and installers are pinned by SHA256SUMS.\n\nPublic install:\n```sh\ncurl -fsSL https://github.com/{args.repo}/releases/download/{tag}/install.sh -o install.sh\nsh install.sh\n```\n\nWindows: download install.ps1, then run `& ./install.ps1`.\n\nInstallers install this exact version, verify SHA-256 and refuse replacement without --force / -Force. Add the printed install directory to PATH."
+    body += "\n\nUpgrade native installations with `lenso self update`; use `--check` to check without writes and `--version VERSION` to select an exact release. Installers now record native ownership beside the executable. Older/manual binaries that support self-update require `--adopt` once. Cargo/Homebrew installations remain managed by their package manager.\n\nSelf-updates verify archive and executable hashes, platform identity and the reported version before replacement. Releases are not independently signed."
     if release["draft"]:
         api(args.repo, "releases/" + str(release["id"]), method="PATCH", data={**release_target(args.repo, tag, args.commit), "draft": True, "body": body})
     current = api(args.repo, "releases/" + str(release["id"]))
