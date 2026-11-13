@@ -1,0 +1,20 @@
+extensions/code/src/lib.rs
+  s_c5695907fe744f::t_1d01e3826f5639 390-393,521-554
+  s_c5695907fe744f::t_f1cd6fc7ed1abf 555
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "298aa26c0372e661ee4d2fed49be8bce230d14ab",
+  "prompts": {},
+  "sessions": {
+    "s_c5695907fe744f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d06d-149b-7062-aa67-3c0145df9d90",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
