@@ -29,6 +29,8 @@ struct Release {
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Target {
+    #[serde(default)]
+    when: BTreeMap<String, Value>,
     language: String,
     runtime: String,
     catalog: String,
@@ -36,6 +38,8 @@ struct Target {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Installed {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    when: BTreeMap<String, Value>,
     version: String,
     profile: Profile,
     artifact: String,
@@ -127,9 +131,18 @@ fn directory(p: &Profile, refresh: bool) -> Result<Directory> {
             let mut targets = std::collections::BTreeSet::new();
             for t in &release.targets {
                 crate::relative(&t.catalog)?;
+                if t.when.len() > 32
+                    || t.when
+                        .values()
+                        .any(|v| crate::project_config::scalar(v).is_none())
+                {
+                    return Err(error(
+                        "target conditions must be scalar project conventions",
+                    ));
+                }
                 if !slug(&t.language)
                     || !slug(&t.runtime)
-                    || !targets.insert((&t.language, &t.runtime))
+                    || !targets.insert((&t.language, &t.runtime, serde_json::to_string(&t.when)?))
                 {
                     return Err(error("invalid module target"));
                 }
@@ -209,6 +222,8 @@ fn roots(ctx: &mut Value, root: &str, previous: Option<&str>) -> Result<()> {
 }
 pub fn plan(ctx: &Value, refresh: bool) -> Result<Json<Value>> {
     let refresh = refresh || ctx["input"]["refresh"].as_bool().unwrap_or(false);
+    let mut policy = crate::project_config::load(ctx)?;
+    let mut fixed = policy.fixed();
     let p = profile(ctx)?.ok_or_else(|| error("choose a registry"))?;
     let name = item(ctx)?;
     if p.format == "lenso-compose-v1" {
@@ -285,10 +300,23 @@ pub fn plan(ctx: &Value, refresh: bool) -> Result<Json<Value>> {
             &json!({"id":id,"version":release.version,"languages":languages})
         )?)
     );
+    if let Some(configured) = fixed.get("language") {
+        if ctx["input"]["language"]
+            .as_str()
+            .is_some_and(|v| v != configured)
+        {
+            return Err(error("language conflicts with lenso.code.toml"));
+        }
+        if !state.language.is_empty() && state.language != *configured {
+            return Err(error("changing project language requires a new target"));
+        }
+    }
     let language = ctx["input"]["language"]
         .as_str()
         .or_else(|| ctx["answers"][&q].as_str())
-        .or_else(|| (!state.language.is_empty()).then_some(state.language.as_str()));
+        .or_else(|| (!state.language.is_empty()).then_some(state.language.as_str()))
+        .or_else(|| fixed.get("language").map(String::as_str))
+        .map(str::to_owned);
     let Some(language) = language else {
         return Ok(question(
             &q,
@@ -299,19 +327,111 @@ pub fn plan(ctx: &Value, refresh: bool) -> Result<Json<Value>> {
     if !state.language.is_empty() && state.language != language {
         return Err(error("changing language requires a new project target"));
     }
+    let rq = format!("code:module-runtime:{id}:{}:{language}", release.version);
+    let selected_runtime = ctx["input"]["runtime"]
+        .as_str()
+        .or_else(|| ctx["answers"][&rq].as_str())
+        .or_else(|| (!state.runtime.is_empty()).then_some(state.runtime.as_str()))
+        .or_else(|| fixed.get("runtime").map(String::as_str))
+        .map(str::to_owned);
+    let mut discovered = BTreeMap::new();
+    loop {
+        let candidates: Vec<_> = release
+            .targets
+            .iter()
+            .filter(|t| {
+                t.language == language
+                    && selected_runtime.as_ref().is_none_or(|r| &t.runtime == r)
+                    && t.when.iter().all(|(k, v)| {
+                        fixed.get(k).is_none_or(|current| {
+                            crate::project_config::scalar(v).as_ref() == Some(current)
+                        })
+                    })
+            })
+            .collect();
+        if candidates.is_empty() {
+            return Err(error(
+                "module does not support the configured project conventions",
+            ));
+        }
+        let missing: std::collections::BTreeSet<_> = candidates
+            .iter()
+            .flat_map(|t| t.when.keys())
+            .filter(|key| !fixed.contains_key(*key))
+            .cloned()
+            .collect();
+        let Some(field) = missing.into_iter().next() else {
+            break;
+        };
+        let values: BTreeMap<_, _> = candidates
+            .iter()
+            .filter_map(|t| t.when.get(&field))
+            .filter_map(|v| crate::project_config::scalar(v).map(|key| (key, v.clone())))
+            .collect();
+        let question_id = format!(
+            "code:project-convention:{}",
+            crate::generation::digest(&serde_json::to_string(
+                &json!({"module":id,"version":release.version,"field":field,"values":values})
+            )?)
+        );
+        let supplied = ctx["input"]["context"]
+            .get(&field)
+            .or_else(|| ctx["answers"].get(&question_id))
+            .and_then(crate::project_config::scalar);
+        let Some(supplied) = supplied else {
+            return Ok(question(
+                &question_id,
+                &format!("Choose project convention {field}; it will be saved after approval"),
+                json!({"type":"select","options":values.keys().collect::<Vec<_>>()}),
+            ));
+        };
+        let selected = values
+            .get(&supplied)
+            .ok_or_else(|| error("invalid project convention choice"))?
+            .clone();
+        policy.conventions.insert(field.clone(), selected.clone());
+        discovered.insert(field, selected);
+        fixed = policy.fixed();
+    }
+    policy.validate()?;
     let targets: Vec<_> = release
         .targets
         .iter()
-        .filter(|t| t.language == language)
+        .filter(|t| {
+            t.language == language
+                && selected_runtime.as_ref().is_none_or(|r| &t.runtime == r)
+                && t.when
+                    .iter()
+                    .all(|(k, v)| crate::project_config::scalar(v).as_ref() == fixed.get(k))
+        })
         .collect();
     if targets.is_empty() {
         return Err(error("module does not support the selected language"));
     }
-    let rq = format!("code:module-runtime:{id}:{}:{language}", release.version);
+    let mut runtimes = std::collections::BTreeSet::new();
+    if targets
+        .iter()
+        .any(|target| !runtimes.insert(&target.runtime))
+    {
+        return Err(error(
+            "ambiguous module targets for the configured project conventions",
+        ));
+    }
+    if let Some(configured) = fixed.get("runtime")
+        && (ctx["input"]["runtime"]
+            .as_str()
+            .is_some_and(|v| v != configured)
+            || !state.runtime.is_empty() && state.runtime != *configured)
+    {
+        return Err(error(
+            "runtime conflicts with lenso.code.toml; use a new target",
+        ));
+    }
     let runtime = ctx["input"]["runtime"]
         .as_str()
         .or_else(|| ctx["answers"][&rq].as_str())
-        .or_else(|| (!state.runtime.is_empty()).then_some(state.runtime.as_str()));
+        .or_else(|| (!state.runtime.is_empty()).then_some(state.runtime.as_str()))
+        .or_else(|| fixed.get("runtime").map(String::as_str));
     let target = if let Some(runtime) = runtime {
         targets
             .iter()
@@ -355,24 +475,66 @@ pub fn plan(ctx: &Value, refresh: bool) -> Result<Json<Value>> {
     }
     if let Some(old) = previous
         && old.version == release.version
-        && (old.profile.source != source.source
-            || old.profile.path != source.path
-            || old.profile.r#ref != source.r#ref
-            || old.root != entry.root)
     {
-        return Err(error(
-            "published module descriptor changed without a new version",
-        ));
+        if old.profile.source != source.source
+            || old.profile.r#ref != source.r#ref
+            || old.root != entry.root
+        {
+            return Err(error(
+                "published module descriptor changed without a new version",
+            ));
+        }
+        if old.profile.path != source.path {
+            if old.when == target.when {
+                return Err(error(
+                    "published module descriptor changed without a new version",
+                ));
+            }
+            if !ctx["input"]["reconfigure"].as_bool().unwrap_or(false) {
+                return Err(error(
+                    "project conventions select a different implementation; preview with --reconfigure to review the change",
+                ));
+            }
+        }
     }
     let mut context = ctx.clone();
     context["input"]["refresh"] = json!(refresh);
     context["capabilities"]["extension.options"]["selection"] =
         json!({"language":language,"runtime":target.runtime});
+    for (key, value) in &discovered {
+        context["input"]["context"][key] = json!(
+            crate::project_config::scalar(value)
+                .ok_or_else(|| error("invalid project convention"))?
+        );
+    }
     roots(&mut context, &entry.root, Some(&artifact))?;
     let loaded = crate::author::load_profile(&context, source.clone())?;
-    let mut result = crate::composition::plan(&context, loaded, &artifact).map_err(|e| e.0)?;
+    let mut result = crate::composition::plan_with_policy(&context, loaded, &artifact, &policy)
+        .map_err(|e| e.0)?;
     if result.0["status"] != "complete" {
         return Ok(result);
+    }
+    if !discovered.is_empty() {
+        if !ctx["capabilities"]["host.reads"]
+            .as_array()
+            .is_some_and(|paths| paths.iter().any(|p| p == crate::project_config::FILE))
+        {
+            return Err(error("review Code setup before saving project conventions"));
+        }
+        let mut document = local(crate::project_config::FILE)?
+            .map(|s| s.parse::<toml_edit::DocumentMut>())
+            .transpose()?
+            .unwrap_or_default();
+        let encoded = toml_edit::ser::to_document(&policy)?;
+        for key in discovered.keys() {
+            document["conventions"][key] = encoded["conventions"][key].clone();
+        }
+        let content = document.to_string();
+        result.0["output"]["files"]
+            .as_array_mut()
+            .ok_or_else(|| error("missing module files"))?
+            .push(json!({"path":crate::project_config::FILE,"content":content}));
+        result.0["output"]["expected"][crate::project_config::FILE] = json!(content);
     }
     let files = &result.0["output"]["composition"]["generation"]["files"];
     for (other, record) in &state.modules {
@@ -391,11 +553,12 @@ pub fn plan(ctx: &Value, refresh: bool) -> Result<Json<Value>> {
         }
     }
     state.schema_version = 1;
-    state.language = language.into();
+    state.language = language;
     state.runtime = target.runtime.clone();
     state.modules.insert(
         id.clone(),
         Installed {
+            when: target.when.clone(),
             version: release.version.clone(),
             profile: source,
             artifact,

@@ -4,6 +4,7 @@ mod composition;
 mod generation;
 mod modules;
 mod native;
+mod project_config;
 mod setup;
 use extism_pdk::{FnResult, Json, host_fn, plugin_fn};
 use serde::{Deserialize, Serialize};
@@ -517,6 +518,18 @@ fn native_setup(ctx: &Value, proposal: &mut Value) -> Result<()> {
         );
         proposal["installation"]["processes"] = json!(commands);
     }
+    for field in ["reads", "files"] {
+        if proposal["installation"][field].is_null() {
+            proposal["installation"][field] = json!([]);
+        }
+        let paths = proposal["installation"][field]
+            .as_array_mut()
+            .ok_or_else(|| error("invalid configuration grants"))?;
+        if !paths.iter().any(|p| p == project_config::FILE) {
+            paths.push(json!(project_config::FILE));
+        }
+    }
+
     Ok(())
 }
 

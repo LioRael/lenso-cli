@@ -25,6 +25,8 @@ struct Artifact {
     generated_directory: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     dependencies: Vec<lenso_codegen::Dependency>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_catalog: Option<String>,
 }
 
 fn answer(request: &mut Request, choice: &Choice, value: &Value) -> crate::Result<()> {
@@ -157,6 +159,32 @@ pub(crate) fn plan(
     loaded: crate::author::Loaded,
     artifact_path: &str,
 ) -> FnResult<Json<Value>> {
+    let policy = crate::project_config::load(ctx)?;
+    plan_with_policy(ctx, loaded, artifact_path, &policy)
+}
+pub(crate) fn plan_with_policy(
+    ctx: &Value,
+    mut loaded: crate::author::Loaded,
+    artifact_path: &str,
+    policy: &crate::project_config::Config,
+) -> FnResult<Json<Value>> {
+    if let Some(root) = &policy.paths.modules {
+        let prefix = format!("{}/", loaded.profile.target);
+        let relative=if root==&loaded.profile.target{Some("")}else{root.strip_prefix(&prefix)}.ok_or_else(||error("paths.modules must stay within the configured Code target; review Code setup to change target grants"))?;
+        if let Some(generator) = loaded.document.generator.as_mut() {
+            let family = generator
+                .directory
+                .rsplit('/')
+                .next()
+                .unwrap_or("module")
+                .to_owned();
+            generator.directory = if relative.is_empty() {
+                family
+            } else {
+                format!("{relative}/{family}")
+            };
+        }
+    }
     let profile = &loaded.profile;
     let commit = &loaded.commit;
     let catalog = &loaded.catalog;
@@ -167,6 +195,7 @@ pub(crate) fn plan(
         if previous.schema_version != 1
             || previous.source != profile.source
             || previous.catalog != profile.path
+                && !ctx["input"]["reconfigure"].as_bool().unwrap_or(false)
         {
             return Err(error("composition artifact belongs to a different source").into());
         }
@@ -295,10 +324,31 @@ pub(crate) fn plan(
             }
         }
     }
+    policy.constrain(
+        &mut request,
+        ctx["input"]["reconfigure"].as_bool().unwrap_or(false),
+    )?;
+    policy.module_defaults(&mut request);
     let resolution = loop {
         match catalog.evaluate(&request)? {
             Evaluation::Complete { resolution } => break resolution,
             Evaluation::NeedsInput { choice } => {
+                if let Choice::Context { field, .. } = &choice
+                    && policy.fixed().contains_key(field)
+                {
+                    return Err(error(format!(
+                        "module does not support project convention {field}"
+                    ))
+                    .into());
+                }
+                if let Some(binding) = policy.provider(&choice)?
+                    && let Choice::Provider { slot, .. } = &choice
+                {
+                    request.bindings.insert(slot.clone(), binding);
+                    policy.module_defaults(&mut request);
+                    continue;
+                }
+
                 let choice_bytes = serde_json::to_vec(
                     &json!({"commit":commit,"request":request,"choice":choice}),
                 )?;
@@ -351,8 +401,14 @@ pub(crate) fn plan(
         Ok(changes) => changes,
         Err(question) => return Ok(question),
     };
+    let native_catalog = previous
+        .as_ref()
+        .map(|a| a.native_catalog.as_deref().unwrap_or(&a.catalog))
+        .unwrap_or(&profile.path)
+        .to_owned();
+    lenso_codegen::relative(&native_catalog)?;
     let group = crate::generation::digest(&serde_json::to_string(
-        &json!({"source":profile.source,"catalog":profile.path,"artifact":artifact_path}),
+        &json!({"source":profile.source,"catalog":native_catalog,"artifact":artifact_path}),
     )?);
     if ctx["capabilities"]["extension.options"]["native"].is_null()
         && previous
@@ -382,6 +438,7 @@ pub(crate) fn plan(
         generation: Some(changes.receipt),
         generated_directory: rendered.generated_directory,
         dependencies: rendered.dependencies,
+        native_catalog: Some(native_catalog),
     };
     let content = format!("{}\n", serde_json::to_string_pretty(&artifact)?);
     if files
