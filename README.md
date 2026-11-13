@@ -4,6 +4,12 @@ An embeddable Rust CLI framework and a standalone `lenso` executable. Commands c
 from native handlers or explicitly declared extension manifests. Project changes
 are an optional extension; running a command does not require a file plan.
 
+Version 1.0 migrates the crates.io names `lenso-cli` and `lenso` from the previous
+main-repository implementation to this standalone CLI project. `lenso-cli` is now
+the embeddable CLI engine; `lenso` installs the executable. This is a breaking
+product/API migration, not a compatible SDK upgrade. Existing main-framework
+consumers should retain their 0.x constraints. See [the 1.0 migration](docs/crates-release.md).
+
 Source: [LioRael/lenso-cli](https://github.com/LioRael/lenso-cli).
 The previous CLI implementation is preserved in
 [LioRael/lenso-cli-previous](https://github.com/LioRael/lenso-cli-previous).
@@ -72,7 +78,7 @@ for the working catalog format, author setup, Agent input and implementation lim
 The author workflow also supports strict templates, isolated generated directories,
 `code validate` and complete named samples. See [authoring code generators](docs/code-generation.md)
 and the [compilable Rust two-adapter example](examples/codegen-demo/README.md).
-These author features require a source build of native CLI 0.2.4.
+These author features require a source build of native CLI 1.0.0.
 
 Code's optional [native dependency management](docs/native-dependencies.md) applies
 Cargo/npm declarations to real manifests, preserves shared ownership, and proposes

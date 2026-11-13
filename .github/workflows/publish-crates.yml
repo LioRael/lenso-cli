@@ -1,0 +1,96 @@
+name: Publish Rust crates
+
+on:
+  workflow_dispatch:
+    inputs:
+      bootstrap_framework:
+        description: Publish only the existing framework crate during the 1.0 migration
+        type: boolean
+        default: false
+  push:
+    tags: ["v[0-9]*"]
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  CARGO_BUILD_JOBS: "2"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  RUSTUP_TOOLCHAIN: "1.99.0"
+
+concurrency:
+  group: publish-crates-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  foundations:
+    if: ${{ !inputs.bootstrap_framework && github.repository == 'LioRael/lenso-cli' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: crates-io
+    strategy:
+      fail-fast: false
+      matrix:
+        directory: [crates/framework, crates/composition]
+    env:
+      PACKAGE_DIR: ${{ matrix.directory }}
+    steps: &publish_steps
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Prepare Rust
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - name: Inspect immutable version
+        id: status
+        run: python3 scripts/release/crates.py --only "$PACKAGE_DIR" --status
+      - name: Verify distributable before requesting credentials
+        if: steps.status.outputs.published != 'true'
+        run: cargo publish --locked --dry-run --manifest-path "$PACKAGE_DIR/Cargo.toml"
+      - name: Authenticate with crates.io
+        id: auth
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1
+      - name: Publish verified crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: python3 scripts/release/crates.py --only "$PACKAGE_DIR" --publish
+
+  libraries:
+    needs: foundations
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: crates-io
+    strategy:
+      fail-fast: false
+      matrix:
+        directory: [crates/codegen, crates/runtime]
+    env:
+      PACKAGE_DIR: ${{ matrix.directory }}
+    steps: *publish_steps
+
+  project:
+    needs: libraries
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: crates-io
+    env:
+      PACKAGE_DIR: extensions/project
+    steps: *publish_steps
+
+  binary:
+    needs: project
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: crates-io
+    env:
+      PACKAGE_DIR: crates/cli
+    steps: *publish_steps
+
+  framework_bootstrap:
+    if: inputs.bootstrap_framework && github.repository == 'LioRael/lenso-cli' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: crates-io
+    env:
+      PACKAGE_DIR: crates/framework
+    steps: *publish_steps

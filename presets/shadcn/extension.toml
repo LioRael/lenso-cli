@@ -1,7 +1,7 @@
 schema_version = 1
 id = "shadcn"
-version = "0.1.1"
-host = ">=0.2.0, <0.3.0"
+version = "0.1.2"
+host = ">=0.2.0, <2.0.0"
 
 [dependencies.project]
 source = "builtin:project"

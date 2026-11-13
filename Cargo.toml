@@ -4,15 +4,18 @@ members = ["crates/*", "extensions/project", "examples/acme-cli"]
 exclude = ["examples/wasm-greeting", "extensions/shadcn", "extensions/code"]
 
 [workspace.package]
-version = "0.2.4"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/LioRael/lenso-cli"
+homepage = "https://github.com/LioRael/lenso-cli"
+readme = "README.md"
 
 [workspace.dependencies]
-lenso-cli = { path = "crates/framework" }
-lenso-runtime = { path = "crates/runtime" }
-lenso-project = { path = "extensions/project" }
+lenso-cli = { path = "crates/framework", version = "1.0.0" }
+lenso-runtime = { path = "crates/runtime", version = "1.0.0" }
+lenso-project = { path = "extensions/project", version = "0.1.2" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

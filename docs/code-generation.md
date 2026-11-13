@@ -1,7 +1,7 @@
 # Authoring code generators
 
 Implemented in the CLI repository, independently of the main Lenso SDK and official
-Registry. Requires a source build of native CLI 0.2.4 and the unpublished Code 0.2.0
+Registry. Requires a source build of native CLI 1.0.0 and the unpublished Code 0.2.0
 extension. Existing published packages do not acquire these commands automatically.
 
 ## Author workflow
@@ -204,7 +204,7 @@ the composition artifact, 1 MiB sources/output budgets, and 16 author samples.
 Template evaluation has its own 100,000-operation budget and bounded output writer.
 Code's compose/validate handlers request 50 million Wasm fuel units. The generic
 Host permits declared budgets from 1 to 50 million, defaults to 10 million, and
-retains its memory, message and timeout limits. This requires native CLI 0.2.4;
+retains its memory, message and timeout limits. This requires native CLI 1.0.0;
 older hosts cannot execute a manifest with these new handler declarations.
 
 ## Compilable two-adapter example

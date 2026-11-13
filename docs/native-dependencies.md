@@ -1,6 +1,6 @@
 # Code extension native dependency management
 
-Implemented in this CLI repository. Requires native CLI 0.2.4, Project provider
+Implemented in this CLI repository. Requires native CLI 1.0.0, Project provider
 0.1.2 and the unpublished Code 0.2.0 extension. SDK and official Registry changes
 are not part of this implementation.
 
