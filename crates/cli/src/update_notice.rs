@@ -248,6 +248,10 @@ mod tests {
 
     #[test]
     fn __lenso_update_check() {
+        if std::env::var_os("LENSO_TEST_HOLD_NOTICE_LOCK").is_some() {
+            std::thread::sleep(Duration::from_millis(200));
+            return;
+        }
         let Some(root) = std::env::var_os("LENSO_TEST_NOTICE_WORKER") else {
             return;
         };
@@ -279,6 +283,62 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
+    }
+
+    fn eventually_refresh(
+        root: &Path,
+        now: u64,
+        mut check: impl FnMut() -> Result<Version, Error>,
+    ) {
+        // Concurrent process tests can briefly inherit a lock before exec closes it.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            refresh(root, now, &mut check).unwrap();
+            if read(&root.join(CACHE_FILE)).is_some_and(|cached| cached.checked_at == now) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cache lock remained busy"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_inheriting_a_lock_can_defer_a_refresh() {
+        let directory = tempfile::tempdir().unwrap();
+        eventually_refresh(directory.path(), 100, || Ok(Version::new(2, 0, 0)));
+        let lock = fs::File::options()
+            .read(true)
+            .write(true)
+            .open(directory.path().join(LOCK_FILE))
+            .unwrap();
+        lock.lock().unwrap();
+        let mut child = worker_command(&std::env::current_exe().unwrap())
+            .env("LENSO_TEST_HOLD_NOTICE_LOCK", "1")
+            .stdin(lock)
+            .spawn()
+            .unwrap();
+        refresh(directory.path(), 100 + SUCCESS_TTL, || {
+            panic!("child still owns the lock")
+        })
+        .unwrap();
+        assert_eq!(
+            read(&directory.path().join(CACHE_FILE)).unwrap().latest,
+            Some(Version::new(2, 0, 0))
+        );
+        assert!(child.wait().unwrap().success());
+        eventually_refresh(directory.path(), 100 + SUCCESS_TTL, || {
+            Err(Error::Operation("offline".into()))
+        });
+        assert!(
+            read(&directory.path().join(CACHE_FILE))
+                .unwrap()
+                .latest
+                .is_none()
+        );
     }
 
     #[test]
@@ -342,27 +402,25 @@ mod tests {
     #[test]
     fn cached_success_and_failure_throttle_requests() {
         let directory = tempfile::tempdir().unwrap();
-        refresh(directory.path(), 100, || Ok(Version::new(2, 0, 0))).unwrap();
+        eventually_refresh(directory.path(), 100, || Ok(Version::new(2, 0, 0)));
         refresh(directory.path(), 101, || {
             panic!("fresh cache must not make a request")
         })
         .unwrap();
         let file = directory.path().join(CACHE_FILE);
         assert_eq!(read(&file).unwrap().latest, Some(Version::new(2, 0, 0)));
-        refresh(directory.path(), 100 + SUCCESS_TTL, || {
+        eventually_refresh(directory.path(), 100 + SUCCESS_TTL, || {
             Err(Error::Operation("offline".into()))
-        })
-        .unwrap();
+        });
         assert!(read(&file).unwrap().latest.is_none());
         refresh(directory.path(), 101 + SUCCESS_TTL, || {
             panic!("failed checks must back off")
         })
         .unwrap();
         fs::write(&file, b"broken cache").unwrap();
-        refresh(directory.path(), 102 + SUCCESS_TTL, || {
+        eventually_refresh(directory.path(), 102 + SUCCESS_TTL, || {
             Ok(Version::new(3, 0, 0))
-        })
-        .unwrap();
+        });
         assert_eq!(read(&file).unwrap().latest, Some(Version::new(3, 0, 0)));
     }
 
