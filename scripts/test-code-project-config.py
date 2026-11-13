@@ -83,12 +83,12 @@ credentials=('--token-env',args.token_env) if args.token_env else ()
 call('init','--preset','code' if args.official else 'preset.toml','--input',json.dumps({'author_root':'author','format':'lenso-modules-v1','catalog':'lenso.modules.toml'}),'--yes',*credentials)
 lock=json.loads((project/'lenso.lock').read_text())
 pin=next(item for item in lock['extensions'] if item['id']=='code')
-assert pin['definition']['version']=='0.3.4'
+assert pin['definition']['version']=='0.3.5'
 if args.official:
- assert pin['github']['tag']=='code-v0.3.4'
+ assert pin['github']['tag']=='code-v0.3.5'
  config=call('config')['outputs']['main']['config']['cli']
  assert next(item for item in config['extensions'] if item['id']=='code')['source']=='registry:@lenso/code'
- assert config['presets']['@lenso/code']['version']=='0.3.4'
+ assert config['presets']['@lenso/code']['version']=='0.3.5'
 settings={'project':{'language':'typescript','runtime':'node26'},'conventions':{'styles':'plain','rsc':True},'paths':{'modules':'src/features','import_alias':'@/features'},'defaults':{'providers':{'demo.store':'sqlite'}},'modules':{'feature':{'options':{'label':'project'}},'sqlite':{'options':{'path':'configured.sqlite'}},'postgres':{'options':{'connection':{'env':'AUTH_DATABASE_URL'}}}}}
 initial={**settings,'conventions':{}}
 call('code','config','--input',json.dumps({'settings':initial}),'--yes')

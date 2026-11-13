@@ -75,7 +75,10 @@ fn profile(ctx: &Value) -> Result<Option<Profile>> {
         None
     };
     value
-        .map(|value| serde_json::from_value(value.clone()).map_err(Into::into))
+        .map(|value| -> Result<Profile> {
+            crate::setup::require_current_profile(value)?;
+            Ok(serde_json::from_value(value.clone())?)
+        })
         .transpose()
 }
 pub fn enabled(ctx: &Value) -> Result<bool> {

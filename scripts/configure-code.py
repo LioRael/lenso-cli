@@ -14,8 +14,8 @@ source = parser.add_mutually_exclusive_group(required=True)
 source.add_argument("--repo", help="GitHub owner/repo")
 source.add_argument("--author-root", help="Project-relative local author catalog directory")
 parser.add_argument("--ref", default="HEAD")
-parser.add_argument("--catalog", default="catalog.toml")
-parser.add_argument("--format", choices=["lenso-code-v1", "lenso-compose-v1"], default="lenso-code-v1")
+parser.add_argument("--catalog")
+parser.add_argument("--format", choices=["lenso-code-v1", "lenso-compose-v1", "lenso-modules-v1"])
 parser.add_argument("--registry", default="main")
 parser.add_argument("--target", default="src", help="Project-relative destination/read/write root")
 parser.add_argument("--file", action="append", help="Use explicit repository files instead of a remote catalog")
@@ -23,6 +23,10 @@ parser.add_argument("--item", default="files", help="Item name for --file")
 parser.add_argument("--github-api", help="Explicit API base, for GitHub Enterprise or loopback testing")
 parser.add_argument("--token-env", help="Explicit environment variable name; no token values are saved")
 args = parser.parse_args()
+if args.format is None:
+    args.format = "lenso-modules-v1" if args.repo and args.repo.lower() == "liorael/lenso-modules" and args.catalog in (None, "lenso.modules.toml") else "lenso-code-v1"
+if args.catalog is None:
+    args.catalog = "lenso.modules.toml" if args.format == "lenso-modules-v1" else "catalog.toml"
 root = Path(__file__).resolve().parent.parent
 project = args.project.resolve(strict=True)
 
@@ -53,7 +57,7 @@ destination.mkdir(parents=True, exist_ok=True)
 shutil.copyfile(module, destination / "code.wasm")
 shutil.copyfile(manifest, destination / "extension.toml")
 profile = {"source":("github-repo:" + args.repo if args.repo else "project:" + args.author_root), "ref":args.ref, "path":args.catalog, "format":args.format, "target":args.target}
-if args.author_root:
+if args.author_root and args.format != "lenso-modules-v1":
     profile["format"] = "lenso-compose-v1"
 if args.file:
     if args.author_root:
@@ -72,3 +76,6 @@ if args.github_api or args.token_env:
         github["token_env"] = args.token_env
 save(path, config)
 print(f"Declared code extension and {profile['source']}; destination grant: {args.target}")
+
+if profile["format"] == "lenso-modules-v1":
+    print("Run lenso ext configure code to review project/native access before adding modules.")
