@@ -42,7 +42,10 @@ existing = release is not None and not release["draft"]
 if existing:
     published = api(f"repos/{repo}/commits/{quote(tag, safe='')}")["sha"]
     original, current = tree(repo, published), tree(repo, commit)
-    for path in [f"extensions/{args.id}", f"presets/{args.id}/extension.toml", "lenso.registry.toml"]:
+    source_paths = [f"extensions/{args.id}", f"presets/{args.id}/extension.toml", "lenso.registry.toml"]
+    if args.id == 'code':
+        source_paths.extend(['crates/composition', 'crates/codegen'])
+    for path in source_paths:
         if path not in original or original[path] != current.get(path):
             raise RuntimeError(f"Published {tag} has different source at {path}; increment the extension version")
     output = Path("dist/lenso")

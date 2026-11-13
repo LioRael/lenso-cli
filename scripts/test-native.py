@@ -11,10 +11,17 @@ from project_config import load, save
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--keep', action='store_true')
+parser.add_argument('--binary', type=Path, help='Use an installed CLI instead of the workspace build')
+parser.add_argument('--extension-source', help='Install a published extension instead of building local Wasm')
+parser.add_argument('--extension-version', default='0.2.0')
+parser.add_argument('--token-env', default='GITHUB_TOKEN')
+parser.add_argument('--out', type=Path, help='New directory for projects, cache and verification report')
 args = parser.parse_args()
 root = Path(__file__).resolve().parent.parent
-binary = root / 'target/debug/lenso'
-scratch = Path(tempfile.mkdtemp(prefix='lenso-native-'))
+binary = args.binary.resolve(strict=True) if args.binary else root / 'target/debug/lenso'
+scratch = args.out.resolve() if args.out else Path(tempfile.mkdtemp(prefix='lenso-native-'))
+if args.out:
+    scratch.mkdir(parents=True, exist_ok=False)
 project = scratch / 'project'
 project.mkdir()
 env = dict(os.environ, LENSO_CACHE_DIR=str(scratch / 'cache'))
@@ -94,8 +101,15 @@ try:
         write(f'vendor/{path}/index.js', f'module.exports = "{value}";\n')
     write('author/output.j2', '{% for id in resolution.order %}{{ id }}\n{% endfor %}')
     catalog()
-    subprocess.run(['python3', str(root / 'scripts/configure-code.py'), str(project), '--author-root', 'author'], env=env, check=True)
-    declaration = load(project / 'lenso.toml')['cli']['extensions'][0]['source']
+    if args.extension_source:
+        run('init', '--preset', 'empty', '--yes')
+        run('ext', 'add', args.extension_source, '--id', 'code', '--constraint', '=' + args.extension_version,
+            '--token-env', args.token_env, '--input', json.dumps({'author_root': 'author', 'target': 'src'}), '--yes')
+        pin = next(item for item in json.loads((project / 'lenso.lock').read_text())['extensions'] if item['definition']['id'] == 'code')
+        assert pin['definition']['version'] == args.extension_version
+        assert pin['github']['tag'] == 'code-v' + args.extension_version
+    else:
+        subprocess.run(['python3', str(root / 'scripts/configure-code.py'), str(project), '--author-root', 'author'], env=env, check=True)
     native = {'cargo': {'manifest': 'Cargo.toml', 'offline': True}, 'npm': {'manifest': 'package.json', 'offline': True}}
     configured_before = (project / 'lenso.toml').read_bytes()
     grant = run('ext', 'configure', 'code', '--input', json.dumps({'native': native}), expected=2)
@@ -208,9 +222,16 @@ try:
     assert 'user-js' in json.loads((project / 'package.json').read_text())['dependencies']
     assert run('code', 'compose-preview')['outputs']['compose']['commands'] == []
     print('Native dependency acceptance passed: actual offline Cargo/npm installation, manifest preservation, two-phase authorization, updates, shared module/composition owners, failure/retry, user conflicts, restoration and safe removal', flush=True)
+    (scratch / 'verification.json').write_text(json.dumps({
+        'extension_source': args.extension_source, 'version': args.extension_version if args.extension_source else None,
+        'cli_version': subprocess.check_output([str(binary), '--version'], text=True).strip(),
+        'cargo_npm_install': True, 'updates': True, 'shared_ownership': True,
+        'conflict_preservation': True, 'failure_retry': True, 'safe_removal': True,
+        'github': pin['github'] if args.extension_source else None,
+    }, indent=2) + '\n')
 except BaseException:
     print(f'Failed project retained: {project}', flush=True)
     raise
 else:
-    if not args.keep:
+    if not args.keep and not args.out:
         shutil.rmtree(scratch)

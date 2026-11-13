@@ -7,13 +7,16 @@ import subprocess
 from project_config import load, save
 
 
-def verify(root, scratch, config, snapshot, run, application, empty_path_env):
+def verify(root, scratch, config, snapshot, run, application, empty_path_env, setup=None):
     project = scratch / 'author-demo'
     shutil.copytree(root / 'examples/codegen-demo', project)
-    subprocess.run(['python3', str(root / 'scripts/configure-code.py'), str(project), '--author-root', 'author'], check=True)
-    declaration = load(project / 'lenso.toml')['cli']['extensions'][0]['source']
-    run(project, 'ext', 'remove', 'code', '--yes')
-    run(project, 'ext', 'add', declaration, '--id', 'code', '--input', json.dumps({'author_root': 'author', 'target': 'src'}), '--yes')
+    if setup:
+        setup(project)
+    else:
+        subprocess.run(['python3', str(root / 'scripts/configure-code.py'), str(project), '--author-root', 'author'], check=True)
+        declaration = load(project / 'lenso.toml')['cli']['extensions'][0]['source']
+        run(project, 'ext', 'remove', 'code', '--yes')
+        run(project, 'ext', 'add', declaration, '--id', 'code', '--input', json.dumps({'author_root': 'author', 'target': 'src'}), '--yes')
     authored = {path: path.read_bytes() for path in [project / 'src/main.rs', project / 'src/business.rs']}
     checked = run(project, 'code', 'validate', overrides=empty_path_env)
     assert checked['outputs']['validate']['validated']
@@ -87,11 +90,17 @@ def verify(root, scratch, config, snapshot, run, application, empty_path_env):
     catalog.write_text(original_catalog)
     before = application(project)
     policy = load(project / 'lenso.toml')
+    original_policy = copy.deepcopy(policy)
     policy['cli']['extensions'][0]['read_roots'] = ['src']
     save(project / 'lenso.toml', policy)
     denied = run(project, 'code', 'validate', expected=1)
     assert 'permission denied' in denied['message']
     assert application(project) == before
+    if snapshot is None:
+        save(project / 'lenso.toml', original_policy)
+        assert run(project, 'code', 'compose-preview', '--locked', '--offline', overrides=empty_path_env)['outputs']['compose']['files'] == []
+        print('Published author acceptance passed: validation, compiled memory/disk/shared samples, adapter cleanup, local update merge, denial and locked/offline replay', flush=True)
+        return
     # The exact author catalog works through pinned GitHub sources as well.
     resources = {str(path.relative_to(project / 'author')): path.read_bytes() for path in (project / 'author').rglob('*') if path.is_file()}
     snapshot('acme/author-demo', '1' * 40, resources)
