@@ -93,7 +93,8 @@ Code 0.3.5 selects the official `lenso-modules-v1` directory at
 `LioRael/lenso-modules` repository. Module-format custom/local authors use that
 filename by default too; explicit catalog paths and other formats remain supported.
 
-Existing official profiles that still use `lenso-code-v1` with `catalog.toml` are
+Existing official profiles on `HEAD`/`main` that still use `lenso-code-v1` with
+`catalog.toml` are
 migrated through the extension configuration proposal. Current Host versions keep
 existing settings on package upgrades, so review the migration after upgrading:
 
@@ -111,6 +112,10 @@ configuration and lock unchanged. Repeated configuration is stable. Preview/sear
 never rewrite configuration or broaden grants; an unmigrated profile gives an
 explicit `ext configure code` diagnostic before reading repository files.
 
-Pinned references are retained, including old commits/tags. If that reference does
-not contain `lenso.modules.toml`, explicitly review a newer reference using
-`lenso ext configure code --input '{"ref":"main"}'` after the migration.
+Custom branches and pinned commits/tags retain their original format and path;
+they may intentionally host a resource catalog. To switch such a profile to the
+standard official module directory, review an explicit configuration:
+
+```sh
+lenso ext configure code --input '{"repo":"LioRael/lenso-modules","ref":"main","format":"lenso-modules-v1","catalog":"lenso.modules.toml"}'
+```

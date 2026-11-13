@@ -664,7 +664,7 @@ mod official_directory_tests {
     #[test]
     fn migration_preserves_custom_profiles_options_and_grants() {
         let options = json!({"selection":{"language":"rust","runtime":"tokio"},"unrelated":"retained","registries":{
-            "official":{"source":"github-repo:LioRael/lenso-modules","ref":"pinned-ref","path":"catalog.toml","format":"lenso-code-v1","target":"src/custom"},
+            "official":{"source":"github-repo:LioRael/lenso-modules","ref":"HEAD","path":"catalog.toml","format":"lenso-code-v1","target":"src/custom"},
             "custom":{"source":"github-repo:acme/resources","ref":"v1","path":"catalog.toml","format":"lenso-code-v1","target":"src/other"}}});
         let result=configure_context(json!({"input":{},"answers":{},"capabilities":{"extension.options":options,"host.reads":["custom.toml"],"project.files":["custom.toml"],"host.processes":[{"program":"custom","args":[]}]}})).unwrap().0;
         assert_eq!(result["status"], "complete");
@@ -672,7 +672,7 @@ mod official_directory_tests {
         let migrated = &installation["options"]["registries"]["official"];
         assert_eq!(migrated["format"], "lenso-modules-v1");
         assert_eq!(migrated["path"], "lenso.modules.toml");
-        assert_eq!(migrated["ref"], "pinned-ref");
+        assert_eq!(migrated["ref"], "HEAD");
         assert_eq!(migrated["target"], "src/custom");
         assert_eq!(installation["options"]["selection"], options["selection"]);
         assert_eq!(
@@ -699,6 +699,7 @@ mod official_directory_tests {
     fn custom_and_current_profiles_are_never_reinterpreted() {
         for profile in [
             json!({"source":"github-repo:acme/resources","ref":"v1","format":"lenso-code-v1","path":"catalog.toml","target":"src"}),
+            json!({"source":"github-repo:LioRael/lenso-modules","ref":"feature/resources","format":"lenso-code-v1","path":"catalog.toml","target":"src"}),
             json!({"source":"github-repo:LioRael/lenso-modules","ref":"v0.2.0","format":"lenso-compose-v1","path":"auth.rust.toml","target":"src"}),
             json!({"source":"github-repo:LioRael/lenso-modules","ref":"custom","format":"lenso-code-v1","path":"custom.toml","target":"src"}),
             json!({"source":"github-repo:LioRael/lenso-modules","ref":"pinned","format":"lenso-modules-v1","path":"lenso.modules.toml","target":"src"}),

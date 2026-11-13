@@ -17,6 +17,7 @@ pub fn legacy_profile(profile: &Value) -> bool {
         .is_some_and(official_repo)
         && profile["format"].as_str().unwrap_or("lenso-code-v1") == "lenso-code-v1"
         && profile["path"].as_str().unwrap_or("catalog.toml") == "catalog.toml"
+        && matches!(profile["ref"].as_str().unwrap_or("HEAD"), "HEAD" | "main")
 }
 
 pub fn require_current_profile(profile: &Value) -> Result<()> {
@@ -75,6 +76,7 @@ pub fn migration_options(ctx: &Value) -> Option<Value> {
         && defaults["repo"].as_str().is_some_and(official_repo)
         && defaults["format"].as_str().unwrap_or("lenso-code-v1") == "lenso-code-v1"
         && defaults["catalog"].as_str().unwrap_or("catalog.toml") == "catalog.toml"
+        && matches!(defaults["ref"].as_str().unwrap_or("HEAD"), "HEAD" | "main")
     {
         defaults["format"] = json!("lenso-modules-v1");
         defaults["catalog"] = json!(MODULE_DIRECTORY);
