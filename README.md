@@ -201,9 +201,9 @@ for the package format, authentication and GitHub Actions publishing.
 
 ## Code generation
 
-Code 0.3.0 is available as a [GitHub Release](https://github.com/LioRael/lenso-cli/releases/tag/code-v0.3.0)
+Code 0.3.1 is available as a [GitHub Release](https://github.com/LioRael/lenso-cli/releases/tag/code-v0.3.1)
 and runs on CLI 1.0.0. Both `lenso ext add code` and the official `code` preset
-resolve Code 0.3.0. It provides:
+resolve Code 0.3.1. It provides:
 
 - Capability-based composition with independently selected adapters and explicit
   instance bindings, rather than a preset for every possible combination.
