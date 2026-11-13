@@ -1,6 +1,6 @@
 [package]
 name = "lenso-code"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 publish = false
 [lib]
@@ -15,6 +15,7 @@ lenso-composition = { path = "../../crates/composition" }
 lenso-codegen = { path = "../../crates/codegen" }
 sha2 = "0.10"
 similar = "2"
+semver = "1"
 [workspace]
 [profile.release]
 opt-level = "s"

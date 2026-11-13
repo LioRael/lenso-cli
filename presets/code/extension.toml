@@ -1,6 +1,6 @@
 schema_version = 1
 id = "code"
-version = "0.3.1"
+version = "0.3.2"
 host = ">=0.2.4, <0.3.0"
 
 [dependencies.project]
@@ -23,12 +23,14 @@ sha256 = "auto"
 type = "wasm"
 module = "code.wasm"
 function = "resolve"
+fuel = 50000000
 sha256 = "auto"
 
 [handlers."code/diff"]
 type = "wasm"
 module = "code.wasm"
 function = "diff"
+fuel = 50000000
 sha256 = "auto"
 
 [handlers."code/verify"]
@@ -91,6 +93,7 @@ provider = "code"
 arguments = [
  { name = "registry", help = "Configured resource registry" },
  { name = "query", help = "Filter resource names and descriptions" },
+ { name = "term", help = "Search modules or resources", positional = true },
 ]
 
 [[commands]]
@@ -101,6 +104,9 @@ provider = "code"
 arguments = [
  { name = "registry", help = "Configured resource registry" },
  { name = "item", help = "Catalog resource names", positional = true, kind = "list" },
+ { name = "language", help = "Target language" },
+ { name = "runtime", help = "Target runtime" },
+
 ]
 
 [[commands]]
@@ -111,6 +117,9 @@ provider = "code"
 arguments = [
  { name = "registry", help = "Configured resource registry" },
  { name = "item", help = "Catalog resource names", positional = true, kind = "list" },
+ { name = "language", help = "Target language" },
+ { name = "runtime", help = "Target runtime" },
+
 ]
 
 [[commands]]
@@ -121,6 +130,9 @@ provider = "code"
 arguments = [
  { name = "registry", help = "Configured resource registry" },
  { name = "item", help = "Catalog resource names", positional = true, kind = "list" },
+ { name = "language", help = "Target language" },
+ { name = "runtime", help = "Target runtime" },
+
 ]
 
 [[commands]]
@@ -131,6 +143,9 @@ provider = "code"
 arguments = [
  { name = "registry", help = "Configured resource registry" },
  { name = "item", help = "Catalog resource names", positional = true, kind = "list" },
+ { name = "language", help = "Target language" },
+ { name = "runtime", help = "Target runtime" },
+
 ]
 
 [setup]
