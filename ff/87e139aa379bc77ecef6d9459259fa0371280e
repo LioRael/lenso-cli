@@ -1,0 +1,57 @@
+crates/cli/Cargo.toml
+  s_c5695907fe744f::t_e14fa6fa6f4fc9 8-11
+.github/workflows/publish-crates.yml
+  s_c5695907fe744f::t_44d475e9d92422 10,12-16,22,27-30,32-33,39-44,48,51-82
+  s_c5695907fe744f::t_e14fa6fa6f4fc9 1-9,11,17-21,23-26,31,34-38,45-47,49-50
+  s_c5695907fe744f::t_02b342e61bcd89 83-96
+crates/composition/Cargo.toml
+  s_c5695907fe744f::t_e14fa6fa6f4fc9 8-11
+crates/codegen/Cargo.toml
+  s_c5695907fe744f::t_e14fa6fa6f4fc9 8-11
+  s_c5695907fe744f::t_abd1df7c0d77d7 14
+extensions/project/Cargo.toml
+  s_c5695907fe744f::t_e14fa6fa6f4fc9 8-11
+crates/framework/Cargo.toml
+  s_c5695907fe744f::t_e14fa6fa6f4fc9 8-11
+Cargo.toml
+  s_c5695907fe744f::t_e14fa6fa6f4fc9 11-13,18
+  s_c5695907fe744f::t_924403b4f634eb 7,16-17
+crates/runtime/Cargo.toml
+  s_c5695907fe744f::t_e14fa6fa6f4fc9 8-11
+scripts/release/crates.py
+  s_c5695907fe744f::t_e14fa6fa6f4fc9 1-13,16-44,47-59,62-63,72-78
+  s_c5695907fe744f::t_159a8919fd96fd 14-15,60-61,64-71
+  s_c5695907fe744f::t_03471f64c8fadc 45-46
+Cargo.lock
+  s_c5695907fe744f::t_581832c960abdf 7,1434,1448,1463,1475,1501
+README.md
+  s_c5695907fe744f::t_71b3460ea77722 7-12,81
+docs/code-generation.md
+  s_c5695907fe744f::t_a9c2b3e5b1d32f 4,207
+docs/crates-release.md
+  s_c5695907fe744f::t_6edeabc44dff6f 1-48
+docs/native-dependencies.md
+  s_c5695907fe744f::t_50bee0112ec43b 3
+extensions/code/Cargo.lock
+  s_c5695907fe744f::t_6eb367cc29c15a 215,226
+presets/code/extension.toml
+  s_c5695907fe744f::t_25fdd1d9d5447a 4
+presets/shadcn/extension.toml
+  s_c5695907fe744f::t_264543098219a6 3-4
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ff87e139aa379bc77ecef6d9459259fa0371280e",
+  "prompts": {},
+  "sessions": {
+    "s_c5695907fe744f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d06d-149b-7062-aa67-3c0145df9d90",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
