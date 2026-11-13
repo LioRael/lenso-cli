@@ -1,0 +1,20 @@
+crates/cli/src/update_notice.rs
+  s_db0826ea383830::t_bea433500e1a63 288-292,300-303,313-317,322-331,333-341
+  s_db0826ea383830::t_8902f8762c67d0 251-254,293-299,304-312,318-321,332,342-343,405,412,414,421,423
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "54656cc8b1660b786c0059184d13a466905ed6f0",
+  "prompts": {},
+  "sessions": {
+    "s_db0826ea383830": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d570-6bcc-75a1-a80c-75f063970d87",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
