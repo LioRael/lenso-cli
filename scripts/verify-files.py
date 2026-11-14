@@ -190,6 +190,11 @@ try:
      cores=[project/f'src/modules/{name}/modules/{name}/{"core.ts" if language=="typescript" else "mod.rs"}' for name in ['auth','files']]
      for core in cores:core.write_text('// retained module customization\n'+core.read_text())
      call('ext','configure','code','--input','{"ref":"HEAD"}','--yes',*credential_flags)
+     protected=cores+[project/('package.json' if language=='typescript' else 'Cargo.toml'),project/'lenso/native.lock',project/'src/code.modules.json']
+     before={str(path):path.read_bytes() for path in protected}
+     conflict=call('code','update','auth','--yes',expected=1)
+     assert 'conflicting composition requests' in conflict['message'], conflict
+     assert all(Path(path).read_bytes()==content for path,content in before.items())
      options=next(item['options'] for item in call('config')['outputs']['main']['config']['cli']['extensions'] if item['id']=='code')
      native=json.loads(json.dumps(options['native']))
      ecosystem='npm' if language=='typescript' else 'cargo'
@@ -200,6 +205,7 @@ try:
      native[ecosystem].pop('patch_overrides')
      call('ext','configure','code','--input',json.dumps({'native':native}),'--yes',*credential_flags)
      call('code','update','auth','--yes')
+     assert 'patch_overrides' not in (project/'lenso/native.lock').read_text()
      for core in cores:assert 'retained module customization' in core.read_text()
      installed=json.loads((project/'src/code.modules.json').read_text())['modules']
      for name,version in [('auth',a.auth_version),('files',a.files_version)]:
