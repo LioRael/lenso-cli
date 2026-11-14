@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Create native apps, install Auth, supervise HTTP hosts and verify real operations."""
+import tomllib
 import argparse,functools,http.server,json,os,re,shutil,signal,subprocess,tempfile,threading,time
 from pathlib import Path
 from urllib.request import Request,urlopen
@@ -70,7 +71,7 @@ try:
    call(case,'new','app','--preset',preset,'--input',intent,'--yes',*credentials)
    assert (project/'lenso/app.lock').is_file()
    config=call(project,'code','config')['outputs']['config']['config']
-   assert config['project']['language']==language and config['conventions']['app_host']=='lenso-http-v1'
+   assert config['project']['language']==language and config['conventions']['app_host']==('lenso-http-v2' if not a.official else 'lenso-http-v1')
    call(project,'app','check','--yes')
    pending_run=call(project,'app','run',expected=2,empty=True)
    assert pending_run['question']['kind']['type']=='confirm'
@@ -119,8 +120,8 @@ try:
    if a.modules:
     for directory in ['templates','typescript/src/modules','rust/src/modules']:
      shutil.copytree(a.modules/directory,project/'author'/directory)
-    for name in ['lenso.modules.toml','auth.typescript.toml','auth.rust.toml','auth.typescript.app.toml','auth.rust.app.toml']:
-     shutil.copyfile(a.modules/name,project/'author'/name)
+    for path in a.modules.glob('*.toml'):
+     shutil.copyfile(path,project/'author'/path.name)
     shutil.copytree(project/'author',preview/'author')
     call(preview,'ext','add','code' if a.official else base+'/code/extension.toml','--id','code','--input',intent,'--yes',*credentials,empty=True)
     for suffix in ['', '.app']:
@@ -130,7 +131,8 @@ try:
       assert validated['validated'] and len(validated['samples'])==1
    call(project,'code','config','--provider','lenso.auth-store='+storage,'--yes')
    plan=call(project,'code','preview','auth')['outputs']['resolve']
-   assert plan['module']['version']=='0.3.0' and not (project/'src/modules/auth').exists()
+   expected_version=tomllib.loads((a.modules/'lenso.modules.toml').read_text())['modules']['auth']['releases'][-1]['version'] if a.modules else '0.3.0'
+   assert plan['module']['version']==expected_version and not (project/'src/modules/auth').exists()
    call(project,'code','add','auth','--yes')
    assert (project/('src/modules/auth/assembly/host.ts' if language=='typescript' else 'src/modules/auth/assembly/host.rs')).is_file()
    if storage=='postgres':

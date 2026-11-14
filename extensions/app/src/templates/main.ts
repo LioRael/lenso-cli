@@ -2,6 +2,9 @@ import { createServer, type IncomingMessage } from "node:http";
 import { readFile, readdir } from "node:fs/promises";
 import { resolve, dirname, join, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import type { Module, Services, Response } from "./lenso-host.js";
 import { parse } from "smol-toml";
 
 try { process.loadEnvFile(".env"); } catch (error) {
@@ -14,9 +17,6 @@ if (typeof source !== "string" || !source.startsWith("src/") || source.split("/"
 const output = dirname(fileURLToPath(import.meta.url));
 const modules = resolve(output, source.slice(4));
 if (!modules.startsWith(output + sep)) throw new Error("Modules must remain below src");
-export interface Request { method: string; path: string; authorization: string | undefined; body: unknown }
-export interface Response { status: number; body: unknown }
-export interface Module { handle(request: Request): Promise<Response | undefined>; close(): Promise<void> }
 const loaded: Module[] = [];
 let server: ReturnType<typeof createServer> | undefined;
 async function body(request: IncomingMessage): Promise<unknown> {
@@ -40,6 +40,7 @@ try {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return [];
     throw error;
   });
+  const plugins: Array<{ name: string; requiresIdentity?: boolean; mount(migrate:boolean, services?: Services): Promise<Module> }> = [];
   for (const entry of entries.sort((a,b) => a.name.localeCompare(b.name))) {
     if (!entry.isDirectory() || !/^[a-zA-Z0-9_-]+$/.test(entry.name)) continue;
     const file = join(modules, entry.name, "assembly", "host.js");
@@ -48,34 +49,69 @@ try {
       throw error;
     }
     const plugin = await import(pathToFileURL(file).href);
-    loaded.push(await plugin.mount((process.argv.includes("--migrate") || process.argv.includes("--migrate-only"))) as Module);
+    let requiresIdentity = false;
+    try {
+      const descriptor = parse(await readFile(join(modules, entry.name, "assembly", "host.toml"), "utf8"));
+      if (descriptor.protocol !== 2) throw new Error("Unsupported module host protocol");
+      requiresIdentity = descriptor.requires_identity === true;
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+    }
+    plugins.push({ ...plugin, requiresIdentity, name: entry.name });
+  }
+  const services: Services = {};
+  for (const plugin of plugins.sort((a,b) => Number(Boolean(a.requiresIdentity))-Number(Boolean(b.requiresIdentity)))) {
+    if (plugin.requiresIdentity && !services.identity) throw new Error(`Module ${plugin.name} requires an identity provider`);
+    const module = await plugin.mount(process.argv.includes("--migrate") || process.argv.includes("--migrate-only"), services);
+    loaded.push(module);
+    if (module.identity) {
+      if (services.identity) throw new Error("Multiple identity providers; select one application identity explicitly");
+      services.identity = module.identity;
+    }
   }
   if (process.argv.includes("--migrate-only")) { await close(); process.exit(0); }
   let active = 0;
   server = createServer(async (request, response) => {
+    const controller = new AbortController();
+    const deadline=setTimeout(() => { controller.abort(); request.destroy(); response.destroy(); },30_000);
+    deadline.unref();
+    request.once("aborted", () => controller.abort());
+    response.once("close", () => { if (!response.writableFinished) controller.abort(); });
     const send = (status: number, result: unknown) => {
       if (!response.destroyed) { response.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" }); response.end(JSON.stringify(result)); }
+    };
+    const reply = async (result: Response) => {
+      if (result.stream) {
+        response.writeHead(result.status, { "Content-Type": "application/octet-stream", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", ...result.headers });
+        await pipeline(Readable.from(result.stream), response, { signal: controller.signal });
+      } else { send(result.status, result.body ?? null); }
     };
     if (active >= 32) { request.resume(); send(429, { code: "capacity" }); return; }
     active++;
     try {
       const path = new URL(request.url ?? "/", "http://localhost").pathname;
       if (request.method === "GET" && path === "/health") { request.resume(); send(200, { status: "ok", modules: loaded.length }); return; }
-      let input: unknown;
-      try { input = await body(request); } catch (error) {
-        request.resume();
-        const message = error instanceof Error ? error.message : "invalid_input";
-        send(message === "body_limit" ? 413 : message === "content_type" ? 415 : 400, { code: "invalid_input" }); return;
-      }
+      let parsed: Promise<unknown> | undefined;
+      const url = new URL(request.url ?? "/", "http://localhost");
       for (const module of loaded) {
-        const result = await module.handle({ method: request.method ?? "GET", path, authorization: request.headers.authorization, body: input });
-        if (result) { send(result.status, result.body); return; }
+        const result = module.handleStream
+          ? await module.handleStream({ method: request.method ?? "GET", path, url, headers: request.headers, authorization: request.headers.authorization, source: request.iterator({ destroyOnReturn: false }), signal: controller.signal, json: () => parsed ??= body(request) })
+          : await module.handle?.({ method: request.method ?? "GET", path, authorization: request.headers.authorization, body: await (parsed ??= body(request)) });
+        if (result) { request.resume(); await reply(result); return; }
       }
+      request.resume();
       send(404, { code: "not_found" });
-    } catch { send(500, { code: "internal", message: "Request failed" }); }
-    finally { active--; }
+    } catch (error) {
+      request.resume();
+      if (response.headersSent) response.destroy();
+      else {
+        const message = error instanceof Error ? error.message : "internal";
+        send(message === "body_limit" ? 413 : message === "content_type" ? 415 : error instanceof SyntaxError ? 400 : 500, { code: "invalid_request" });
+      }
+    }
+    finally { clearTimeout(deadline); active--; }
   });
-  server.requestTimeout = 10_000; server.headersTimeout = 10_000;
+  server.requestTimeout = 30_000; server.headersTimeout = 10_000;
   const port = Number(process.env.PORT ?? "__APP_PORT__");
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("Invalid PORT");
   server.listen(port, "127.0.0.1", () => {
@@ -86,8 +122,9 @@ try {
     const timeout = setTimeout(() => process.exit(1), 10_000); timeout.unref();
     void close().then(() => { clearTimeout(timeout); }, () => { process.exitCode = 1; });
   });
-} catch {
+} catch (error) {
   await close();
+  if (error instanceof Error && (error.message.startsWith("Module ") || error.message.startsWith("Multiple identity"))) console.error(error.message);
   console.error("Application startup failed; check module configuration and explicit migrations.");
   process.exitCode = 1;
 }

@@ -197,11 +197,13 @@ checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
 name = "lenso-app-extension"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "extism-pdk",
  "lenso-codegen",
  "serde_json",
+ "sha2",
+ "similar",
  "toml",
  "toml_edit",
 ]
@@ -441,6 +443,12 @@ dependencies = [
  "cpufeatures",
  "digest",
 ]
+
+[[package]]
+name = "similar"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "smallvec"
