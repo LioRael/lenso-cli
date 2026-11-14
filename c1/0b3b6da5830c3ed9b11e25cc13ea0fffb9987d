@@ -1,0 +1,21 @@
+.github/workflows/check.yml
+  s_0a36fa17311984::t_77769781b43bf2 65-73
+scripts/test-ops.py
+  s_0a36fa17311984::t_77769781b43bf2 8,267-271,274-277
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c10b3b6da5830c3ed9b11e25cc13ea0fffb9987d",
+  "prompts": {},
+  "sessions": {
+    "s_0a36fa17311984": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1daa8-3fb7-7c03-beac-1e3b4a74162a",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
