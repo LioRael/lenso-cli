@@ -1,9 +1,8 @@
 # Files integration and App host v2
 
-Status: implementation prepared for App 0.2.0 and module source train v0.4.0
-(Auth shared identity; Files 0.1.0). Code remains 0.3.6. The native CLI Runtime and
-published SDKs are unchanged. Official Registry/preset publication is a separate
-step after branch acceptance.
+Status: published App 0.2.0, Auth 0.4.0 and Files 0.1.0 (module source v0.4.0).
+Code remains 0.3.6. The native CLI Runtime and published SDKs are unchanged. The
+official Registry and app preset select the matching native host.
 
 ## Native host protocol
 
@@ -40,8 +39,8 @@ App initialization still hands application source to the user. It never uses a
 repeat init to overwrite an existing host. Upgrade an App 0.1.0 project explicitly:
 
 ```sh
-# After the matching versions are published:
-lenso ext add app --constraint '^0.2.0'
+lenso preset apply app
+# For an explicitly constrained App declaration, first update it to ^0.2.0.
 lenso app upgrade-preview
 lenso app upgrade
 lenso code update auth --input '{"reconfigure":true}'
@@ -83,3 +82,19 @@ reconfiguration, preserved session, and subsequent private Files operations.
 Metadata and blob implementation, migrations, interfaces and fixture ownership
 remain in lenso-modules. App owns the native host protocol; Code supplies its existing
 selection/generation/ownership machinery. No Files registry is added to the CLI Host.
+
+## Official source verification
+
+`verify-files.py --official --token-env GITHUB_TOKEN` uses the public app preset,
+extension Registry/Release and module source tag with a new cache per case. Add
+`--upgrade` to install actual App 0.1.0 and Auth 0.3.0 first, then upgrade App,
+apply the current preset and reconfigure Auth. `--storage both` covers SQLite and
+PostgreSQL; `--language` selects TypeScript or Rust. No local module copies or
+HTTP fixture server are used in official mode. The optional token binding provides
+GitHub API quota for repeated cold-cache CI scenarios and stores only its name.
+
+The official Files Actions workflow verifies both new and upgraded applications
+for both languages/databases with published CLI 1.0.0. Local release acceptance
+also uses a fresh native CLI 1.1.2 installation. Reports include exact extension
+asset metadata and module source refs, authorization/streaming results, customized
+updates and locked/offline replay. SDK versions are unchanged.

@@ -86,9 +86,9 @@ Onboarding writes the configuration for you; editing TOML is a secondary option.
 
 ### Create an application
 
-App [0.1.0](https://github.com/LioRael/lenso-cli/releases/tag/app-v0.1.0)
+App [0.2.0](https://github.com/LioRael/lenso-cli/releases/tag/app-v0.2.0)
 creates an editable native HTTP application. The official `app` preset installs
-App and Code 0.3.6; Auth 0.3.0 remains a module added separately through Code.
+App and Code 0.3.6; Auth 0.4.0 and Files 0.1.0 remain modules added separately through Code.
 TypeScript requires Node.js 26; Rust requires Rust 1.99.0 and a native linker.
 
 ```sh
@@ -114,12 +114,28 @@ stderr in JSON mode. Generated application source belongs to you; repeated
 `app init` preserves your edits. See [App workflows](docs/app-extension.md) for
 configuration, module hosts and development verification.
 
-### Files development
+### Private files and existing applications
 
-The next App release (0.2.0) adds a shared identity and file-streaming host for the
-Files 0.1.0 module. It is implemented on this branch, pending publication alongside
-the matching Auth adapter and module source release. See
-[Files integration and reviewed App upgrades](docs/files-integration.md).
+App 0.2.0 supplies shared identity and native file streams. Auth 0.4.0 resolves
+sessions; Files 0.1.0 owns private upload, metadata, download and deletion. Both
+modules have TypeScript/Rust and SQLite/PostgreSQL implementations; content uses
+the local filesystem. Install through the same Code workflow:
+
+```sh
+lenso code config --provider lenso.files-metadata=sqlite
+lenso code preview files
+lenso code add files
+lenso app check
+lenso app migrate
+lenso app run
+```
+
+For an existing App 0.1.0 project, refresh the app preset, then explicitly review
+`lenso app upgrade-preview` and apply `lenso app upgrade`. Update Auth with
+`lenso code update auth --input '{"reconfigure":true}'` before adding Files.
+Explicit App version constraints must be updated to `^0.2.0`. User changes are
+merged or reported as conflicts; source upgrades never transfer database/blob data.
+See [Files integration and reviewed App upgrades](docs/files-integration.md).
 
 ### Use a preset
 
