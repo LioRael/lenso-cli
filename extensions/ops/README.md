@@ -180,5 +180,10 @@ ambient environment, missing prerequisites, static/locked/offline discovery,
 feature absence, distinct redacted streams, unchanged source files, PID absence
 and reusable ports. The Node service also creates a descendant process.
 
-The CI Ops job runs this script on Linux with Node 26/Rust 1.99. Local validation
-and current limits are recorded in [implementation status](../../docs/agent-native-status.md).
+Set `LENSO_OPS_REPORT=/absolute/path/report.json` to retain the successful JSON
+report with OS, architecture and actual Node/Cargo versions. The CI Ops job runs
+this script on Linux with Node 26/Rust 1.99 and uploads its report and terminal
+log as `ops-acceptance-linux`, preserving the log even when acceptance fails.
+The [cross-platform record](../../docs/ops-acceptance.md) contains the macOS arm64
+and Linux x86_64 results; current limits remain in
+[implementation status](../../docs/agent-native-status.md).

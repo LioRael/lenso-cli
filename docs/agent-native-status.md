@@ -78,8 +78,9 @@ uses actual offline Cargo/npm packages and exercises failure/retry and preserved
 user changes. Registry tests install/build single-project and monorepo npm Vite
 apps against a local authenticated Registry. GitHub/publish tests use local mock
 HTTP endpoints and fake credentials, not real GitHub mutation. The Check CLI
-workflow now includes the real M0 and compact-protocol checks; remote CI has not
-run for this local change. No release or package publication was performed.
+workflow includes the real M0 and compact-protocol checks. Linux CI and its
+follow-up fixes are tracked in [PR #13](https://github.com/LioRael/lenso-cli/pull/13).
+No release or package publication was performed.
 
 The fixed `test-agent-protocol.py` task generates `Hello, Rust!`, validates the
 file plan with a real Wasm hook, and applies it with explicit confirmations:
@@ -156,9 +157,10 @@ avoid feature builds replacing a test's executable midway through acceptance.
 
 Four Ops unit tests cover config guards, numeric-loopback rules, bounded secret
 redaction and graceful-exit reaping before group escalation. The dependency-free
-Rust fixture also passed native offline check/test/clippy/build. Linux CI now has
-an Ops job with both binary variants and both fixtures; that remote job has not
-run for this local change. Windows process management is unsupported in this slice.
+Rust fixture also passed native offline check/test/clippy/build. The Linux Ops job
+passed the same 20 lifecycle cases and additional checks with both binary variants
+and both fixtures. Reports, platform versions, job evidence and Linux fixes are in
+the [cross-platform record](ops-acceptance.md). Windows process management is unsupported in this slice.
 No Ops package/preset release or Registry publication was performed.
 
 ## Remaining implementation
@@ -174,7 +176,7 @@ Optional Agent/MCP adaptation, SDK Action/Module
 metadata, Files capability prechecks and Action integration, readable generated
 exports, Registry discovery and Site updates remain open. Auth/Files application
 consumer acceptance was not rerun; no SDK/Modules sources were changed.
-Windows/Linux, downstream Rust consumers and published-package compatibility
+Windows, Linux arm64, downstream Rust consumers and published-package compatibility
 have not been validated for the new interface. New manifest contracts require a
 compatible future Host release before publication; no supported release version
 is asserted yet.
