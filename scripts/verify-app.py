@@ -10,6 +10,7 @@ p.add_argument('--binary',type=Path,required=True)
 p.add_argument('--modules',type=Path,help='Working-tree Auth source; omit for the live module directory')
 p.add_argument('--official',action='store_true')
 p.add_argument('--token-env')
+p.add_argument('--auth-version',help='Expected Auth version when consuming official modules')
 p.add_argument('--out',type=Path,required=True)
 p.add_argument('--language',choices=['typescript','rust'])
 p.add_argument('--storage',choices=['sqlite','postgres','both'],default='sqlite')
@@ -133,7 +134,7 @@ try:
       assert validated['validated'] and len(validated['samples'])==1
    call(project,'code','config','--provider','lenso.auth-store='+storage,'--yes')
    plan=call(project,'code','preview','auth')['outputs']['resolve']
-   expected_version=tomllib.loads((a.modules/'lenso.modules.toml').read_text())['modules']['auth']['releases'][-1]['version'] if a.modules else ('0.4.0' if host_v2 else '0.3.0')
+   expected_version=tomllib.loads((a.modules/'lenso.modules.toml').read_text())['modules']['auth']['releases'][-1]['version'] if a.modules else (a.auth_version or ('0.4.0' if host_v2 else '0.3.0'))
    assert plan['module']['version']==expected_version and not (project/'src/modules/auth').exists()
    call(project,'code','add','auth','--yes')
    assert (project/('src/modules/auth/assembly/host.ts' if language=='typescript' else 'src/modules/auth/assembly/host.rs')).is_file()

@@ -10,6 +10,10 @@ p.add_argument('--binary',type=Path,required=True)
 p.add_argument('--modules',type=Path)
 p.add_argument('--official',action='store_true')
 p.add_argument('--token-env')
+p.add_argument('--auth-version',default='0.4.0',help='Expected current Auth module version')
+p.add_argument('--files-version',default='0.1.0',help='Expected current Files module version')
+p.add_argument('--module-ref',default='v0.4.0',help='Expected immutable current module source ref')
+p.add_argument('--expect-input-issues',action='store_true',help='Require structured field errors from the current Files source')
 p.add_argument('--upgrade',action='store_true',help='Upgrade real official App 0.1.0 and Auth 0.3.0')
 p.add_argument('--out',type=Path,required=True)
 p.add_argument('--legacy-app',type=Path,help='Unpacked published App 0.1.0 for reviewed upgrade acceptance')
@@ -135,7 +139,7 @@ try:
     try:assert http(port,'/auth/session',token=legacy_token)[0]==200
     finally:stop(process,stream)
    # Verify that Files can be generated independently, but cannot run without its declared identity.
-   plan=call('code','preview','files',empty=True)['outputs']['resolve'];assert plan['module']['version']=='0.1.0'
+   plan=call('code','preview','files',empty=True)['outputs']['resolve'];assert plan['module']['version']==a.files_version
    assert not (project/'src/modules/files').exists() and not (project/'data').exists()
    pending=call('code','add','files',expected=2,empty=True);answers=case/'answers.json'
    answers.write_text(json.dumps({pending['question']['id']:False}));call('code','add','files','--answers',str(answers),expected=130,empty=True)
@@ -159,9 +163,9 @@ try:
      public_pins[name]=item['github']
     assert lock['presets']['@lenso/app']['version']=='0.2.0'
     installed=json.loads((project/'src/code.modules.json').read_text())['modules']
-    for name,version in [('auth','0.4.0'),('files','0.1.0')]:
+    for name,version in [('auth',a.auth_version),('files',a.files_version)]:
      item=installed['@lenso/'+name]
-     assert item['version']==version and item['profile']['source']=='github-repo:LioRael/lenso-modules' and item['profile']['ref']=='v0.4.0'
+     assert item['version']==version and item['profile']['source']=='github-repo:LioRael/lenso-modules' and item['profile']['ref']==a.module_ref
      public_pins[name]=item
     assert not (project/'author').exists()
    payload=bytes(range(256))*4096+os.urandom(711);process,stream,port=start()
@@ -179,8 +183,12 @@ try:
     assert http(port,'/files/'+file_id,'DELETE',token=tokens[1])[0]==404
     assert http(port,'/files',token=tokens[1])==(200,{'files':[]})
     assert len(http(port,'/files?limit=1',token=tokens[0])[1]['files'])==1
-    assert http(port,'/files?name=../escape','POST',b'bad',tokens[0])[0]==400
+    status,bad_name=http(port,'/files?name=../escape','POST',b'bad',tokens[0]);assert status==400
+    if a.expect_input_issues:
+     assert bad_name['issues']==[{'path':['name'],'code':'invalid_value'}]
+     assert '../escape' not in json.dumps(bad_name) and tokens[0] not in json.dumps(bad_name)
     status,oversize=http(port,'/files?name=large.bin','POST',b'0'*(2*1024*1024+1),tokens[0]);assert status==400,(status,oversize)
+    if a.expect_input_issues:assert oversize['issues']==[{'path':['source'],'code':'out_of_range'}]
     assert len(http(port,'/files',token=tokens[0])[1]['files'])==1
     sock=socket.create_connection(('127.0.0.1',port),timeout=10)
     try:
@@ -219,7 +227,7 @@ try:
    finally:stop(process,stream)
    for path in ['lenso.toml','lenso.lock','lenso.code.toml']:
     if env.get('DATABASE_URL'):assert env['DATABASE_URL'] not in (project/path).read_text()
-   report={'language':language,'storage':storage,'legacy_app_upgrade':legacy,'official':a.official,'public_pins':public_pins,'streamed_bytes':len(payload),'shared_identity':True,'cross_user_denied':True,'revoked_session_denied':True,'restart_persistence':True,'delete_content':True,'oversize_cleanup':True,'interrupted_upload_cleanup':True,'preview_denial_update_offline':True,'commands':commands}
+   report={'language':language,'storage':storage,'legacy_app_upgrade':legacy,'official':a.official,'public_pins':public_pins,'streamed_bytes':len(payload),'shared_identity':True,'cross_user_denied':True,'revoked_session_denied':True,'restart_persistence':True,'delete_content':True,'oversize_cleanup':True,'interrupted_upload_cleanup':True,'preview_denial_update_offline':True,'structured_input_issues':a.expect_input_issues,'commands':commands}
    (case/'verification.json').write_text(json.dumps(report,indent=2)+'\n');reports.append(report)
    print(f'{language}/{storage} authenticated streaming Files passed',flush=True)
 finally:
