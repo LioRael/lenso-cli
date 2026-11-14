@@ -1,0 +1,21 @@
+scripts/test-code-initialization.py
+  s_0a36fa17311984::t_a1333462961e24 3,23,62
+scripts/test-code-project-config.py
+  s_0a36fa17311984::t_f3841ac8ec1198 3,14,88,90,93
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "895ac011a420887fa63247fc3c7b4b5e4587e561",
+  "prompts": {},
+  "sessions": {
+    "s_0a36fa17311984": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1daa8-3fb7-7c03-beac-1e3b4a74162a",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
