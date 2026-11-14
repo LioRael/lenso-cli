@@ -1,0 +1,25 @@
+.github/workflows/publish-extension.yml
+  s_0a36fa17311984::t_930302f12e252d 94-95,97
+scripts/author_acceptance.py
+  s_0a36fa17311984::t_12abaa1843c9da 10,80-83,100-103
+scripts/test-native.py
+  s_0a36fa17311984::t_99f0b7b7007710 13,175-179,187-190
+scripts/verify-code-release.py
+  s_0a36fa17311984::t_73a7b3255ec1d8 70-71,74-75
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "61d330fa8cb0313fbf49b27ff1e444cc131795d5",
+  "prompts": {},
+  "sessions": {
+    "s_0a36fa17311984": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1daa8-3fb7-7c03-beac-1e3b4a74162a",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
