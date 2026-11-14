@@ -573,7 +573,7 @@ fn onboarding_is_reviewed_and_optional_native_providers_are_selected_explicitly(
 
 #[test]
 fn self_update_is_project_independent_and_requires_explicit_adoption() {
-    let root = tempfile::tempdir().unwrap();
+    let root = installation_root();
     fs::write(
         root.path().join("lenso.toml"),
         "invalid project declaration",
@@ -582,7 +582,7 @@ fn self_update_is_project_independent_and_requires_explicit_adoption() {
     let executable = root
         .path()
         .join(if cfg!(windows) { "lenso.exe" } else { "lenso" });
-    fs::copy(env!("CARGO_BIN_EXE_lenso"), &executable).unwrap();
+    fs::hard_link(env!("CARGO_BIN_EXE_lenso"), &executable).unwrap();
     let run = |args: &[&str]| {
         Command::new(&executable)
             .current_dir(root.path())
@@ -627,7 +627,7 @@ fn self_update_is_project_independent_and_requires_explicit_adoption() {
 
 #[test]
 fn package_manager_ownership_cannot_be_overridden_by_adoption() {
-    let root = tempfile::tempdir().unwrap();
+    let root = installation_root();
     let name = if cfg!(windows) { "lenso.exe" } else { "lenso" };
     for (directory, expected) in [
         (root.path().join("custom-cargo/bin"), "Cargo"),
@@ -638,7 +638,7 @@ fn package_manager_ownership_cannot_be_overridden_by_adoption() {
             fs::write(directory.parent().unwrap().join(".crates2.json"), "{}").unwrap();
         }
         let executable = directory.join(name);
-        fs::copy(env!("CARGO_BIN_EXE_lenso"), &executable).unwrap();
+        fs::hard_link(env!("CARGO_BIN_EXE_lenso"), &executable).unwrap();
         let result = Command::new(&executable)
             .current_dir(root.path())
             .args(["self", "update", "--adopt", "--offline", "--json"])
@@ -656,4 +656,10 @@ fn package_manager_ownership_cannot_be_overridden_by_adoption() {
         );
         assert!(!directory.join("lenso-install.json").exists());
     }
+}
+
+fn installation_root() -> tempfile::TempDir {
+    // Keep hard links on the binary's filesystem; no writable copy can cross a concurrent fork.
+    let binary = std::path::Path::new(env!("CARGO_BIN_EXE_lenso"));
+    tempfile::tempdir_in(binary.parent().unwrap()).unwrap()
 }
