@@ -86,10 +86,9 @@ Onboarding writes the configuration for you; editing TOML is a secondary option.
 
 ### Create an application
 
-App 0.1.0 is implemented in this branch and awaits publication alongside Code
-0.3.6, Auth 0.3.0 and the official Registry records. After publication, the workflow
-below creates an editable native HTTP application. Its `app` preset
-installs App and Code; Auth remains a module added separately through Code.
+App [0.1.0](https://github.com/LioRael/lenso-cli/releases/tag/app-v0.1.0)
+creates an editable native HTTP application. The official `app` preset installs
+App and Code 0.3.6; Auth 0.3.0 remains a module added separately through Code.
 TypeScript requires Node.js 26; Rust requires Rust 1.99.0 and a native linker.
 
 ```sh
@@ -240,9 +239,9 @@ for the package format, authentication and GitHub Actions publishing.
 
 ## Code generation
 
-Code 0.3.5 is available as a [GitHub Release](https://github.com/LioRael/lenso-cli/releases/tag/code-v0.3.5)
+Code 0.3.6 is available as a [GitHub Release](https://github.com/LioRael/lenso-cli/releases/tag/code-v0.3.6)
 and runs on CLI 1.0.0. Both `lenso ext add code` and the official `code` preset
-resolve Code 0.3.5. It provides:
+resolve Code 0.3.6. It provides:
 
 - Capability-based composition with independently selected adapters and explicit
   instance bindings, rather than a preset for every possible combination.
@@ -355,7 +354,7 @@ For release maintenance, see [native binary releases](docs/install.md#publish-th
 [crate publishing](docs/crates-release.md) and the
 [native release workflow](.github/workflows/release-cli.yml).
 
-Code 0.3.5 initializes the official module directory at `lenso.modules.toml`,
+Code 0.3.6 initializes the official module directory at `lenso.modules.toml`,
 including when the official repository is supplied explicitly. For an older
 project still pointing at `catalog.toml`, upgrade Code and run
 `lenso ext configure code` to review migration. Custom profiles, references and
