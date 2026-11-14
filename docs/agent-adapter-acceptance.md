@@ -4,7 +4,7 @@ Source implementation, 2026-11-15. The optional `crates/agent` adapter derives t
 from the existing catalog and invokes the existing CLI JSON interface. No Core
 command, workflow model, SDK or Module implementation was replaced.
 
-## Actual local acceptance
+## Actual cross-platform acceptance
 
 On macOS arm64, `scripts/test-agent-adapter.py` passed 22 recorded scenario groups
 against the real Acme, Agent and Ops-enabled Lenso binaries. All projects started
@@ -12,6 +12,18 @@ as isolated temporary directories. The Acme tests ran with empty PATH, verifying
 that its embedded Framework works without a standalone Lenso process.
 The [recorded JSON report](agent-acceptance/macos-arm64.json) includes every group
 and the actual binary/toolchain versions.
+
+The same source at `8df0bd5528d3781913ba622be721a3066e46dd20` passed both remote
+Agent jobs in [Check CLI run 43627439136](https://github.com/LioRael/lenso-cli/actions/runs/43627439136).
+Both downloaded CI reports contain the same 22 ordered scenario groups as the
+local report. No assertion was removed or relaxed, and no implementation fix was
+needed for this cross-platform run.
+
+| Environment | Architecture | Node | Cargo | Groups | Retained evidence |
+| --- | --- | --- | --- | --- | --- |
+| Local macOS | arm64 | 26.10.0 | 1.99.0 | 22 passed | [Local JSON](agent-acceptance/macos-arm64.json) |
+| Ubuntu 24.04 CI | x86_64 | 26.13.1 | 1.99.0 | 22 passed | [CI JSON](agent-acceptance/linux-ci-x86_64.json), [job log](https://github.com/LioRael/lenso-cli/actions/runs/43627439136/job/132546382056) |
+| macOS 15 CI | arm64 | 26.13.1 | 1.99.0 | 22 passed | [CI JSON](agent-acceptance/macos-ci-arm64.json), [job log](https://github.com/LioRael/lenso-cli/actions/runs/43627439136/job/132546382280) |
 
 | Boundary | Observed |
 | --- | --- |
@@ -30,19 +42,21 @@ interrupt-ignoring process, and report-storage failure after completed execution
 Standard toolchain `cargo check --locked --workspace --all-targets --all-features`,
 workspace all-feature tests (100 passed, one existing live credential/network test
 ignored), no-default-feature CLI tests (29 passed), Clippy with warnings denied,
-rustdoc, rustfmt and diff checks passed. Existing real Wasm M0 and compact-protocol
-and onboarding acceptance passed. Release-helper tests and both modified workflow YAML files
-also passed their checks.
+rustdoc, rustfmt and diff checks passed. Existing real Wasm M0, compact-protocol
+and onboarding acceptance passed. Release-helper tests and both modified workflow
+YAML files also passed their checks. Each remote Agent job additionally passed
+all four native adapter regressions and the Core dependency-isolation check.
 The JSON acceptance report and clean-project terminal record are emitted with
 `LENSO_AGENT_REPORT` and the reproducible commands in the
 [adapter README](../crates/agent/README.md#acceptance).
 
 The Check CLI workflow adds Linux/macOS Agent jobs, each building both feature
 variants, running the native regressions and real Acme/Node/Rust acceptance, and
-uploading `agent-acceptance-{Linux,macOS}` JSON/log artifacts. Those new remote jobs
-have not run for this local implementation. Earlier Ops-only CI evidence does not
-establish MCP compatibility on Linux. No push, publication or deployment is
-claimed by this local record.
+uploading `agent-acceptance-{Linux,macOS}` JSON/log artifacts. The jobs above passed
+with both artifacts retained. The committed JSON copies remain available after
+CI artifact expiration. [PR #14](https://github.com/LioRael/lenso-cli/pull/14/checks)
+tracks the complete CLI/Agent/Ops/extension checks on subsequent commits.
+No package publication or deployment was performed.
 
 ## Cost and scope of the evidence
 

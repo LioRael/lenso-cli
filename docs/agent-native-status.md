@@ -175,8 +175,9 @@ same-invocation report resources. Calls do not retain Sessions across invocation
 Acme now defines a read-only status command and a restricted note workflow through
 the existing Project plan/apply provider. Actual Shell/JSON/MCP, authority, stale
 approval, schema, report and Node/Rust lifecycle checks passed in 22 local scenario
-groups. Four native regressions cover process/output/storage boundaries. Scope,
-reproduction, evidence costs and unrun remote CI are recorded in
+groups. The same 22 groups and four native regressions also passed remote Linux
+x86_64 and macOS arm64 Agent jobs, including Core dependency isolation. Scope,
+reproduction, CI links, retained reports and evidence costs are recorded in
 [Agent acceptance](agent-adapter-acceptance.md). No adapter release was performed.
 
 ## Remaining implementation
