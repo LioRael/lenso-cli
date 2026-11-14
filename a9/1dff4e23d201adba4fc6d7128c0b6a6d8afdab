@@ -1,0 +1,21 @@
+.github/workflows/check.yml
+  s_0a36fa17311984::t_2e2d89c62f59cb 13
+docs/ops-acceptance.md
+  s_0a36fa17311984::t_2e2d89c62f59cb 49-52
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a91dff4e23d201adba4fc6d7128c0b6a6d8afdab",
+  "prompts": {},
+  "sessions": {
+    "s_0a36fa17311984": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1daa8-3fb7-7c03-beac-1e3b4a74162a",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
