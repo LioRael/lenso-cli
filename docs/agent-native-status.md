@@ -1,6 +1,6 @@
 # Agent-native implementation status
 
-P0 protocols and P1 Ops source implementation, 2026-11-14–15. At the start, the CLI, SDK, Modules
+P0 protocols, P1 Ops and optional Agent/MCP source implementation, 2026-11-14–15. At the start, the CLI, SDK, Modules
 and Registry local main branches matched origin/main after fetching. The Site repository was not
 present alongside those checkouts; no Site changes were made.
 
@@ -50,7 +50,7 @@ cargo fmt --all --check
 git diff --check
 ```
 
-Workspace tests with Ops: 96 passed, one existing live GitHub credential/network test
+Workspace tests with Ops and Agent: 100 passed, one existing live GitHub credential/network test
 ignored. New regressions exercise secret-bearing legacy errors, parser/input
 redaction even in debug mode, typed Wasm Host denials, guest error redaction,
 actual Wasm deadlines/fuel exhaustion, failed/skipped validation, stale reads,
@@ -163,6 +163,22 @@ and both fixtures. Reports, platform versions, job evidence and Linux fixes are 
 the [cross-platform record](ops-acceptance.md). Windows process management is unsupported in this slice.
 No Ops package/preset release or Registry publication was performed.
 
+## P1 optional Agent/MCP delivery
+
+The separate source-only `lenso-agent` library/binary selects exact aliases from
+the existing catalog and calls their native JSON entrypoints. MCP is a disabled-
+by-default feature using the official Rust SDK and local stdio protocol 2025-11-25.
+Core has no Agent/MCP dependency or command. The adapter retains native questions,
+approval/grant semantics, diagnostics, exit codes and summaries, and serves bounded
+same-invocation report resources. Calls do not retain Sessions across invocations.
+
+Acme now defines a read-only status command and a restricted note workflow through
+the existing Project plan/apply provider. Actual Shell/JSON/MCP, authority, stale
+approval, schema, report and Node/Rust lifecycle checks passed in 22 local scenario
+groups. Four native regressions cover process/output/storage boundaries. Scope,
+reproduction, evidence costs and unrun remote CI are recorded in
+[Agent acceptance](agent-adapter-acceptance.md). No adapter release was performed.
+
 ## Remaining implementation
 
 P0.2/P0.3 and their related regressions are implemented in source. They retain
@@ -172,8 +188,7 @@ public. Native authors should use `Diagnostic`; old guest failures without a typ
 Host cause conservatively report `wasm_failed`. Other authored outputs, questions
 and child logs remain public content and are not automatically scrubbed.
 
-Optional Agent/MCP adaptation, SDK Action/Module
-metadata, Files capability prechecks and Action integration, readable generated
+SDK Action/Module metadata, Files capability prechecks and Action integration, readable generated
 exports, Registry discovery and Site updates remain open. Auth/Files application
 consumer acceptance was not rerun; no SDK/Modules sources were changed.
 Windows, Linux arm64, downstream Rust consumers and published-package compatibility

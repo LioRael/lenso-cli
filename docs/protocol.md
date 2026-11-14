@@ -478,3 +478,18 @@ source development adds the receipts and diagnostics described above.
 GitHub Release transport, author package metadata and current limits are documented
 in [GitHub distribution](github-distribution.md). Generic HTTP redirect rules are
 unchanged; GitHub transfer uses its own bounded, credential-stripping provider.
+
+## Optional Agent/MCP adapter (source development)
+
+The independent [Agent adapter](../crates/agent/README.md) consumes this catalog and
+execution protocol; it adds no workflow or authority model to Core. Tool selection
+is an exact local allowlist. Descriptions retain original contracts/unknown values,
+input validation uses the selected schema without external resolution, and calls
+use the existing JSON entrypoint. The optional MCP transport negotiates 2025-11-25
+over local stdio and returns native results/diagnostics inside `structuredContent`.
+
+Summary results reference bounded, process-local report resources for the same
+invocation. They are not resumable Sessions or permission tokens. Native discovery
+failures, exit status, questions and digest-bound approvals retain their existing
+meaning; request cancellation and disconnects use the target CLI's supervisors.
+See [acceptance and scope](agent-adapter-acceptance.md) for actual binary evidence.

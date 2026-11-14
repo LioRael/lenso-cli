@@ -358,6 +358,12 @@ verification. Build with `--features ops` and explicitly install the project
 manifest to expose its commands. Node/Rust acceptance fixtures exercise real
 processes and cleanup; the extension is not yet published.
 
+The separate [Agent adapter](crates/agent/README.md) derives tools from that same
+catalog and invokes the existing JSON interface for explicitly selected aliases.
+Its optional `mcp` feature serves local stdio tools and execution-report resources;
+Core has no MCP dependency. The Acme example demonstrates read-only status and a
+restricted, approved file change. These adapter interfaces are source-only.
+
 | Package | Responsibility |
 | --- | --- |
 | [`lenso`](https://crates.io/crates/lenso) | Standalone executable, command name `lenso` |
