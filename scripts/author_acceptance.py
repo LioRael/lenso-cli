@@ -98,7 +98,7 @@ def verify(root, scratch, config, snapshot, run, application, empty_path_env, se
     save(project / 'lenso.toml', policy)
     denied = run(project, 'code', 'validate', expected=1)
     if legacy_diagnostics:
-        assert denied['type'] == 'diagnostic' and denied['status'] == 'failed' and 'host.reads' in denied['message'], denied
+        assert denied['type'] == 'diagnostic' and denied['status'] == 'failed' and 'permission denied: file read author/catalog.toml' in denied['message'], denied
     else:
         assert denied['code'] == 'permission_denied' and denied['details']['capability'] == 'host.reads'
     assert application(project) == before

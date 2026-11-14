@@ -56,6 +56,7 @@ jobs:
           PACKAGE_ID: ${{ steps.package.outputs.id }}
           EXISTING: ${{ steps.existing.outputs.existing }}
         run: |
+          if [ "$EXISTING" = true ] && [ "$PACKAGE_ID" = code ]; then exit 0; fi
           rustup toolchain install 1.99.0 --profile minimal --target wasm32-unknown-unknown
           cargo +1.99.0 build --locked --release -p lenso
           if [ "$EXISTING" = true ]; then exit 0; fi

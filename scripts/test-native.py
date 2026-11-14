@@ -173,7 +173,7 @@ try:
     before = manifest_state()
     denied = run('code', 'compose', '--registry', 'main', '--install', '--yes', expected=1)
     if args.legacy_diagnostics:
-        assert denied['type']=='diagnostic' and denied['status']=='failed' and 'host.processes' in denied['message'], denied
+        assert denied['type']=='diagnostic' and denied['status']=='failed' and 'permission denied: process' in denied['message'], denied
     else:
         assert denied['code']=='permission_denied' and denied['details']['capability']=='host.processes'
     assert manifest_state()==before
