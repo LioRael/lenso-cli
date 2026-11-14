@@ -114,6 +114,13 @@ stderr in JSON mode. Generated application source belongs to you; repeated
 `app init` preserves your edits. See [App workflows](docs/app-extension.md) for
 configuration, module hosts and development verification.
 
+### Files development
+
+The next App release (0.2.0) adds a shared identity and file-streaming host for the
+Files 0.1.0 module. It is implemented on this branch, pending publication alongside
+the matching Auth adapter and module source release. See
+[Files integration and reviewed App upgrades](docs/files-integration.md).
+
 ### Use a preset
 
 Presets select extensions and can provide a project creation or adoption recipe.

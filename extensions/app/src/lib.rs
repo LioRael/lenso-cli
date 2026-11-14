@@ -1,6 +1,8 @@
 //! Native application scaffolding and reviewed toolchain invocations.
+mod merge;
 use extism_pdk::{FnResult, Json, host_fn};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 #[host_fn("extism:host/user")]
@@ -138,13 +140,13 @@ fn project_config(text: Option<&str>, lang: &str) -> Result<(String, String)> {
     if doc
         .get("conventions")
         .and_then(|v| v.get("app_host"))
-        .is_some_and(|v| v.as_str() != Some("lenso-http-v1"))
+        .is_some_and(|v| v.as_str() != Some("lenso-http-v2"))
     {
         return Err(error(
             "existing app_host differs; configure a new App target",
         ));
     }
-    doc["conventions"]["app_host"] = toml_edit::value("lenso-http-v1");
+    doc["conventions"]["app_host"] = toml_edit::value("lenso-http-v2");
     let modules = doc
         .get("paths")
         .and_then(|v| v.get("modules"))
@@ -172,7 +174,7 @@ fn scaffold(lang: &str, port: u16, config: Option<&str>) -> Result<BTreeMap<Stri
         ("lenso.code.toml".into(), config),
         (
             ".gitignore".into(),
-            "node_modules/\ndist/\ntarget/\n.env\n*.sqlite*\n".into(),
+            "node_modules/\ndist/\ntarget/\n.env\n*.sqlite*\ndata/\n".into(),
         ),
         (".env.example".into(), format!("PORT={port}\n")),
         (
@@ -184,11 +186,15 @@ fn scaffold(lang: &str, port: u16, config: Option<&str>) -> Result<BTreeMap<Stri
         files.insert("package.json".into(),serde_json::to_string_pretty(&json!({"name":"lenso-app","private":true,"type":"module","scripts":{"build":"node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\" && tsc -p tsconfig.json","start":"npm run build && node dist/main.js","migrate":"npm run build && node dist/main.js --migrate-only","check":"tsc -p tsconfig.json --noEmit"},"dependencies":{"smol-toml":"^1"},"devDependencies":{"typescript":"^6","@types/node":"^26"},"imports":{"#modules/*":{"types":format!("./{modules}/*"),"default":format!("./dist/{}/*",modules.trim_start_matches("src/"))}}}))?+"\n");
         files.insert("tsconfig.json".into(),serde_json::to_string_pretty(&json!({"compilerOptions":{"target":"ES2024","module":"NodeNext","moduleResolution":"NodeNext","strict":true,"types":["node"],"noEmitOnError":true,"noUnusedLocals":true,"noUnusedParameters":true,"verbatimModuleSyntax":true,"rootDir":"src","outDir":"dist"},"include":["src/**/*.ts"]}))?+"\n");
         files.insert(
+            "src/lenso-host.ts".into(),
+            include_str!("templates/lenso-host.ts").into(),
+        );
+        files.insert(
             "src/main.ts".into(),
             include_str!("templates/main.ts").replace("__APP_PORT__", &port.to_string()),
         );
     } else {
-        files.insert("Cargo.toml".into(),"[package]\nname=\"lenso-app-consumer\"\nversion=\"0.1.0\"\nedition=\"2024\"\nrust-version=\"1.99\"\n[workspace]\n[dependencies]\naxum=\"0.8\"\nserde_json=\"1\"\ndotenvy=\"0.15\"\ntokio={version=\"1\",features=[\"macros\",\"net\",\"rt\",\"rt-multi-thread\",\"signal\",\"sync\",\"time\"]}\n[build-dependencies]\ntoml=\"1\"\n".into());
+        files.insert("Cargo.toml".into(),"[package]\nname=\"lenso-app-consumer\"\nversion=\"0.1.0\"\nedition=\"2024\"\nrust-version=\"1.99\"\n[workspace]\n[dependencies]\naxum=\"0.8\"\nserde_json=\"1\"\ndotenvy=\"0.15\"\ntokio={version=\"1\",features=[\"fs\",\"io-util\",\"macros\",\"net\",\"rt\",\"rt-multi-thread\",\"signal\",\"sync\",\"time\"]}\n[build-dependencies]\ntoml=\"1\"\n".into());
         files.insert(
             "rust-toolchain.toml".into(),
             "[toolchain]\nchannel=\"1.99.0\"\nprofile=\"minimal\"\n".into(),
@@ -196,6 +202,10 @@ fn scaffold(lang: &str, port: u16, config: Option<&str>) -> Result<BTreeMap<Stri
         files.insert(
             "src/main.rs".into(),
             include_str!("templates/main.rs").replace("__APP_PORT__", &port.to_string()),
+        );
+        files.insert(
+            "src/lenso_host.rs".into(),
+            include_str!("templates/lenso_host.rs").into(),
         );
         files.insert("build.rs".into(), include_str!("templates/build.rs").into());
     }
@@ -235,7 +245,7 @@ fn bootstrap_context(ctx: Value) -> FnResult<Json<Value>> {
         }
     }
     let receipt =
-        format!("schema_version=1\nlanguage={lang:?}\nversion=\"0.1.0\"\nstate=\"ready\"\n");
+        format!("schema_version=1\nlanguage={lang:?}\nversion=\"0.2.0\"\nstate=\"ready\"\n");
     files.push(json!({"path":"lenso/app.lock","content":receipt.replace("state=\"ready\"","state=\"pending\"")}));
     Ok(complete(
         json!({"files":files,"commands":[command(lang,"prepare")],"finalizations":[{"path":"lenso/app.lock","content":receipt}],"message":"Create native App files and prepare dependencies; run lenso app check or lenso app run"}),
@@ -306,6 +316,133 @@ pub fn authorize_run(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
 #[cfg_attr(not(test), extism_pdk::plugin_fn)]
 pub fn authorize_migrate(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
     authorize(ctx, "migrate")
+}
+
+#[cfg_attr(not(test), extism_pdk::plugin_fn)]
+pub fn upgrade(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
+    let lang = language(&ctx)?.ok_or_else(|| error("configure App language first"))?;
+    if !receipt_ready(lang)? {
+        return Err(error("initialize App first").into());
+    }
+    let old_receipt = read("lenso/app.lock")?.ok_or_else(|| error("missing App receipt"))?;
+    let receipt: toml::Table = toml::from_str(&old_receipt)?;
+    if receipt.get("version").and_then(toml::Value::as_str) == Some("0.2.0") {
+        return Ok(complete(
+            json!({"files":[],"commands":[],"message":"App host is already current"}),
+        ));
+    }
+    if receipt.get("version").and_then(toml::Value::as_str) != Some("0.1.0") {
+        return Err(error("unsupported App upgrade baseline").into());
+    }
+    let config = read("lenso.code.toml")?.ok_or_else(|| error("missing Code config"))?;
+    let mut doc = config.parse::<toml_edit::DocumentMut>()?;
+    if doc["conventions"]["app_host"].as_str() != Some("lenso-http-v1") {
+        return Err(error("review the existing application host before upgrading").into());
+    }
+    doc["conventions"]["app_host"] = toml_edit::value("lenso-http-v2");
+    let desired = scaffold(lang, port(&ctx)?, Some(&doc.to_string()))?;
+    let legacy = if lang == "typescript" {
+        vec![("src/main.ts", include_str!("legacy/main.ts"))]
+    } else {
+        vec![
+            ("src/main.rs", include_str!("legacy/main.rs")),
+            ("build.rs", include_str!("legacy/build.rs")),
+        ]
+    };
+    let mut files = Vec::new();
+    for (path, base) in legacy {
+        let current = read(path)?.ok_or_else(|| {
+            error(format!(
+                "Missing {path}; restore or upgrade the host manually"
+            ))
+        })?;
+        let base = base.replace("__APP_PORT__", &port(&ctx)?.to_string());
+        let next = desired
+            .get(path)
+            .ok_or_else(|| error("missing upgrade template"))?;
+        let content = if let Some(merged) = merge::merge(&base, &current, next) {
+            merged
+        } else {
+            let id = format!(
+                "app:upgrade:{path}:{:x}",
+                Sha256::digest(format!("{current}\0{next}").as_bytes())
+            );
+            match ctx["answers"][&id].as_str() {
+                Some("replace") => next.clone(),
+                Some("cancel") => return Err(error("App upgrade cancelled").into()),
+                Some(_) => return Err(error("choose replace or cancel").into()),
+                None => {
+                    return Ok(Json(
+                        json!({"status":"needs_input","question":{"id":id,"message":format!("App host conflict in {path}. Replacing discards overlapping edits; cancel to merge manually."),"kind":{"type":"select","options":["cancel","replace"]}}}),
+                    ));
+                }
+            }
+        };
+        if content != current {
+            files.push(json!({"path":path,"content":content}));
+        }
+    }
+    let host_path = if lang == "typescript" {
+        "src/lenso-host.ts"
+    } else {
+        "src/lenso_host.rs"
+    };
+    let content = &desired[host_path];
+    if read(host_path)?.is_some_and(|current| current != *content) {
+        return Err(error("native host protocol file already exists with user changes").into());
+    }
+    files.push(json!({"path":host_path,"content":content}));
+    if lang == "rust" {
+        let text = read("Cargo.toml")?.ok_or_else(|| error("missing Cargo.toml"))?;
+        let mut manifest = text.parse::<toml_edit::DocumentMut>()?;
+        let dependency = manifest
+            .get_mut("dependencies")
+            .and_then(|v| v.get_mut("tokio"))
+            .ok_or_else(|| error("missing Tokio dependency"))?;
+        if let Some(version) = dependency.as_str().map(str::to_owned) {
+            let mut table = toml_edit::InlineTable::new();
+            table.insert("version", version.into());
+            *dependency = toml_edit::Item::Value(table.into());
+        }
+        let table = dependency
+            .as_table_like_mut()
+            .ok_or_else(|| error("review Tokio dependency options manually"))?;
+        let mut features: std::collections::BTreeSet<String> = table
+            .get("features")
+            .and_then(|v| v.as_array())
+            .map(|v| {
+                v.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        features.extend(["fs".into(), "io-util".into()]);
+        let mut array = toml_edit::Array::new();
+        for feature in features {
+            array.push(feature);
+        }
+        table.insert("features", toml_edit::value(array));
+        let content = manifest.to_string();
+        if content != text {
+            files.push(json!({"path":"Cargo.toml","content":content}));
+        }
+    }
+    let mut ignored = read(".gitignore")?.unwrap_or_default();
+    if !ignored
+        .lines()
+        .any(|line| line == "data/" || line == "/data/")
+    {
+        if !ignored.ends_with('\n') {
+            ignored.push('\n');
+        }
+        ignored.push_str("data/\n");
+        files.push(json!({"path":".gitignore","content":ignored}));
+    }
+    files.push(json!({"path":"lenso.code.toml","content":desired["lenso.code.toml"]}));
+    files.push(json!({"path":"lenso/app.lock","content":format!("schema_version=1\nlanguage={lang:?}\nversion=\"0.2.0\"\nstate=\"ready\"\n")}));
+    Ok(complete(
+        json!({"files":files,"commands":[],"message":"Upgrade the native host. Review Auth update with reconfigure before adding identity-dependent modules."}),
+    ))
 }
 
 #[cfg(test)]

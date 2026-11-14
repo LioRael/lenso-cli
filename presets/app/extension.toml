@@ -1,6 +1,6 @@
 schema_version=1
 id="app"
-version="0.1.0"
+version="0.2.0"
 host=">=0.2.4, <0.3.0"
 [dependencies.project]
 source="builtin:project"
@@ -143,3 +143,26 @@ path=["app","migrate-rust"]
 workflow="app/migrate-rust"
 provider="app"
 about="Migrate the native application"
+
+[handlers."app/upgrade"]
+type="wasm"
+module="app.wasm"
+function="upgrade"
+sha256="auto"
+fuel=50000000
+[[workflows]]
+id="app/upgrade-preview"
+steps=[{id="app",handler="app/upgrade"},{id="plan",handler="project/plan",needs=["app"]}]
+[[commands]]
+path=["app","upgrade-preview"]
+workflow="app/upgrade-preview"
+provider="app"
+about="Preview a reviewed native host upgrade"
+[[workflows]]
+id="app/upgrade"
+steps=[{id="app",handler="app/upgrade"},{id="plan",handler="project/plan",needs=["app"]},{id="apply",handler="project/apply",needs=["plan"]}]
+[[commands]]
+path=["app","upgrade"]
+workflow="app/upgrade"
+provider="app"
+about="Upgrade the native host while retaining disjoint user edits"

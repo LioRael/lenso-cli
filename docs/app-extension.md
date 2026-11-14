@@ -94,3 +94,10 @@ three repositories are being released independently; native extension checks run
 on every CLI PR. Publication supports `app-v*` tags and the existing release
 checksum/packaging pipeline. Release order is Code, Auth, App, then official
 Registry/preset synchronization and `--official` consumer verification.
+
+## Prepared host v2
+
+App 0.2.0 supplies shared identity, binary request/response streams and reviewed
+0.1.0 host upgrades. The published 0.1.0 behavior above remains the compatibility
+baseline. See [Files integration](files-integration.md) for the new native protocol,
+version prerequisites and verification. The SDK and Runtime remain unchanged.

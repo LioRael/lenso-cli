@@ -1,6 +1,6 @@
 [package]
 name = "lenso-app-extension"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 publish = false
 [lib]
@@ -12,6 +12,8 @@ serde_json = "1"
 toml = "1"
 toml_edit = { version = "0.25", features = ["serde"] }
 lenso-codegen = { path = "../../crates/codegen" }
+similar = "2"
+sha2 = "0.10"
 [workspace]
 [profile.release]
 opt-level = "s"

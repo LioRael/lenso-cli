@@ -1,4 +1,5 @@
 use axum::{Json, Router, routing::get};
+pub mod lenso_host;
 include!(concat!(env!("OUT_DIR"), "/modules.rs"));
 
 #[tokio::main]

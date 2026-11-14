@@ -60,9 +60,19 @@ jobs:
           python3 scripts/verify-app.py --binary target/debug/lenso \
             --modules dist/app-module-source --language "$LANGUAGE" --storage both \
             --out "dist/app-verification-$LANGUAGE"
+      - name: Verify streamed private Files with shared identity
+        env:
+          LANGUAGE: ${{ matrix.language }}
+          DATABASE_URL: postgresql://lenso:test-only-password@127.0.0.1:${{ job.services.postgres.ports[5432] }}/app?sslmode=disable
+        run: |
+          python3 scripts/verify-files.py --binary target/debug/lenso \
+            --modules dist/app-module-source --language "$LANGUAGE" --storage both \
+            --out "dist/files-verification-$LANGUAGE"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: app-${{ matrix.language }}-verification
-          path: dist/app-verification-${{ matrix.language }}/**/verification.json
+          path: |
+            dist/app-verification-${{ matrix.language }}/**/verification.json
+            dist/files-verification-${{ matrix.language }}/**/verification.json
           if-no-files-found: warn
