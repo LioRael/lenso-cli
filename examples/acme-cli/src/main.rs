@@ -1,4 +1,6 @@
-use lenso_cli::{Argument, Cli, CommandSpec, Error, Outcome, Question, QuestionKind, serde_json};
+use lenso_cli::{
+    Argument, Cli, CommandContract, CommandSpec, Error, Outcome, Question, QuestionKind, serde_json,
+};
 
 fn configure() -> Result<Cli, Error> {
     let mut cli = Cli::new("acme");
@@ -32,6 +34,26 @@ fn configure() -> Result<Cli, Error> {
                     },
                 }),
             }
+        },
+    )?;
+    cli.provider_version("acme", env!("CARGO_PKG_VERSION"))?;
+    cli.contract(
+        "acme/hello",
+        CommandContract {
+            input_schema: Some(serde_json::json!({
+                "type":"object","properties":{"name":{"type":"string","minLength":1}}
+            })),
+            output_schema: Some(serde_json::json!({
+                "type":"object","required":["greeting"],"properties":{"greeting":{"type":"string"}}
+            })),
+            capabilities: Some(vec![]),
+            effects: Some(vec![]),
+            questions: Some(vec![Question {
+                id: "name".into(),
+                message: "Who should Acme greet?".into(),
+                kind: QuestionKind::Text,
+            }]),
+            verification: None,
         },
     )?;
     Ok(cli)

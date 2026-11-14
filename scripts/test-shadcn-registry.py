@@ -238,7 +238,7 @@ try:
         missing = dict(env)
         del missing["PRIVATE_TOKEN"]
         failed = run(project,"preview","@private/feature",*options,expected=1,overrides=missing)
-        assert "not set" in failed["message"]
+        assert failed["code"] == "invalid_input" and failed["details"]["environment_variable"] == "PRIVATE_TOKEN"
         run(project,"search","@private",*options,expected=1,overrides=missing)
         assert before == snapshot(project)
         original_declaration = (project / "lenso.toml").read_text()
@@ -246,7 +246,7 @@ try:
         policy["cli"]["extensions"][0]["env"] = []
         save(project / "lenso.toml", policy)
         denied = run(project,"preview","@private/feature",*options,expected=1)
-        assert "credential environment variable" in denied["message"] and "permission denied" in denied["message"]
+        assert denied["code"] == "permission_denied" and denied["details"]["capability"] == "host.env"
         (project / "lenso.toml").write_text(original_declaration)
         assert before == snapshot(project)
         targeted = run(project,"preview",origin+"/public/targeted.json",*options)
@@ -269,7 +269,7 @@ try:
             stub.chmod(0o755)
             broken = dict(env, PATH=str(tools) + os.pathsep + env["PATH"])
             failed = run(project,"add","@private/feature",*options,"--yes",expected=1,overrides=broken)
-            assert "files already applied" in failed["message"] and "status 7" in failed["message"]
+            assert failed["code"] == "partial_failure" and failed["details"]["completed_files"] and failed["details"]["cause"]["details"]["exit_code"] == 7
             retry = run(project,"preview","@private/feature",*options)
             assert retry["outputs"]["resolve"]["files"] == [] and retry["outputs"]["resolve"]["commands"], "matching source files must retain dependency recovery"
         installed = run(project,"add","@private/feature",*options,"--yes")

@@ -1,0 +1,117 @@
+{
+  "status": "passed",
+  "cases": [
+    [
+      "node",
+      "exit0",
+      "passed"
+    ],
+    [
+      "node",
+      "exit7",
+      "passed"
+    ],
+    [
+      "node",
+      "exit_before_http_ready",
+      "passed"
+    ],
+    [
+      "node",
+      "not_ready",
+      "passed"
+    ],
+    [
+      "node",
+      "redirect",
+      "passed"
+    ],
+    [
+      "node",
+      "silent",
+      "passed"
+    ],
+    [
+      "node",
+      "runtime_deadline",
+      "passed"
+    ],
+    [
+      "node",
+      "wrong_health_path",
+      "passed"
+    ],
+    [
+      "node",
+      "SIGINT",
+      "passed"
+    ],
+    [
+      "node",
+      "SIGTERM",
+      "passed"
+    ],
+    [
+      "rust",
+      "exit0",
+      "passed"
+    ],
+    [
+      "rust",
+      "exit7",
+      "passed"
+    ],
+    [
+      "rust",
+      "exit_before_http_ready",
+      "passed"
+    ],
+    [
+      "rust",
+      "not_ready",
+      "passed"
+    ],
+    [
+      "rust",
+      "redirect",
+      "passed"
+    ],
+    [
+      "rust",
+      "silent",
+      "passed"
+    ],
+    [
+      "rust",
+      "runtime_deadline",
+      "passed"
+    ],
+    [
+      "rust",
+      "wrong_health_path",
+      "passed"
+    ],
+    [
+      "rust",
+      "SIGINT",
+      "passed"
+    ],
+    [
+      "rust",
+      "SIGTERM",
+      "passed"
+    ]
+  ],
+  "core_without_installation": "no_ops_commands",
+  "platform": {
+    "system": "Linux",
+    "release": "7.0.0-1017-azure",
+    "machine": "x86_64",
+    "node": "v26.13.1",
+    "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)"
+  },
+  "preflight": "grants, executable, cwd, env, port, endpoint",
+  "cleanup": "direct children reaped; recorded descendant PIDs absent; ports reusable",
+  "json": "one document, distinct bounded redacted streams",
+  "source_files": "unchanged"
+}

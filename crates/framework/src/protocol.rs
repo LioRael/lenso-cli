@@ -8,6 +8,18 @@ use serde_json::Value;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+    /// Explicitly public, structured diagnostic from a trusted adapter.
+    #[error(transparent)]
+    Diagnostic(Box<crate::Diagnostic>),
+    /// Execution failure retaining completed calls without serializing internal causes.
+    #[error("{source}")]
+    Execution {
+        /// Original typed failure, retained for Rust callers and exit status.
+        #[source]
+        source: Box<Error>,
+        /// Public execution receipt at the point of failure.
+        summary: Box<crate::ExecutionSummary>,
+    },
     /// Invalid definitions, arguments, or extension responses.
     #[error("{0}")]
     Invalid(String),
@@ -111,7 +123,17 @@ impl Question {
         if valid {
             Ok(())
         } else {
-            Err(Error::Invalid(format!("invalid answer for {}", self.id)))
+            Err(crate::Diagnostic::new(crate::DiagnosticCode::InvalidInput)
+                .with_details(serde_json::json!({"field":self.id,"expected":match self.kind {
+                    QuestionKind::Text => "text", QuestionKind::Confirm => "confirm",
+                    QuestionKind::Select { .. } => "select", QuestionKind::MultiSelect { .. } => "multi_select",
+                }}))
+                .with_retryable(false)
+                .with_recovery(
+                    "supply_answer",
+                    "Supply an answer matching the question's declared type and choices.",
+                )
+                .into())
         }
     }
 }

@@ -49,7 +49,10 @@ impl ProcessSpec {
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
         #[cfg(windows)]
         let mut interrupts = tokio::signal::windows::ctrl_c()?;
-        let mut child = command.spawn()?;
+        let mut child = command.spawn().map_err(|error| lenso_cli::Diagnostic::new(lenso_cli::DiagnosticCode::ProcessSpawnFailed)
+            .with_details(serde_json::json!({"kind":format!("{:?}",error.kind())}))
+            .with_retryable(false)
+            .with_recovery("check_program", "Check that the granted executable and working directory exist and can be used."))?;
         let logs = if events.is_enabled() {
             let stdout = child
                 .stdout

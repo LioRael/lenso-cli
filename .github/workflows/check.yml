@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       CARGO_BUILD_JOBS: "2"
+      RUSTUP_TOOLCHAIN: "1.99.0"
     steps:
       - uses: actions/checkout@v7
       - name: Prepare Rust
@@ -39,6 +40,38 @@ jobs:
           python3 scripts/test-onboarding.py
           python3 scripts/test-code-project-config.py
           python3 scripts/test-code-initialization.py
+          python3 scripts/build-demo.py
+          python3 scripts/test-demo.py
+          python3 scripts/test-agent-protocol.py
+
+  ops:
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_BUILD_JOBS: "2"
+      RUSTUP_TOOLCHAIN: "1.99.0"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+      - name: Prepare Rust
+        run: rustup toolchain install 1.99.0 --profile minimal --component clippy
+      - name: Verify optional Ops with real Node and Rust processes
+        run: |
+          cargo test --locked -p lenso-ops
+          cargo build --locked -p lenso --features ops
+          cp target/debug/lenso target/debug/lenso-with-ops
+          cargo build --locked -p lenso --no-default-features
+          cp target/debug/lenso target/debug/lenso-core
+          LENSO_BIN="$PWD/target/debug/lenso-with-ops" LENSO_CORE_BIN="$PWD/target/debug/lenso-core" LENSO_OPS_REPORT=ops-acceptance.json python3 scripts/test-ops.py 2>&1 | tee ops-acceptance.log
+      - name: Preserve Ops acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ops-acceptance-linux
+          path: |
+            ops-acceptance.json
+            ops-acceptance.log
 
   extensions:
     strategy:

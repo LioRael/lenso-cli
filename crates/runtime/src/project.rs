@@ -250,7 +250,7 @@ impl LoadOptions {
             if arg == "--" {
                 break;
             }
-            if ["--project", "--input", "--answers", "--color"]
+            if ["--project", "--input", "--answers", "--color", "--report"]
                 .iter()
                 .any(|flag| arg == *flag)
             {
@@ -453,7 +453,12 @@ pub fn read_project(project: &Path) -> Result<Option<Project>, Error> {
     let config: Project =
         toml::from_str(text).map_err(|e| Error::Invalid(format!("lenso.toml: {e}")))?;
     if config.cli.schema_version != 1 {
-        return Err(Error::Invalid("unsupported project schema_version".into()));
+        return Err(
+            lenso_cli::Diagnostic::new(lenso_cli::DiagnosticCode::InvalidInput)
+                .with_details(serde_json::json!({"field":"cli.schema_version","supported":[1]}))
+                .with_retryable(false)
+                .into(),
+        );
     }
     for (namespace, url) in &config.cli.registries {
         crate::registry::reference(&format!("registry:{namespace}/check"))?;
@@ -737,7 +742,15 @@ pub(crate) fn resolve_flat(
     for installed in config.cli.extensions.iter().filter(|entry| entry.enabled) {
         if let Some(id) = installed.source.strip_prefix("builtin:") {
             let provider = options.providers.get(id).ok_or_else(|| {
-                Error::Invalid(format!("native provider {id} is unavailable in this CLI"))
+                lenso_cli::Diagnostic::new(lenso_cli::DiagnosticCode::DependencyUnavailable)
+                    .with_details(
+                        serde_json::json!({"provider":id,"reason":"native_provider_unavailable"}),
+                    )
+                    .with_retryable(false)
+                    .with_recovery(
+                        "select_host",
+                        "Use a Host that explicitly makes this native provider available.",
+                    )
             })?;
             let definition: Extension = serde_json::from_value(
                 serde_json::json!({"schema_version":1,"id":id,"version":provider.version,"handlers":{},"workflows":[],"commands":[]}),
@@ -1047,10 +1060,16 @@ impl LockedExtension {
                 options.events.preparing(format!("Preparing {}", self.id));
                 let bytes = source.bytes(16 * 1024 * 1024, options)?;
                 if digest(&bytes) != module.sha256 {
-                    return Err(Error::Permission(format!(
-                        "locked source module changed: {}; use lenso update to accept new pins",
-                        module.source
-                    )));
+                    return Err(lenso_cli::Diagnostic::new(
+                        lenso_cli::DiagnosticCode::IntegrityMismatch,
+                    )
+                    .with_details(serde_json::json!({"artifact":"wasm"}))
+                    .with_retryable(false)
+                    .with_recovery(
+                        "restore_pinned",
+                        "Restore the pinned bytes, or explicitly review and update the dependency.",
+                    )
+                    .into());
                 }
                 Ok(bytes)
             })

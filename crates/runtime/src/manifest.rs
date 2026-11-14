@@ -35,6 +35,9 @@ pub struct Extension {
     pub workflows: Vec<Workflow>,
     /// Statically discoverable command aliases.
     pub commands: Vec<CommandSpec>,
+    /// Optional workflow contracts, shared by every alias targeting the workflow.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub contracts: BTreeMap<String, lenso_cli::CommandContract>,
 }
 
 /// A required provider and its independently resolved distribution source.
@@ -94,6 +97,17 @@ pub(crate) fn validate_metadata(extension: &Extension) -> Result<(), Error> {
         }
     }
     let namespace = format!("{}/", extension.id);
+    for workflow in extension.contracts.keys() {
+        if !extension
+            .workflows
+            .iter()
+            .any(|definition| &definition.id == workflow)
+        {
+            return Err(Error::Invalid(format!(
+                "contract references unknown workflow: {workflow}"
+            )));
+        }
+    }
     for id in extension
         .handlers
         .keys()
@@ -202,7 +216,15 @@ pub(crate) fn register_locked(
     for locked in &lock.extensions {
         if let Some(id) = locked.source.strip_prefix("builtin:") {
             let provider = options.providers.get(id).ok_or_else(|| {
-                Error::Invalid(format!("native provider {id} is unavailable in this CLI"))
+                lenso_cli::Diagnostic::new(lenso_cli::DiagnosticCode::DependencyUnavailable)
+                    .with_details(
+                        serde_json::json!({"provider":id,"reason":"native_provider_unavailable"}),
+                    )
+                    .with_retryable(false)
+                    .with_recovery(
+                        "select_host",
+                        "Use a Host that explicitly makes this native provider available.",
+                    )
             })?;
             if provider.version != locked.definition.version {
                 return Err(Error::Invalid(format!(
@@ -262,10 +284,10 @@ pub(crate) fn register_locked(
                         let spec = spec.clone();
                         async move {
                             if !granted {
-                                return Err(Error::Permission(format!(
-                                    "process {} {:?}",
-                                    spec.program, spec.args
-                                )));
+                                return Err(lenso_cli::Diagnostic::missing_capability(
+                                    "host.processes",
+                                )
+                                .into());
                             }
                             spec.run(ctx).await
                         }
@@ -337,6 +359,10 @@ pub(crate) fn register_locked(
         }
     }
     for (installed, extension) in extensions {
+        next.provider_version(&extension.id, &extension.version)?;
+        for (workflow, contract) in &extension.contracts {
+            next.contract(workflow, contract.clone())?;
+        }
         for mut command in extension.commands.clone() {
             let original = command.path.join(" ");
             if installed.disabled_commands.contains(&original) {

@@ -136,5 +136,5 @@ def verify(root, scratch, config, snapshot, run, application, empty_path_env):
     assert run(project, 'code', 'compose-preview', '--locked', '--offline')['outputs']['compose']['files'] == []
     save(project / 'lenso.toml', {**policy, 'cli': {**policy['cli'], 'extensions': [{**extension, 'sources': []}]}})
     denied = run(project, 'code', 'compose-preview', expected=1)
-    assert 'permission denied' in denied['message']
+    assert denied['code'] == 'permission_denied' and denied['details']['capability'] == 'host.sources'
     print('Composition acceptance passed: actual Wasm, scoped choices, SQLite/PG, optional Redis, shared instances, persisted intent, preview/denial/apply, locked offline replay without Node/Git and repository grants', flush=True)

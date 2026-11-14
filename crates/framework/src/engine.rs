@@ -7,7 +7,8 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::{
-    Context, Error, EventSink, ExecutionEvent, Outcome, Question, Report, Status, Workflow,
+    CallSummary, Context, DiagnosticCode, Error, EventSink, ExecutionEvent, ExecutionSummary,
+    Outcome, Question, Report, Status, StepSummary, VerificationSummary, Workflow,
 };
 
 /// Object-safe asynchronous result for registered handlers.
@@ -21,6 +22,7 @@ pub struct Engine {
     handlers: BTreeMap<String, Handler>,
     workflows: BTreeMap<String, Workflow>,
     grants: BTreeMap<String, BTreeMap<String, Value>>,
+    summarizers: BTreeMap<String, fn(&Value) -> Option<StepSummary>>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -120,6 +122,24 @@ impl Engine {
         self.handlers.contains_key(id)
     }
 
+    /// Register a trusted, pure projection of a handler's successful output for compact receipts.
+    ///
+    /// # Errors
+    /// Rejects unknown handlers and duplicate projections. Authors must exclude secret values.
+    pub fn summarizer(
+        &mut self,
+        handler: &str,
+        summarize: fn(&Value) -> Option<StepSummary>,
+    ) -> Result<(), Error> {
+        if !self.handlers.contains_key(handler) || self.summarizers.contains_key(handler) {
+            return Err(Error::Invalid(
+                "summarizer requires an unclaimed registered handler".into(),
+            ));
+        }
+        self.summarizers.insert(handler.into(), summarize);
+        Ok(())
+    }
+
     /// Attach an application-owned capability value to a registered workflow.
     ///
     /// Extensions cannot edit these grants through handler outputs.
@@ -162,6 +182,30 @@ impl Engine {
         if !project.is_dir() {
             return Err(Error::Invalid("project must be a directory".into()));
         }
+        static NEXT_EXECUTION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let execution_id = format!(
+            "{:x}-{timestamp:x}-{:x}",
+            std::process::id(),
+            NEXT_EXECUTION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let verification = workflow
+            .steps
+            .iter()
+            .flat_map(|step| {
+                step.hooks
+                    .validate
+                    .iter()
+                    .map(|handler| VerificationSummary {
+                        step: step.id.clone(),
+                        handler: handler.clone(),
+                        status: "not_run".into(),
+                    })
+            })
+            .collect();
         Ok(Session {
             workflow,
             context: Context {
@@ -177,6 +221,16 @@ impl Engine {
             questions: BTreeMap::new(),
             question_order: Vec::new(),
             outputs: BTreeMap::new(),
+            execution: ExecutionSummary {
+                id: execution_id,
+                workflow: id.into(),
+                status: "running".into(),
+                completed_steps: vec![],
+                calls: vec![],
+                verification,
+                verification_status: "not_run".into(),
+                application_verification: "not_reported",
+            },
         })
     }
 
@@ -196,9 +250,41 @@ pub struct Session {
     questions: BTreeMap<String, (String, Question)>,
     question_order: Vec<String>,
     outputs: BTreeMap<String, Value>,
+    execution: ExecutionSummary,
 }
 
 impl Session {
+    /// Snapshot host-observed calls and validation, without input, answers, or full step outputs.
+    #[must_use]
+    pub fn summary(&self) -> ExecutionSummary {
+        let mut summary = self.execution.clone();
+        summary.completed_steps = self.outputs.keys().cloned().collect();
+        summary.verification_status = if summary.verification.is_empty() {
+            "not_declared"
+        } else if summary
+            .verification
+            .iter()
+            .any(|check| check.status == "failed")
+        {
+            "failed"
+        } else if summary
+            .verification
+            .iter()
+            .all(|check| check.status == "passed")
+        {
+            "passed"
+        } else {
+            "not_run"
+        }
+        .into();
+        summary
+    }
+
+    /// Borrow completed outputs for an explicitly requested full execution report.
+    #[must_use]
+    pub fn outputs(&self) -> &BTreeMap<String, Value> {
+        &self.outputs
+    }
     /// Attach a native progress/log observer without changing the Wasm JSON context.
     pub fn observe(&mut self, events: EventSink) {
         self.context.events = events;
@@ -229,6 +315,11 @@ impl Session {
             }
         }
         self.outputs.retain(|step, _| !invalid.contains(step));
+        for check in &mut self.execution.verification {
+            if invalid.contains(&check.step) {
+                check.status = "not_run".into();
+            }
+        }
         // Downstream consent is bound to its old inputs; it must be requested again.
         let position = self
             .question_order
@@ -255,6 +346,33 @@ impl Session {
     /// # Errors
     /// Propagates handler failures and rejects malformed or repeatedly answered questions.
     pub async fn advance(&mut self, engine: &Engine) -> Result<Report, Error> {
+        self.execution.status = "running".into();
+        match self.advance_inner(engine).await {
+            Ok(report) => {
+                self.execution.status = match report.status {
+                    Status::Complete => "complete",
+                    Status::NeedsInput => "needs_input",
+                }
+                .into();
+                Ok(report)
+            }
+            Err(source) => {
+                self.execution.status =
+                    if source.diagnostic().code() == DiagnosticCode::Cancelled {
+                        "cancelled"
+                    } else {
+                        "failed"
+                    }
+                    .into();
+                Err(Error::Execution {
+                    source: Box::new(source),
+                    summary: Box::new(self.summary()),
+                })
+            }
+        }
+    }
+
+    async fn advance_inner(&mut self, engine: &Engine) -> Result<Report, Error> {
         while self.outputs.len() < self.workflow.steps.len() {
             let step = self
                 .workflow
@@ -275,6 +393,12 @@ impl Session {
                 .map(|id| (id.clone(), self.outputs[id].clone()))
                 .collect();
             let mut output = Value::Null;
+            for check in &mut self.execution.verification {
+                if check.step == step.id {
+                    check.status = "not_run".into();
+                }
+            }
+            let mut validation_index = 0;
             let calls = step
                 .hooks
                 .prepare
@@ -285,7 +409,44 @@ impl Session {
                 .chain(step.hooks.validate.iter().map(|h| ("validate", h)))
                 .chain(step.hooks.after.iter().map(|h| ("after", h)));
             for (phase, handler) in calls {
-                match engine.invoke(handler, ctx.clone()).await? {
+                let result = engine.invoke(handler, ctx.clone()).await;
+                let status = match &result {
+                    Ok(Outcome::Complete { .. }) => "complete",
+                    Ok(Outcome::NeedsInput { .. }) => "needs_input",
+                    Err(_) => "failed",
+                };
+                let receipt = match &result {
+                    Ok(Outcome::Complete { output }) => engine
+                        .summarizers
+                        .get(handler)
+                        .and_then(|summarize| summarize(output)),
+                    _ => None,
+                };
+                self.execution.calls.push(CallSummary {
+                    step: step.id.clone(),
+                    handler: handler.clone(),
+                    phase: phase.into(),
+                    status: status.into(),
+                    receipt,
+                });
+                if phase == "validate" {
+                    if let Some(check) = self
+                        .execution
+                        .verification
+                        .iter_mut()
+                        .filter(|check| check.step == step.id)
+                        .nth(validation_index)
+                    {
+                        check.status = match status {
+                            "complete" => "passed",
+                            "failed" => "failed",
+                            _ => "not_run",
+                        }
+                        .into();
+                    }
+                    validation_index += 1;
+                }
+                match result? {
                     Outcome::Complete { output: value } => {
                         if phase == "result" {
                             output = value.clone();

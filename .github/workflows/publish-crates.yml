@@ -73,8 +73,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     environment: crates-io
+    strategy:
+      fail-fast: false
+      matrix:
+        directory: [extensions/project, extensions/ops]
     env:
-      PACKAGE_DIR: extensions/project
+      PACKAGE_DIR: ${{ matrix.directory }}
     steps: *publish_steps
 
   binary:

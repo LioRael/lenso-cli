@@ -192,13 +192,13 @@ try:
     custom['cli']['extensions'][0]['options']['registries']['main']['ref']=A
     save(policy_path,custom)
     absent=run(first,'code','preview','missing',expected=1)
-    assert 'pinned repository' in absent['message']
+    assert absent['code']=='invalid_input' and absent['details']['reason']=='not_found_in_snapshot'
     C='3'*40
     snapshot('acme/resources',C,{'link.txt':b'dereferenced contents'},modes={'link.txt':'120000'})
     custom['cli']['extensions'][0]['options']['registries']['main'].update({'ref':C,'items':[{'name':'link','files':['link.txt']}]})
     save(policy_path,custom)
     link=run(first,'code','preview','link',expected=1)
-    assert 'symlink' in link['message']
+    assert link['code']=='permission_denied' and link['details']['restriction']=='regular_source_file'
     policy_path.write_text(original_policy)
     # The same release/module and source snapshot reuse immutable cached bytes in another project.
     second=scratch/'second';second.mkdir();save(second/'lenso.toml',config)
@@ -208,7 +208,7 @@ try:
     # All repository capability and file grants remain independent of a package's metadata.
     original=(first/'lenso.toml').read_text()
     policy=load(first/'lenso.toml');policy['cli']['extensions'][0]['sources']=[];save(first/'lenso.toml',policy)
-    denied=run(first,'code','preview','button',expected=1);assert 'permission denied' in denied['message']
+    denied=run(first,'code','preview','button',expected=1);assert denied['code']=='permission_denied' and denied['details']['capability']=='host.sources'
     (first/'lenso.toml').write_text(original)
     no_node=dict(env,PATH=str(scratch/'empty-path'))
     run(first,'code','diff','button','--offline','--locked',overrides=no_node)
@@ -250,7 +250,7 @@ try:
     shutil.rmtree(cache)
     app_before=application(first)
     failed=run(first,'code','diff','button','--locked',expected=1)
-    assert 'digest' in failed['message'] and application(first)==app_before and (first/'lenso.lock').read_bytes()==pinned
+    assert failed['code']=='integrity_mismatch' and application(first)==app_before and (first/'lenso.lock').read_bytes()==pinned
     assert not leaks,leaks
     for path in [first/'lenso.lock',*cache.rglob('*')]:
         if path.is_file():assert token.encode() not in path.read_bytes() and signed.encode() not in path.read_bytes(),'credentials or signed URLs persisted'

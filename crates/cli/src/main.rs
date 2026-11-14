@@ -19,6 +19,14 @@ async fn run(args: Vec<std::ffi::OsString>) {
         let args = setup_args;
         let mut options = lenso_runtime::LoadOptions::from_args(&args);
         options.events = events;
+        #[cfg(feature = "ops")]
+        options.providers.insert(
+            "ops-host".into(),
+            lenso_runtime::NativeProvider {
+                version: lenso_ops::VERSION.into(),
+                register: lenso_ops::register,
+            },
+        );
         #[cfg(feature = "project")]
         options.providers.insert(
             "project".into(),

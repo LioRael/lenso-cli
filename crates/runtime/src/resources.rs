@@ -93,10 +93,7 @@ impl Host {
             .source_grants
             .contains(&format!("github:{}", repo.name()))
         {
-            return Err(Error::Permission(format!(
-                "repository source {}",
-                repo.name()
-            )));
+            return Err(lenso_cli::Diagnostic::missing_capability("host.sources").into());
         }
         if request.refresh && self.source_options.locked {
             return Err(Error::Invalid(
@@ -187,7 +184,11 @@ impl Host {
                 &cache,
                 &self.source_options,
             )?
-            .ok_or_else(|| Error::Invalid("file is absent from the pinned repository".into()))?;
+            .ok_or_else(|| {
+                lenso_cli::Diagnostic::new(lenso_cli::DiagnosticCode::InvalidInput).with_details(
+                    serde_json::json!({"field":"source.path","reason":"not_found_in_snapshot"}),
+                )
+            })?;
         let hash = digest(&bytes);
         if pin
             .files

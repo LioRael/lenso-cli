@@ -33,6 +33,7 @@ async fn answering_and_revising_invalidates_only_dependent_steps() -> Result<(),
     })?;
     let mut render = Step::new("render", "render");
     render.needs.push("ask".into());
+    render.hooks.validate.push("render".into());
     engine.workflow(Workflow {
         id: "test".into(),
         steps: vec![
@@ -48,6 +49,7 @@ async fn answering_and_revising_invalidates_only_dependent_steps() -> Result<(),
         BTreeMap::new(),
     )?;
     assert_eq!(session.advance(&engine).await?.status, Status::NeedsInput);
+    assert_eq!(session.summary().verification_status, "not_run");
     assert!(
         session.answer("name", Value::Bool(true)).is_err(),
         "text questions must reject boolean answers"
@@ -57,7 +59,15 @@ async fn answering_and_revising_invalidates_only_dependent_steps() -> Result<(),
         session.advance(&engine).await?.outputs["render"]["name"],
         "Rust"
     );
+    assert_eq!(session.summary().verification_status, "passed");
+    let calls_before_revision = session.summary().calls.len();
     session.answer("name", json!("Wasm"))?;
+    assert_eq!(session.summary().verification_status, "not_run");
+    assert_eq!(
+        session.summary().calls.len(),
+        calls_before_revision,
+        "answer changes do not undo past calls"
+    );
     assert_eq!(
         session.advance(&engine).await?.outputs["render"]["name"],
         "Wasm"

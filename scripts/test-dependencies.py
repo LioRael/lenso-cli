@@ -84,7 +84,7 @@ try:
         assert not (projects[0] / "greeting.txt").exists()
         shutil.rmtree(cache)
         result = run(projects[0], "greet", "--offline", expected=1)
-        assert "offline" in result["message"]
+        assert result["code"] == "dependency_unavailable" and result["details"]["offline"]
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             results = list(pool.map(lambda _: run(projects[0], "greet"), range(4)))
         assert all(result["status"] == "needs_input" for result in results)

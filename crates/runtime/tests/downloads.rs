@@ -230,15 +230,17 @@ fn remote_first_execution_shares_cache_recovers_corruption_and_keeps_pins_offlin
     assert!(
         invoke(first.path(), &offline)
             .unwrap_err()
-            .to_string()
-            .contains("offline")
+            .diagnostic()
+            .code()
+            == lenso_cli::DiagnosticCode::DependencyUnavailable
     );
     server.set("/guest.wasm", b"wrong digest".to_vec());
     assert!(
         invoke(first.path(), &options)
             .unwrap_err()
-            .to_string()
-            .contains("locked source module changed")
+            .diagnostic()
+            .code()
+            == lenso_cli::DiagnosticCode::IntegrityMismatch
     );
     assert!(
         !blob.exists(),

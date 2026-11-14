@@ -1,5 +1,68 @@
 # Automatic dependency preparation and JSON ABI v1
 
+## Static command discovery (source development)
+
+The source checkout supports `lenso help --json` to list registered aliases and
+`lenso help app run --json` to describe an installed command or group. The same
+interface works in embedded CLIs, for example `acme help hello --json`. No handler
+is called. Human `help` and `--help` retain terminal help; `--help --json` still
+prints Clap help text. Only the explicit `help ... --json` form returns a catalog.
+The generic `run` and `help` frontend controls are not workflow aliases and are
+not catalog entries. An unknown or uninstalled path fails rather than returning
+an empty successful selection.
+
+Catalogs use `type: command_catalog`, `schema_version: 1`, and a `commands` array
+sorted by command path. Each entry contains the original `CommandSpec` fields,
+`provider_version`, `cli_input_schema`, and `contract`. The CLI schema is derived
+from existing Text/Flag/List arguments: string, boolean, and an array of strings
+with `minItems: 1`. All CLI options remain optional; absence is passed through to
+the workflow rather than inventing a default or required input. Workflow-level
+required/default/enum constraints belong in the optional declared input schema.
+Additional `--input` keys remain accepted, so the derived CLI schema does not
+set `additionalProperties: false`.
+
+`Cli::describe(path)` exposes the same catalog without a terminal or an installed
+`lenso` executable. `Cli::contract(workflow, contract)` attaches an optional
+`CommandContract` to a registered workflow; aliases share that declaration.
+`Cli::provider_version(provider, version)` records a native provider's version.
+Old `Argument` and `CommandSpec` Rust literals and serialized manifests remain
+valid without adding fields.
+
+Extensions may declare a `contracts` map keyed by an owned workflow ID:
+
+```toml
+[contracts."example/check"]
+input_schema = { type = "object", properties = { mode = { type = "string", enum = ["fast", "full"] } } }
+capabilities = ["host.reads"]
+effects = []
+verification = ["Check the returned state against the project's expected state"]
+```
+
+Other optional fields are `output_schema` and `questions` (the existing Question
+shape). Omitted contract fields serialize as `null`, meaning unknown; `[]`
+explicitly declares none. A wholly absent contract is also `null`. Provider
+versions come from resolved extension metadata, or remain `null` for native
+commands whose host has not declared a version. Contracts referencing a workflow
+outside the extension's definitions are rejected before publishing a lock or
+changing the host registry.
+
+Contracts are public author declarations, not sandbox proofs, schema validators,
+permission grants, or evidence of verification. Do not include secrets, secret
+defaults, environment values, credential URLs, or private diagnostic data in them.
+Discovery does not serialize host grants, extension options, answers, or credential
+bindings. Execution and its independent authorization checks are unchanged.
+
+Machine help uses the existing read-only discovery load mode: it respects aliases,
+disabled commands, `--project`, `--offline`, and `--locked`, and does not write a
+project lock or hydrate/execute Wasm. First discovery may resolve source metadata
+under the existing network policy. Warm locked discovery can run without the
+original module or manifest files. This additive manifest field is implemented
+in the source checkout only; older releases reject unknown fields. Publish a
+compatible Host release and declare its minimum version before distributing a
+manifest using `contracts`.
+
+## Dependency preparation
+
 `lenso` reads `<project>/lenso.toml` for explicit sources and project policy, and
 `<project>/lenso.lock` for pinned command/workflow/handler metadata. An explicit
 `--project` is exact; otherwise the nearest ancestor with `lenso.toml` is selected.
@@ -260,12 +323,134 @@ require a compatible Host version.
 
 The CLI emits one JSON object on stdout per invocation with `--json`. Result
 objects use `type: result`, `status: complete|needs_input`, a workflow ID, completed
-outputs, and an optional question. Errors use `type: diagnostic`, `status: failed`,
-and a message. Help and version retain normal text output. Process logs go to
+outputs, and an optional question. Source development also adds an `execution`
+receipt and `code: missing_input` on unanswered questions. Errors use
+`type: diagnostic`, `status: failed`, a public message, and the structured fields
+described below. Help and version retain normal text output. Process logs go to
 stderr. Exit codes: 0 complete, 2 missing input/parser error, 1 host/extension failure,
 130 cancellation before application or from a standalone process, or the standalone
 child's nonzero code (clamped to 1..255). Compound project application failures use 1
 and include partial-application context.
+
+## Public diagnostics (source development)
+
+Diagnostics retain `type`, `status`, and `message`, and add `code`, `details`,
+`retryable`, and `recovery`. Retry safety and recovery can be `null` when unknown.
+Cancellation retains `status: failed` for compatibility and uses `code: cancelled`;
+its execution receipt separately says `cancelled`. Consumers must use codes and
+typed details rather than match message wording. Additional fields/codes can be
+introduced; handle unfamiliar codes without implicitly retrying.
+
+| Code | Public details / next action |
+| --- | --- |
+| `invalid_input` | Field/expected shape, JSON line/column, or parser category when known; supply corrected input |
+| `command_conflict` | Both alias paths/providers; disable or rename one alias |
+| `permission_denied` | Required capability name when known; explicitly review the project grant |
+| `invalid_plan` | Correct unsafe paths, limits, or the approval digest and review again |
+| `stale_plan` | Changed path or repository evidence; create and review a fresh plan |
+| `partial_failure` | Plan digest/files/command indices or release ID/verified uploads, with a safe nested cause; inspect before recovery |
+| `process_spawn_failed` | OS error kind; check the granted executable and working directory |
+| `process_failed` | Actual child `exit_code`; retry safety is unknown |
+| `process_timeout` | Declared process lifetime exceeded; inspect cleanup and completed effects |
+| `verification_failed` | Actual readiness/health evidence did not meet its declaration |
+| `cancelled` | Explicit user cancellation; no automatic retry |
+| `wasm_timeout` | Host deadline and cancellation request; inspect effects before retrying |
+| `wasm_fuel_exhausted` | Actual instruction-budget exhaustion; inspect the extension and limits |
+| `wasm_failed` | Other Wasm failure without a safe, typed diagnosis |
+| `invalid_response` | Invalid Wasm outcome protocol |
+| `dependency_unavailable` | Offline policy when applicable; prepare or restore the dependency |
+| `integrity_mismatch` | Artifact kind; restore pinned bytes or explicitly review an update |
+| `io_error`, `operation_failed` | Safe OS kind or operation/status when known |
+
+The Host never derives a code from error message substrings. Host-function errors
+retain their typed diagnosis through Wasm. Fuel classification reads the engine's
+consumption counter. A Host-owned deadline starts after plugin initialization,
+requests Extism cancellation, and waits for the call worker before returning a
+timeout. Existing HTTP callback time limits still apply; this does not promise
+immediate interruption of a synchronous Host callback or bound compilation time.
+
+`Diagnostic::new`, `with_details`, `with_retryable`, and `with_recovery` let trusted
+native authors declare public errors. Authors must only add public field names,
+capability names and receipts, never input values, expanded environment values,
+authentication headers, credential URLs, or internal exception/cause strings.
+Existing `Error::Invalid/Operation/Permission/Io/Json` values still work; their
+arbitrary strings are deliberately excluded from JSON and terminal diagnostics,
+including `--debug`. Legacy plugin error strings therefore get a conservative
+category and generic message instead of exposing a guest error or stack trace.
+Important native paths provide explicit fields; undeclared guest failures require
+extension inspection. This intentionally changes message wording, not envelope
+field names or established execution exit codes.
+
+`Error::diagnostic()` provides that public projection. Session failures wrap the
+original error in `Error::Execution` with a receipt. Rust callers can inspect its
+`source`; `Error::exit_code()` preserves standalone child status and cancellation
+through wrappers. A compound file/command application remains exit 1, with the
+underlying child status or cancellation in `details.cause`. No global rollback or
+cross-process exactly-once execution is implied.
+
+These guarantees concern diagnostics generated by the Host. Successful outputs,
+questions, native receipt projections, and external process logs remain authored
+public content; trusted authors must not put secrets in those streams either.
+
+## Result summaries and same-invocation reports (source development)
+
+Default `--json` continues to include the original `outputs`. Use
+`--json --summary` to omit step payloads and add `mode: summary`,
+`schema_version: 1`. Both forms keep type/status/workflow and an `execution`
+receipt containing an invocation ID, completed steps, actual handler/hook calls,
+and the outcomes of declared validation hooks. The ID is for correlation, not a
+persistent session address or an idempotency key. Answer revisions reset current
+validation outcomes while retaining past call receipts; they do not undo effects.
+`summary` and `report` are now reserved global argument names; extension arguments
+with either name must be renamed rather than shadowing a Host control.
+
+`verification_status` aggregates only the listed `hooks.validate` calls:
+`passed`, `failed`, `not_run`, or `not_declared`. Ordinary steps named `verify`
+are not inferred to be validators. A successful handler/command is not proof of
+application health. `application_verification: not_reported` states that limit,
+even when a plan-validation hook passed. Check the listed handlers and declared
+verification instructions for the specific coverage; run application checks when
+required. A failed validation records the preceding successful primary call and
+any later checks that did not run.
+
+Trusted native adapters can register `Engine::summarizer(handler, projection)` to
+provide small `StepSummary` receipts. The engine does not guess effects from
+arbitrary JSON keys. Missing receipts mean unknown. Project plan/diff receipts
+include their digest and declare no application changes; apply receipts contain
+actual affected paths and completed command counts. Partial application errors
+carry completed paths and command indices against the reviewed plan, without
+copying command arguments or file contents into diagnostics.
+
+Use `--report NEW_FILE` alongside JSON to save the full result or execution-failure
+envelope, execution receipt, and completed-step outputs from the same invocation:
+
+```sh
+lenso greet --name Rust --yes --json --summary --report execution.json
+cat execution.json
+```
+
+Here `greet` is supplied by the [M0 fixture](../examples/m0), not a Core command.
+`report` in stdout points to the actual saved file. Relative paths resolve from
+the invocation directory. The Host reserves a new file before running handlers,
+refuses existing paths/symlinks, and uses mode 0600 on Unix. It does not create
+parent directories. A pre-execution error can leave the reserved file empty.
+A post-execution write failure returns `io_error` with `report_saved: false`,
+the observed outcome and execution receipt; inspect effects before retrying.
+The file can contain partial JSON if writing failed. Saving a report is explicit
+because full outputs may contain large source/diffs or authored private data.
+Without `--report`, omitted payloads are not persisted and cannot be retrieved by
+the execution ID; do not rerun a side-effecting command merely to inspect them.
+
+Summary mode preserves the full pending question, including approval review
+content. It reduces output payloads, not the information needed for consent.
+`--yes` still answers only explicit confirmations, never selections or capability
+grants. Error diagnostics always retain safe partial-progress information in
+either output mode.
+
+Run `python3 scripts/build-demo.py` and `python3 scripts/test-agent-protocol.py`
+after building the CLI for the real Wasm/file-plan compatibility and byte-size
+comparison. Measurements are recorded in [implementation status](agent-native-status.md);
+this protocol makes no universal token-cost or fixed percentage claim.
 
 ## Native terminal adapter
 
@@ -287,7 +472,8 @@ not answer select/text/multiselect questions.
 `--color auto|always|never` controls human output and help. Auto respects `NO_COLOR`;
 explicit always overrides it. JSON mode never adds host styles or progress even
 with `--color always`; it retains one result/diagnostic on stdout and child logs on
-stderr. Existing ABI v1 context fields and result documents are unchanged.
+stderr. ABI v1 context/outcome fields and existing result fields are retained;
+source development adds the receipts and diagnostics described above.
 
 GitHub Release transport, author package metadata and current limits are documented
 in [GitHub distribution](github-distribution.md). Generic HTTP redirect rules are

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "extensions/project", "examples/acme-cli"]
+members = ["crates/*", "extensions/project", "extensions/ops", "examples/acme-cli"]
 exclude = ["examples/wasm-greeting", "extensions/shadcn", "extensions/code"]
 
 [workspace.package]
@@ -16,10 +16,11 @@ readme = "README.md"
 lenso-cli = { path = "crates/framework", version = "1.1.2" }
 lenso-runtime = { path = "crates/runtime", version = "0.2.4" }
 lenso-project = { path = "extensions/project", version = "0.1.2" }
+lenso-ops = { path = "extensions/ops", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "signal", "io-util", "sync"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "signal", "io-util", "sync", "time", "net"] }
 sha2 = "0.10"
 tempfile = "3"
 toml = "1"

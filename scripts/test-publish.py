@@ -199,21 +199,21 @@ try:
         assert len(requests)==count and not mutations
     manifest.write_text(original)
     tags['code-v0.1.0']=B
-    mismatch=run(author,*common,'--yes',expected=1);assert 'different commit' in mismatch['message'] and not mutations
+    mismatch=run(author,*common,'--yes',expected=1);assert mismatch['code']=='stale_plan' and mismatch['details']['field']=='release.tag' and not mutations
     tags.clear()
     fail_upload='extension.toml'
     partial=run(author,*common,'--yes',expected=1)
-    assert 'preserved' in partial['message'] and 'verified uploads in this attempt: 1' in partial['message']
+    assert partial['code']=='partial_failure' and partial['details']['verified_uploads']==1 and partial['details']['release_id']
     release=next(iter(releases.values()));assert release['draft'] and len(assets)==1
     uploaded_name=next(iter(assets.values()))['name'];asset_before=copy.deepcopy(next(iter(assets.values())))
     # A draft created for another commit cannot be silently promoted for this target.
     before=list(mutations);release['target_commitish']=B
     mismatch=run(author,*common,'--yes',expected=1)
-    assert 'target differs' in mismatch['message'] and mutations==before
+    assert mismatch['code']=='stale_plan' and mismatch['details']['field']=='release.target_commitish' and mutations==before
     release['target_commitish']=A
     release['prerelease']=True
     mismatch=run(author,*common,'--yes',expected=1)
-    assert 'prerelease flag' in mismatch['message'] and mutations==before
+    assert mismatch['code']=='invalid_input' and mismatch['details']['field']=='release.prerelease' and mutations==before
     release['prerelease']=False
     # Unexpected draft contents are never deleted/replaced.
     foreign={'id':999,'release':release['id'],'name':'unrelated.txt','body':b'keep','size':4,'state':'uploaded'};assets[999]=foreign
@@ -246,13 +246,13 @@ try:
     annotated=False;evil_upload=True
     manifest.write_text(original.replace('version = "0.1.0"','version = "0.1.2"'))
     unsafe=run(author,*common,'--yes',expected=1)
-    assert 'outside the approved' in unsafe['message']
+    assert unsafe['code']=='partial_failure' and unsafe['details']['cause']['details']['restriction']=='approved_upload_destination'
     draft=[r for r in releases.values() if r['tag_name']=='code-v0.1.2'][0]
     assert draft['draft'] and not [a for a in assets.values() if a['release']==draft['id']]
     evil_upload=False
     redirect_upload=True
     redirected=run(author,*common,'--yes',expected=1)
-    assert '307' in redirected['message'] and all(path!='/unexpected-upload' for _,path in requests)
+    assert redirected['code']=='partial_failure' and redirected['details']['cause']['details']['status']==307 and all(path!='/unexpected-upload' for _,path in requests)
     assert not [a for a in assets.values() if a['release']==draft['id']]
     redirect_upload=False
     ready=run(author,*common,'--draft','--yes')['outputs']['main']

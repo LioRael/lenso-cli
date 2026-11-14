@@ -86,8 +86,8 @@ for name, settings in [('default', {}), ('explicit-official', {'repo': 'LioRael/
     save(project / 'lenso.toml', cfg)
     before = (project / 'lenso.toml').read_bytes()
     lock_before = (project / 'lenso.lock').read_bytes()
-    diagnostic = call('code', 'preview', 'auth', '--registry', 'official', '--locked', '--offline', expected=1)['message']
-    assert 'lenso ext configure code' in diagnostic and 'backtrace' not in diagnostic
+    diagnostic = call('code', 'preview', 'auth', '--registry', 'official', '--locked', '--offline', expected=1)
+    assert diagnostic['code'] == 'wasm_failed' and diagnostic['recovery']['kind'] == 'inspect_extension'
     assert (project / 'lenso.toml').read_bytes() == before and (project / 'lenso.lock').read_bytes() == lock_before
     pending = call('ext', 'configure', 'code', expected=2)
     assert (project / 'lenso.toml').read_bytes() == before
@@ -117,8 +117,8 @@ for name, settings in [('default', {}), ('explicit-official', {'repo': 'LioRael/
     call('ext', 'add', source, '--id', 'code', '--yes', *credentials)
     upgraded = code(config())
     assert upgraded['options'] == installed['options']
-    diagnostic = call('code', 'preview', 'auth', '--registry', 'official', '--locked', '--offline', expected=1)['message']
-    assert 'lenso ext configure code' in diagnostic
+    diagnostic = call('code', 'preview', 'auth', '--registry', 'official', '--locked', '--offline', expected=1)
+    assert diagnostic['code'] == 'wasm_failed' and diagnostic['recovery']['kind'] == 'inspect_extension'
     call('ext', 'configure', 'code', '--yes')
     assert code(config())['options'] == expected['options']
     assert upgraded['sources'] == expected['sources']

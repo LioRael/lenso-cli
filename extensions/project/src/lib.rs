@@ -7,7 +7,10 @@ mod plan;
 
 pub use plan::{FileChange, Plan, PlanError};
 
-use lenso_cli::{Context, Engine, Error, Outcome, Question, QuestionKind};
+use lenso_cli::{
+    Context, Diagnostic, DiagnosticCode, Engine, Error, Outcome, Question, QuestionKind,
+    StepSummary,
+};
 
 /// Register optional `project/plan`, `project/diff`, and `project/apply` handlers.
 ///
@@ -50,9 +53,19 @@ pub fn register(engine: &mut Engine) -> Result<(), Error> {
         }
         check_reads_grant(&ctx, evidence.reads.keys().map(std::path::PathBuf::as_path))?;
         let finalizations: Vec<FileChange> = ctx.steps.values().filter_map(|output|output.get("finalizations")).map(|value|serde_json::from_value::<Vec<FileChange>>(value.clone())).collect::<Result<Vec<_>,_>>()?.into_iter().flatten().collect();
-        let plan = Plan::build_operations(&ctx.project, files, deletions).and_then(|plan|plan.with_finalizations(finalizations)).and_then(|p| p.with_evidence(evidence)).map_err(|e| Error::Operation(e.to_string()))?.with_commands(commands);
-        Ok(Outcome::complete(serde_json::json!({"id": plan.id().map_err(|e| Error::Operation(e.to_string()))?, "diff":plan.preview(), "plan":plan})))
+        let plan = Plan::build_operations(&ctx.project, files, deletions).and_then(|plan|plan.with_finalizations(finalizations)).and_then(|p| p.with_evidence(evidence)).map_err(plan_error)?.with_commands(commands);
+        Ok(Outcome::complete(serde_json::json!({"id": plan.id().map_err(plan_error)?, "diff":plan.preview(), "plan":plan})))
     })?;
+        engine.summarizer(handler, |output| {
+            Some(StepSummary {
+                affected: Some(vec![]),
+                identifiers: std::collections::BTreeMap::from([(
+                    "plan_id".into(),
+                    output.get("id")?.as_str()?.into(),
+                )]),
+                operations: Some(0),
+            })
+        })?;
     }
     engine.handler("project/apply", |ctx: Context| async move {
         let sources: Vec<_> = ctx.steps.values().filter_map(|v| v.get("plan")).collect();
@@ -65,13 +78,13 @@ pub fn register(engine: &mut Engine) -> Result<(), Error> {
         check_files_grant(&ctx, plan.paths())?;
         check_reads_grant(&ctx, plan.reads())?;
         let granted: Vec<lenso_runtime::ProcessSpec> = ctx.capabilities.get("host.processes").cloned().map(serde_json::from_value).transpose()?.unwrap_or_default();
-        for command in plan.commands() { if !granted.contains(command) { return Err(Error::Permission(format!("process {} {:?}", command.program, command.args))); } }
+        for command in plan.commands() { if !granted.contains(command) { return Err(Diagnostic::missing_capability("host.processes").into()); } }
         if plan.project() != ctx.project {
             return Err(Error::Permission(
                 "plan belongs to a different project".into(),
             ));
         }
-        let id = plan.id().map_err(|e| Error::Operation(e.to_string()))?;
+        let id = plan.id().map_err(plan_error)?;
         let question_id = format!("apply:{id}");
         if plan.paths().next().is_some() { match ctx.answers.get(&question_id) {
             None => return Ok(Outcome::NeedsInput {
@@ -94,15 +107,54 @@ pub fn register(engine: &mut Engine) -> Result<(), Error> {
                 Some(_) => return Err(Error::Invalid("command approval must be a boolean".into())),
             }
         }
-        let completed = plan.apply(&id).map_err(|e| Error::Operation(e.to_string()))?;
+        let completed = plan.apply(&id).map_err(plan_error)?;
         let mut executed = Vec::new();
         for command in plan.commands() {
-            if let Err(error) = command.run(ctx.clone()).await { return Err(Error::Operation(format!("files already applied: {completed:?}; commands completed: {executed:?}; failed command {} {:?}: {error}; inspect files and lockfile before retrying", command.program, command.args))); }
+            if let Err(error) = command.run(ctx.clone()).await {
+                return Err(Diagnostic::new(DiagnosticCode::PartialFailure)
+                    .with_details(serde_json::json!({"plan_id":id,"completed_files":completed,
+                        "completed_commands":(0..executed.len()).collect::<Vec<_>>(),"failed_command_index":executed.len(),
+                        "cause":error.diagnostic(),"partial_side_effects":true}))
+                    .with_retryable(false).with_recovery("inspect_partial", "Inspect changed files and completed command indices against the reviewed plan before creating another plan.").into());
+            }
             executed.push(command.clone());
         }
-        let finalized = plan.finalize(&id).map_err(|error|Error::Operation(format!("files already applied: {completed:?}; commands completed: {executed:?}; completion failed: {error}")))?;
+        let finalized = plan.finalize(&id).map_err(|error| Diagnostic::new(DiagnosticCode::PartialFailure)
+            .with_details(serde_json::json!({"plan_id":id,"completed_files":completed,
+                "completed_commands":(0..executed.len()).collect::<Vec<_>>(),"completion":plan_error(error).diagnostic(),"partial_side_effects":true}))
+            .with_retryable(false).with_recovery("inspect_partial", "Inspect prepared files and completion records before planning recovery."))?;
         Ok(Outcome::complete(serde_json::json!({"applied":completed,"finalized":finalized,"commands":executed,"plan_id":id})))
+    })?;
+    engine.summarizer("project/apply", |output| {
+        Some(StepSummary {
+            affected: Some(serde_json::from_value(output.get("applied")?.clone()).ok()?),
+            identifiers: std::collections::BTreeMap::from([(
+                "plan_id".into(),
+                output.get("plan_id")?.as_str()?.into(),
+            )]),
+            operations: Some(output.get("commands")?.as_array()?.len()),
+        })
     })
+}
+
+fn plan_error(error: PlanError) -> Error {
+    let diagnostic = match error {
+        PlanError::Stale(path) => Diagnostic::new(DiagnosticCode::StalePlan)
+            .with_details(serde_json::json!({"path":path,"plan_files_applied":false}))
+            .with_recovery("review_plan", "Re-read dependencies and create a new plan; the old approval is stale."),
+        PlanError::EvidenceChanged => Diagnostic::new(DiagnosticCode::StalePlan)
+            .with_details(serde_json::json!({"dependency_kind":"repository","plan_files_applied":false}))
+            .with_recovery("review_plan", "Refresh repository evidence and create a new plan; the old approval is stale."),
+        PlanError::Partial { completed, .. } => Diagnostic::new(DiagnosticCode::PartialFailure)
+            .with_details(serde_json::json!({"completed_files":completed,"partial_side_effects":true}))
+            .with_recovery("inspect_partial", "Inspect the completed paths before planning recovery; no global rollback occurred."),
+        PlanError::Invalid(_) => Diagnostic::new(DiagnosticCode::InvalidPlan)
+            .with_recovery("review_plan", "Correct the plan's paths, limits, or approval digest and review it again."),
+        PlanError::Io(error) => Diagnostic::new(DiagnosticCode::IoError)
+            .with_details(serde_json::json!({"kind":format!("{:?}",error.kind()),"partial_side_effects":"unknown"})),
+        PlanError::Json(_) => Diagnostic::new(DiagnosticCode::InvalidPlan),
+    };
+    diagnostic.with_retryable(false).into()
 }
 
 fn check_reads_grant<'a>(
@@ -125,7 +177,7 @@ fn check_reads_grant<'a>(
         .unwrap_or_default();
     for path in paths {
         if !lenso_runtime::path_allowed(path, &allowed, &roots) {
-            return Err(Error::Permission(format!("file read {}", path.display())));
+            return Err(Diagnostic::missing_capability("host.reads").into());
         }
     }
     Ok(())
@@ -151,10 +203,7 @@ fn check_files_grant<'a>(
         .unwrap_or_default();
     for path in paths {
         if !lenso_runtime::path_allowed(path, &allowed, &roots) {
-            return Err(Error::Permission(format!(
-                "file destination {}",
-                path.display()
-            )));
+            return Err(Diagnostic::missing_capability("project.files").into());
         }
     }
     Ok(())

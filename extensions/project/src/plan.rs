@@ -52,6 +52,9 @@ pub enum PlanError {
     /// A read or destination changed after planning.
     #[error("project changed after review: {0}")]
     Stale(PathBuf),
+    /// Repository provenance changed or became unavailable after planning.
+    #[error("repository evidence changed after review")]
+    EvidenceChanged,
     /// A file operation failed before application.
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -471,7 +474,7 @@ impl Plan {
 
     fn check_reads(&self) -> Result<(), PlanError> {
         lenso_runtime::verify_resource_pins(&self.project, &self.evidence.resources)
-            .map_err(|e| PlanError::Invalid(e.to_string()))?;
+            .map_err(|_| PlanError::EvidenceChanged)?;
         for (path, expected) in &self.evidence.reads {
             let absolute = lenso_runtime::project_path(&self.project, path)
                 .map_err(|e| PlanError::Invalid(e.to_string()))?;

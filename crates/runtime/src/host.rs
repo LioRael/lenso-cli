@@ -111,10 +111,7 @@ impl Host {
 
     pub fn read(&mut self, relative: &Path) -> Result<Option<String>, Error> {
         if !path_allowed(relative, &self.reads, &self.read_roots) {
-            return Err(Error::Permission(format!(
-                "file read {}",
-                relative.display()
-            )));
+            return Err(lenso_cli::Diagnostic::missing_capability("host.reads").into());
         }
         let path = project_path(&self.project, relative)?;
         let content = match std::fs::File::open(path) {
@@ -168,9 +165,8 @@ impl Host {
         evidence_key: &str,
         max: usize,
     ) -> Result<String, Error> {
-        let safe_url = public_url(permission_url);
         if !http_allowed(permission_url, &self.http) {
-            return Err(Error::Permission(format!("HTTP GET {safe_url}")));
+            return Err(lenso_cli::Diagnostic::missing_capability("host.http").into());
         }
         self.requests += 1;
         if self.requests > 256 {
@@ -179,7 +175,9 @@ impl Host {
         let response = request
             .send()
             .and_then(reqwest::blocking::Response::error_for_status)
-            .map_err(|e| Error::Operation(format!("HTTP GET {safe_url}: {}", e.without_url())))?;
+            .map_err(|error| lenso_cli::Diagnostic::new(lenso_cli::DiagnosticCode::OperationFailed)
+                .with_details(serde_json::json!({"operation":"http_get","status":error.status().map(|status|status.as_u16())}))
+                .with_recovery("check_http", "Check the granted endpoint, connectivity and credential configuration before retrying."))?;
         if response.status().is_redirection() {
             return Err(Error::Permission("HTTP redirects are not followed".into()));
         }
@@ -246,7 +244,9 @@ pub fn project_path(project: &Path, relative: &Path) -> Result<PathBuf, Error> {
     Ok(path)
 }
 
-pub(crate) fn http_allowed(url: &str, grants: &[String]) -> bool {
+/// Check an explicit HTTP origin/path-prefix grant without granting credentials or redirects.
+#[must_use]
+pub fn http_allowed(url: &str, grants: &[String]) -> bool {
     let Ok(url) = reqwest::Url::parse(url) else {
         return false;
     };
@@ -298,6 +298,8 @@ fn transport_allowed(url: &reqwest::Url) -> bool {
 pub(crate) fn public_url(value: &str) -> String {
     match reqwest::Url::parse(value) {
         Ok(mut url) => {
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
             url.set_query(None);
             url.set_fragment(None);
             url.to_string()

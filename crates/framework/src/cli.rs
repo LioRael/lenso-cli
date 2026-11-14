@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::terminal::{ColorMode, Prompt, Terminal, UiOptions};
+use crate::{CommandCatalog, CommandContract, CommandDescription, Diagnostic, DiagnosticCode};
 use crate::{Context, Engine, Error, EventSink, Outcome, Question, QuestionKind, Step, Workflow};
 
 /// Argument value shape exposed by a dynamically installed command.
@@ -63,6 +64,8 @@ pub struct Cli {
     name: String,
     engine: Engine,
     commands: Vec<CommandSpec>,
+    contracts: BTreeMap<String, CommandContract>,
+    provider_versions: BTreeMap<String, String>,
 }
 
 impl Cli {
@@ -73,12 +76,83 @@ impl Cli {
             name: name.into(),
             engine: Engine::new(),
             commands: Vec::new(),
+            contracts: BTreeMap::new(),
+            provider_versions: BTreeMap::new(),
         }
     }
 
     /// Access the registry for trusted native or sandboxed runtime adapters.
     pub fn engine_mut(&mut self) -> &mut Engine {
         &mut self.engine
+    }
+
+    /// Attach optional static declarations to a registered workflow without changing its handler.
+    ///
+    /// # Errors
+    /// Rejects unknown workflows and duplicate declarations.
+    pub fn contract(&mut self, workflow: &str, contract: CommandContract) -> Result<(), Error> {
+        if !self.engine.workflows().any(|id| id == workflow) {
+            return Err(Error::Invalid(format!("unknown workflow: {workflow}")));
+        }
+        if self.contracts.contains_key(workflow) {
+            return Err(Error::Invalid(format!("duplicate contract: {workflow}")));
+        }
+        self.contracts.insert(workflow.into(), contract);
+        Ok(())
+    }
+
+    /// Declare a provider version without exposing its installation policy or credential bindings.
+    ///
+    /// # Errors
+    /// Rejects empty identities and inconsistent versions for the same provider.
+    pub fn provider_version(&mut self, provider: &str, version: &str) -> Result<(), Error> {
+        if provider.is_empty()
+            || version.is_empty()
+            || self
+                .provider_versions
+                .get(provider)
+                .is_some_and(|old| old != version)
+        {
+            return Err(Error::Invalid(format!(
+                "invalid or conflicting provider version: {provider}"
+            )));
+        }
+        self.provider_versions
+            .insert(provider.into(), version.into());
+        Ok(())
+    }
+
+    /// Describe aliases beneath a path without invoking handlers or reading execution contexts.
+    ///
+    /// # Errors
+    /// Rejects paths with no registered aliases; the empty path returns the whole catalog.
+    pub fn describe(&self, path: &[String]) -> Result<CommandCatalog<'_>, Error> {
+        let mut commands: Vec<_> = self
+            .commands
+            .iter()
+            .filter(|spec| spec.path.starts_with(path))
+            .map(|spec| CommandDescription {
+                command: spec,
+                provider_version: self
+                    .provider_versions
+                    .get(&spec.provider)
+                    .map(String::as_str),
+                cli_input_schema: crate::description::input_schema(spec),
+                contract: self.contracts.get(&spec.workflow),
+            })
+            .collect();
+        if !path.is_empty() && commands.is_empty() {
+            return Err(Error::Invalid(format!(
+                "unknown command path: {}",
+                path.join(" ")
+            )));
+        }
+        commands.sort_by(|a, b| a.command.path.cmp(&b.command.path));
+        Ok(CommandCatalog {
+            r#type: "command_catalog",
+            schema_version: 1,
+            commands,
+        })
     }
 
     /// Register a command alias for an existing workflow.
@@ -99,6 +173,8 @@ impl Cli {
             "no-interactive",
             "offline",
             "locked",
+            "summary",
+            "report",
         ];
         let valid = |s: &str| {
             !s.is_empty()
@@ -139,13 +215,17 @@ impl Cli {
             .iter()
             .find(|c| c.path.starts_with(&spec.path) || spec.path.starts_with(&c.path))
         {
-            return Err(Error::Invalid(format!(
-                "command conflict: {} ({}) and {} ({})",
-                other.path.join(" "),
-                other.provider,
-                spec.path.join(" "),
-                spec.provider
-            )));
+            return Err(Diagnostic::new(DiagnosticCode::CommandConflict)
+                .with_details(serde_json::json!({"commands":[
+                    {"path":other.path,"provider":other.provider},
+                    {"path":spec.path,"provider":spec.provider}
+                ]}))
+                .with_retryable(false)
+                .with_recovery(
+                    "configure_alias",
+                    "Disable or rename one conflicting alias in the project declaration.",
+                )
+                .into());
         }
         self.commands.push(spec);
         Ok(())
@@ -209,7 +289,7 @@ impl Cli {
     pub fn command_from_args(args: &[OsString]) -> Option<&str> {
         let mut args = args.iter().skip(1);
         while let Some(arg) = args.next() {
-            if ["--project", "--input", "--answers", "--color"]
+            if ["--project", "--input", "--answers", "--color", "--report"]
                 .iter()
                 .any(|flag| arg == *flag)
             {
@@ -261,11 +341,7 @@ impl Cli {
             Ok(code) => code,
             Err(error) => {
                 terminal.diagnostic(&error);
-                match error {
-                    Error::Cancelled => 130,
-                    Error::ProcessExit(code) => code.clamp(1, 255),
-                    _ => 1,
-                }
+                error.exit_code()
             }
         }
     }
@@ -277,6 +353,7 @@ impl Cli {
 
     fn parser(&self, options: UiOptions) -> Command {
         let mut parser = Command::new(self.name.clone())
+            .disable_help_subcommand(true)
             .version(env!("CARGO_PKG_VERSION"))
             .color(
                 if options.json
@@ -342,6 +419,22 @@ impl Cli {
                     .help("Return a JSON result; never prompt"),
             )
             .arg(
+                Arg::new("summary")
+                    .long("summary")
+                    .global(true)
+                    .action(ArgAction::SetTrue)
+                    .requires("json")
+                    .help("Omit full step outputs and return an execution summary"),
+            )
+            .arg(
+                Arg::new("report")
+                    .long("report")
+                    .global(true)
+                    .value_name("NEW_FILE")
+                    .requires("json")
+                    .help("Save this invocation's full JSON report to a new file"),
+            )
+            .arg(
                 Arg::new("answers")
                     .long("answers")
                     .global(true)
@@ -360,6 +453,11 @@ impl Cli {
                     .global(true)
                     .value_name("JSON")
                     .help("Workflow input object"),
+            )
+            .subcommand(
+                Command::new("help")
+                    .about("Show help or a static command catalog with --json")
+                    .arg(Arg::new("command").num_args(0..)),
             )
             .subcommand(
                 Command::new("run")
@@ -416,8 +514,19 @@ impl Cli {
         let matches = match parser.clone().try_get_matches_from(&args) {
             Ok(matches) => matches,
             Err(error) => {
-                if json && error.exit_code() != 0 {
-                    terminal.diagnostic(&Error::Invalid(error.to_string()));
+                if error.exit_code() != 0 {
+                    terminal.diagnostic(
+                        &Diagnostic::new(DiagnosticCode::InvalidInput)
+                            .with_details(
+                                serde_json::json!({"parser_kind":format!("{:?}",error.kind())}),
+                            )
+                            .with_retryable(false)
+                            .with_recovery(
+                                "query_help",
+                                "Query help for the command's accepted arguments.",
+                            )
+                            .into(),
+                    );
                     return Ok(error.exit_code());
                 }
                 error.print()?;
@@ -429,14 +538,50 @@ impl Cli {
             println!();
             return Ok(0);
         };
+        if name == "help" {
+            let path: Vec<String> = sub
+                .get_many::<String>("command")
+                .map(|parts| parts.cloned().collect())
+                .unwrap_or_default();
+            if json {
+                println!("{}", serde_json::to_string(&self.describe(&path)?)?);
+            } else {
+                let mut target = &mut parser;
+                for part in &path {
+                    target = target
+                        .find_subcommand_mut(part)
+                        .ok_or_else(|| Error::Invalid(format!("unknown command: {part}")))?;
+                }
+                target.print_long_help()?;
+                println!();
+            }
+            return Ok(0);
+        }
+        let report_file = matches
+            .get_one::<String>("report")
+            .map(|path| {
+                let mut options = std::fs::OpenOptions::new();
+                options.write(true).create_new(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600);
+                }
+                let file = options.open(path)?;
+                Ok::<_, std::io::Error>((std::fs::canonicalize(path)?, file))
+            })
+            .transpose()?;
+        let mut report_file = report_file;
         let mut input: Value = matches
             .get_one::<String>("input")
             .map(|s| serde_json::from_str(s))
-            .transpose()?
+            .transpose().map_err(|error: serde_json::Error| Diagnostic::new(DiagnosticCode::InvalidInput)
+                .with_details(serde_json::json!({"field":"input","line":error.line(),"column":error.column()})))?
             .unwrap_or_else(|| serde_json::json!({}));
-        let object = input
-            .as_object_mut()
-            .ok_or_else(|| Error::Invalid("--input must be a JSON object".into()))?;
+        let object = input.as_object_mut().ok_or_else(|| {
+            Diagnostic::new(DiagnosticCode::InvalidInput)
+                .with_details(serde_json::json!({"field":"input","expected":"object"}))
+        })?;
         let workflow;
         if name == "run" {
             workflow = sub
@@ -477,7 +622,8 @@ impl Cli {
             }
         }
         let answers = if let Some(path) = matches.get_one::<String>("answers") {
-            serde_json::from_slice(&std::fs::read(path)?)?
+            serde_json::from_slice(&std::fs::read(path)?).map_err(|error| Diagnostic::new(DiagnosticCode::InvalidInput)
+                .with_details(serde_json::json!({"field":"answers","line":error.line(),"column":error.column()})))?
         } else {
             BTreeMap::new()
         };
@@ -498,16 +644,36 @@ impl Cli {
                         Some(event) = events.next() => terminal.event(event)?,
                         result = &mut advancing => {
                             while let Some(event) = events.try_next() { terminal.event(event)?; }
-                            break result?;
+                            break result;
                         }
                     }
+                }
+            };
+            let report = match report {
+                Ok(report) => report,
+                Err(error) => {
+                    if let Some((path, file)) = &mut report_file {
+                        let mut diagnostic =
+                            error.diagnostic().with_report(path.display().to_string());
+                        diagnostic.exit_code = error.exit_code();
+                        let mut full = serde_json::to_value(&diagnostic)?;
+                        full["outputs"] = serde_json::to_value(session.outputs())?;
+                        save_report(file, &full, &session.summary())?;
+                        return Err(diagnostic.into());
+                    }
+                    return Err(error);
                 }
             };
             terminal.stop();
             terminal.review(&report);
             let Some(question) = &report.question else {
                 if json {
-                    println!("{}", serde_json::to_string(&report)?);
+                    print_report(
+                        &report,
+                        &session.summary(),
+                        matches.get_flag("summary"),
+                        &mut report_file,
+                    )?;
                 } else {
                     terminal.complete(&report)?;
                 }
@@ -519,7 +685,12 @@ impl Cli {
             }
             if !interactive {
                 if json {
-                    println!("{}", serde_json::to_string(&report)?);
+                    print_report(
+                        &report,
+                        &session.summary(),
+                        matches.get_flag("summary"),
+                        &mut report_file,
+                    )?;
                 } else {
                     terminal.needs_input(question);
                 }
@@ -542,6 +713,50 @@ impl Cli {
     }
 }
 
+fn save_report(
+    file: &mut std::fs::File,
+    full: &Value,
+    execution: &crate::ExecutionSummary,
+) -> Result<(), Error> {
+    let result = serde_json::to_writer(&mut *file, full)
+        .map_err(Error::from)
+        .and_then(|()| file.sync_all().map_err(Error::from));
+    result.map_err(|error| Error::Execution {
+        source: Box::new(Diagnostic::new(DiagnosticCode::IoError)
+            .with_details(serde_json::json!({"report_saved":false,"operation_may_have_completed":true,"failure":error.diagnostic(),
+                "outcome":if full["type"] == "diagnostic" { serde_json::json!({"code":full["code"],"details":full["details"]}) } else { serde_json::json!({"status":full["status"]}) }}))
+            .with_retryable(false)
+            .with_recovery("inspect_execution", "Inspect the execution receipt before retrying; saving the report failed after execution.").into()),
+        summary: Box::new(execution.clone()),
+    })
+}
+
+fn print_report(
+    report: &crate::Report,
+    execution: &crate::ExecutionSummary,
+    summary: bool,
+    report_file: &mut Option<(PathBuf, std::fs::File)>,
+) -> Result<(), Error> {
+    let mut full = serde_json::to_value(report)?;
+    if report.status == crate::Status::NeedsInput {
+        full["code"] = serde_json::json!("missing_input");
+    }
+    full["execution"] = serde_json::to_value(execution)?;
+    if let Some((path, file)) = report_file {
+        full["report"] = serde_json::json!(path);
+        save_report(file, &full, execution)?;
+    }
+    if summary {
+        full.as_object_mut()
+            .expect("report serializes as an object")
+            .remove("outputs");
+        full["mode"] = serde_json::json!("summary");
+        full["schema_version"] = serde_json::json!(1);
+    }
+    println!("{}", serde_json::to_string(&full)?);
+    Ok(())
+}
+
 fn command_path<'a>(name: &str, matches: &'a ArgMatches) -> (Vec<String>, &'a ArgMatches) {
     let mut path = vec![name.to_owned()];
     let mut leaf = matches;
@@ -550,4 +765,37 @@ fn command_path<'a>(name: &str, matches: &'a ArgMatches) -> (Vec<String>, &'a Ar
         leaf = sub;
     }
     (path, leaf)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn report_write_failure_keeps_the_original_process_failure_and_receipt() {
+        let mut directory = std::fs::File::open(".").unwrap();
+        let execution = crate::ExecutionSummary {
+            id: "execution".into(),
+            workflow: "test".into(),
+            status: "failed".into(),
+            completed_steps: vec!["first".into()],
+            calls: vec![],
+            verification: vec![],
+            verification_status: "not_declared".into(),
+            application_verification: "not_reported",
+        };
+        let mut full = serde_json::to_value(Error::ProcessExit(7).diagnostic()).unwrap();
+        full["outputs"] = serde_json::json!({"private":"secret-output"});
+        let error = save_report(&mut directory, &full, &execution).unwrap_err();
+        let value = serde_json::to_value(error.diagnostic()).unwrap();
+        assert_eq!(value["code"], "io_error");
+        assert_eq!(value["details"]["report_saved"], false);
+        assert_eq!(value["details"]["outcome"]["code"], "process_failed");
+        assert_eq!(value["details"]["outcome"]["details"]["exit_code"], 7);
+        assert_eq!(
+            value["execution"]["completed_steps"],
+            serde_json::json!(["first"])
+        );
+        assert!(!value.to_string().contains("secret-output"));
+    }
 }

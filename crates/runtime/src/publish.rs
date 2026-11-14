@@ -6,7 +6,7 @@ use crate::{
     package::{ReleaseMetadata, archive_files, publication_conventions},
     project::{atomic_write, read_bounded},
 };
-use lenso_cli::{Context, Error, Outcome, Question, QuestionKind};
+use lenso_cli::{Context, Diagnostic, DiagnosticCode, Error, Outcome, Question, QuestionKind};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -235,9 +235,9 @@ fn verify_target(github: &Github, plan: &Prepared, release: &Release) -> Result<
     let version = semver::Version::parse(&plan.metadata.version)
         .map_err(|e| Error::Invalid(e.to_string()))?;
     if release.prerelease == version.pre.is_empty() {
-        return Err(Error::Invalid(
-            "release prerelease flag does not match the package version".into(),
-        ));
+        return Err(Diagnostic::new(DiagnosticCode::InvalidInput)
+            .with_details(json!({"field":"release.prerelease","reason":"version_mismatch"}))
+            .into());
     }
     let commit = match tag_commit(github, &plan.options.repository, &plan.tag)? {
         Some(commit) => commit,
@@ -247,10 +247,12 @@ fn verify_target(github: &Github, plan: &Prepared, release: &Release) -> Result<
         None => return Err(Error::Permission("published release tag is missing".into())),
     };
     if commit != plan.commit {
-        return Err(Error::Permission(
-            "release target differs from the approved commit; rerun with the original --target"
-                .into(),
-        ));
+        return Err(Diagnostic::new(DiagnosticCode::StalePlan)
+            .with_details(
+                json!({"field":"release.target_commitish","reason":"approved_commit_mismatch"}),
+            )
+            .with_retryable(false)
+            .into());
     }
     Ok(())
 }
@@ -339,9 +341,10 @@ fn upload_url(
         || url.query().is_some()
         || url.fragment().is_some()
     {
-        return Err(Error::Permission(
-            "GitHub upload URL is outside the approved repository/release".into(),
-        ));
+        return Err(Diagnostic::new(DiagnosticCode::PermissionDenied)
+            .with_details(json!({"restriction":"approved_upload_destination"}))
+            .with_retryable(false)
+            .into());
     }
     url.query_pairs_mut().append_pair("name", name);
     Ok(url)
@@ -423,9 +426,10 @@ fn prepare(ctx: &Context, options: Options) -> Result<Prepared, Error> {
     if tag_commit(&github, &plan.options.repository, &plan.tag)?
         .is_some_and(|commit| commit != plan.commit)
     {
-        return Err(Error::Permission(
-            "release tag points to a different commit; tags are never moved".into(),
-        ));
+        return Err(Diagnostic::new(DiagnosticCode::StalePlan)
+            .with_details(json!({"field":"release.tag","reason":"approved_commit_mismatch"}))
+            .with_retryable(false)
+            .into());
     }
     let discovery = target_commit(&github, &plan.options.repository, "HEAD")?;
     let descriptor = github.file(
@@ -648,7 +652,9 @@ fn execute(ctx: &Context, plan: &Prepared) -> Result<Value, Error> {
         );
         Ok(output)
     })();
-    operation.map_err(|error|Error::Operation(format!("GitHub release {} for {} / {} is preserved; verified uploads in this attempt: {uploaded}. Rerun publish to inspect/resume it. {error}",release.id,plan.options.repository.name(),plan.tag)))
+    operation.map_err(|error| Diagnostic::new(DiagnosticCode::PartialFailure)
+        .with_details(json!({"release_id":release.id,"verified_uploads":uploaded,"cause":error.diagnostic(),"partial_side_effects":true}))
+        .with_retryable(false).with_recovery("inspect_release", "Inspect the preserved release and verified uploads before explicitly resuming publication.").into())
 }
 fn output_file() -> Option<PathBuf> {
     in_actions()
@@ -749,11 +755,10 @@ pub(crate) async fn run(ctx: Context, load: LoadOptions) -> Result<Outcome, Erro
     let output = tokio::task::spawn_blocking(move || execute(&ctx, &plan))
         .await
         .map_err(|e| Error::Operation(e.to_string()))??;
-    actions_output(&output).map_err(|e| {
-        Error::Operation(format!(
-            "release {} is {}; GitHub Actions output failed: {e}",
-            output["release_id"], output["state"]
-        ))
+    actions_output(&output).map_err(|error| {
+        Diagnostic::new(DiagnosticCode::PartialFailure)
+            .with_details(json!({"release_id":output["release_id"],"state":output["state"],"cause":error.diagnostic(),"operation":"actions_output"}))
+            .with_retryable(false).with_recovery("inspect_release", "Inspect the actual release before retrying; writing the Actions output failed after publication.")
     })?;
     Ok(Outcome::complete(output))
 }
