@@ -205,3 +205,20 @@ separate consent, denied grants, user baselines, updates, module/profile sharing
 installer failure and retirement retry, safe removal, native lock creation,
 no-op replay and disabled npm lifecycle scripts. No official Registry or SDK is
 needed by this acceptance fixture.
+
+## Coordinating pinned SDK patch upgrades
+
+Code 0.3.7 adds an explicit `patch_overrides` map to each configured native target.
+It is opt-in and appears in the reviewed setup options. For example, an npm target
+can declare `{"manifest":"package.json","patch_overrides":{"@lenso/app":"0.1.2"}}`;
+a Cargo target can declare the same map for `lenso-app` beside its manifest.
+This permits an operator to align shared, pinned SDK requests while upgrading
+installed modules one at a time. The native receipt retains original owner requests;
+only the proposed manifest projection uses the override. Feature unions remain intact.
+
+Overrides accept stable pinned registry versions and only same-major/same-minor
+patch increases. They reject downgrades, prereleases, loose ranges and source
+replacement. Without an override, conflicting owners still fail as before. This is
+an explicit compatibility decision, not automatic semver inference. Remove the map
+after all owners request the new SDK, then preview/update again to clear the receipt's
+configuration snapshot. No package-manager or global Cargo configuration is changed.

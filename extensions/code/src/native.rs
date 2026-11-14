@@ -19,6 +19,8 @@ pub struct Target {
     pub offline: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub patch_overrides: BTreeMap<String, String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -108,7 +110,71 @@ impl Target {
         {
             return Err(error("invalid native program"));
         }
+        if self.patch_overrides.len() > 64 {
+            return Err(error("too many native patch overrides"));
+        }
+        for (package, version) in &self.patch_overrides {
+            let parsed = semver::Version::parse(version)?;
+            if !parsed.pre.is_empty() || !parsed.build.is_empty() {
+                return Err(error(
+                    "native patch overrides require stable pinned versions",
+                ));
+            }
+            identity(&Dependency {
+                ecosystem: ecosystem.into(),
+                package: package.clone(),
+                version: version.clone(),
+                module: None,
+                options: BTreeMap::new(),
+            })?;
+        }
         Ok(())
+    }
+    /// Explicitly reviewed patch projection; original owner requests remain in the receipt.
+    fn project_request(&self, key: &str, value: &Value) -> crate::Result<Value> {
+        let package = key
+            .split_once(':')
+            .ok_or_else(|| error("invalid native package key"))?
+            .1;
+        let Some(version) = self.patch_overrides.get(package) else {
+            return Ok(value.clone());
+        };
+        let requested = if let Some(version) = value.as_str() {
+            version
+        } else {
+            if ["git", "path", "registry"]
+                .iter()
+                .any(|key| value.get(key).is_some())
+            {
+                return Err(error(
+                    "native patch overrides cannot change package sources",
+                ));
+            }
+            value["version"].as_str().ok_or_else(|| {
+                error("native patch override requires a pinned registry dependency")
+            })?
+        };
+        let old = semver::Version::parse(requested)?;
+        let new = semver::Version::parse(version)?;
+        if !old.pre.is_empty()
+            || !old.build.is_empty()
+            || !new.pre.is_empty()
+            || !new.build.is_empty()
+            || old.major != new.major
+            || old.minor != new.minor
+            || new.patch < old.patch
+        {
+            return Err(error(
+                "native patch override must be a stable same-minor patch upgrade",
+            ));
+        }
+        let mut projected = value.clone();
+        if projected.is_string() {
+            projected = json!(version);
+        } else {
+            projected["version"] = json!(version);
+        }
+        Ok(projected)
     }
     fn lock_path(&self, ecosystem: &str) -> String {
         self.lock.clone().unwrap_or_else(|| {
@@ -630,11 +696,18 @@ pub fn plan(
                 if request.owners.is_empty() {
                     return Err(error("native receipt request has no owner"));
                 }
+                let projected = managed.target.project_request(key, &request.value)?;
                 if let Some(old) = desired.get_mut(key) {
-                    old.value = combine(&old.value, &request.value).map_err(|failure|error(format!("conflicting composition requests for {manifest_path} [{key}]: {failure}")))?;
+                    old.value = combine(&old.value, &projected).map_err(|failure|error(format!("conflicting composition requests for {manifest_path} [{key}]: {failure}")))?;
                     old.owners.extend(request.owners.clone());
                 } else {
-                    desired.insert(key.clone(), request.clone());
+                    desired.insert(
+                        key.clone(),
+                        Request {
+                            value: projected,
+                            owners: request.owners.clone(),
+                        },
+                    );
                 }
             }
         }
@@ -783,6 +856,74 @@ pub fn plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_patch_projection_coordinates_sdk_owners_without_mutating_requests() {
+        let target: Target = serde_json::from_value(
+            json!({"manifest":"Cargo.toml","patch_overrides":{"lenso-app":"0.1.2"}}),
+        )
+        .unwrap();
+        target.validate("cargo").unwrap();
+        let old = json!({"version":"0.1.1","features":["json"]});
+        let new = json!({"version":"0.1.2","features":["extra"]});
+        assert!(combine(&old, &new).is_err());
+        assert_eq!(
+            combine(
+                &target
+                    .project_request("dependencies:lenso-app", &old)
+                    .unwrap(),
+                &target
+                    .project_request("dependencies:lenso-app", &new)
+                    .unwrap()
+            )
+            .unwrap(),
+            json!({"version":"0.1.2","features":["extra","json"]})
+        );
+        assert_eq!(old["version"], "0.1.1");
+        assert_eq!(
+            target
+                .project_request("dependencies:other", &json!("1"))
+                .unwrap(),
+            json!("1")
+        );
+        let npm: Target = serde_json::from_value(
+            json!({"manifest":"package.json","patch_overrides":{"@lenso/app":"0.1.2"}}),
+        )
+        .unwrap();
+        assert_eq!(
+            npm.project_request("dependencies:@lenso/app", &json!("0.1.1"))
+                .unwrap(),
+            json!("0.1.2")
+        );
+    }
+    #[test]
+    fn patch_projection_rejects_downgrades_cross_minor_changes_and_source_replacement() {
+        let target: Target = serde_json::from_value(
+            json!({"manifest":"Cargo.toml","patch_overrides":{"sdk":"0.1.2"}}),
+        )
+        .unwrap();
+        for request in [
+            json!("0.1.3"),
+            json!("0.2.0"),
+            json!("0.0.9"),
+            json!("0.1.1-alpha"),
+            json!("^0.1.1"),
+            json!({"version":"0.1.1","git":"https://example.invalid/sdk"}),
+            json!({"path":"../sdk"}),
+        ] {
+            assert!(
+                target
+                    .project_request("dependencies:sdk", &request)
+                    .is_err(),
+                "{request}"
+            );
+        }
+        assert!(
+            configure(
+                &json!({"npm":{"manifest":"package.json","patch_overrides":{"sdk":"file:../sdk"}}})
+            )
+            .is_err()
+        );
+    }
     #[test]
     fn cargo_edits_preserve_comments_unrelated_fields_and_table_style() {
         let text = "# project note\n[package]\nname = \"demo\" # keep\nversion=\"1.0.0\"\n[dependencies]\nold = \"1\" # dependency note\n[dependencies.other]\nversion = \"2\"\nfeatures = [\"extra\"]\n";

@@ -10,6 +10,8 @@ p.add_argument('--binary',type=Path,required=True)
 p.add_argument('--modules',type=Path)
 p.add_argument('--official',action='store_true')
 p.add_argument('--token-env')
+p.add_argument('--upgrade-modules',action='store_true',help='Upgrade installed Auth 0.4.0 and Files 0.1.0, retaining sessions and content')
+p.add_argument('--code-version',default='0.3.6')
 p.add_argument('--auth-version',default='0.4.0',help='Expected current Auth module version')
 p.add_argument('--files-version',default='0.1.0',help='Expected current Files module version')
 p.add_argument('--module-ref',default='v0.4.0',help='Expected immutable current module source ref')
@@ -24,6 +26,7 @@ if a.official and a.modules:p.error('choose official sources or local modules')
 if not a.official and not a.modules:p.error('--modules is required for local acceptance')
 if a.upgrade and not a.official and not a.legacy_app:p.error('local upgrade needs --legacy-app')
 legacy=bool(a.legacy_app or a.upgrade)
+if a.upgrade_modules and (not a.official or legacy):p.error('--upgrade-modules requires official mode without a host upgrade')
 credential_flags=['--token-env',a.token_env] if a.token_env else []
 root=Path(__file__).resolve().parent.parent;binary=a.binary.resolve(strict=True)
 out=a.out.resolve();out.mkdir(parents=True,exist_ok=False)
@@ -100,6 +103,7 @@ try:
     author=project/'author';author.mkdir()
     for directory in ['templates','typescript/src/modules','rust/src/modules']:shutil.copytree(a.modules/directory,author/directory)
     for path in a.modules.glob('*.toml'):shutil.copyfile(path,author/path.name)
+   if a.upgrade_modules:call('ext','configure','code','--input','{"ref":"v0.4.0"}','--yes',*credential_flags)
    config=call('code','config')['outputs']['config']['config']
    config.setdefault('defaults',{}).setdefault('providers',{}).update({'lenso.files-metadata':storage,'lenso.auth-store':storage})
    config.setdefault('modules',{}).setdefault('files',{}).setdefault('options',{})['max_bytes']=2*1024*1024
@@ -139,7 +143,7 @@ try:
     try:assert http(port,'/auth/session',token=legacy_token)[0]==200
     finally:stop(process,stream)
    # Verify that Files can be generated independently, but cannot run without its declared identity.
-   plan=call('code','preview','files',empty=True)['outputs']['resolve'];assert plan['module']['version']==a.files_version
+   plan=call('code','preview','files',empty=True)['outputs']['resolve'];assert plan['module']['version']==('0.1.0' if a.upgrade_modules else a.files_version)
    assert not (project/'src/modules/files').exists() and not (project/'data').exists()
    pending=call('code','add','files',expected=2,empty=True);answers=case/'answers.json'
    answers.write_text(json.dumps({pending['question']['id']:False}));call('code','add','files','--answers',str(answers),expected=130,empty=True)
@@ -153,19 +157,19 @@ try:
    if storage=='postgres':
     assert env.get('DATABASE_URL');(project/'.env').write_text('DATABASE_URL='+env['DATABASE_URL']+'\n')
    call('app','check','--yes');call('app','migrate','--yes')
-   public_pins={}
+   public_pins={};previous_pins={}
    if a.official:
     lock=json.loads((project/'lenso.lock').read_text())
-    for name,version in [('app','0.2.0'),('code','0.3.6')]:
+    for name,version in [('app','0.2.0'),('code',a.code_version)]:
      item=next(x for x in lock['extensions'] if x['id']==name)
      assert item['source']=='registry:@lenso/'+name and item['definition']['version']==version
      assert item['github']['tag']==name+'-v'+version
      public_pins[name]=item['github']
     assert lock['presets']['@lenso/app']['version']=='0.2.0'
     installed=json.loads((project/'src/code.modules.json').read_text())['modules']
-    for name,version in [('auth',a.auth_version),('files',a.files_version)]:
+    for name,version in [('auth','0.4.0' if a.upgrade_modules else a.auth_version),('files','0.1.0' if a.upgrade_modules else a.files_version)]:
      item=installed['@lenso/'+name]
-     assert item['version']==version and item['profile']['source']=='github-repo:LioRael/lenso-modules' and item['profile']['ref']==a.module_ref
+     assert item['version']==version and item['profile']['source']=='github-repo:LioRael/lenso-modules' and item['profile']['ref']==('v0.4.0' if a.upgrade_modules else a.module_ref)
      public_pins[name]=item
     assert not (project/'author').exists()
    payload=bytes(range(256))*4096+os.urandom(711);process,stream,port=start()
@@ -178,6 +182,35 @@ try:
      status,session=http(port,'/auth/login','POST',credentials);assert status==200,(status,session);tokens.append(session['token'])
     status,file=http(port,'/files?name=sample.bin&owner=forged','POST',payload,tokens[0],True);assert status==201,(status,file)
     assert file['owner']==users[0]['id'] and file['size']==len(payload) and file['sha256']==hashlib.sha256(payload).hexdigest()
+
+    if a.upgrade_modules:
+     stop(process,stream)
+     previous_pins={name:public_pins[name] for name in ['auth','files']}
+     ext='ts' if language=='typescript' else 'rs'
+     cores=[project/f'src/modules/{name}/modules/{name}/{"core.ts" if language=="typescript" else "mod.rs"}' for name in ['auth','files']]
+     for core in cores:core.write_text('// retained module customization\n'+core.read_text())
+     call('ext','configure','code','--input','{"ref":"HEAD"}','--yes',*credential_flags)
+     options=next(item['options'] for item in call('config')['outputs']['main']['config']['cli']['extensions'] if item['id']=='code')
+     native=json.loads(json.dumps(options['native']))
+     ecosystem='npm' if language=='typescript' else 'cargo'
+     package='@lenso/app' if language=='typescript' else 'lenso-app'
+     native[ecosystem]['patch_overrides']={package:'0.1.2'}
+     call('ext','configure','code','--input',json.dumps({'native':native}),'--yes',*credential_flags)
+     call('code','update','auth','--yes');call('code','update','files','--yes')
+     native[ecosystem].pop('patch_overrides')
+     call('ext','configure','code','--input',json.dumps({'native':native}),'--yes',*credential_flags)
+     call('code','update','auth','--yes')
+     for core in cores:assert 'retained module customization' in core.read_text()
+     installed=json.loads((project/'src/code.modules.json').read_text())['modules']
+     for name,version in [('auth',a.auth_version),('files',a.files_version)]:
+      item=installed['@lenso/'+name];assert item['version']==version and item['profile']['ref']==a.module_ref
+      public_pins[name]=item
+      assert (project/f'src/modules/{name}/modules/{name}/metadata.json').is_file()
+     call('app','check','--yes')
+     process,stream,port=start()
+     assert http(port,'/auth/session',token=tokens[0])[0]==200
+     assert http(port,'/files/'+file['id']+'/content',token=tokens[0])==(200,payload)
+
     file_id=file['id'];assert http(port,'/files/'+file_id+'/content',token=tokens[0])==(200,payload)
     assert http(port,'/files/'+file_id+'/content',token=tokens[1])[0]==404
     assert http(port,'/files/'+file_id,'DELETE',token=tokens[1])[0]==404
@@ -227,7 +260,7 @@ try:
    finally:stop(process,stream)
    for path in ['lenso.toml','lenso.lock','lenso.code.toml']:
     if env.get('DATABASE_URL'):assert env['DATABASE_URL'] not in (project/path).read_text()
-   report={'language':language,'storage':storage,'legacy_app_upgrade':legacy,'official':a.official,'public_pins':public_pins,'streamed_bytes':len(payload),'shared_identity':True,'cross_user_denied':True,'revoked_session_denied':True,'restart_persistence':True,'delete_content':True,'oversize_cleanup':True,'interrupted_upload_cleanup':True,'preview_denial_update_offline':True,'structured_input_issues':a.expect_input_issues,'commands':commands}
+   report={'language':language,'storage':storage,'legacy_app_upgrade':legacy,'module_source_upgrade':a.upgrade_modules,'previous_pins':previous_pins,'official':a.official,'public_pins':public_pins,'streamed_bytes':len(payload),'shared_identity':True,'cross_user_denied':True,'revoked_session_denied':True,'restart_persistence':True,'delete_content':True,'oversize_cleanup':True,'interrupted_upload_cleanup':True,'preview_denial_update_offline':True,'structured_input_issues':a.expect_input_issues,'commands':commands}
    (case/'verification.json').write_text(json.dumps(report,indent=2)+'\n');reports.append(report)
    print(f'{language}/{storage} authenticated streaming Files passed',flush=True)
 finally:

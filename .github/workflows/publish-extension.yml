@@ -90,7 +90,8 @@ jobs:
           curl -fsSL --retry 2 "https://github.com/$GITHUB_REPOSITORY/releases/download/v1.0.0/install.sh" \
             -o "$RUNNER_TEMP/published-cli/install.sh"
           sh "$RUNNER_TEMP/published-cli/install.sh" --prefix "$RUNNER_TEMP/published-cli/bin"
-          python3 scripts/verify-code-release.py --binary "$RUNNER_TEMP/published-cli/bin/lenso" \
+          cli_version=$("$RUNNER_TEMP/published-cli/bin/lenso" --version)
+          python3 scripts/verify-code-release.py --cli-version "${cli_version#lenso }" --binary "$RUNNER_TEMP/published-cli/bin/lenso" \
             --repo "$GITHUB_REPOSITORY" --version "$PACKAGE_VERSION" --ref "$GITHUB_SHA" \
             --out "$RUNNER_TEMP/lenso-release-e2e"
       - uses: actions/upload-artifact@v7
