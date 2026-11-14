@@ -1,0 +1,29 @@
+docs/code-generation.md
+  s_0a36fa17311984::t_c356544667a1ca 204-206
+extensions/code/Cargo.lock
+  s_0a36fa17311984::t_4bca5dcf3de36c 200
+extensions/code/Cargo.toml
+  s_0a36fa17311984::t_c7a0c2c7a2689f 3,21
+extensions/code/src/author.rs
+  s_0a36fa17311984::t_08d8b59fe2b230 381
+extensions/code/src/generation.rs
+  s_0a36fa17311984::t_f8b56b4163798f 9
+presets/code/extension.toml
+  s_0a36fa17311984::t_9a11dfa0936cd7 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "86d615ad3f2cf6ef20dd95fa81df38884c2e3a6c",
+  "prompts": {},
+  "sessions": {
+    "s_0a36fa17311984": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1daa8-3fb7-7c03-beac-1e3b4a74162a",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
