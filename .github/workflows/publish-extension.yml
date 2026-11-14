@@ -91,8 +91,10 @@ jobs:
             -o "$RUNNER_TEMP/published-cli/install.sh"
           sh "$RUNNER_TEMP/published-cli/install.sh" --prefix "$RUNNER_TEMP/published-cli/bin"
           cli_version=$("$RUNNER_TEMP/published-cli/bin/lenso" --version)
+          release_ref=$(git ls-remote origin "refs/tags/code-v$PACKAGE_VERSION" "refs/tags/code-v$PACKAGE_VERSION^{}" | awk '/\^\{\}$/ { peeled=$1 } { direct=$1 } END { print peeled ? peeled : direct }')
+          test -n "$release_ref"
           python3 scripts/verify-code-release.py --cli-version "${cli_version#lenso }" --binary "$RUNNER_TEMP/published-cli/bin/lenso" \
-            --repo "$GITHUB_REPOSITORY" --version "$PACKAGE_VERSION" --ref "$GITHUB_SHA" \
+            --repo "$GITHUB_REPOSITORY" --version "$PACKAGE_VERSION" --ref "$release_ref" \
             --out "$RUNNER_TEMP/lenso-release-e2e"
       - uses: actions/upload-artifact@v7
         if: steps.publish.outputs.state == 'published' && steps.package.outputs.id == 'code'

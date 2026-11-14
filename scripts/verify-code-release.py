@@ -67,11 +67,12 @@ def application(project):
 subprocess.run([sys.executable, str(root / 'scripts/verify-github-release.py'), '--binary', str(binary),
                 '--repo', args.repo, '--version', args.version, '--ref', args.ref,
                 '--token-env', args.token_env, '--out', str(scratch / 'resources')], check=True)
-verify(root, scratch, None, None, run, application, empty_env, setup=setup)
+legacy_diagnostics = tuple(map(int, args.cli_version.split('.'))) <= (1, 1, 2)
+verify(root, scratch, None, None, run, application, empty_env, setup=setup, legacy_diagnostics=legacy_diagnostics)
 subprocess.run([sys.executable, str(root / 'scripts/test-native.py'), '--binary', str(binary),
                 '--extension-source', source, '--extension-version', args.version,
-                '--token-env', args.token_env, '--out', str(scratch / 'native')], check=True)
-report = {'cli_version': args.cli_version, 'extension_version': args.version, 'source': source,
+                '--token-env', args.token_env, '--out', str(scratch / 'native'), *(['--legacy-diagnostics'] if legacy_diagnostics else [])], check=True)
+report = {'legacy_diagnostics': legacy_diagnostics, 'cli_version': args.cli_version, 'extension_version': args.version, 'source': source,
           'source_commit': args.ref, 'resource_download_and_cache_restore': True,
           'compiled_memory_disk_shared': True, 'adapter_cleanup': True, 'local_update_merge': True,
           'preview_and_authorization': True, 'locked_offline': True,

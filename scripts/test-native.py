@@ -10,6 +10,7 @@ import tempfile
 from project_config import load, save
 
 parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--legacy-diagnostics', action='store_true', help='Verify the public pre-structured CLI diagnostic contract')
 parser.add_argument('--keep', action='store_true')
 parser.add_argument('--binary', type=Path, help='Use an installed CLI instead of the workspace build')
 parser.add_argument('--extension-source', help='Install a published extension instead of building local Wasm')
@@ -171,7 +172,11 @@ try:
     save(project / 'lenso.toml', denied_config)
     before = manifest_state()
     denied = run('code', 'compose', '--registry', 'main', '--install', '--yes', expected=1)
-    assert denied['code'] == 'permission_denied' and denied['details']['capability'] == 'host.processes' and manifest_state() == before
+    if args.legacy_diagnostics:
+        assert denied['type']=='diagnostic' and denied['status']=='failed' and 'host.processes' in denied['message'], denied
+    else:
+        assert denied['code']=='permission_denied' and denied['details']['capability']=='host.processes'
+    assert manifest_state()==before
     (project / 'lenso.toml').write_text(original_config)
     # Failure persists pending original baselines; retry prepares the same requirements.
     fail = scratch / 'fail-cargo'
@@ -179,7 +184,10 @@ try:
     fail.chmod(0o755)
     setup({**native, 'cargo': {**native['cargo'], 'program': str(fail)}})
     failed = run('code', 'compose', '--sample', 'on', '--install', '--yes', expected=1)
-    assert failed['code'] == 'partial_failure' and failed['details']['completed_files']
+    if args.legacy_diagnostics:
+        assert failed['type']=='diagnostic' and failed['status']=='failed' and '7' in failed['message'], failed
+    else:
+        assert failed['code']=='partial_failure' and failed['details']['completed_files']
     assert 'installed =' not in (project / 'lenso/native.lock').read_text()
     setup(native)
     retried = run('code', 'compose', '--sample', 'on', '--yes')

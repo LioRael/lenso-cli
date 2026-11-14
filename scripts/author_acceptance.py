@@ -7,7 +7,7 @@ import subprocess
 from project_config import load, save
 
 
-def verify(root, scratch, config, snapshot, run, application, empty_path_env, setup=None):
+def verify(root, scratch, config, snapshot, run, application, empty_path_env, setup=None, legacy_diagnostics=False):
     project = scratch / 'author-demo'
     shutil.copytree(root / 'examples/codegen-demo', project)
     if setup:
@@ -77,7 +77,10 @@ def verify(root, scratch, config, snapshot, run, application, empty_path_env, se
     original_template = template.read_bytes()
     template.unlink()
     failed = run(project, 'code', 'validate', expected=1)
-    assert failed['code'] == 'wasm_failed' and failed['recovery']['kind'] == 'inspect_extension'
+    if legacy_diagnostics:
+        assert failed['type'] == 'diagnostic' and failed['status'] == 'failed' and 'wasm' in failed['message'].lower(), failed
+    else:
+        assert failed['code'] == 'wasm_failed' and failed['recovery']['kind'] == 'inspect_extension'
     template.write_bytes(original_template)
     template.write_text('{% invalid %}')
     run(project, 'code', 'validate', expected=1)
@@ -94,7 +97,10 @@ def verify(root, scratch, config, snapshot, run, application, empty_path_env, se
     policy['cli']['extensions'][0]['read_roots'] = ['src']
     save(project / 'lenso.toml', policy)
     denied = run(project, 'code', 'validate', expected=1)
-    assert denied['code'] == 'permission_denied' and denied['details']['capability'] == 'host.reads'
+    if legacy_diagnostics:
+        assert denied['type'] == 'diagnostic' and denied['status'] == 'failed' and 'host.reads' in denied['message'], denied
+    else:
+        assert denied['code'] == 'permission_denied' and denied['details']['capability'] == 'host.reads'
     assert application(project) == before
     if snapshot is None:
         save(project / 'lenso.toml', original_policy)
