@@ -62,7 +62,15 @@ jobs:
           cp target/debug/lenso target/debug/lenso-with-ops
           cargo build --locked -p lenso --no-default-features
           cp target/debug/lenso target/debug/lenso-core
-          LENSO_BIN="$PWD/target/debug/lenso-with-ops" LENSO_CORE_BIN="$PWD/target/debug/lenso-core" python3 scripts/test-ops.py
+          LENSO_BIN="$PWD/target/debug/lenso-with-ops" LENSO_CORE_BIN="$PWD/target/debug/lenso-core" LENSO_OPS_REPORT=ops-acceptance.json python3 scripts/test-ops.py 2>&1 | tee ops-acceptance.log
+      - name: Preserve Ops acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ops-acceptance-linux
+          path: |
+            ops-acceptance.json
+            ops-acceptance.log
 
   extensions:
     strategy:

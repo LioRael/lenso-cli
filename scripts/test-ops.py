@@ -5,6 +5,7 @@ import copy
 import json
 import os
 from pathlib import Path
+import platform
 import shutil
 import signal
 import socket
@@ -263,7 +264,14 @@ with tempfile.TemporaryDirectory(prefix="lenso-ops-") as directory:
                 (project / "pids.json").unlink(missing_ok=True)
         for path, original in source_files.items():
             assert path.read_bytes() == original, ("Ops modified project source", path)
-    print(json.dumps({"status": "passed", "cases": cases, "core_without_installation": "no_ops_commands",
+    report = {"status": "passed", "cases": cases, "core_without_installation": "no_ops_commands",
+                      "platform": {"system": platform.system(), "release": platform.release(),
+                                   "machine": platform.machine(),
+                                   "node": subprocess.check_output([node, "--version"], text=True).strip(),
+                                   "cargo": subprocess.check_output([cargo, "--version"], text=True).strip()},
                       "preflight": "grants, executable, cwd, env, port, endpoint",
                       "cleanup": "direct children reaped; recorded descendant PIDs absent; ports reusable",
-                      "json": "one document, distinct bounded redacted streams", "source_files": "unchanged"}))
+                      "json": "one document, distinct bounded redacted streams", "source_files": "unchanged"}
+    if report_path := os.environ.get("LENSO_OPS_REPORT"):
+        Path(report_path).write_text(json.dumps(report, indent=2) + "\n")
+    print(json.dumps(report))
