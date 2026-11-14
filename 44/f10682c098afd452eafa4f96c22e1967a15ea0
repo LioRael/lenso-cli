@@ -1,0 +1,32 @@
+extensions/code/src/native.rs
+  s_0a36fa17311984::t_945e71026228ef 113-130,133-178,699,701,704-710,860-925
+  s_0a36fa17311984::t_cbfbcdb8247259 22-23,926-927
+scripts/verify-files.py
+  s_0a36fa17311984::t_945e71026228ef 13-14,29,106,146,160,163,170,172,185-213,263
+.github/workflows/publish-extension.yml
+  s_0a36fa17311984::t_216fcb95ec9d7d 93-94
+docs/native-dependencies.md
+  s_0a36fa17311984::t_b66983a6e6be64 208-224
+extensions/code/Cargo.lock
+  s_0a36fa17311984::t_cc78d0f28cd81a 200
+extensions/code/Cargo.toml
+  s_0a36fa17311984::t_dadd4d54f33834 3
+presets/code/extension.toml
+  s_0a36fa17311984::t_4e32b3317f6389 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "44f10682c098afd452eafa4f96c22e1967a15ea0",
+  "prompts": {},
+  "sessions": {
+    "s_0a36fa17311984": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1daa8-3fb7-7c03-beac-1e3b4a74162a",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
