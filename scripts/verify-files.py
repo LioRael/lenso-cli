@@ -7,37 +7,51 @@ from http.client import HTTPConnection
 from urllib.parse import urlsplit
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--binary',type=Path,required=True)
-p.add_argument('--modules',type=Path,required=True)
+p.add_argument('--modules',type=Path)
+p.add_argument('--official',action='store_true')
+p.add_argument('--token-env')
+p.add_argument('--upgrade',action='store_true',help='Upgrade real official App 0.1.0 and Auth 0.3.0')
 p.add_argument('--out',type=Path,required=True)
 p.add_argument('--legacy-app',type=Path,help='Unpacked published App 0.1.0 for reviewed upgrade acceptance')
 p.add_argument('--language',choices=['typescript','rust'])
 p.add_argument('--storage',choices=['sqlite','postgres','both'],default='sqlite')
-a=p.parse_args();root=Path(__file__).resolve().parent.parent;binary=a.binary.resolve(strict=True)
-out=a.out.resolve();out.mkdir(parents=True,exist_ok=False);served=out/'served';served.mkdir()
-for name in ['app','code']:
- shutil.copytree(root/'dist/mainline'/name,served/name)
- shutil.copyfile(root/'dist/author'/name/(name+'.wasm'),served/name/(name+'.wasm'))
-class Handler(http.server.SimpleHTTPRequestHandler):
- def log_message(self,*args):pass
-server=http.server.ThreadingHTTPServer(('127.0.0.1',0),functools.partial(Handler,directory=str(served)))
-threading.Thread(target=server.serve_forever,daemon=True).start();base=f'http://127.0.0.1:{server.server_port}'
-if a.legacy_app:
- shutil.copytree(a.legacy_app,served/'legacy')
- old=served/'legacy/extension.toml';old.write_text(old.read_text().replace('registry:@lenso/code',base+'/code/extension.toml'))
-manifest=served/'app/extension.toml';manifest.write_text(manifest.read_text().replace('registry:@lenso/code',base+'/code/extension.toml'))
-if a.legacy_app:shutil.copytree(served/'app',served/'app-v2')
-(served/'preset.json').write_text(json.dumps({'schema_version':1,'id':'@test/app','version':'0.2.0','create':'app/init','adopt':'app/init','extensions':[{'id':'app','source':base+'/app/extension.toml'},{'id':'code','source':base+'/code/extension.toml'}]}))
+a=p.parse_args()
+if a.official and a.modules:p.error('choose official sources or local modules')
+if not a.official and not a.modules:p.error('--modules is required for local acceptance')
+if a.upgrade and not a.official and not a.legacy_app:p.error('local upgrade needs --legacy-app')
+legacy=bool(a.legacy_app or a.upgrade)
+credential_flags=['--token-env',a.token_env] if a.token_env else []
+root=Path(__file__).resolve().parent.parent;binary=a.binary.resolve(strict=True)
+out=a.out.resolve();out.mkdir(parents=True,exist_ok=False)
+server=None;preset='app'
+if not a.official:
+ served=out/'served';served.mkdir()
+ for name in ['app','code']:
+  shutil.copytree(root/'dist/mainline'/name,served/name)
+  shutil.copyfile(root/'dist/author'/name/(name+'.wasm'),served/name/(name+'.wasm'))
+ class Handler(http.server.SimpleHTTPRequestHandler):
+  def log_message(self,*args):pass
+ server=http.server.ThreadingHTTPServer(('127.0.0.1',0),functools.partial(Handler,directory=str(served)))
+ threading.Thread(target=server.serve_forever,daemon=True).start();base=f'http://127.0.0.1:{server.server_port}'
+ if legacy:
+  shutil.copytree(a.legacy_app,served/'legacy')
+  old=served/'legacy/extension.toml';old.write_text(old.read_text().replace('registry:@lenso/code',base+'/code/extension.toml'))
+ manifest=served/'app/extension.toml';manifest.write_text(manifest.read_text().replace('registry:@lenso/code',base+'/code/extension.toml'))
+ if legacy:shutil.copytree(served/'app',served/'app-v2')
+ (served/'preset.json').write_text(json.dumps({'schema_version':1,'id':'@test/app','version':'0.2.0','create':'app/init','adopt':'app/init','extensions':[{'id':'app','source':base+'/app/extension.toml'},{'id':'code','source':base+'/code/extension.toml'}]}))
+ preset=base+'/preset.json'
 reports=[]
 try:
  for language in ([a.language] if a.language else ['typescript','rust']):
   for storage in (['sqlite','postgres'] if a.storage=='both' else [a.storage]):
-   if a.legacy_app:shutil.copytree(served/'legacy',served/'app',dirs_exist_ok=True)
+   if legacy and not a.official:shutil.copytree(served/'legacy',served/'app',dirs_exist_ok=True)
    case=out/(language+'-'+storage);case.mkdir();project=case/'app';commands=[]
    env=dict(os.environ,LENSO_CACHE_DIR=str(case/'cache'))
    def call(*args,expected=0,empty=False):
     result=subprocess.run([str(binary),'--project',str(project),*args,'--json'],env=dict(env,PATH='') if empty else env,capture_output=True,text=True,timeout=600)
     assert result.returncode==expected,(args,result.returncode,result.stdout[-5000:],result.stderr[-6000:])
     assert '\x1b' not in result.stdout
+    if a.token_env and env.get(a.token_env):assert env[a.token_env] not in result.stdout+result.stderr
     commands.append({'args':list(args),'exit_code':result.returncode});return json.loads(result.stdout)
    def start():
     log=case/f'server-{time.time_ns()}.log';stream=log.open('wb')
@@ -67,20 +81,34 @@ try:
      conn.request(method,path,body=data,headers=headers,encode_chunked=chunked);response=conn.getresponse();content=response.read();status=response.status
      return status,json.loads(content) if response.getheader('Content-Type','').startswith('application/json') and content else content
     finally:conn.close()
-   settings={'author_root':'author','format':'lenso-modules-v1','catalog':'lenso.modules.toml','language':language,'port':0}
-   result=subprocess.run([str(binary),'--project',str(case),'new','app','--preset',base+'/preset.json','--input',json.dumps(settings),'--yes','--json'],env=env,capture_output=True,text=True,timeout=600)
-   assert result.returncode==0,(result.stdout[-4000:],result.stderr[-6000:])
-   author=project/'author';author.mkdir()
-   for directory in ['templates','typescript/src/modules','rust/src/modules']:shutil.copytree(a.modules/directory,author/directory)
-   for path in a.modules.glob('*.toml'):shutil.copyfile(path,author/path.name)
+   settings={'language':language,'port':0}
+   if a.modules:settings.update(author_root='author',format='lenso-modules-v1',catalog='lenso.modules.toml')
+   if a.official and legacy:
+    project.mkdir();call('init','--preset','empty','--yes',*credential_flags)
+    call('ext','add','code','--constraint','=0.3.6','--input',json.dumps(settings),'--yes',*credential_flags)
+    call('ext','add','app','--constraint','=0.1.0','--input',json.dumps(settings),'--yes',*credential_flags)
+    call('app','init','--yes')
+    call('ext','configure','code','--input','{"ref":"v0.3.0"}','--yes',*credential_flags)
+   else:
+    result=subprocess.run([str(binary),'--project',str(case),'new','app','--preset',preset,'--input',json.dumps(settings),'--yes',*credential_flags,'--json'],env=env,capture_output=True,text=True,timeout=600)
+    assert result.returncode==0,(result.stdout[-4000:],result.stderr[-6000:])
+   if a.modules:
+    author=project/'author';author.mkdir()
+    for directory in ['templates','typescript/src/modules','rust/src/modules']:shutil.copytree(a.modules/directory,author/directory)
+    for path in a.modules.glob('*.toml'):shutil.copyfile(path,author/path.name)
    config=call('code','config')['outputs']['config']['config']
    config.setdefault('defaults',{}).setdefault('providers',{}).update({'lenso.files-metadata':storage,'lenso.auth-store':storage})
    config.setdefault('modules',{}).setdefault('files',{}).setdefault('options',{})['max_bytes']=2*1024*1024
    call('code','config','--input',json.dumps({'settings':config}),'--yes')
    if storage=='postgres':
     assert env.get('DATABASE_URL');(project/'.env').write_text('DATABASE_URL='+env['DATABASE_URL']+'\n')
-   if a.legacy_app:
+   if legacy:
     call('code','add','auth','--yes');call('app','migrate','--yes')
+    if a.official:
+     old_index=json.loads((project/'src/code.modules.json').read_text())
+     assert old_index['modules']['@lenso/auth']['version']=='0.3.0'
+     old_lock=json.loads((project/'lenso.lock').read_text())
+     assert next(x['definition']['version'] for x in old_lock['extensions'] if x['id']=='app')=='0.1.0'
     process,stream,port=start()
     legacy_credentials={'name':f'legacy_{time.time_ns()}','password':'correct horse battery'}
     try:
@@ -89,8 +117,9 @@ try:
     finally:stop(process,stream)
     entry=project/('src/main.ts' if language=='typescript' else 'src/main.rs')
     entry.write_text('// user host customization\n'+entry.read_text())
-    shutil.copytree(served/'app-v2',served/'app',dirs_exist_ok=True)
-    call('ext','add',base+'/app/extension.toml','--id','app','--constraint','^0.2.0','--input',json.dumps(settings),'--yes')
+    if not a.official:shutil.copytree(served/'app-v2',served/'app',dirs_exist_ok=True)
+    call('ext','add','app' if a.official else base+'/app/extension.toml','--id','app','--constraint','^0.2.0','--input',json.dumps(settings),'--yes',*credential_flags)
+    if a.official:call('preset','apply','app','--input',json.dumps(settings),'--yes',*credential_flags)
     before={str(path):path.read_bytes() for path in [entry,project/'lenso.code.toml',project/'lenso/app.lock']}
     call('app','upgrade-preview',empty=True)
     assert all(Path(path).read_bytes()==content for path,content in before.items())
@@ -99,6 +128,7 @@ try:
     call('app','upgrade','--answers',str(answer_file),expected=130,empty=True)
     assert all(Path(path).read_bytes()==content for path,content in before.items())
     call('app','upgrade','--yes',empty=True);assert 'user host customization' in entry.read_text()
+    if a.official:call('ext','configure','code','--input','{"ref":"HEAD"}','--yes',*credential_flags)
     call('code','update','auth','--input','{"reconfigure":true}','--yes')
     call('app','check','--yes')
     process,stream,port=start()
@@ -112,13 +142,28 @@ try:
    assert not (project/'src/modules/files').exists()
    call('code','add','files','--yes')
    call('app','check','--yes')
-   if not a.legacy_app:
+   if not legacy:
     call('app','migrate','--yes',expected=1)
     assert not (project/'data').exists()
    call('code','add','auth','--yes')
    if storage=='postgres':
     assert env.get('DATABASE_URL');(project/'.env').write_text('DATABASE_URL='+env['DATABASE_URL']+'\n')
    call('app','check','--yes');call('app','migrate','--yes')
+   public_pins={}
+   if a.official:
+    lock=json.loads((project/'lenso.lock').read_text())
+    for name,version in [('app','0.2.0'),('code','0.3.6')]:
+     item=next(x for x in lock['extensions'] if x['id']==name)
+     assert item['source']=='registry:@lenso/'+name and item['definition']['version']==version
+     assert item['github']['tag']==name+'-v'+version
+     public_pins[name]=item['github']
+    assert lock['presets']['@lenso/app']['version']=='0.2.0'
+    installed=json.loads((project/'src/code.modules.json').read_text())['modules']
+    for name,version in [('auth','0.4.0'),('files','0.1.0')]:
+     item=installed['@lenso/'+name]
+     assert item['version']==version and item['profile']['source']=='github-repo:LioRael/lenso-modules' and item['profile']['ref']=='v0.4.0'
+     public_pins[name]=item
+    assert not (project/'author').exists()
    payload=bytes(range(256))*4096+os.urandom(711);process,stream,port=start()
    try:
     assert http(port,'/files')[0]==401
@@ -174,8 +219,9 @@ try:
    finally:stop(process,stream)
    for path in ['lenso.toml','lenso.lock','lenso.code.toml']:
     if env.get('DATABASE_URL'):assert env['DATABASE_URL'] not in (project/path).read_text()
-   report={'language':language,'storage':storage,'legacy_app_upgrade':bool(a.legacy_app),'streamed_bytes':len(payload),'shared_identity':True,'cross_user_denied':True,'revoked_session_denied':True,'restart_persistence':True,'delete_content':True,'oversize_cleanup':True,'interrupted_upload_cleanup':True,'preview_denial_update_offline':True,'commands':commands}
+   report={'language':language,'storage':storage,'legacy_app_upgrade':legacy,'official':a.official,'public_pins':public_pins,'streamed_bytes':len(payload),'shared_identity':True,'cross_user_denied':True,'revoked_session_denied':True,'restart_persistence':True,'delete_content':True,'oversize_cleanup':True,'interrupted_upload_cleanup':True,'preview_denial_update_offline':True,'commands':commands}
    (case/'verification.json').write_text(json.dumps(report,indent=2)+'\n');reports.append(report)
    print(f'{language}/{storage} authenticated streaming Files passed',flush=True)
-finally:server.shutdown();server.server_close()
+finally:
+ if server:server.shutdown();server.server_close()
 (out/'verification.json').write_text(json.dumps({'cases':reports},indent=2)+'\n')
