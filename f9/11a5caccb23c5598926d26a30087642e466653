@@ -1,0 +1,21 @@
+scripts/verify-app.py
+  s_0a36fa17311984::t_7b93a27187eaa4 13,137
+scripts/verify-files.py
+  s_0a36fa17311984::t_a92b44e0752634 13-16,142,166,168,186-189,191,230
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f911a5caccb23c5598926d26a30087642e466653",
+  "prompts": {},
+  "sessions": {
+    "s_0a36fa17311984": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1daa8-3fb7-7c03-beac-1e3b4a74162a",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
