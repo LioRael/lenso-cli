@@ -378,9 +378,7 @@ pub fn validate(Json(ctx): Json<Value>) -> FnResult<Json<Value>> {
         let second = loaded.render(request, &resolution)?;
         crate::native::validate(&first.dependencies, &resolution)?;
         let first_bytes = serde_json::to_vec(&first.files)?;
-        if first_bytes != serde_json::to_vec(&second.files)?
-            || first.dependencies != second.dependencies
-        {
+        if first.files != second.files || first.dependencies != second.dependencies {
             return Err(error(format!("sample {name} generated nondeterministic output")).into());
         }
         covered.extend(

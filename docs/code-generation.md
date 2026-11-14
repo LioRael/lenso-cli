@@ -201,6 +201,9 @@ implicitly adopted or rewritten.
 Source and output budgets are bounded: at most 127 generated resource paths plus
 the composition artifact, 1 MiB sources/output budgets, and 16 author samples.
 Template evaluation has its own 100,000-operation budget and bounded output writer.
+Code 0.3.8 builds its Wasm with speed optimization and compares rendered files directly
+before serializing one result for its digest. This keeps the Auth 0.4.1 Rust
+catalog's three-sample deterministic validation within the existing budget.
 Code's compose/validate handlers request 50 million Wasm fuel units. The generic
 Host permits declared budgets from 1 to 50 million, defaults to 10 million, and
 retains its memory, message and timeout limits. This requires native CLI 1.0.0;

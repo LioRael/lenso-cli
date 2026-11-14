@@ -1,6 +1,6 @@
 [package]
 name = "lenso-code"
-version = "0.3.7"
+version = "0.3.8"
 edition = "2024"
 publish = false
 [lib]
@@ -18,6 +18,6 @@ similar = "2"
 semver = "1"
 [workspace]
 [profile.release]
-opt-level = "s"
+opt-level = 3
 strip = true
 lto = true
