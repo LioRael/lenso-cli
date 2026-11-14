@@ -19,7 +19,7 @@ lenso-project = { path = "extensions/project", version = "0.1.2" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "signal", "io-util", "sync"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "signal", "io-util", "sync", "time"] }
 sha2 = "0.10"
 tempfile = "3"
 toml = "1"

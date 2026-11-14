@@ -276,10 +276,10 @@ pub(crate) fn register_locked(
                         let spec = spec.clone();
                         async move {
                             if !granted {
-                                return Err(Error::Permission(format!(
-                                    "process {} {:?}",
-                                    spec.program, spec.args
-                                )));
+                                return Err(lenso_cli::Diagnostic::missing_capability(
+                                    "host.processes",
+                                )
+                                .into());
                             }
                             spec.run(ctx).await
                         }

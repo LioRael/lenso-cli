@@ -39,6 +39,9 @@ jobs:
           python3 scripts/test-onboarding.py
           python3 scripts/test-code-project-config.py
           python3 scripts/test-code-initialization.py
+          python3 scripts/build-demo.py
+          python3 scripts/test-demo.py
+          python3 scripts/test-agent-protocol.py
 
   extensions:
     strategy:

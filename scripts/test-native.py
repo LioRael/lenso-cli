@@ -171,7 +171,7 @@ try:
     save(project / 'lenso.toml', denied_config)
     before = manifest_state()
     denied = run('code', 'compose', '--registry', 'main', '--install', '--yes', expected=1)
-    assert 'permission denied' in denied['message'] and manifest_state() == before
+    assert denied['code'] == 'permission_denied' and denied['details']['capability'] == 'host.processes' and manifest_state() == before
     (project / 'lenso.toml').write_text(original_config)
     # Failure persists pending original baselines; retry prepares the same requirements.
     fail = scratch / 'fail-cargo'
@@ -179,7 +179,7 @@ try:
     fail.chmod(0o755)
     setup({**native, 'cargo': {**native['cargo'], 'program': str(fail)}})
     failed = run('code', 'compose', '--sample', 'on', '--install', '--yes', expected=1)
-    assert 'files already applied' in failed['message']
+    assert failed['code'] == 'partial_failure' and failed['details']['completed_files']
     assert 'installed =' not in (project / 'lenso/native.lock').read_text()
     setup(native)
     retried = run('code', 'compose', '--sample', 'on', '--yes')

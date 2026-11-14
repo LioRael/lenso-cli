@@ -79,7 +79,7 @@ fn eligible(args: &[OsString], env: impl Fn(&str) -> Option<OsString>) -> bool {
         if arg == "--" {
             break;
         }
-        if ["--project", "--input", "--answers", "--color"]
+        if ["--project", "--input", "--answers", "--color", "--report"]
             .iter()
             .any(|name| arg == *name)
         {

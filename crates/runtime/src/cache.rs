@@ -105,9 +105,12 @@ impl Cache {
         if self.read(sha256, max)?.is_none() {
             let bytes = load()?;
             if bytes.len() > max || digest(&bytes) != sha256 {
-                return Err(Error::Permission(
-                    "dependency digest mismatch; cached bytes were not replaced".into(),
-                ));
+                return Err(lenso_cli::Diagnostic::new(
+                    lenso_cli::DiagnosticCode::IntegrityMismatch,
+                )
+                .with_details(serde_json::json!({"artifact":"dependency","cache_replaced":false}))
+                .with_retryable(false)
+                .into());
             }
             let path = self.blob_path(sha256)?;
             std::fs::create_dir_all(

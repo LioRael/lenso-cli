@@ -58,6 +58,135 @@ fn process_fixture() -> tempfile::TempDir {
 }
 
 #[test]
+fn compact_results_preserve_full_outputs_in_the_same_invocation_report() {
+    let root = setup(
+        extension(),
+        json!({"options":{"template":"native source line\n".repeat(4096)}}),
+    );
+    let full = cli(root.path(), &["config", "--json"]);
+    assert!(full.status.success());
+    let full_value: Value = serde_json::from_slice(&full.stdout).unwrap();
+    let path = root.path().join("receipt.json");
+    let summary = cli(
+        root.path(),
+        &[
+            "config",
+            "--json",
+            "--summary",
+            "--report",
+            path.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        summary.status.success(),
+        "{}",
+        String::from_utf8_lossy(&summary.stdout)
+    );
+    let value: Value = serde_json::from_slice(&summary.stdout).unwrap();
+    assert_eq!(value["type"], "result");
+    assert_eq!(value["status"], "complete");
+    assert_eq!(value["mode"], "summary");
+    assert!(value.get("outputs").is_none());
+    assert_eq!(value["execution"]["verification_status"], "not_declared");
+    assert!(summary.stdout.len() < full.stdout.len());
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["outputs"], full_value["outputs"]);
+    assert_eq!(saved["execution"]["id"], value["execution"]["id"]);
+    assert_eq!(saved["report"], json!(path.canonicalize().unwrap()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    let missing = cli(root.path(), &["demo", "--summary"]);
+    assert_eq!(missing.status.code(), Some(2), "summary requires JSON mode");
+}
+
+#[test]
+fn parser_and_input_diagnostics_never_echo_secret_values_even_in_debug_mode() {
+    let root = process_fixture();
+    for args in [
+        vec![
+            "demo",
+            "--input",
+            "{\"token\":\"secret-token\", invalid}",
+            "--json",
+            "--debug",
+        ],
+        vec![
+            "demo",
+            "--color",
+            "https://user:password@example.test/?key=secret-token",
+            "--json",
+            "--debug",
+        ],
+    ] {
+        let output = cli(root.path(), &args);
+        assert!(!output.status.success());
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["code"], "invalid_input");
+        for secret in ["secret-token", "password"] {
+            assert!(!String::from_utf8_lossy(&output.stdout).contains(secret));
+            assert!(!String::from_utf8_lossy(&output.stderr).contains(secret));
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn reports_refuse_overwrites_before_handlers_and_keep_process_failure_exit_codes() {
+    let command =
+        json!({"type":"process","program":"/bin/sh","args":["-c","printf ran > marker; exit 7"]});
+    let mut definition = extension();
+    definition["handlers"]["example/step"] = command;
+    let root = setup(
+        definition,
+        json!({"processes":[{"program":"/bin/sh","args":["-c","printf ran > marker; exit 7"]}]}),
+    );
+    let existing = root.path().join("existing.json");
+    fs::write(&existing, "preserve me").unwrap();
+    let result = cli(
+        root.path(),
+        &[
+            "demo",
+            "--json",
+            "--summary",
+            "--report",
+            existing.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(result.status.code(), Some(1));
+    assert!(!root.path().join("marker").exists());
+    assert_eq!(fs::read_to_string(existing).unwrap(), "preserve me");
+    let path = root.path().join("failed.json");
+    let result = cli(
+        root.path(),
+        &[
+            "demo",
+            "--json",
+            "--summary",
+            "--report",
+            path.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(result.status.code(), Some(7));
+    let value: Value = serde_json::from_slice(&result.stdout).unwrap();
+    let saved: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(value["code"], "process_failed");
+    assert_eq!(value["details"]["exit_code"], 7);
+    assert_eq!(value["execution"]["id"], saved["execution"]["id"]);
+    assert_eq!(value["execution"]["status"], "failed");
+    assert_eq!(saved["outputs"], json!({}));
+    assert_eq!(
+        fs::read_to_string(root.path().join("marker")).unwrap(),
+        "ran"
+    );
+}
+
+#[test]
 fn machine_help_uses_read_only_discovery_and_reports_real_project_commands() {
     let mut definition = extension();
     definition["contracts"] = json!({"example/work":{
@@ -227,12 +356,8 @@ fn duplicate_aliases_report_both_providers_and_schema_errors_are_structured() {
     )
     .unwrap();
     let result: Value = serde_json::from_slice(&cli(root.path(), &["--json"]).stdout).unwrap();
-    assert!(
-        result["message"]
-            .as_str()
-            .unwrap()
-            .contains("schema_version")
-    );
+    assert_eq!(result["code"], "invalid_input");
+    assert_eq!(result["details"]["field"], "cli.schema_version");
     let output = cli(root.path(), &["cache", "path", "--json"]);
     assert!(
         output.status.success(),
@@ -475,7 +600,9 @@ fn self_update_is_project_independent_and_requires_explicit_adoption() {
     assert!(String::from_utf8_lossy(&help.stdout).contains("--version"));
     let invalid = run(&["self", "update", "--version", "bad", "--json"]);
     assert!(!invalid.status.success());
-    assert!(String::from_utf8_lossy(&invalid.stdout).contains("semantic version"));
+    let diagnostic: Value = serde_json::from_slice(&invalid.stdout).unwrap();
+    assert_eq!(diagnostic["code"], "invalid_input");
+    assert_eq!(diagnostic["details"]["field"], "version");
     let unmanaged = run(&["self", "update", "--offline", "--json"]);
     assert!(!unmanaged.status.success());
     assert!(String::from_utf8_lossy(&unmanaged.stdout).contains("--adopt"));
@@ -489,7 +616,8 @@ fn self_update_is_project_independent_and_requires_explicit_adoption() {
         "--json",
     ]);
     assert!(!adopted.status.success());
-    assert!(String::from_utf8_lossy(&adopted.stdout).contains("requires network access"));
+    let diagnostic: Value = serde_json::from_slice(&adopted.stdout).unwrap();
+    assert_eq!(diagnostic["details"]["required"], "network_access");
     assert!(!root.path().join("lenso-install.json").exists());
     assert_eq!(
         fs::read(&executable).unwrap(),

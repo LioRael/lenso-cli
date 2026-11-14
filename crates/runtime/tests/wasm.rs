@@ -16,6 +16,51 @@ fn context() -> Context {
     }
 }
 
+fn wasm_with_string(imports: &str, instruction: &str, text: &[u8]) -> Vec<u8> {
+    let stores = text
+        .iter()
+        .enumerate()
+        .map(|(offset, byte)| {
+            format!("local.get $p i64.const {offset} i64.add i32.const {byte} call $store")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    wat::parse_str(format!(
+        r#"(module
+        (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))
+        (import "extism:host/env" "store_u8" (func $store (param i64 i32)))
+        {imports}
+        (func (export "run") (result i32) (local $p i64)
+            i64.const {} call $alloc local.set $p
+            {stores} local.get $p {instruction} i32.const 1))"#,
+        text.len()
+    ))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn wasm_host_denials_keep_typed_capabilities_and_guest_errors_do_not_leak_text() {
+    for (bytes, expected) in [
+        (wasm_with_string(r#"(import "extism:host/user" "read_file" (func $read (param i64) (result i64)))"#,
+            "call $read drop", b"secret-path"), lenso_cli::DiagnosticCode::PermissionDenied),
+        (wasm_with_string(r#"(import "extism:host/env" "error_set" (func $error (param i64)))"#,
+            "call $error", b"Bearer secret-token https://user:password@example.test/?key=secret-value\nstack backtrace"), lenso_cli::DiagnosticCode::WasmFailed),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("plugin.wasm"),&bytes).unwrap();
+        let spec = WasmSpec { module:"plugin.wasm".into(),function:"run".into(),sha256:format!("{:x}",Sha256::digest(&bytes)),fuel:None };
+        let diagnostic = spec.run(root.path(),context()).await.unwrap_err().diagnostic();
+        assert_eq!(diagnostic.code(),expected);
+        let wire = serde_json::to_string(&diagnostic).unwrap();
+        for secret in ["secret-path","secret-token","password","secret-value","backtrace"] {
+            assert!(!wire.contains(secret),"leaked {secret}: {wire}");
+        }
+        if expected == lenso_cli::DiagnosticCode::PermissionDenied {
+            assert_eq!(diagnostic.details()["capability"],"host.reads");
+        }
+    }
+}
+
 #[tokio::test]
 async fn runaway_wasm_is_stopped_by_fuel_or_timeout() -> Result<(), Box<dyn std::error::Error>> {
     let root = tempfile::tempdir()?;
@@ -31,7 +76,7 @@ async fn runaway_wasm_is_stopped_by_fuel_or_timeout() -> Result<(), Box<dyn std:
     let started = std::time::Instant::now();
     let error = spec.run(root.path(), context()).await.unwrap_err();
     assert!(
-        error.to_string().contains("Wasm call failed"),
+        error.diagnostic().code() == lenso_cli::DiagnosticCode::WasmFuelExhausted,
         "unexpected failure: {error}"
     );
     assert!(
@@ -62,8 +107,9 @@ async fn malformed_response_and_changed_digest_are_errors() -> Result<(), Box<dy
         spec.run(root.path(), context())
             .await
             .unwrap_err()
-            .to_string()
-            .contains("digest changed")
+            .diagnostic()
+            .code()
+            == lenso_cli::DiagnosticCode::IntegrityMismatch
     );
     Ok(())
 }

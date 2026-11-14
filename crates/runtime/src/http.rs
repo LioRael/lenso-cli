@@ -172,16 +172,16 @@ fn expand(value: &str, allowed: &[String]) -> Result<String, Error> {
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
             || !allowed.iter().any(|entry| entry == name)
         {
-            return Err(Error::Permission(format!(
-                "credential environment variable {name}"
-            )));
+            return Err(lenso_cli::Diagnostic::missing_capability("host.env").into());
         }
         let expanded = std::env::var(name)
             .ok()
             .filter(|value| !value.is_empty())
             .or_else(|| fallback.map(str::to_owned))
             .ok_or_else(|| {
-                Error::Invalid(format!("credential environment variable {name} is not set"))
+                Error::from(lenso_cli::Diagnostic::new(lenso_cli::DiagnosticCode::InvalidInput)
+                    .with_details(serde_json::json!({"environment_variable":name,"required":true}))
+                    .with_retryable(false).with_recovery("configure_environment", "Set the named environment variable in the trusted Host before retrying."))
             })?;
         result.push_str(&expanded);
         rest = suffix;

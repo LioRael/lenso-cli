@@ -77,7 +77,7 @@ def verify(root, scratch, config, snapshot, run, application, empty_path_env, se
     original_template = template.read_bytes()
     template.unlink()
     failed = run(project, 'code', 'validate', expected=1)
-    assert 'missing author source' in failed['message']
+    assert failed['code'] == 'wasm_failed' and failed['recovery']['kind'] == 'inspect_extension'
     template.write_bytes(original_template)
     template.write_text('{% invalid %}')
     run(project, 'code', 'validate', expected=1)
@@ -94,7 +94,7 @@ def verify(root, scratch, config, snapshot, run, application, empty_path_env, se
     policy['cli']['extensions'][0]['read_roots'] = ['src']
     save(project / 'lenso.toml', policy)
     denied = run(project, 'code', 'validate', expected=1)
-    assert 'permission denied' in denied['message']
+    assert denied['code'] == 'permission_denied' and denied['details']['capability'] == 'host.reads'
     assert application(project) == before
     if snapshot is None:
         save(project / 'lenso.toml', original_policy)

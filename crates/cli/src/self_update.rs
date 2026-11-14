@@ -463,9 +463,21 @@ fn run(ctx: Context, offline: bool) -> Result<Outcome, Error> {
         .get("version")
         .map(|v| {
             v.as_str()
-                .ok_or_else(|| invalid("--version must be a semantic version"))
+                .ok_or_else(|| {
+                    Error::from(
+                        lenso_cli::Diagnostic::new(lenso_cli::DiagnosticCode::InvalidInput)
+                            .with_details(json!({"field":"version","expected":"semantic_version"})),
+                    )
+                })
                 .and_then(|s| {
-                    Version::parse(s).map_err(|_| invalid("--version must be a semantic version"))
+                    Version::parse(s).map_err(|_| {
+                        Error::from(
+                            lenso_cli::Diagnostic::new(lenso_cli::DiagnosticCode::InvalidInput)
+                                .with_details(
+                                    json!({"field":"version","expected":"semantic_version"}),
+                                ),
+                        )
+                    })
                 })
         })
         .transpose()?;
@@ -478,15 +490,16 @@ fn run(ctx: Context, offline: bool) -> Result<Outcome, Error> {
     let platform = target()?;
     let installed = receipt(&executable, platform)?;
     if installed.is_none() && !adopt && !check {
-        return Err(Error::Permission(format!(
-            "unmanaged executable: {}; use --adopt to allow native self-updates, or upgrade through its package manager",
-            executable.display()
-        )));
+        return Err(lenso_cli::Diagnostic::missing_capability("self.update")
+            .with_recovery("adopt_installation", "Use --adopt to explicitly enable native self-updates, or upgrade through the package manager.").into());
     }
     if offline {
-        return Err(invalid(
-            "self update requires network access; --offline prevents release checks",
-        ));
+        return Err(
+            lenso_cli::Diagnostic::new(lenso_cli::DiagnosticCode::InvalidInput)
+                .with_details(json!({"field":"offline","required":"network_access"}))
+                .with_retryable(false)
+                .into(),
+        );
     }
     let github = Github::new()?;
     let (version, release) = if github.token.is_none() {

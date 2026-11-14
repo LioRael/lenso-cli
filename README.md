@@ -347,6 +347,10 @@ The versioned catalog derives CLI argument shapes from `CommandSpec` and shares
 optional workflow contracts across aliases. See [static command discovery](docs/protocol.md#static-command-discovery-source-development)
 for unknown fields, offline/locked behavior, and release compatibility, and
 [implementation status](docs/agent-native-status.md) for validation and remaining work.
+Execution JSON retains `outputs` by default. `--json --summary --report NEW_FILE`
+returns a compact receipt and saves the same invocation's full report. Structured
+errors expose stable codes, safe details and recovery; see the
+[diagnostic and result protocol](docs/protocol.md#public-diagnostics-source-development).
 
 | Package | Responsibility |
 | --- | --- |

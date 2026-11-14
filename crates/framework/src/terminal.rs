@@ -33,7 +33,7 @@ impl UiOptions {
             if arg == "--" {
                 break;
             }
-            if ["--project", "--input", "--answers"]
+            if ["--project", "--input", "--answers", "--report"]
                 .iter()
                 .any(|flag| arg == *flag)
             {
@@ -599,12 +599,10 @@ impl Terminal {
 
     pub fn diagnostic(&mut self, error: &Error) {
         self.stop();
+        let diagnostic = error.diagnostic();
         if self.options.json {
-            println!(
-                "{}",
-                serde_json::json!({"type":"diagnostic","status":"failed","message":error.to_string()})
-            );
-        } else if matches!(error, Error::Cancelled) {
+            println!("{}", serde_json::json!(diagnostic));
+        } else if diagnostic.code() == crate::DiagnosticCode::Cancelled {
             eprintln!(
                 "{} Cancelled",
                 self.stderr_style(Style::new().yellow()).apply_to("!")
@@ -614,8 +612,18 @@ impl Terminal {
                 "{} {}",
                 self.stderr_style(Style::new().red().bold())
                     .apply_to("Error:"),
-                printable(&error.to_string())
+                printable(&diagnostic.to_string())
             );
+            if diagnostic
+                .details()
+                .as_object()
+                .is_some_and(|details| !details.is_empty())
+            {
+                eprintln!("  {}", printable(&diagnostic.details().to_string()));
+            }
+            if let Some(recovery) = diagnostic.recovery() {
+                eprintln!("  {}", printable(&recovery.message));
+            }
         }
     }
 }

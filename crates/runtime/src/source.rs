@@ -119,11 +119,14 @@ impl Source {
             Self::Local(path) => read_bounded(path, max),
             Self::Remote(url) => {
                 if options.offline {
-                    return Err(Error::Operation(format!(
-                        "dependency unavailable offline: {url}"
-                    )));
+                    return Err(lenso_cli::Diagnostic::new(lenso_cli::DiagnosticCode::DependencyUnavailable)
+                        .with_details(serde_json::json!({"offline":true})).with_retryable(false)
+                        .with_recovery("prepare_dependency", "Prepare the pinned dependency online or restore its cached bytes before retrying offline.").into());
                 }
-                options.events.preparing(format!("Downloading {url}"));
+                options.events.preparing(format!(
+                    "Downloading {}",
+                    crate::host::public_url(url.as_str())
+                ));
                 let mut builder = reqwest::blocking::Client::builder();
                 if url
                     .host_str()

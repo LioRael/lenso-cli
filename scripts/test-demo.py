@@ -48,7 +48,7 @@ with tempfile.TemporaryDirectory(prefix="lenso-m0-") as directory:
     config["cli"]["extensions"][0]["files"] = []
     save(config_path, config)
     result = run("preview", "--name", "Rust", expected=1)
-    assert "permission denied: file destination" in result["message"]
+    assert result["code"] == "permission_denied" and result["details"]["capability"] == "project.files"
     config["cli"]["extensions"][0]["files"] = ["greeting.txt"]
     save(config_path, config)
     shutil.rmtree(cache)
@@ -58,6 +58,6 @@ with tempfile.TemporaryDirectory(prefix="lenso-m0-") as directory:
     wasm.write_bytes(wasm.read_bytes() + b"tampered")
     shutil.rmtree(cache)
     result = run("preview", "--name", "Rust", expected=1)
-    assert "locked source module changed" in result["message"]
+    assert result["code"] == "integrity_mismatch"
 
 print("M0 demo passed: real Wasm, hook, questions, preview, approval, answers, process, file grants, tamper rejection")

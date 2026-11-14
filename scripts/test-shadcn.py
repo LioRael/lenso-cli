@@ -63,13 +63,13 @@ try:
     config_path = project / "lenso.toml"
     original_config_text = config_path.read_text()
     original_config = load(config_path)
-    for capability, expected_message in [("processes", "permission denied: process"), ("reads", "permission denied: file read"), ("http", "permission denied: HTTP GET")]:
+    for capability, required in [("processes", "host.processes"), ("reads", "host.reads"), ("http", "host.http")]:
         config = json.loads(json.dumps(original_config))
         config["cli"]["extensions"][0][capability] = []
         save(config_path, config)
         denied_snapshot = snapshot()
         result = run("add", "button", "--yes", expected=1)
-        assert expected_message in result["message"], result
+        assert result["code"] == "permission_denied" and result["details"]["capability"] == required, result
         assert denied_snapshot == snapshot(), f"denied {capability} changed project files"
     config_path.write_text(original_config_text)
     offline = os.environ.copy()
@@ -78,7 +78,7 @@ try:
             del offline[key]
     offline.update({"https_proxy":"http://127.0.0.1:9", "no_proxy":""})
     result = run("preview", "button", expected=1, env=offline)
-    assert "HTTP GET" in result["message"]
+    assert result["code"] == "operation_failed" and result["details"]["operation"] == "http_get"
     assert before == snapshot(), "network failure changed project files"
     target = project / "src/components/ui/button.tsx"
     target.parent.mkdir(parents=True, exist_ok=True)

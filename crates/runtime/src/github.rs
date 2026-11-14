@@ -178,10 +178,9 @@ impl Github {
                 Error::Operation(format!("GitHub {method} failed: {}", e.without_url()))
             })?;
         if !response.status().is_success() {
-            return Err(Error::Operation(format!(
-                "GitHub {method} failed: HTTP {}; no automatic mutation retry was attempted",
-                response.status()
-            )));
+            return Err(lenso_cli::Diagnostic::new(lenso_cli::DiagnosticCode::OperationFailed)
+                .with_details(serde_json::json!({"operation":"github_mutation","status":response.status().as_u16()}))
+                .with_retryable(false).into());
         }
         let mut bytes = Vec::new();
         response.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
@@ -403,9 +402,12 @@ impl Github {
             || value.get("submodule_git_url").is_some()
             || value.get("target").is_some()
         {
-            return Err(Error::Permission(
-                "GitHub source must be a regular file, not a symlink or submodule".into(),
-            ));
+            return Err(
+                lenso_cli::Diagnostic::new(lenso_cli::DiagnosticCode::PermissionDenied)
+                    .with_details(serde_json::json!({"restriction":"regular_source_file"}))
+                    .with_retryable(false)
+                    .into(),
+            );
         }
         // Contents API may dereference symlinks; verify the tree mode at the same commit.
         let blob = self.regular_file(repo, revision, path, cache, options)?;
@@ -465,15 +467,19 @@ impl Github {
             let entry = value["tree"]
                 .as_array()
                 .and_then(|entries| entries.iter().find(|e| e["path"] == *name))
-                .ok_or_else(|| Error::Invalid("file is absent from the pinned Git tree".into()))?;
+                .ok_or_else(|| lenso_cli::Diagnostic::new(lenso_cli::DiagnosticCode::InvalidInput)
+                    .with_details(serde_json::json!({"field":"source.path","reason":"not_found_in_snapshot"})))?;
             let last = index + 1 == pieces.len();
             if last {
                 if entry["type"] != "blob"
                     || !matches!(entry["mode"].as_str(), Some("100644" | "100755"))
                 {
-                    return Err(Error::Permission(
-                        "GitHub symlinks and submodules are not allowed".into(),
-                    ));
+                    return Err(lenso_cli::Diagnostic::new(
+                        lenso_cli::DiagnosticCode::PermissionDenied,
+                    )
+                    .with_details(serde_json::json!({"restriction":"regular_source_file"}))
+                    .with_retryable(false)
+                    .into());
                 }
                 let blob = entry["sha"]
                     .as_str()
