@@ -20,7 +20,7 @@ if a.official and a.modules:p.error('choose official sources or local modules')
 if not a.official and not a.modules:p.error('--modules is required for local acceptance')
 if a.upgrade and not a.official and not a.legacy_app:p.error('local upgrade needs --legacy-app')
 legacy=bool(a.legacy_app or a.upgrade)
-credentials=['--token-env',a.token_env] if a.token_env else []
+credential_flags=['--token-env',a.token_env] if a.token_env else []
 root=Path(__file__).resolve().parent.parent;binary=a.binary.resolve(strict=True)
 out=a.out.resolve();out.mkdir(parents=True,exist_ok=False)
 server=None;preset='app'
@@ -84,13 +84,13 @@ try:
    settings={'language':language,'port':0}
    if a.modules:settings.update(author_root='author',format='lenso-modules-v1',catalog='lenso.modules.toml')
    if a.official and legacy:
-    project.mkdir();call('init','--preset','empty','--yes',*credentials)
-    call('ext','add','code','--constraint','=0.3.6','--input',json.dumps(settings),'--yes',*credentials)
-    call('ext','add','app','--constraint','=0.1.0','--input',json.dumps(settings),'--yes',*credentials)
+    project.mkdir();call('init','--preset','empty','--yes',*credential_flags)
+    call('ext','add','code','--constraint','=0.3.6','--input',json.dumps(settings),'--yes',*credential_flags)
+    call('ext','add','app','--constraint','=0.1.0','--input',json.dumps(settings),'--yes',*credential_flags)
     call('app','init','--yes')
-    call('ext','configure','code','--input','{"ref":"v0.3.0"}','--yes',*credentials)
+    call('ext','configure','code','--input','{"ref":"v0.3.0"}','--yes',*credential_flags)
    else:
-    result=subprocess.run([str(binary),'--project',str(case),'new','app','--preset',preset,'--input',json.dumps(settings),'--yes',*credentials,'--json'],env=env,capture_output=True,text=True,timeout=600)
+    result=subprocess.run([str(binary),'--project',str(case),'new','app','--preset',preset,'--input',json.dumps(settings),'--yes',*credential_flags,'--json'],env=env,capture_output=True,text=True,timeout=600)
     assert result.returncode==0,(result.stdout[-4000:],result.stderr[-6000:])
    if a.modules:
     author=project/'author';author.mkdir()
@@ -118,8 +118,8 @@ try:
     entry=project/('src/main.ts' if language=='typescript' else 'src/main.rs')
     entry.write_text('// user host customization\n'+entry.read_text())
     if not a.official:shutil.copytree(served/'app-v2',served/'app',dirs_exist_ok=True)
-    call('ext','add','app' if a.official else base+'/app/extension.toml','--id','app','--constraint','^0.2.0','--input',json.dumps(settings),'--yes',*credentials)
-    if a.official:call('preset','apply','app','--input',json.dumps(settings),'--yes',*credentials)
+    call('ext','add','app' if a.official else base+'/app/extension.toml','--id','app','--constraint','^0.2.0','--input',json.dumps(settings),'--yes',*credential_flags)
+    if a.official:call('preset','apply','app','--input',json.dumps(settings),'--yes',*credential_flags)
     before={str(path):path.read_bytes() for path in [entry,project/'lenso.code.toml',project/'lenso/app.lock']}
     call('app','upgrade-preview',empty=True)
     assert all(Path(path).read_bytes()==content for path,content in before.items())
@@ -128,7 +128,7 @@ try:
     call('app','upgrade','--answers',str(answer_file),expected=130,empty=True)
     assert all(Path(path).read_bytes()==content for path,content in before.items())
     call('app','upgrade','--yes',empty=True);assert 'user host customization' in entry.read_text()
-    if a.official:call('ext','configure','code','--input','{"ref":"HEAD"}','--yes',*credentials)
+    if a.official:call('ext','configure','code','--input','{"ref":"HEAD"}','--yes',*credential_flags)
     call('code','update','auth','--input','{"reconfigure":true}','--yes')
     call('app','check','--yes')
     process,stream,port=start()
