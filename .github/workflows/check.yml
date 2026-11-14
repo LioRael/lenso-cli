@@ -73,6 +73,39 @@ jobs:
             ops-acceptance.json
             ops-acceptance.log
 
+  agent:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_BUILD_JOBS: "2"
+      RUSTUP_TOOLCHAIN: "1.99.0"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+      - name: Prepare Rust
+        run: rustup toolchain install 1.99.0 --profile minimal --component clippy
+      - name: Verify optional features and real Agent/MCP behavior
+        run: |
+          cargo build --locked -p lenso-agent --no-default-features
+          cp target/debug/lenso-agent target/debug/lenso-agent-no-mcp
+          cargo build --locked -p lenso-agent -p acme-example -p lenso --features lenso-agent/mcp,lenso/ops
+          cargo test --locked -p lenso-agent --all-features
+          python3 -c 'import subprocess; lines=subprocess.check_output(["cargo","tree","--locked","-p","lenso","--edges","normal","--prefix","none"],text=True).splitlines(); assert not any(line.startswith(("lenso-agent ","rmcp ","jsonschema ")) for line in lines)'
+          LENSO_AGENT_NO_MCP_BIN="$PWD/target/debug/lenso-agent-no-mcp" LENSO_AGENT_REPORT=agent-acceptance.json python3 scripts/test-agent-adapter.py 2>&1 | tee agent-acceptance.log
+      - name: Preserve Agent acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-acceptance-${{ runner.os }}
+          path: |
+            agent-acceptance.json
+            agent-acceptance.log
+
   extensions:
     strategy:
       matrix:

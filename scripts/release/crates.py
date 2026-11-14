@@ -9,7 +9,7 @@ import urllib.error
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
-PATHS = ['crates/framework', 'crates/composition', 'crates/codegen', 'crates/runtime', 'extensions/project', 'extensions/ops', 'crates/cli']
+PATHS = ['crates/framework', 'crates/composition', 'crates/codegen', 'crates/runtime', 'crates/agent', 'extensions/project', 'extensions/ops', 'crates/cli']
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--only', choices=PATHS, help='Select one public package directory')
 parser.add_argument('--status', action='store_true', help='Write publication status to GitHub Actions outputs')

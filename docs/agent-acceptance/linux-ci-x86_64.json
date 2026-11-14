@@ -1,0 +1,38 @@
+{
+  "status": "passed",
+  "cases": [
+    "explicit selection and shared static contracts; no standalone Lenso or PATH required",
+    "Shell, native JSON and selected Agent call agree; unselected operation denied",
+    "MCP initialization, selected descriptions and conservative effect hints",
+    "Schema types/required/unknown fields checked without echoing rejected values or accepting grants",
+    "Host grant plus digest-bound approval; compact receipt and same-invocation full report",
+    "Changed preimages invalidate approval; host grant revocation applies to an existing MCP connection",
+    "Text questions stay explicit; report lookup cannot read arbitrary paths and retention is bounded",
+    "One-shot summary saves a private full report; overwrite is rejected before execution",
+    "Contract drift blocks execution before the newly described operation can run",
+    "Selected schemas cannot fetch HTTP/file references; unrelated schemas are not compiled",
+    "Discovery failures retain the native diagnostic code without leaking internal parse input",
+    "Default Agent binary has no MCP command",
+    "node: real HTTP readiness and MCP request cancellation preserve Ops cleanup evidence",
+    "node: actual nonzero exit and structured failure survive MCP transport",
+    "node: MCP EOF cancels active execution and leaves no fixture process or listener",
+    "node: adapter deadline forwards cancellation and retains target cleanup plus timeout evidence",
+    "node: SIGTERM to the adapter cleans up its active runner and application",
+    "rust: real HTTP readiness and MCP request cancellation preserve Ops cleanup evidence",
+    "rust: actual nonzero exit and structured failure survive MCP transport",
+    "rust: MCP EOF cancels active execution and leaves no fixture process or listener",
+    "rust: adapter deadline forwards cancellation and retains target cleanup plus timeout evidence",
+    "rust: SIGTERM to the adapter cleans up its active runner and application"
+  ],
+  "platform": {
+    "system": "Linux",
+    "machine": "x86_64"
+  },
+  "versions": {
+    "agent": "lenso-agent 0.1.0",
+    "acme": "acme 1.1.2",
+    "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
+    "node": "v26.13.1"
+  },
+  "scope": "real native binaries, local stdio, fake secrets, isolated projects"
+}

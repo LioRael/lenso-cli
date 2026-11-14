@@ -63,7 +63,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        directory: [crates/codegen, crates/runtime]
+        directory: [crates/codegen, crates/runtime, crates/agent]
     env:
       PACKAGE_DIR: ${{ matrix.directory }}
     steps: *publish_steps
