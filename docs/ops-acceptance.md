@@ -46,6 +46,10 @@ offline Cargo check/test/clippy/build on both systems.
   assertion was added. The 13 command integration tests passed locally after this
   change; the [PR checks](https://github.com/LioRael/lenso-cli/pull/13/checks) track
   the complete Linux rerun.
+- The M0 Wasm build script invoked bare `cargo`, which selected the runner's
+  default toolchain instead of the explicitly prepared 1.99.0 toolchain and its
+  Wasm target. The native check job now sets `RUSTUP_TOOLCHAIN=1.99.0` for its
+  Python subprocesses as well as its explicit Cargo commands.
 
 ## Reproduction and retained evidence
 
