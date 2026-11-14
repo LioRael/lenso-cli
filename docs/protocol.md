@@ -351,6 +351,8 @@ introduced; handle unfamiliar codes without implicitly retrying.
 | `partial_failure` | Plan digest/files/command indices or release ID/verified uploads, with a safe nested cause; inspect before recovery |
 | `process_spawn_failed` | OS error kind; check the granted executable and working directory |
 | `process_failed` | Actual child `exit_code`; retry safety is unknown |
+| `process_timeout` | Declared process lifetime exceeded; inspect cleanup and completed effects |
+| `verification_failed` | Actual readiness/health evidence did not meet its declaration |
 | `cancelled` | Explicit user cancellation; no automatic retry |
 | `wasm_timeout` | Host deadline and cancellation request; inspect effects before retrying |
 | `wasm_fuel_exhausted` | Actual instruction-budget exhaustion; inspect the extension and limits |

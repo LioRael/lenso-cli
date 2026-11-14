@@ -742,7 +742,15 @@ pub(crate) fn resolve_flat(
     for installed in config.cli.extensions.iter().filter(|entry| entry.enabled) {
         if let Some(id) = installed.source.strip_prefix("builtin:") {
             let provider = options.providers.get(id).ok_or_else(|| {
-                Error::Invalid(format!("native provider {id} is unavailable in this CLI"))
+                lenso_cli::Diagnostic::new(lenso_cli::DiagnosticCode::DependencyUnavailable)
+                    .with_details(
+                        serde_json::json!({"provider":id,"reason":"native_provider_unavailable"}),
+                    )
+                    .with_retryable(false)
+                    .with_recovery(
+                        "select_host",
+                        "Use a Host that explicitly makes this native provider available.",
+                    )
             })?;
             let definition: Extension = serde_json::from_value(
                 serde_json::json!({"schema_version":1,"id":id,"version":provider.version,"handlers":{},"workflows":[],"commands":[]}),

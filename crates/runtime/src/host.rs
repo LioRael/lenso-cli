@@ -244,7 +244,9 @@ pub fn project_path(project: &Path, relative: &Path) -> Result<PathBuf, Error> {
     Ok(path)
 }
 
-pub(crate) fn http_allowed(url: &str, grants: &[String]) -> bool {
+/// Check an explicit HTTP origin/path-prefix grant without granting credentials or redirects.
+#[must_use]
+pub fn http_allowed(url: &str, grants: &[String]) -> bool {
     let Ok(url) = reqwest::Url::parse(url) else {
         return false;
     };

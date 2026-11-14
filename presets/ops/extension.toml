@@ -1,0 +1,59 @@
+schema_version = 1
+id = "ops"
+version = "0.1.0"
+
+[dependencies.ops-host]
+source = "builtin:ops-host"
+version = "^0.1.0"
+
+[handlers]
+
+[[workflows]]
+id = "ops/inspect"
+steps = [{ id = "inspect", handler = "ops-host/inspect" }]
+
+[[workflows]]
+id = "ops/run"
+steps = [{ id = "run", handler = "ops-host/run" }]
+
+[[workflows]]
+id = "ops/verify"
+steps = [{ id = "verify", handler = "ops-host/verify" }]
+
+[[commands]]
+path = ["ops", "inspect"]
+workflow = "ops/inspect"
+about = "Inspect declared processes and their launch prerequisites"
+provider = "ops"
+arguments = [{ name = "workflow", positional = true, help = "Workflow name; omit to inspect all" }]
+
+[[commands]]
+path = ["ops", "run"]
+workflow = "ops/run"
+about = "Supervise a declared foreground process through exit, timeout or cancellation"
+provider = "ops"
+arguments = [{ name = "workflow", positional = true, help = "Declared workflow to run" }]
+
+[[commands]]
+path = ["ops", "verify"]
+workflow = "ops/verify"
+about = "Read the declared HTTP health endpoint without launching a process"
+provider = "ops"
+arguments = [{ name = "workflow", positional = true, help = "Workflow whose HTTP endpoint to check" }]
+
+[contracts."ops/inspect"]
+capabilities = ["host.reads"]
+effects = ["transient loopback port availability check"]
+questions = []
+verification = []
+
+[contracts."ops/run"]
+input_schema = { type = "object", required = ["workflow"], properties = { workflow = { type = "string" } } }
+effects = ["foreground child process group", "effects of the explicitly granted application"]
+verification = ["Read declared HTTP readiness, or observe the declared exit code", "Inspect cleanup and separate stream evidence"]
+
+[contracts."ops/verify"]
+input_schema = { type = "object", required = ["workflow"], properties = { workflow = { type = "string" } } }
+capabilities = ["host.reads", "host.http"]
+effects = ["GET the configured loopback health endpoint"]
+verification = ["Inspect actual HTTP status and observation time; managed process identity is not inferred"]

@@ -216,7 +216,15 @@ pub(crate) fn register_locked(
     for locked in &lock.extensions {
         if let Some(id) = locked.source.strip_prefix("builtin:") {
             let provider = options.providers.get(id).ok_or_else(|| {
-                Error::Invalid(format!("native provider {id} is unavailable in this CLI"))
+                lenso_cli::Diagnostic::new(lenso_cli::DiagnosticCode::DependencyUnavailable)
+                    .with_details(
+                        serde_json::json!({"provider":id,"reason":"native_provider_unavailable"}),
+                    )
+                    .with_retryable(false)
+                    .with_recovery(
+                        "select_host",
+                        "Use a Host that explicitly makes this native provider available.",
+                    )
             })?;
             if provider.version != locked.definition.version {
                 return Err(Error::Invalid(format!(

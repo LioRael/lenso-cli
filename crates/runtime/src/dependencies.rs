@@ -127,9 +127,9 @@ pub(crate) fn resolve(
                     .get(id)
                     .is_none_or(|provider| provider.version != entry.definition.version)
             {
-                return Err(Error::Invalid(format!(
-                    "native provider {id} changed or unavailable; update CLI or lenso update"
-                )));
+                return Err(lenso_cli::Diagnostic::new(lenso_cli::DiagnosticCode::DependencyUnavailable)
+                    .with_details(serde_json::json!({"provider":id,"reason":"native_provider_changed_or_unavailable"}))
+                    .with_retryable(false).with_recovery("review_provider", "Use a compatible Host, or explicitly review the provider upgrade and update the lock.").into());
             }
         }
         return Ok(lock.clone());
@@ -321,6 +321,9 @@ impl Resolver<'_> {
             let mut entry = match resolved {
                 Ok(entry) => entry,
                 Err(error) => {
+                    if matches!(&error, Error::Diagnostic(_) | Error::Execution { .. }) {
+                        return Err(last.unwrap_or(error));
+                    }
                     return Err(last.unwrap_or_else(|| {
                         Error::Invalid(format!(
                             "{} -> {id}: {error}",

@@ -352,6 +352,12 @@ returns a compact receipt and saves the same invocation's full report. Structure
 errors expose stable codes, safe details and recovery; see the
 [diagnostic and result protocol](docs/protocol.md#public-diagnostics-source-development).
 
+The source checkout also includes [optional Ops](extensions/ops/README.md):
+foreground Unix process supervision, loopback readiness and read-only health
+verification. Build with `--features ops` and explicitly install the project
+manifest to expose its commands. Node/Rust acceptance fixtures exercise real
+processes and cleanup; the extension is not yet published.
+
 | Package | Responsibility |
 | --- | --- |
 | [`lenso`](https://crates.io/crates/lenso) | Standalone executable, command name `lenso` |

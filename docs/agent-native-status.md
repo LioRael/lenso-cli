@@ -1,6 +1,6 @@
 # Agent-native implementation status
 
-P0.1–P0.3 source implementation, 2026-11-14–15. At the start, the CLI, SDK, Modules
+P0 protocols and P1 Ops source implementation, 2026-11-14–15. At the start, the CLI, SDK, Modules
 and Registry local main branches matched origin/main after fetching. The Site repository was not
 present alongside those checkouts; no Site changes were made.
 
@@ -41,16 +41,16 @@ remain accepted, but downstream Rust struct literals need to initialize that fie
 On macOS arm64 with Rust 1.99.0, standard toolchain Cargo passed:
 
 ```sh
-cargo check --workspace --all-targets
-cargo test --locked --workspace
+cargo check --locked --workspace --all-targets --all-features
+cargo test --locked --workspace --all-features
 cargo test --locked -p lenso --no-default-features
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-cargo doc --locked --workspace --no-deps
+cargo doc --locked --workspace --all-features --no-deps
 cargo fmt --all --check
 git diff --check
 ```
 
-Workspace tests: 92 passed, one existing live GitHub credential/network test
+Workspace tests with Ops: 96 passed, one existing live GitHub credential/network test
 ignored. New regressions exercise secret-bearing legacy errors, parser/input
 redaction even in debug mode, typed Wasm Host denials, guest error redaction,
 actual Wasm deadlines/fuel exhaustion, failed/skipped validation, stale reads,
@@ -120,6 +120,47 @@ Observed terminal record:
 Neither a project lock nor a dependency cache was created in that clean project.
 The Acme binary embeds the Framework; it does not invoke the Lenso binary.
 
+## P1 Ops delivery
+
+The source-only `lenso-ops` crate supplies native `ops-host` handlers. The
+`ops` binary feature is disabled by default, and only the separately installed
+Ops manifest adds aliases. `inspect` checks the declared workflow's exact process
+grant, executable/cwd, environment names, HTTP grant/config and port availability.
+`run` supervises a foreground Unix process group, checks actual HTTP or exit-code
+readiness, and handles lifetime/readiness deadlines and SIGINT/SIGTERM cleanup.
+`verify` reads the configured health endpoint and explicitly leaves managed-process
+identity unknown. Full declarations and scope: [Ops README](../extensions/ops/README.md).
+
+On macOS arm64, Node 26.10.0/Rust 1.99.0, `scripts/test-ops.py` passed 20 recorded
+Node/Rust lifecycle cases plus preflight/permission/discovery checks:
+
+| Both fixture languages | Observed |
+| --- | --- |
+| Declared exit 0 / unexpected exit 7 | Actual exit verification / `process_failed`, exit 7 |
+| Zero exit before HTTP readiness | `verification_failed`, no invented readiness |
+| HTTP 503 / 302 / 404 / unavailable listener | Actual not-ready status/reason; redirects not followed |
+| Healthy foreground process past its lifetime | Observed readiness then `process_timeout` |
+| SIGINT / SIGTERM while healthy | `cancelled`, direct child reaped and streams drained |
+| Independent verify during/after the run | Actual HTTP ready/not-ready evidence; process identity remains unknown |
+
+Recorded child PIDs, including the Node descendant, disappeared; ports could be
+rebound with ordinary server `SO_REUSEADDR` semantics. No existing source files
+changed. Separate bounded stdout/stderr contained masked injected values; ambient
+environment was absent. Exact-argv denial, literal shell metacharacters, missing
+program/cwd/env, occupied port and invalid/unauthorized endpoints were checked.
+`--yes` and input-supplied capability objects did not create grants. Static help
+created no execution lock or process; locked/offline discovery kept its pins.
+A separate binary built without Ops rejected the native dependency with a typed
+`dependency_unavailable` diagnosis. The variants were copied before testing to
+avoid feature builds replacing a test's executable midway through acceptance.
+
+Four Ops unit tests cover config guards, numeric-loopback rules, bounded secret
+redaction and graceful-exit reaping before group escalation. The dependency-free
+Rust fixture also passed native offline check/test/clippy/build. Linux CI now has
+an Ops job with both binary variants and both fixtures; that remote job has not
+run for this local change. Windows process management is unsupported in this slice.
+No Ops package/preset release or Registry publication was performed.
+
 ## Remaining implementation
 
 P0.2/P0.3 and their related regressions are implemented in source. They retain
@@ -129,7 +170,7 @@ public. Native authors should use `Diagnostic`; old guest failures without a typ
 Host cause conservatively report `wasm_failed`. Other authored outputs, questions
 and child logs remain public content and are not automatically scrubbed.
 
-P1 Ops lifecycle/readiness, optional Agent/MCP adaptation, SDK Action/Module
+Optional Agent/MCP adaptation, SDK Action/Module
 metadata, Files capability prechecks and Action integration, readable generated
 exports, Registry discovery and Site updates remain open. Auth/Files application
 consumer acceptance was not rerun; no SDK/Modules sources were changed.

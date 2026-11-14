@@ -13,11 +13,13 @@ include = ["src/**", "Cargo.toml", "README.md"]
 [features]
 default = ["project"]
 project = ["dep:lenso-project"]
+ops = ["dep:lenso-ops"]
 
 [dependencies]
 lenso-cli.workspace = true
 lenso-runtime.workspace = true
 lenso-project = { workspace = true, optional = true }
+lenso-ops = { workspace = true, optional = true }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

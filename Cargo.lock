@@ -1435,6 +1435,7 @@ version = "1.1.2"
 dependencies = [
  "flate2",
  "lenso-cli",
+ "lenso-ops",
  "lenso-project",
  "lenso-runtime",
  "nix",
@@ -1487,6 +1488,21 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror 2.0.21",
+ "toml 1.2.1+spec-1.1.0",
+]
+
+[[package]]
+name = "lenso-ops"
+version = "0.1.0"
+dependencies = [
+ "lenso-cli",
+ "lenso-runtime",
+ "nix",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
  "toml 1.2.1+spec-1.1.0",
 ]
 

@@ -26,6 +26,10 @@ pub enum DiagnosticCode {
     ProcessSpawnFailed,
     /// A supervised child exited unsuccessfully.
     ProcessFailed,
+    /// A supervised process exceeded its declared lifetime.
+    ProcessTimeout,
+    /// An explicitly requested readiness or health check did not pass.
+    VerificationFailed,
     /// The user explicitly stopped execution.
     Cancelled,
     /// The host's Wasm call deadline expired.
@@ -36,7 +40,7 @@ pub enum DiagnosticCode {
     WasmFailed,
     /// An extension returned invalid protocol data.
     InvalidResponse,
-    /// A dependency cannot be resolved under the selected offline or lock policy.
+    /// A dependency is unavailable under the selected Host or resolution policy.
     DependencyUnavailable,
     /// Locked dependency bytes do not match their advertised digest.
     IntegrityMismatch,
@@ -59,6 +63,8 @@ impl DiagnosticCode {
             }
             Self::ProcessSpawnFailed => "external process could not be started",
             Self::ProcessFailed => "external process exited unsuccessfully",
+            Self::ProcessTimeout => "external process exceeded its time limit",
+            Self::VerificationFailed => "declared verification did not pass",
             Self::Cancelled => "cancelled",
             Self::WasmTimeout => "Wasm call exceeded its time limit",
             Self::WasmFuelExhausted => "Wasm call exhausted its instruction budget",

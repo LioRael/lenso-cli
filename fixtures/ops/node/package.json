@@ -1,0 +1,6 @@
+{
+  "name": "lenso-ops-node-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": { "dev": "node server.mjs" }
+}
