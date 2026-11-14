@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise Code defaults and reviewed legacy-profile migration with actual Wasm."""
+import tomllib
 import argparse
 import json
 import os
@@ -19,6 +20,7 @@ parser.add_argument('--token-env')
 parser.add_argument('--out', type=Path)
 args = parser.parse_args()
 binary = args.binary.resolve(strict=True)
+code_version=tomllib.loads((root/"presets/code/extension.toml").read_text())["version"]
 out = args.out.resolve() if args.out else Path(tempfile.mkdtemp(prefix='lenso-code-initialization-'))
 if args.out:
     out.mkdir(parents=True, exist_ok=False)
@@ -57,7 +59,7 @@ for name, settings in [('default', {}), ('explicit-official', {'repo': 'LioRael/
     call('ext', 'add', source, '--id', 'code', '--input', json.dumps(settings), '--yes', *credentials)
     installed = code(config())
     pin = next(e for e in json.loads((project / 'lenso.lock').read_text())['extensions'] if e['id'] == 'code')
-    assert pin['definition']['version'] == '0.3.6'
+    assert pin['definition']['version'] == code_version
     fresh = json.loads(json.dumps(installed))
     profile = installed['options']['registries']['main']
     assert profile['format'] == 'lenso-modules-v1' and profile['path'] == 'lenso.modules.toml'
