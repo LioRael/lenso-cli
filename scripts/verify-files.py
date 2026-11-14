@@ -136,7 +136,9 @@ try:
     call('app','upgrade','--answers',str(answer_file),expected=130,empty=True)
     assert all(Path(path).read_bytes()==content for path,content in before.items())
     call('app','upgrade','--yes',empty=True);assert 'user host customization' in entry.read_text()
-    if a.official:call('ext','configure','code','--input','{"ref":"HEAD"}','--yes',*credential_flags)
+    if a.official:
+     call('ext','add','code','--constraint','='+a.code_version,'--input',json.dumps(settings),'--yes',*credential_flags)
+     call('ext','configure','code','--input','{"ref":"HEAD"}','--yes',*credential_flags)
     call('code','update','auth','--input','{"reconfigure":true}','--yes')
     call('app','check','--yes')
     process,stream,port=start()
