@@ -54,7 +54,7 @@ jobs:
         with:
           node-version: "26"
       - name: Prepare Rust
-        run: rustup toolchain install 1.99.0 --profile minimal
+        run: rustup toolchain install 1.99.0 --profile minimal --component clippy
       - name: Verify optional Ops with real Node and Rust processes
         run: |
           cargo test --locked -p lenso-ops
