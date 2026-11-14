@@ -1,0 +1,75 @@
+presets/app/preset.toml
+  s_c5695907fe744f::t_e2623a0afcaf96 3,9
+extensions/app/src/legacy/main.rs
+  s_c5695907fe744f::t_30cd5f92c42881 1-32
+extensions/app/src/legacy/build.rs
+  s_c5695907fe744f::t_30cd5f92c42881 1-54
+extensions/app/src/templates/lenso_host.rs
+  s_c5695907fe744f::t_e2623a0afcaf96 1-10
+docs/app-extension.md
+  s_c5695907fe744f::t_a632f354fd7189 97-103
+scripts/verify-files.py
+  s_c5695907fe744f::t_bb31eddeab2c52 12,24-26,70-91,94-121
+  s_c5695907fe744f::t_993f02c4cfd006 130,137-138
+  s_c5695907fe744f::t_6c7b572ca9fc28 28-29,34,92-93
+  s_c5695907fe744f::t_fa53acc520a186 1-2,4-11,13-23,27,30-33,35-69,122-129,131-136,139,155-176,178-181
+  s_c5695907fe744f::t_60640c11a1299c 3,140-154,177
+extensions/app/src/templates/main.rs
+  s_c5695907fe744f::t_e2623a0afcaf96 2
+extensions/app/Cargo.toml
+  s_c5695907fe744f::t_698beb9753611f 15
+  s_c5695907fe744f::t_e2623a0afcaf96 3
+  s_c5695907fe744f::t_13f617befbd25f 16
+extensions/app/src/templates/lenso-host.ts
+  s_c5695907fe744f::t_e2623a0afcaf96 1-25
+README.md
+  s_c5695907fe744f::t_a632f354fd7189 117-123
+presets/app/extension.toml
+  s_c5695907fe744f::t_e2623a0afcaf96 3
+  s_c5695907fe744f::t_698beb9753611f 146-168
+extensions/app/src/templates/build.rs
+  s_c5695907fe744f::t_e2623a0afcaf96 26,49,51-59,61
+  s_c5695907fe744f::t_30cd5f92c42881 44-48,50
+docs/files-integration.md
+  s_c5695907fe744f::t_a632f354fd7189 1-85
+extensions/app/src/templates/main.ts
+  s_c5695907fe744f::t_e2623a0afcaf96 5-7,43,62-70,75,78-79,83-88,94-95,97-100,102,104-111,114
+  s_c5695907fe744f::t_30cd5f92c42881 52-60
+  s_c5695907fe744f::t_189cb2a4df34aa 76-77,112,125,127
+  s_c5695907fe744f::t_4542dcf212778d 61
+extensions/app/src/legacy/main.ts
+  s_c5695907fe744f::t_30cd5f92c42881 1-93
+extensions/app/src/merge.rs
+  s_c5695907fe744f::t_698beb9753611f 1-56
+  s_c5695907fe744f::t_11015bff6c6e7b 57-77
+extensions/app/src/lib.rs
+  s_c5695907fe744f::t_13f617befbd25f 177,366-369,429-439
+  s_c5695907fe744f::t_e2623a0afcaf96 143,149,248
+  s_c5695907fe744f::t_c1b5a86429774d 188-191,197,206-209
+  s_c5695907fe744f::t_698beb9753611f 2,321
+  s_c5695907fe744f::t_51c0bb045e3093 322-365,370-428,440-445
+  s_c5695907fe744f::t_11015bff6c6e7b 446-447
+  s_c5695907fe744f::t_24362d3d29627f 5
+scripts/verify-app.py
+  s_c5695907fe744f::t_906f2208f4e494 3,74,123-124,134-135
+.github/workflows/verify-app.yml
+  s_c5695907fe744f::t_ee05e4f043bd99 63-70,75-77
+extensions/app/Cargo.lock
+  s_c5695907fe744f::t_01a26acd3d0042 200,205-206,447-452
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "968148899ef496f9e7e81b0e1d5825580b24356a",
+  "prompts": {},
+  "sessions": {
+    "s_c5695907fe744f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d06d-149b-7062-aa67-3c0145df9d90",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
