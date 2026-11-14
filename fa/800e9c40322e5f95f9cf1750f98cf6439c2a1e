@@ -1,0 +1,25 @@
+docs/agent-acceptance/macos-ci-arm64.json
+  s_0a36fa17311984::t_94843c694683ad 1-38
+docs/agent-adapter-acceptance.md
+  s_0a36fa17311984::t_41da340aea67ce 7,16-27,45-48,55-59
+docs/agent-acceptance/linux-ci-x86_64.json
+  s_0a36fa17311984::t_94843c694683ad 1-38
+docs/agent-native-status.md
+  s_0a36fa17311984::t_41da340aea67ce 178-180
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fa800e9c40322e5f95f9cf1750f98cf6439c2a1e",
+  "prompts": {},
+  "sessions": {
+    "s_0a36fa17311984": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1daa8-3fb7-7c03-beac-1e3b4a74162a",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
