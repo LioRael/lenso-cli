@@ -35,6 +35,9 @@ pub struct Extension {
     pub workflows: Vec<Workflow>,
     /// Statically discoverable command aliases.
     pub commands: Vec<CommandSpec>,
+    /// Optional workflow contracts, shared by every alias targeting the workflow.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub contracts: BTreeMap<String, lenso_cli::CommandContract>,
 }
 
 /// A required provider and its independently resolved distribution source.
@@ -94,6 +97,17 @@ pub(crate) fn validate_metadata(extension: &Extension) -> Result<(), Error> {
         }
     }
     let namespace = format!("{}/", extension.id);
+    for workflow in extension.contracts.keys() {
+        if !extension
+            .workflows
+            .iter()
+            .any(|definition| &definition.id == workflow)
+        {
+            return Err(Error::Invalid(format!(
+                "contract references unknown workflow: {workflow}"
+            )));
+        }
+    }
     for id in extension
         .handlers
         .keys()
@@ -337,6 +351,10 @@ pub(crate) fn register_locked(
         }
     }
     for (installed, extension) in extensions {
+        next.provider_version(&extension.id, &extension.version)?;
+        for (workflow, contract) in &extension.contracts {
+            next.contract(workflow, contract.clone())?;
+        }
         for mut command in extension.commands.clone() {
             let original = command.path.join(" ");
             if installed.disabled_commands.contains(&original) {

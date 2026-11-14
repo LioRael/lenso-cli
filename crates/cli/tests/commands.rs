@@ -58,6 +58,56 @@ fn process_fixture() -> tempfile::TempDir {
 }
 
 #[test]
+fn machine_help_uses_read_only_discovery_and_reports_real_project_commands() {
+    let mut definition = extension();
+    definition["contracts"] = json!({"example/work":{
+        "effects":[], "capabilities":["host.reads"]
+    }});
+    let root = setup(definition, json!({"aliases":{"demo":["tool","check"]}}));
+    let output = cli(
+        root.path(),
+        &["help", "tool", "check", "--json", "--offline"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let catalog: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(catalog["type"], "command_catalog");
+    assert_eq!(catalog["commands"].as_array().unwrap().len(), 1);
+    assert_eq!(catalog["commands"][0]["path"], json!(["tool", "check"]));
+    assert_eq!(catalog["commands"][0]["provider_version"], "0.1.0");
+    assert_eq!(catalog["commands"][0]["contract"]["effects"], json!([]));
+    assert!(
+        !root.path().join("lenso.lock").exists(),
+        "help cannot create an execution lock"
+    );
+    assert!(
+        !root.path().join("cache/v1/blobs").exists(),
+        "help cannot hydrate Wasm"
+    );
+    assert_eq!(
+        cli(root.path(), &["help", "ops", "--json"]).status.code(),
+        Some(1)
+    );
+    let human = cli(root.path(), &["help", "tool", "check"]);
+    assert!(human.status.success());
+    assert!(String::from_utf8_lossy(&human.stdout).contains("Example command"));
+    let empty = tempfile::tempdir().unwrap();
+    let output = cli(empty.path(), &["help", "--json"]);
+    assert!(output.status.success());
+    let catalog: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        !catalog["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["provider"] == "example")
+    );
+}
+
+#[test]
 fn human_summary_and_color_policy_do_not_change_json_results() {
     let root = process_fixture();
     let human = cli(root.path(), &["demo", "--color", "never"]);

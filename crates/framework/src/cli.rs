@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::terminal::{ColorMode, Prompt, Terminal, UiOptions};
+use crate::{CommandCatalog, CommandContract, CommandDescription};
 use crate::{Context, Engine, Error, EventSink, Outcome, Question, QuestionKind, Step, Workflow};
 
 /// Argument value shape exposed by a dynamically installed command.
@@ -63,6 +64,8 @@ pub struct Cli {
     name: String,
     engine: Engine,
     commands: Vec<CommandSpec>,
+    contracts: BTreeMap<String, CommandContract>,
+    provider_versions: BTreeMap<String, String>,
 }
 
 impl Cli {
@@ -73,12 +76,83 @@ impl Cli {
             name: name.into(),
             engine: Engine::new(),
             commands: Vec::new(),
+            contracts: BTreeMap::new(),
+            provider_versions: BTreeMap::new(),
         }
     }
 
     /// Access the registry for trusted native or sandboxed runtime adapters.
     pub fn engine_mut(&mut self) -> &mut Engine {
         &mut self.engine
+    }
+
+    /// Attach optional static declarations to a registered workflow without changing its handler.
+    ///
+    /// # Errors
+    /// Rejects unknown workflows and duplicate declarations.
+    pub fn contract(&mut self, workflow: &str, contract: CommandContract) -> Result<(), Error> {
+        if !self.engine.workflows().any(|id| id == workflow) {
+            return Err(Error::Invalid(format!("unknown workflow: {workflow}")));
+        }
+        if self.contracts.contains_key(workflow) {
+            return Err(Error::Invalid(format!("duplicate contract: {workflow}")));
+        }
+        self.contracts.insert(workflow.into(), contract);
+        Ok(())
+    }
+
+    /// Declare a provider version without exposing its installation policy or credential bindings.
+    ///
+    /// # Errors
+    /// Rejects empty identities and inconsistent versions for the same provider.
+    pub fn provider_version(&mut self, provider: &str, version: &str) -> Result<(), Error> {
+        if provider.is_empty()
+            || version.is_empty()
+            || self
+                .provider_versions
+                .get(provider)
+                .is_some_and(|old| old != version)
+        {
+            return Err(Error::Invalid(format!(
+                "invalid or conflicting provider version: {provider}"
+            )));
+        }
+        self.provider_versions
+            .insert(provider.into(), version.into());
+        Ok(())
+    }
+
+    /// Describe aliases beneath a path without invoking handlers or reading execution contexts.
+    ///
+    /// # Errors
+    /// Rejects paths with no registered aliases; the empty path returns the whole catalog.
+    pub fn describe(&self, path: &[String]) -> Result<CommandCatalog<'_>, Error> {
+        let mut commands: Vec<_> = self
+            .commands
+            .iter()
+            .filter(|spec| spec.path.starts_with(path))
+            .map(|spec| CommandDescription {
+                command: spec,
+                provider_version: self
+                    .provider_versions
+                    .get(&spec.provider)
+                    .map(String::as_str),
+                cli_input_schema: crate::description::input_schema(spec),
+                contract: self.contracts.get(&spec.workflow),
+            })
+            .collect();
+        if !path.is_empty() && commands.is_empty() {
+            return Err(Error::Invalid(format!(
+                "unknown command path: {}",
+                path.join(" ")
+            )));
+        }
+        commands.sort_by(|a, b| a.command.path.cmp(&b.command.path));
+        Ok(CommandCatalog {
+            r#type: "command_catalog",
+            schema_version: 1,
+            commands,
+        })
     }
 
     /// Register a command alias for an existing workflow.
@@ -277,6 +351,7 @@ impl Cli {
 
     fn parser(&self, options: UiOptions) -> Command {
         let mut parser = Command::new(self.name.clone())
+            .disable_help_subcommand(true)
             .version(env!("CARGO_PKG_VERSION"))
             .color(
                 if options.json
@@ -362,6 +437,11 @@ impl Cli {
                     .help("Workflow input object"),
             )
             .subcommand(
+                Command::new("help")
+                    .about("Show help or a static command catalog with --json")
+                    .arg(Arg::new("command").num_args(0..)),
+            )
+            .subcommand(
                 Command::new("run")
                     .about("Run a workflow by its installed identifier")
                     .arg(Arg::new("workflow").required(true)),
@@ -429,6 +509,25 @@ impl Cli {
             println!();
             return Ok(0);
         };
+        if name == "help" {
+            let path: Vec<String> = sub
+                .get_many::<String>("command")
+                .map(|parts| parts.cloned().collect())
+                .unwrap_or_default();
+            if json {
+                println!("{}", serde_json::to_string(&self.describe(&path)?)?);
+            } else {
+                let mut target = &mut parser;
+                for part in &path {
+                    target = target
+                        .find_subcommand_mut(part)
+                        .ok_or_else(|| Error::Invalid(format!("unknown command: {part}")))?;
+                }
+                target.print_long_help()?;
+                println!();
+            }
+            return Ok(0);
+        }
         let mut input: Value = matches
             .get_one::<String>("input")
             .map(|s| serde_json::from_str(s))

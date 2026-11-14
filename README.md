@@ -341,6 +341,13 @@ async fn main() -> Result<(), Error> {
 See [Acme CLI](examples/acme-cli/src/main.rs) for questions and optional extension
 loading. Native handlers are trusted application code.
 
+In the source checkout, `acme help hello --json` describes that command without
+executing it. `lenso help --json` lists the current project's registered aliases.
+The versioned catalog derives CLI argument shapes from `CommandSpec` and shares
+optional workflow contracts across aliases. See [static command discovery](docs/protocol.md#static-command-discovery-source-development)
+for unknown fields, offline/locked behavior, and release compatibility, and
+[implementation status](docs/agent-native-status.md) for validation and remaining work.
+
 | Package | Responsibility |
 | --- | --- |
 | [`lenso`](https://crates.io/crates/lenso) | Standalone executable, command name `lenso` |

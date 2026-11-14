@@ -1,5 +1,68 @@
 # Automatic dependency preparation and JSON ABI v1
 
+## Static command discovery (source development)
+
+The source checkout supports `lenso help --json` to list registered aliases and
+`lenso help app run --json` to describe an installed command or group. The same
+interface works in embedded CLIs, for example `acme help hello --json`. No handler
+is called. Human `help` and `--help` retain terminal help; `--help --json` still
+prints Clap help text. Only the explicit `help ... --json` form returns a catalog.
+The generic `run` and `help` frontend controls are not workflow aliases and are
+not catalog entries. An unknown or uninstalled path fails rather than returning
+an empty successful selection.
+
+Catalogs use `type: command_catalog`, `schema_version: 1`, and a `commands` array
+sorted by command path. Each entry contains the original `CommandSpec` fields,
+`provider_version`, `cli_input_schema`, and `contract`. The CLI schema is derived
+from existing Text/Flag/List arguments: string, boolean, and an array of strings
+with `minItems: 1`. All CLI options remain optional; absence is passed through to
+the workflow rather than inventing a default or required input. Workflow-level
+required/default/enum constraints belong in the optional declared input schema.
+Additional `--input` keys remain accepted, so the derived CLI schema does not
+set `additionalProperties: false`.
+
+`Cli::describe(path)` exposes the same catalog without a terminal or an installed
+`lenso` executable. `Cli::contract(workflow, contract)` attaches an optional
+`CommandContract` to a registered workflow; aliases share that declaration.
+`Cli::provider_version(provider, version)` records a native provider's version.
+Old `Argument` and `CommandSpec` Rust literals and serialized manifests remain
+valid without adding fields.
+
+Extensions may declare a `contracts` map keyed by an owned workflow ID:
+
+```toml
+[contracts."example/check"]
+input_schema = { type = "object", properties = { mode = { type = "string", enum = ["fast", "full"] } } }
+capabilities = ["host.reads"]
+effects = []
+verification = ["Check the returned state against the project's expected state"]
+```
+
+Other optional fields are `output_schema` and `questions` (the existing Question
+shape). Omitted contract fields serialize as `null`, meaning unknown; `[]`
+explicitly declares none. A wholly absent contract is also `null`. Provider
+versions come from resolved extension metadata, or remain `null` for native
+commands whose host has not declared a version. Contracts referencing a workflow
+outside the extension's definitions are rejected before publishing a lock or
+changing the host registry.
+
+Contracts are public author declarations, not sandbox proofs, schema validators,
+permission grants, or evidence of verification. Do not include secrets, secret
+defaults, environment values, credential URLs, or private diagnostic data in them.
+Discovery does not serialize host grants, extension options, answers, or credential
+bindings. Execution and its independent authorization checks are unchanged.
+
+Machine help uses the existing read-only discovery load mode: it respects aliases,
+disabled commands, `--project`, `--offline`, and `--locked`, and does not write a
+project lock or hydrate/execute Wasm. First discovery may resolve source metadata
+under the existing network policy. Warm locked discovery can run without the
+original module or manifest files. This additive manifest field is implemented
+in the source checkout only; older releases reject unknown fields. Publish a
+compatible Host release and declare its minimum version before distributing a
+manifest using `contracts`.
+
+## Dependency preparation
+
 `lenso` reads `<project>/lenso.toml` for explicit sources and project policy, and
 `<project>/lenso.lock` for pinned command/workflow/handler metadata. An explicit
 `--project` is exact; otherwise the nearest ancestor with `lenso.toml` is selected.
