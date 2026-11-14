@@ -1,0 +1,20 @@
+crates/cli/tests/commands.rs
+  s_0a36fa17311984::t_a1fe240809eab4 576,585,630,641,660-664
+  s_0a36fa17311984::t_28a1909a880760 665
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b0a0083a39266197951db926a4e4131091e53e50",
+  "prompts": {},
+  "sessions": {
+    "s_0a36fa17311984": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1daa8-3fb7-7c03-beac-1e3b4a74162a",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
