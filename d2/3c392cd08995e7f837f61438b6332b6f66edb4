@@ -1,0 +1,25 @@
+.github/workflows/verify-files-official.yml
+  s_0a36fa17311984::t_4f2b93c090f7a1 37,43,47,49
+docs/files-integration.md
+  s_0a36fa17311984::t_3d40a40685edd1 3-5,90-92,100-103,105-109
+scripts/verify-app.py
+  s_0a36fa17311984::t_91c201ffe78b63 137
+scripts/verify-files.py
+  s_0a36fa17311984::t_5c6c55cbdf0667 14-17
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d23c392cd08995e7f837f61438b6332b6f66edb4",
+  "prompts": {},
+  "sessions": {
+    "s_0a36fa17311984": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1daa8-3fb7-7c03-beac-1e3b4a74162a",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "LioRael <leo@lenso.dev>"
+    }
+  }
+}
