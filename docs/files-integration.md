@@ -1,7 +1,8 @@
 # Files integration and App host v2
 
-Status: published App 0.2.0, Auth 0.4.0 and Files 0.1.0 (module source v0.4.0).
-Code remains 0.3.6. The native CLI Runtime and published SDKs are unchanged. The
+Status: published App 0.2.0, Auth 0.4.1 and Files 0.1.1 (module source v0.4.1).
+Code 0.3.8 supports reviewed shared SDK patch upgrades and full Rust metadata
+validation. Generated modules use published App SDK 0.1.2; the native CLI Runtime is unchanged. The
 official Registry and app preset select the matching native host.
 
 ## Native host protocol
@@ -86,7 +87,9 @@ selection/generation/ownership machinery. No Files registry is added to the CLI 
 ## Official source verification
 
 `verify-files.py --official --token-env GITHUB_TOKEN` uses the public app preset,
-extension Registry/Release and module source tag with a new cache per case. Add
+extension Registry/Release and module source tag. By default each case has a fresh cache; an explicit
+`LENSO_CACHE_DIR` reuses verified downloads across sequential cases to reduce
+GitHub API requests without sharing application state. Add
 `--upgrade` to install actual App 0.1.0 and Auth 0.3.0 first, then upgrade App,
 apply the current preset and reconfigure Auth. `--storage both` covers SQLite and
 PostgreSQL; `--language` selects TypeScript or Rust. No local module copies or
@@ -94,7 +97,13 @@ HTTP fixture server are used in official mode. The optional token binding provid
 GitHub API quota for repeated cold-cache CI scenarios and stores only its name.
 
 The official Files Actions workflow verifies both new and upgraded applications
-for both languages/databases with published CLI 1.0.0. Local release acceptance
-also uses a fresh native CLI 1.1.2 installation. Reports include exact extension
+for both languages/databases with published CLI 1.1.2. The
+[Auth/Files release acceptance](https://github.com/LioRael/lenso-modules/blob/main/docs/releases/v0.4.1-verification.md)
+records Linux/macOS runs for published CLI 1.0.0 and 1.1.2, including existing
+Auth/Files source-pair upgrades. Reports include exact extension
 asset metadata and module source refs, authorization/streaming results, customized
-updates and locked/offline replay. SDK versions are unchanged.
+updates and locked/offline replay. Installed App SDK versions and registry integrity are recorded separately.
+
+For an existing Auth 0.4.0 / Files 0.1.0 pair, use Code 0.3.8 and the explicit
+SDK 0.1.2 patch migration in the [module release notes](https://github.com/LioRael/lenso-modules/blob/main/docs/releases/v0.4.1.md).
+Remove the temporary override after both owners have been updated.

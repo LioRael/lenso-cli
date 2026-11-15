@@ -134,7 +134,7 @@ try:
       assert validated['validated'] and len(validated['samples'])==1
    call(project,'code','config','--provider','lenso.auth-store='+storage,'--yes')
    plan=call(project,'code','preview','auth')['outputs']['resolve']
-   expected_version=tomllib.loads((a.modules/'lenso.modules.toml').read_text())['modules']['auth']['releases'][-1]['version'] if a.modules else (a.auth_version or ('0.4.0' if host_v2 else '0.3.0'))
+   expected_version=tomllib.loads((a.modules/'lenso.modules.toml').read_text())['modules']['auth']['releases'][-1]['version'] if a.modules else (a.auth_version or ('0.4.1' if host_v2 else '0.3.0'))
    assert plan['module']['version']==expected_version and not (project/'src/modules/auth').exists()
    call(project,'code','add','auth','--yes')
    assert (project/('src/modules/auth/assembly/host.ts' if language=='typescript' else 'src/modules/auth/assembly/host.rs')).is_file()

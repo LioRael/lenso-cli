@@ -34,18 +34,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.0
       - name: Install published native CLI
         run: |
-          curl -fsSL --retry 3 --retry-all-errors https://github.com/LioRael/lenso-cli/releases/download/v1.0.0/install.sh -o "$RUNNER_TEMP/install.sh"
+          curl -fsSL --retry 3 --retry-all-errors https://github.com/LioRael/lenso-cli/releases/download/v1.1.2/install.sh -o "$RUNNER_TEMP/install.sh"
           sh "$RUNNER_TEMP/install.sh" --prefix "$RUNNER_TEMP/bin"
       - name: Verify official new projects and real old-version upgrades
         env:
           GITHUB_TOKEN: ${{ github.token }}
           LANGUAGE: ${{ matrix.language }}
+          LENSO_CACHE_DIR: ${{ runner.temp }}/lenso-official-cache
           DATABASE_URL: postgresql://lenso:test-only-password@127.0.0.1:${{ job.services.postgres.ports[5432] }}/files?sslmode=disable
         run: |
           python3 scripts/verify-files.py --binary "$RUNNER_TEMP/bin/lenso" --official --token-env GITHUB_TOKEN \
-            --language "$LANGUAGE" --storage both --out "$RUNNER_TEMP/files-new"
+            --language "$LANGUAGE" --storage both --expect-input-issues --out "$RUNNER_TEMP/files-new"
           python3 scripts/verify-files.py --binary "$RUNNER_TEMP/bin/lenso" --official --token-env GITHUB_TOKEN \
-            --language "$LANGUAGE" --storage both --upgrade --out "$RUNNER_TEMP/files-upgrade"
+            --language "$LANGUAGE" --storage both --upgrade --expect-input-issues --out "$RUNNER_TEMP/files-upgrade"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
