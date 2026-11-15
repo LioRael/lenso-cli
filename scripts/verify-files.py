@@ -53,7 +53,7 @@ try:
   for storage in (['sqlite','postgres'] if a.storage=='both' else [a.storage]):
    if legacy and not a.official:shutil.copytree(served/'legacy',served/'app',dirs_exist_ok=True)
    case=out/(language+'-'+storage);case.mkdir();project=case/'app';commands=[]
-   env=dict(os.environ,LENSO_CACHE_DIR=str(case/'cache'))
+   env=dict(os.environ,LENSO_CACHE_DIR=os.environ.get('LENSO_CACHE_DIR',str(case/'cache')))
    def call(*args,expected=0,empty=False):
     result=subprocess.run([str(binary),'--project',str(project),*args,'--json'],env=dict(env,PATH='') if empty else env,capture_output=True,text=True,timeout=600)
     assert result.returncode==expected,(args,result.returncode,result.stdout[-5000:],result.stderr[-6000:])

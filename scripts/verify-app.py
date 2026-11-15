@@ -37,7 +37,7 @@ try:
  for language in languages:
   for storage in storages:
    case=out/(language+'-'+storage);case.mkdir();project=case/'app'
-   env=dict(os.environ,LENSO_CACHE_DIR=str(case/'cache'))
+   env=dict(os.environ,LENSO_CACHE_DIR=os.environ.get('LENSO_CACHE_DIR',str(case/'cache')))
    credentials=['--token-env',a.token_env] if a.token_env else []
    settings={'language':language,'port':0}
    if a.modules:settings.update(author_root='author',format='lenso-modules-v1',catalog='lenso.modules.toml')
